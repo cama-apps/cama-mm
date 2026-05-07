@@ -463,6 +463,7 @@ class BossDef:
     boss_id: str = ""               # stable unique identifier (e.g. "grothak", "pudge")
     mechanic_pool: tuple[str, ...] = ()  # keys into MECHANIC_REGISTRY; one rolled per fight
     stinger_id: str = ""            # key into STINGER_REGISTRY; fires on player loss
+    prestige_required: int = 0      # min prestige level for this boss to appear in the pool
     # Per-boss outcome flavor pools. Empty defaults fall back to the generic
     # GENERIC_VICTORY_LINES / GENERIC_DEFEAT_LINES pools at render time. Use
     # the {boss} token to reference the boss name.
@@ -1052,6 +1053,115 @@ _DOTA_BOSSES: dict[str, BossDef] = {
         mechanic_pool=("terrorblade_sunder", "terrorblade_metamorphosis"),
         stinger_id="terrorblade_sundering",
     ),
+    # ----- Late-prestige additions (only appear at prestige>=3) -----
+    "xalatath": BossDef(
+        depth=150,
+        boss_id="xalatath",
+        name="Xal'atath",
+        title="Voidweaver",
+        ascii_art=(
+            "   . - . - .\n"
+            "  -  ((  )) -\n"
+            " .   \\___/   .\n"
+            "  -  ~vvv~  -\n"
+            "   . - . - .\n"
+        ),
+        dialogue=[
+            "You carry something. I can taste the shape of it.",
+            "Again. The carrying hasn't helped.",
+            "Still holding it? Set it down. It weighs differently than you think.",
+            "STILL. After everything I said.",
+            "Set it down. I am bored of asking.",
+        ],
+        mechanic_pool=("xalatath_void_pull", "xalatath_whisper_madness"),
+        stinger_id="xalatath_unraveling",
+        prestige_required=3,
+        victory_lines=(
+            "{boss} folds. The whisper folds with her. Stone stops carrying it.",
+            "{boss} unravels into syllables that don't fit anywhere. They leave.",
+            "{boss} lays down quietly. You realize you can hear yourself again.",
+            "Something in {boss}'s mouth stops moving. The cave gets less wrong.",
+        ),
+        defeat_lines=(
+            "{boss} keeps speaking. The words go in. They don't come out.",
+            "You leave. You leave it. You don't know what 'it' was. {boss} is calmer now.",
+            "Something walks home in your boots. {boss} is patient.",
+            "{boss} folds the whisper back into her teeth. She'll save it for later.",
+        ),
+    ),
+    "lilith": BossDef(
+        depth=200,
+        boss_id="lilith",
+        name="Lilith",
+        title="Daughter of Hatred",
+        ascii_art=(
+            "  \\  ___  /\n"
+            " \\ /     \\ /\n"
+            "  | (* *) |\n"
+            "  | \\___/ |\n"
+            "   \\\\|||//\n"
+            "    \\ v /\n"
+        ),
+        dialogue=[
+            "All things return to hatred. You are no exception.",
+            "You return. Hatred is patient. Hatred waited.",
+            "Bleed. The deep drinks bleed. The deep is grateful.",
+            "YOU. AGAIN. My hatred is tireless. Is yours?",
+            "Come, then. Cycle is cycle. Eternity is exhausting.",
+        ],
+        mechanic_pool=("lilith_blood_nova", "lilith_wing_descent"),
+        stinger_id="lilith_hemorrhage",
+        prestige_required=3,
+        victory_lines=(
+            "{boss} kneels. Hatred has a posture and it doesn't fit her any more.",
+            "{boss} bleeds out gracefully — no more graceful than blood allows.",
+            "{boss} folds her wings around herself and quiets.",
+            "{boss} loses interest. The hatred stays. Hers leaves.",
+        ),
+        defeat_lines=(
+            "{boss} leans down to look at you. You become a thought she has.",
+            "Hatred holds the door open for you on the way out. {boss} watches you take it.",
+            "{boss} lets you live. That itself is a kind of ruin.",
+            "You look up; {boss} is gone. The room is wet. You walk back.",
+        ),
+    ),
+    "underlord": BossDef(
+        depth=275,
+        boss_id="underlord",
+        name="The Pit Lord",
+        title="Lord of the Underworld",
+        ascii_art=(
+            "    ______\n"
+            "   /      \\\n"
+            "  | >_  _< |\n"
+            "  |   __   |\n"
+            "   \\______/\n"
+            "    ||||||\n"
+            "   /  pit \\\n"
+        ),
+        dialogue=[
+            "You're not the first. You won't be the last. Fight.",
+            "Back. Good. Weakness is inefficiency. Fix it.",
+            "I don't negotiate. I have a pit for that.",
+            "AGAIN. I respect the persistence. Not much else.",
+            "Just hit me. The pit gets bored.",
+        ],
+        mechanic_pool=("underlord_pit_pull", "underlord_firestorm"),
+        stinger_id="underlord_atrophy",
+        prestige_required=3,
+        victory_lines=(
+            "{boss} sets down his weight and grunts. The grunt is a kind of respect.",
+            "{boss} steps back from his pit. He'll re-dig it tomorrow.",
+            "{boss} folds his arms and looks past you, already bored.",
+            "{boss} grunts: 'Hm. Earned it.' He doesn't stand back up.",
+        ),
+        defeat_lines=(
+            "{boss} hauls you up by the collar and sets you on the path back. It is a long path.",
+            "The pit pulled. {boss} watched. He didn't even strike. He didn't have to.",
+            "{boss} shakes his head once and turns away. The pit walks you home.",
+            "{boss} says nothing. The pit closes. You're on the wrong side of it.",
+        ),
+    ),
 }
 
 
@@ -1065,9 +1175,9 @@ BOSSES_BY_TIER: dict[int, list[BossDef]] = {
     50:  [BOSSES[50],  _DOTA_BOSSES["crystal_maiden"],   _DOTA_BOSSES["tusk"]],
     75:  [BOSSES[75],  _DOTA_BOSSES["lina"],             _DOTA_BOSSES["doom"]],
     100: [BOSSES[100], _DOTA_BOSSES["spectre"],          _DOTA_BOSSES["void_spirit"]],
-    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"]],
-    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"]],
-    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"]],
+    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _DOTA_BOSSES["xalatath"]],
+    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _DOTA_BOSSES["lilith"]],
+    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _DOTA_BOSSES["underlord"]],
 }
 
 
@@ -1079,9 +1189,18 @@ BOSSES_BY_ID: dict[str, BossDef] = {
 }
 
 
-def get_boss_pool_for_tier(tier: int) -> list[BossDef]:
-    """Return the list of candidate BossDefs for the given tier depth."""
-    return BOSSES_BY_TIER.get(tier, [])
+def get_boss_pool_for_tier(tier: int, prestige_level: int = 99) -> list[BossDef]:
+    """Return the list of candidate BossDefs for the given tier depth.
+
+    Bosses with ``prestige_required`` above ``prestige_level`` are filtered
+    out. The default of 99 is fail-open: an unforeseen caller that omits
+    the argument will see the full pool rather than silently hide gated
+    bosses from a player who should see them. The trade-off is that any
+    caller that surfaces boss names to a player MUST pass that player's
+    real prestige, or names of gated bosses can leak.
+    """
+    pool = BOSSES_BY_TIER.get(tier, [])
+    return [b for b in pool if b.prestige_required <= prestige_level]
 
 
 def get_boss_by_id(boss_id: str) -> BossDef | None:
@@ -1171,14 +1290,17 @@ BOSS_ARCHETYPE_BY_ID: dict[str, str] = {
     "sporeling_sovereign": "tank",
     "treant_protector":    "tank",
     "broodmother":         "glass_cannon",
+    "xalatath":            "slippery",
     # Tier 200
     "chronofrost":         "slippery",
     "faceless_void":       "slippery",
     "weaver":              "slippery",
+    "lilith":              "glass_cannon",
     # Tier 275
     "nameless_depth":      "tank",
     "oracle":              "glass_cannon",
     "terrorblade":         "glass_cannon",
+    "underlord":           "tank",
 }
 
 # Payouts: depth -> (cautious_multiplier, bold_multiplier, reckless_multiplier).
@@ -1662,6 +1784,10 @@ class RandomEvent:
     # ``id``, ``duration_seconds``, and an optional ``payload``. Requires
     # ``DigService.dig_guild_modifier_repo`` to be wired or it's a no-op.
     guild_modifier_on_success: dict | None = None
+    # If True, this event is excluded from the random-pool selector and only
+    # reachable via deterministic chain (``next_event_id`` from a predecessor).
+    # Use for narrative arc successors that should not appear out of order.
+    chain_only: bool = False
 
 
 def pick_description(event: Any) -> str:
@@ -5032,10 +5158,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
     ),
     # ===================================================================
-    # P8 DETERMINISTIC CHAIN — three-act lore arc.
-    # Lore-driven, modest payouts. Only fires when prestige >= 8.
-    # Step 1 spawns from the rare-event pool; step 2 and 3 chain from
-    # the previous step's resolution via ``next_event_id``.
+    # DETERMINISTIC CHAIN — three-act lore arc (Hollow Court).
+    # Lore-driven, modest payouts. Step 1 (overture) spawns from the
+    # legendary-event pool when prestige >= 6; steps 2 and 3 chain
+    # deterministically from the previous step's resolution via
+    # ``next_event_id`` and are marked ``chain_only`` so they cannot
+    # roll out of narrative order.
     # ===================================================================
     RandomEvent(
         id="hollow_court_overture",
@@ -5058,7 +5186,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.70,
         ),
         rarity="legendary",
-        min_prestige=8,
+        min_prestige=6,
         next_event_id="hollow_court_audience",
     ),
     RandomEvent(
@@ -5081,8 +5209,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.55,
         ),
         rarity="legendary",
-        min_prestige=8,
+        min_prestige=6,
         next_event_id="hollow_court_recess",
+        chain_only=True,
     ),
     RandomEvent(
         id="hollow_court_recess",
@@ -5104,8 +5233,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.50,
         ),
         rarity="legendary",
-        min_prestige=8,
+        min_prestige=6,
         next_event_id=None,
+        chain_only=True,
     ),
 
     # =====================================================================
@@ -7646,6 +7776,85 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
             "Inspect closely. Royalty rewards attention.",
         ],
     },
+    # ---- Late-prestige additions (only appear at prestige>=3) ----------
+    "xalatath": {
+        "first_meet": [
+            "I have been listening. You came down. I knew.",
+            "Quiet, please. Let me hear which one you are.",
+            "Set down what you are holding. Not the pick. The other thing.",
+        ],
+        "after_defeat": [
+            "You ended me. The whisper continues. It is not mine alone.",
+            "Streak {streak}. The whisper counts too. Differently.",
+            "Round two. I have been carrying it longer this time.",
+        ],
+        "after_retreat": [
+            "Climb. The whisper climbs faster.",
+            "Go. Take it with you. You won't notice it for a while.",
+            "Retreat is also a kind of listening. Welcome to it.",
+        ],
+        "after_close_win": [
+            "A near-naming. Of you, this time.",
+            "Almost. The almost is its own word.",
+            "Closer than I expected. I am rarely surprised.",
+        ],
+        "after_scout": [
+            "Look. The looking is heard, too.",
+            "Examine me. I am examining you back, somewhere quieter.",
+        ],
+    },
+    "lilith": {
+        "first_meet": [
+            "Mother of suffering, mother of stars. I prefer the first title.",
+            "You came to bleed in front of me. Polite of you.",
+            "Hatred is a long room. You are at the door. Come in.",
+        ],
+        "after_defeat": [
+            "You ended a Daughter. Hatred raises another.",
+            "Streak {streak}. I count in centuries. You do well.",
+            "Round two. The hatred has practiced.",
+        ],
+        "after_retreat": [
+            "Leave. Hatred is patient. It learned that from waiting.",
+            "Go. I will be here, in this exact configuration.",
+            "Retreat is permitted. Hatred forbids forgetting.",
+        ],
+        "after_close_win": [
+            "A near-bleeding. Of me, this time. Curious.",
+            "Closer than the cycle allows. Hatred took notes.",
+            "Almost. The almost is a sacrament.",
+        ],
+        "after_scout": [
+            "Look. Hatred enjoys attention.",
+            "Examine me. I am older than the eye that does it.",
+        ],
+    },
+    "underlord": {
+        "first_meet": [
+            "Stand. Or kneel. Doesn't matter. We start either way.",
+            "Surface dweller. Down here a long time? Doesn't show.",
+            "Pit's open. Step in or fight. I'm patient about neither.",
+        ],
+        "after_defeat": [
+            "You won. Earned. Don't rub it in.",
+            "Streak {streak}. Respectable. Now don't waste it.",
+            "Round two. I sharpened things.",
+        ],
+        "after_retreat": [
+            "Climb out, then. Pit'll wait.",
+            "Go. The walk back is its own punishment.",
+            "Retreat. Tactical. I'd do the same. Wouldn't.",
+        ],
+        "after_close_win": [
+            "Close one. I wasn't paying attention.",
+            "Nearly fell in. Of the two of us, I should not have.",
+            "Almost. The almost stings worse than losing.",
+        ],
+        "after_scout": [
+            "Look me over. I'm not a puzzle.",
+            "Inspect away. Pit's not going anywhere.",
+        ],
+    },
     # ---- Pinnacle pool (depth 350) -------------------------------------
     "forgotten_king": {
         "first_meet": [
@@ -8326,6 +8535,7 @@ EVENT_POOL: list[dict] = [
         ] if e.boon_options else None,
         "min_prestige": e.min_prestige,
         "next_event_id": e.next_event_id,
+        "chain_only": e.chain_only,
         "splash": {
             "strategy": e.splash.strategy,
             "victim_count": e.splash.victim_count,

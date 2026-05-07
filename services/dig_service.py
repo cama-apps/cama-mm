@@ -128,7 +128,7 @@ from services.dig_constants import (
 
 logger = logging.getLogger("cama_bot.services.dig")
 
-RARITY_WEIGHTS = {"common": 70, "uncommon": 20, "rare": 12, "legendary": 6}
+RARITY_WEIGHTS = {"common": 70, "uncommon": 20, "rare": 15, "legendary": 10}
 DIG_STARTING_STAT_POINTS = 5
 DIG_BOSS_STAT_POINT_BONUS = 1
 MINER_BACKSTORY_MAX_LENGTH = 600
@@ -1443,7 +1443,8 @@ class DigService:
                 if bid:
                     return bid
         from services.dig_constants import get_boss_pool_for_tier as _pool
-        pool = _pool(depth)
+        prestige_level = int(tunnel.get("prestige_level", 0) or 0)
+        pool = _pool(depth, prestige_level=prestige_level)
         return pool[0].boss_id if pool else ""
 
     def _ensure_boss_locked(
@@ -1473,7 +1474,8 @@ class DigService:
             if bid and bid in _BOSSES_BY_ID:
                 return _BOSSES_BY_ID[bid]
 
-        pool = _pool(depth)
+        prestige_level = int(tunnel.get("prestige_level", 0) or 0)
+        pool = _pool(depth, prestige_level=prestige_level)
         if not pool:
             raise ValueError(f"No boss pool for tier {depth}")
         boss = random.Random().choice(pool)
@@ -2151,11 +2153,12 @@ class DigService:
                      trigger_event_id: str | None = None) -> dict | None:
         """P7+: 25% chance to chain another event of same or higher rarity.
 
-        P8+ override: if the resolving event has a ``next_event_id``
-        and the player meets that next event's ``min_prestige``, fire
-        it deterministically — used by lore-driven multi-step arcs.
+        Deterministic-chain override: if the resolving event has a
+        ``next_event_id`` and the player meets that next event's
+        ``min_prestige``, fire it deterministically — used by
+        lore-driven multi-step arcs.
         """
-        if trigger_event_id and prestige_level >= 8:
+        if trigger_event_id:
             trigger_def = next(
                 (e for e in EVENT_POOL if e["id"] == trigger_event_id), None,
             )
@@ -2192,6 +2195,7 @@ class DigService:
             and (e.get("max_depth") is None or depth <= e["max_depth"])
             and e.get("rarity", "common") in allowed_rarities
             and prestige_level >= e.get("min_prestige", 0)
+            and not e.get("chain_only", False)
         ]
         if not eligible:
             return None
@@ -8045,7 +8049,9 @@ class DigService:
         is_pitch_black = luminosity <= 0
         ascension = self._get_ascension_effects(prestige_level)
 
-        # Filter eligible events by depth, layer, darkness, and prestige
+        # Filter eligible events by depth, layer, darkness, prestige, and
+        # chain-only flag (chain_only events are reachable only via
+        # deterministic chain from a predecessor, never the random pool).
         eligible = [
             e for e in EVENT_POOL
             if depth >= (e.get("min_depth") or 0)
@@ -8053,6 +8059,7 @@ class DigService:
             and (e.get("layer") is None or e["layer"] == layer_name)
             and (not e.get("requires_dark") or is_pitch_black)
             and prestige_level >= e.get("min_prestige", 0)
+            and not e.get("chain_only", False)
         ]
 
         # Non-darkness events are excluded at pitch black if darkness events exist
@@ -8346,7 +8353,7 @@ class DigService:
             log_action_type="event",
         )
 
-        # Check for event chaining (P7+ random; P8+ deterministic via next_event_id)
+        # Check for event chaining (P7+ random; deterministic via next_event_id when player meets target's min_prestige)
         chain_event = self._chain_event(
             new_depth, prestige_level,
             event.get("rarity", "common"),

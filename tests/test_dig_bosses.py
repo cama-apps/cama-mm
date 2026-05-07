@@ -22,6 +22,7 @@ from services.dig_constants import (
     BOSS_HP_REGEN_PER_2_HOURS,
     BOSS_PRESTIGE_BONUS,
     BOSS_TIER_BONUS,
+    BOSSES_BY_ID,
     LUMINOSITY_BRIGHT,
     LUMINOSITY_DARK,
     PHASE_TRANSITION_EVENTS,
@@ -33,6 +34,7 @@ from services.dig_constants import (
     PINNACLE_RELIC_STAT_POOL,
     PINNACLE_RELIC_SUFFIX_POOL,
     WIN_CHANCE_CAP,
+    get_boss_pool_for_tier,
 )
 from services.dig_service import (
     DigService,
@@ -312,7 +314,7 @@ class TestPersistedBossHP:
 
 
 class TestDialogueV2:
-    def test_all_21_bosses_have_first_meet(self):
+    def test_all_24_bosses_have_first_meet(self):
         expected_bosses = [
             "grothak", "pudge", "ogre_magi",
             "crystalia", "crystal_maiden", "tusk",
@@ -321,6 +323,8 @@ class TestDialogueV2:
             "sporeling_sovereign", "treant_protector", "broodmother",
             "chronofrost", "faceless_void", "weaver",
             "nameless_depth", "oracle", "terrorblade",
+            # Late-prestige additions (prestige>=3)
+            "xalatath", "lilith", "underlord",
         ]
         for boss_id in expected_bosses:
             assert boss_id in BOSS_DIALOGUE_V2, f"missing {boss_id}"
@@ -1091,3 +1095,98 @@ class TestPinnacleBuildInfo:
         assert info["phase_total"] == 3
         # Phase 2 title for forgotten_king is "The Crowned Hunger".
         assert info["name"] == PINNACLE_BOSSES["forgotten_king"].phases[1].title
+
+
+# --- Late-prestige boss pool gating ----------------------------------
+
+
+class TestLatePrestigeBossPool:
+    """Bosses with prestige_required=3 should only appear in the pool for P3+ players."""
+
+    LATE_PRESTIGE_IDS = {"xalatath", "lilith", "underlord"}
+    AFFECTED_TIERS = (150, 200, 275)
+
+    def test_pool_full_at_p3(self):
+        for tier in self.AFFECTED_TIERS:
+            pool = get_boss_pool_for_tier(tier, prestige_level=3)
+            assert len(pool) == 4, f"tier {tier} should have 4 bosses at P3, got {len(pool)}"
+            ids = {b.boss_id for b in pool}
+            assert ids & self.LATE_PRESTIGE_IDS, f"tier {tier} P3 pool missing late-prestige boss"
+
+    def test_pool_filtered_below_p3(self):
+        for tier in self.AFFECTED_TIERS:
+            pool = get_boss_pool_for_tier(tier, prestige_level=2)
+            assert len(pool) == 3, f"tier {tier} should have 3 bosses below P3, got {len(pool)}"
+            ids = {b.boss_id for b in pool}
+            assert not (ids & self.LATE_PRESTIGE_IDS), (
+                f"tier {tier} P2 pool leaked late-prestige boss: {ids & self.LATE_PRESTIGE_IDS}"
+            )
+
+    def test_pool_default_returns_full_pool(self):
+        # Default prestige_level=99 is fail-open: callers that omit the
+        # argument see the full pool (gated bosses included). All callers
+        # that surface boss names to a player must pass the player's real
+        # prestige explicitly to avoid leaking gated names.
+        for tier in self.AFFECTED_TIERS:
+            assert len(get_boss_pool_for_tier(tier)) == 4
+
+    def test_unaffected_tiers_unchanged(self):
+        # Tiers without late-prestige additions should return 3 entries at any prestige.
+        for tier in (25, 50, 75, 100):
+            assert len(get_boss_pool_for_tier(tier, prestige_level=0)) == 3
+            assert len(get_boss_pool_for_tier(tier, prestige_level=10)) == 3
+
+    def test_late_prestige_field_correct(self):
+        for boss_id in self.LATE_PRESTIGE_IDS:
+            boss = BOSSES_BY_ID[boss_id]
+            assert boss.prestige_required == 3, f"{boss_id} prestige_required should be 3"
+
+    def test_existing_bosses_default_prestige_required(self):
+        # Spot-check that existing bosses default to 0.
+        for boss_id in ("grothak", "treant_protector", "oracle", "terrorblade"):
+            assert BOSSES_BY_ID[boss_id].prestige_required == 0
+
+
+class TestLatePrestigeBossLocking:
+    """_ensure_boss_locked must respect prestige_required when rolling a boss."""
+
+    def test_p0_player_never_locks_late_prestige_boss(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=200, prestige_level=0, boss_progress="{}",
+        )
+        seen: set[str] = set()
+        for _ in range(50):
+            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
+            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
+            seen.add(boss.boss_id)
+        assert "lilith" not in seen, "P0 player should never lock the P3 boss"
+        assert seen <= {"chronofrost", "faceless_void", "weaver"}
+
+    def test_p3_player_can_lock_late_prestige_boss(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=200, prestige_level=3, boss_progress="{}",
+        )
+        seen: set[str] = set()
+        for _ in range(50):
+            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
+            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
+            seen.add(boss.boss_id)
+        # Over 50 rolls of a 4-boss pool, the late-prestige boss should appear at least once
+        # with overwhelming probability (P(missing) = 0.75^50 ≈ 5.7e-7).
+        assert "lilith" in seen, "P3 player should be able to lock the P3 boss"

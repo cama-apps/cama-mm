@@ -145,6 +145,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_HALVE_NEXT_WAGER,
         flavor_on_loss="You rip out of the web, leaving too much coin behind.",
     ),
+    "xalatath_unraveling": StingerEffect(
+        id="xalatath_unraveling",
+        extra_knockback=0,
+        extended_cooldown_s=0,
+        cursed_status=CURSE_NO_SCOUT_NEXT_DIG,
+        flavor_on_loss="Something was said. You can't unhear it. The path won't show itself.",
+    ),
     # -------------------------- Tier 200 --------------------------
     "chronofrost_stillness": StingerEffect(
         id="chronofrost_stillness",
@@ -167,6 +174,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The skitterwing pulled a thread from your timeline. Your next prize is thinner.",
     ),
+    "lilith_hemorrhage": StingerEffect(
+        id="lilith_hemorrhage",
+        extra_knockback=0,
+        extended_cooldown_s=1800,
+        cursed_status=CURSE_DRAIN_NEXT_REWARD,
+        flavor_on_loss="The bleeding doesn't stop on the way back. The next descent is slower for it.",
+    ),
     # -------------------------- Tier 275 --------------------------
     "nameless_erase": StingerEffect(
         id="nameless_erase",
@@ -188,6 +202,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extended_cooldown_s=900,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The sundered prince swaps something of yours for something of his. You don't want to know what.",
+    ),
+    "underlord_atrophy": StingerEffect(
+        id="underlord_atrophy",
+        extra_knockback=12,
+        extended_cooldown_s=900,
+        cursed_status=None,
+        flavor_on_loss="The pit pulled. You came out a long way back, with less to show for it.",
     ),
 }
 

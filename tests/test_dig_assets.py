@@ -167,6 +167,18 @@ class TestGetBossArt:
         assert get_boss_art("not_a_boss", "encounter", "Dirt") is None
         assert get_boss_art(9999, "encounter", "Dirt") is None
 
+    def test_every_registered_boss_id_has_a_slug(self):
+        """Every boss in BOSSES_BY_ID must be resolvable by get_boss_art.
+
+        Catches the case where a new BossDef is added but its boss_id is
+        omitted from BOSS_SLUGS — without this check, the asset path
+        silently returns None instead of falling through to PIL.
+        """
+        from services.dig_constants import BOSSES_BY_ID
+        from utils.dig_assets import BOSS_SLUGS
+        missing = [bid for bid in BOSSES_BY_ID if bid not in BOSS_SLUGS]
+        assert not missing, f"boss_ids missing from BOSS_SLUGS: {missing}"
+
 
 class TestGetLayerThumbnail:
     """Tests for layer thumbnail loading."""

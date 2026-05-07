@@ -64,6 +64,10 @@ BOSS_SLUGS: dict[str, str] = {
     "weaver": "weaver",
     "oracle": "oracle",
     "terrorblade": "terrorblade",
+    # Late-prestige roster (prestige_required=3) — slug == boss_id.
+    "xalatath": "xalatath",
+    "lilith": "lilith",
+    "underlord": "underlord",
     # Pinnacle (depth 300) — slug == boss_id.
     "forgotten_king": "forgotten_king",
     "hollowforged": "hollowforged",
