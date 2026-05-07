@@ -375,6 +375,9 @@ class SchemaManager:
             ("add_bankrupt_buff_flags_to_player_mana", self._migration_add_bankrupt_buff_flags_to_player_mana),
             # Witch's Curse: per-target hex with anonymous casters and 7-day duration
             ("create_curses_table", self._migration_create_curses_table),
+            # Guild-wide modifiers (e.g. dig "bell" effects that bias all
+            # diggers in a guild for a short window).
+            ("create_dig_guild_modifiers_table", self._migration_create_dig_guild_modifiers_table),
         ]
 
     # --- Migrations ---
@@ -1980,6 +1983,32 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_curses_caster_target
             ON curses(caster_discord_id, target_discord_id, guild_id)
+            """
+        )
+
+    def _migration_create_dig_guild_modifiers_table(self, cursor) -> None:
+        """Guild-wide dig modifiers with expiry.
+
+        One row per (guild, modifier_id). On re-trigger the row is upserted
+        and ``expires_at`` extended. Queries filter ``WHERE expires_at > now``;
+        expired rows are pruned lazily on access.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_guild_modifiers (
+                guild_id     INTEGER NOT NULL,
+                modifier_id  TEXT    NOT NULL,
+                expires_at   INTEGER NOT NULL,
+                payload_json TEXT    NOT NULL DEFAULT '{}',
+                created_at   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, modifier_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_guild_modifiers_active
+            ON dig_guild_modifiers(guild_id, expires_at)
             """
         )
 

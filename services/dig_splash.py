@@ -70,6 +70,27 @@ def _select_richest_n(repos, guild_id: int, digger_id: int, count: int) -> list[
     return [p["discord_id"] for p in players if p["discord_id"] != digger_id][:count]
 
 
+def _select_deepest_n(repos, guild_id: int, digger_id: int, count: int) -> list[int]:
+    """Top-N deepest tunnels in the guild, excluding the digger.
+
+    Used by events themed around the dungeon's apex predator preferring
+    fresh marrow — bigger fish first.
+    """
+    try:
+        rows = repos.dig_repo.get_leaderboard(guild_id, limit=count + 2)
+    except Exception:
+        return []
+    out: list[int] = []
+    for row in rows or []:
+        did = row.get("discord_id")
+        depth = row.get("depth", 0) or 0
+        if did is not None and did != digger_id and depth > 0:
+            out.append(int(did))
+        if len(out) >= count:
+            break
+    return out
+
+
 def _select_active_diggers(repos, guild_id: int, digger_id: int, count: int) -> list[int]:
     # Over-fetch enough to keep the local sample uniform but bounded; an
     # unbounded pull could return thousands of distinct actors in a
@@ -90,7 +111,87 @@ _SELECTORS = {
     "random_active": _select_random_active,
     "richest_n": _select_richest_n,
     "active_diggers": _select_active_diggers,
+    "deepest_n": _select_deepest_n,
 }
+
+
+def pick_splash_target(
+    *,
+    player_repo,
+    dig_repo,
+    guild_id: int,
+    exclude_id: int | None,
+    mode: str,
+) -> int | None:
+    """Pick a single splash target for an event that affects one other player.
+
+    Modes:
+        ``random_recent`` — random pick from recent diggers, weighted by
+                            balance (richer players proportionally more
+                            likely; debtors and zero-balance fall back to
+                            uniform if no positives exist).
+        ``wealthiest``    — top positive-balance player.
+        ``deepest``       — player with the highest current tunnel depth.
+
+    Returns ``None`` if the pool is empty after exclusion. Never returns
+    ``exclude_id`` even if they would otherwise win the selection.
+    """
+    if mode == "wealthiest":
+        try:
+            top = player_repo.get_richest_players(guild_id, limit=4)
+        except Exception:
+            logger.debug("pick_splash_target wealthiest: query failed", exc_info=True)
+            return None
+        for row in top or []:
+            did = row.get("discord_id")
+            if did is not None and did != exclude_id:
+                return int(did)
+        return None
+
+    if mode == "deepest":
+        try:
+            top = dig_repo.get_leaderboard(guild_id, limit=4)
+        except Exception:
+            logger.debug("pick_splash_target deepest: query failed", exc_info=True)
+            return None
+        for row in top or []:
+            did = row.get("discord_id")
+            depth = row.get("depth", 0) or 0
+            if did is not None and did != exclude_id and depth > 0:
+                return int(did)
+        return None
+
+    if mode == "random_recent":
+        try:
+            recent = dig_repo.get_recent_diggers(
+                guild_id,
+                days=ACTIVE_DIGGERS_LOOKBACK_DAYS,
+                exclude_id=exclude_id,
+                limit=64,
+            ) or []
+        except Exception:
+            logger.debug("pick_splash_target random_recent: query failed", exc_info=True)
+            return None
+        if not recent:
+            return None
+        # Weighted by balance: richer players are more likely targets.
+        weighted: list[tuple[int, int]] = []
+        for did in recent:
+            try:
+                bal = player_repo.get_balance(did, guild_id)
+            except Exception:
+                bal = 0
+            if bal and bal > 0:
+                weighted.append((did, int(bal)))
+        if weighted:
+            ids = [d for d, _ in weighted]
+            wts = [w for _, w in weighted]
+            return int(random.choices(ids, weights=wts, k=1)[0])
+        # Fallback: uniform pick if nobody has positive balance.
+        return int(random.choice(recent))
+
+    logger.warning("pick_splash_target: unknown mode %r", mode)
+    return None
 
 
 class _ReposBundle:

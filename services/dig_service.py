@@ -35,8 +35,14 @@ from services.dig_constants import (
     BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
-    CAVE_IN_BLOCK_LOSS_MAX,
-    CAVE_IN_BLOCK_LOSS_MIN,
+    CAVE_IN_BLOCK_LOSS_RANGES,
+    CAVE_IN_CATASTROPHIC_GEAR_TICKS,
+    CAVE_IN_CATASTROPHIC_MEDICAL_BILL,
+    CAVE_IN_CATASTROPHIC_MILESTONE_STEP,
+    CAVE_IN_CATASTROPHIC_STUN_DIGS_RANGE,
+    CAVE_IN_INJURY_DIGS_BY_BAND,
+    CAVE_IN_MEDICAL_BILL_RANGES,
+    CAVE_IN_STUN_DIGS_BY_BAND,
     CHEER_COOLDOWN_SECONDS,
     CONSUMABLE_ITEMS,
     CORRUPTION_BAD,
@@ -50,6 +56,8 @@ from services.dig_constants import (
     GEAR_MAX_DURABILITY,
     GEAR_REPAIR_COST_PCT,
     GEAR_TIER_TABLES,
+    HELLTIDE_MODIFIER_ID,
+    HELLTIDE_TAX_PER_DIG,
     INJURY_SLOW_COOLDOWN,
     ITEM_PRICES,
     LAYER_WEATHER_POOL,
@@ -112,7 +120,10 @@ from services.dig_constants import (
     WEATHER_BY_ID,
     WIN_CHANCE_CAP,
     WIN_CHANCE_FLOOR,
+    cave_in_band,
     format_relic_label,
+    pick_cave_in_consequence,
+    roll_catastrophic_cave_in,
 )
 
 logger = logging.getLogger("cama_bot.services.dig")
@@ -237,11 +248,13 @@ class DigService:
         player_repo: PlayerRepository,
         mana_effects_service=None,
         bankruptcy_repo=None,
+        dig_guild_modifier_repo=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
         self.mana_effects_service = mana_effects_service
         self.bankruptcy_repo = bankruptcy_repo
+        self.dig_guild_modifier_repo = dig_guild_modifier_repo
 
     def _mana_effects_or_none(self, discord_id: int, guild_id):
         """Resolve the player's active mana effects, swallowing lookup errors.
@@ -289,6 +302,21 @@ class DigService:
             modified += effects.green_steady_bonus
 
         return max(0, modified)
+
+    def _helltide_tax(self, guild_id) -> int:
+        """Per-dig flat JC tax while the helltide bell is active in this guild.
+
+        Returns 0 when the modifier repo isn't wired or the modifier has
+        expired. The tax is destroyed (deflation), not transferred.
+        """
+        if self.dig_guild_modifier_repo is None:
+            return 0
+        try:
+            if self.dig_guild_modifier_repo.is_active(guild_id, HELLTIDE_MODIFIER_ID):
+                return HELLTIDE_TAX_PER_DIG
+        except Exception:
+            return 0
+        return 0
 
     def _apply_mana_yield_taxes(
         self, discord_id: int, guild_id, total_jc: int
@@ -2407,6 +2435,204 @@ class DigService:
 
         return items_used, items_used_ids, flags
 
+    def _apply_cave_in_consequence(
+        self,
+        *,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        depth_before: int,
+        band: str,
+        block_loss: int,
+        catastrophic: bool,
+        balance: int,
+        injury_bonus: int,
+        tunnel_updates: dict,
+    ) -> tuple[dict, int]:
+        """Pick & apply a cave-in consequence (or catastrophic upgrade).
+
+        Mutates ``tunnel_updates`` with any tunnel-state changes (the caller
+        is responsible for the actual write — atomic or incremental). Side
+        effects that aren't tunnel-state (gear durability tick, inventory
+        item removal) are applied to repos directly. Returns
+        ``(cave_in_detail, jc_debit)`` where ``jc_debit`` is the JC amount
+        the caller should subtract from the player's balance.
+        """
+        # Catastrophic overrides the consequence pick entirely.
+        if catastrophic:
+            # Catastrophic overrides block_loss with a hard roll-back to the
+            # nearest 25-multiple milestone strictly less than depth_before.
+            milestone = max(
+                0,
+                ((max(0, depth_before - 1)) // CAVE_IN_CATASTROPHIC_MILESTONE_STEP)
+                * CAVE_IN_CATASTROPHIC_MILESTONE_STEP,
+            )
+            new_depth = milestone
+            tunnel_updates["depth"] = new_depth
+            tunnel_updates["temp_buffs"] = None  # nukes any second_wind set above
+
+            cmin, cmax = CAVE_IN_CATASTROPHIC_MEDICAL_BILL
+            med_cost = min(random.randint(cmin, cmax), max(0, balance))
+
+            smin, smax = CAVE_IN_CATASTROPHIC_STUN_DIGS_RANGE
+            stun_digs = random.randint(smin, smax) + injury_bonus
+            tunnel_updates["injury_state"] = json.dumps(
+                {"type": "slower_cooldown", "digs_remaining": stun_digs}
+            )
+
+            for _ in range(CAVE_IN_CATASTROPHIC_GEAR_TICKS):
+                try:
+                    self.dig_repo.tick_gear_durability(discord_id, guild_id)
+                except Exception:
+                    logger.debug("catastrophic gear tick failed", exc_info=True)
+                    break
+
+            total_block_loss = max(block_loss, depth_before - new_depth)
+            detail = {
+                "type": "catastrophic",
+                "block_loss": total_block_loss,
+                "jc_lost": med_cost,
+                "stun_digs": stun_digs,
+                "depth_after": new_depth,
+                "message": (
+                    f"CATASTROPHIC CAVE-IN! Tunnel folds in on itself. "
+                    f"Lost {total_block_loss} blocks, paid {med_cost} JC, "
+                    f"stunned for {stun_digs} digs, gear shattered."
+                ),
+            }
+            return detail, med_cost
+
+        # Non-catastrophic: weighted pick based on current state.
+        try:
+            inventory = self.dig_repo.get_inventory(discord_id, guild_id) or []
+        except Exception:
+            inventory = []
+        try:
+            equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id) or {}
+        except Exception:
+            equipped = {}
+        luminosity_now = int(tunnel.get("luminosity") or 0)
+        hard_hat_charges = int(tunnel.get("hard_hat_charges") or 0)
+
+        consequence_id = pick_cave_in_consequence(
+            band,
+            has_consumables=bool(inventory),
+            has_equipped_gear=bool(equipped),
+            can_lower_luminosity=luminosity_now > 0,
+            has_hard_hat_charges=hard_hat_charges > 0,
+        )
+
+        if consequence_id == "stun":
+            stun_digs = CAVE_IN_STUN_DIGS_BY_BAND[band] + injury_bonus
+            tunnel_updates["injury_state"] = json.dumps(
+                {"type": "slower_cooldown", "digs_remaining": stun_digs}
+            )
+            return (
+                {
+                    "type": "stun", "block_loss": block_loss,
+                    "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
+                },
+                0,
+            )
+        if consequence_id == "injury":
+            injury_digs = CAVE_IN_INJURY_DIGS_BY_BAND[band] + injury_bonus
+            tunnel_updates["injury_state"] = json.dumps(
+                {"type": "reduced_advance", "digs_remaining": injury_digs}
+            )
+            return (
+                {
+                    "type": "injury", "block_loss": block_loss,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks and you're injured "
+                        f"(reduced digging for {injury_digs} digs)."
+                    ),
+                },
+                0,
+            )
+        if consequence_id == "medical_bill":
+            bmin, bmax = CAVE_IN_MEDICAL_BILL_RANGES[band]
+            med_cost = min(random.randint(bmin, bmax), max(0, balance))
+            return (
+                {
+                    "type": "medical_bill", "block_loss": block_loss,
+                    "jc_lost": med_cost,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks and paid "
+                        f"{med_cost} JC in medical bills."
+                    ),
+                },
+                med_cost,
+            )
+        if consequence_id == "gear_nick":
+            try:
+                self.dig_repo.tick_gear_durability(discord_id, guild_id)
+            except Exception:
+                logger.debug("gear_nick tick failed", exc_info=True)
+            return (
+                {
+                    "type": "gear_nick", "block_loss": block_loss,
+                    "message": f"Cave-in! Lost {block_loss} blocks. Gear took a beating.",
+                },
+                0,
+            )
+        if consequence_id == "spilled_satchel" and inventory:
+            item = random.choice(inventory)
+            item_type = item.get("type") or item.get("item_type") or ""
+            item_name = item.get("name") or item_type or "an item"
+            if item_type:
+                try:
+                    self.dig_repo.remove_inventory_item(discord_id, guild_id, item_type)
+                except Exception:
+                    logger.debug("spilled_satchel removal failed", exc_info=True)
+            return (
+                {
+                    "type": "spilled_satchel", "block_loss": block_loss,
+                    "item_lost": item_name,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks. "
+                        f"Your {item_name} spills into the dark."
+                    ),
+                },
+                0,
+            )
+        if consequence_id == "snuffed_light" and luminosity_now > 0:
+            new_lum = max(0, luminosity_now - 25)
+            tunnel_updates["luminosity"] = new_lum
+            return (
+                {
+                    "type": "snuffed_light", "block_loss": block_loss,
+                    "message": f"Cave-in! Lost {block_loss} blocks. The dark presses in.",
+                },
+                0,
+            )
+        if consequence_id == "cracked_hat" and hard_hat_charges > 0:
+            tunnel_updates["hard_hat_charges"] = max(0, hard_hat_charges - 1)
+            return (
+                {
+                    "type": "cracked_hat", "block_loss": block_loss,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks. "
+                        f"Your hard hat takes a chunk out of itself."
+                    ),
+                },
+                0,
+            )
+
+        # Fallback: medical bill if the picker landed on something inapplicable.
+        bmin, bmax = CAVE_IN_MEDICAL_BILL_RANGES[band]
+        med_cost = min(random.randint(bmin, bmax), max(0, balance))
+        return (
+            {
+                "type": "medical_bill", "block_loss": block_loss,
+                "jc_lost": med_cost,
+                "message": (
+                    f"Cave-in! Lost {block_loss} blocks and paid "
+                    f"{med_cost} JC in medical bills."
+                ),
+            },
+            med_cost,
+        )
+
     def dig(self, discord_id: int, guild_id, paid: bool = False) -> dict:
         """
         Main dig action.
@@ -2746,7 +2972,9 @@ class DigService:
                         )
                 except Exception:
                     blue_refund = 0
-            block_loss = random.randint(CAVE_IN_BLOCK_LOSS_MIN, CAVE_IN_BLOCK_LOSS_MAX)
+            band = cave_in_band(depth_before)
+            block_min, block_max = CAVE_IN_BLOCK_LOSS_RANGES[band]
+            block_loss = random.randint(block_min, block_max)
             # Weather: cap on block loss (e.g. Mudslide Warning)
             weather_loss_cap = weather_fx.get("cave_in_loss_cap")
             if weather_loss_cap is not None:
@@ -2798,42 +3026,26 @@ class DigService:
                     "effect": {"advance_bonus": int(mutation_fx["post_cave_in_advance"])},
                 })
 
-            # Random additional consequence
             # Mutation: fragile — injuries last longer
             injury_bonus = int(mutation_fx.get("injury_duration_bonus", 0))
-            consequence_roll = random.random()
-            if consequence_roll < 0.3:
-                # Stun: extra cooldown on next dig
-                cave_in_detail = {
-                    "type": "stun",
-                    "block_loss": block_loss,
-                    "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
-                }
-                cave_in_tunnel_updates["injury_state"] = json.dumps(
-                    {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
-                )
-            elif consequence_roll < 0.6:
-                # Injury: reduced advance
-                cave_in_detail = {
-                    "type": "injury",
-                    "block_loss": block_loss,
-                    "message": f"Cave-in! Lost {block_loss} blocks and you're injured (reduced digging for {3 + injury_bonus} digs).",
-                }
-                cave_in_tunnel_updates["injury_state"] = json.dumps(
-                    {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
-                )
-            else:
-                # Medical bill (capped at current balance to prevent negative)
-                med_cost = random.randint(3, 9)
-                balance = self.player_repo.get_balance(discord_id, guild_id)
-                med_cost = min(med_cost, max(0, balance))
-                cave_in_balance_delta -= med_cost
-                cave_in_detail = {
-                    "type": "medical_bill",
-                    "block_loss": block_loss,
-                    "jc_lost": med_cost,
-                    "message": f"Cave-in! Lost {block_loss} blocks and paid {med_cost} JC in medical bills.",
-                }
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            catastrophic = roll_catastrophic_cave_in(band)
+            cave_in_detail, jc_debit = self._apply_cave_in_consequence(
+                discord_id=discord_id,
+                guild_id=guild_id,
+                tunnel=tunnel,
+                depth_before=depth_before,
+                band=band,
+                block_loss=block_loss,
+                catastrophic=catastrophic,
+                balance=balance,
+                injury_bonus=injury_bonus,
+                tunnel_updates=cave_in_tunnel_updates,
+            )
+            cave_in_balance_delta -= jc_debit
+            # Catastrophic depth roll-back overrides new_depth.
+            if catastrophic:
+                new_depth = cave_in_tunnel_updates["depth"]
 
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
@@ -3012,6 +3224,12 @@ class DigService:
         # Plains tithe / Blue tax apply to the full payout (base + milestone +
         # streak) so the deflationary pressure matches /roll and /betting.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
+
+        # Helltide bell: a flat per-dig tax while the guild modifier is active.
+        # Pure deflation — coins burn, not transferred.
+        helltide_tax = self._helltide_tax(guild_id)
+        if helltide_tax > 0:
+            jc_earned = max(0, jc_earned - helltide_tax)
 
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
@@ -3654,7 +3872,9 @@ class DigService:
         cave_in_detail = None
 
         if cave_in:
-            block_loss = random.randint(CAVE_IN_BLOCK_LOSS_MIN, CAVE_IN_BLOCK_LOSS_MAX)
+            band = cave_in_band(depth_before)
+            block_min, block_max = CAVE_IN_BLOCK_LOSS_RANGES[band]
+            block_loss = random.randint(block_min, block_max)
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
             if weather_loss_cap is not None:
                 block_loss = min(block_loss, int(weather_loss_cap))
@@ -3669,8 +3889,14 @@ class DigService:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
 
+            tunnel_updates: dict = {
+                "depth": new_depth,
+                "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
+                "last_dig_at": now,
+            }
+
             if p["thick_skin_saved"]:
-                self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
+                tunnel_updates["thick_skin_date"] = today
 
             cave_in_jc = 0
             loot_chance = p["mutation_fx"].get("cave_in_loot_chance", 0)
@@ -3681,55 +3907,33 @@ class DigService:
                 self.player_repo.add_balance(discord_id, guild_id, cave_in_jc)
 
             if p["mutation_fx"].get("post_cave_in_advance"):
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    temp_buffs=json.dumps({
-                        "id": "second_wind", "name": "Second Wind",
-                        "digs_remaining": 1,
-                        "effect": {"advance_bonus": int(p["mutation_fx"]["post_cave_in_advance"])},
-                    }),
-                )
+                tunnel_updates["temp_buffs"] = json.dumps({
+                    "id": "second_wind", "name": "Second Wind",
+                    "digs_remaining": 1,
+                    "effect": {"advance_bonus": int(p["mutation_fx"]["post_cave_in_advance"])},
+                })
 
             injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
-            consequence_roll = random.random()
-            if consequence_roll < 0.3:
-                cave_in_detail = {
-                    "type": "stun", "block_loss": block_loss,
-                    "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
-                }
-                injury = {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
-                self.dig_repo.update_tunnel(discord_id, guild_id, injury_state=json.dumps(injury))
-            elif consequence_roll < 0.6:
-                cave_in_detail = {
-                    "type": "injury", "block_loss": block_loss,
-                    "message": (
-                        f"Cave-in! Lost {block_loss} blocks and you're injured "
-                        f"(reduced digging for {3 + injury_bonus} digs)."
-                    ),
-                }
-                injury = {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
-                self.dig_repo.update_tunnel(discord_id, guild_id, injury_state=json.dumps(injury))
-            else:
-                med_cost = random.randint(3, 9)
-                balance = self.player_repo.get_balance(discord_id, guild_id)
-                med_cost = min(med_cost, max(0, balance))
-                if med_cost > 0:
-                    self.player_repo.add_balance(discord_id, guild_id, -med_cost)
-                cave_in_detail = {
-                    "type": "medical_bill", "block_loss": block_loss,
-                    "jc_lost": med_cost,
-                    "message": (
-                        f"Cave-in! Lost {block_loss} blocks and paid "
-                        f"{med_cost} JC in medical bills."
-                    ),
-                }
-
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                depth=new_depth,
-                total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
-                last_dig_at=now,
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            catastrophic = roll_catastrophic_cave_in(band)
+            cave_in_detail, jc_debit = self._apply_cave_in_consequence(
+                discord_id=discord_id,
+                guild_id=guild_id,
+                tunnel=tunnel,
+                depth_before=depth_before,
+                band=band,
+                block_loss=block_loss,
+                catastrophic=catastrophic,
+                balance=balance,
+                injury_bonus=injury_bonus,
+                tunnel_updates=tunnel_updates,
             )
+            if jc_debit > 0:
+                self.player_repo.add_balance(discord_id, guild_id, -jc_debit)
+            if catastrophic:
+                new_depth = tunnel_updates["depth"]
+
+            self.dig_repo.update_tunnel(discord_id, guild_id, **tunnel_updates)
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
                 details=json.dumps({
@@ -8062,6 +8266,26 @@ class DigService:
             tunnel_updates["temp_buffs"] = json.dumps(buff_payload)
             buff_applied = buff_data
 
+        # Marquee guild modifier (e.g. helltide_active) — set on success.
+        guild_modifier_set: dict | None = None
+        gm_cfg = event.get("guild_modifier_on_success")
+        if (
+            gm_cfg
+            and succeeded
+            and choice in ("risky", "desperate")
+            and self.dig_guild_modifier_repo is not None
+        ):
+            try:
+                self.dig_guild_modifier_repo.set_modifier(
+                    guild_id=guild_id,
+                    modifier_id=gm_cfg.get("id", ""),
+                    duration_seconds=int(gm_cfg.get("duration_seconds", 0)),
+                    payload=gm_cfg.get("payload") or {},
+                )
+                guild_modifier_set = dict(gm_cfg)
+            except Exception:
+                logger.debug("guild_modifier_on_success set failed", exc_info=True)
+
         # Splash burns JC from OTHER players; it writes to their rows, not
         # the actor's, so it runs in its own txns around the atomic block.
         splash_result = None
@@ -8125,6 +8349,7 @@ class DigService:
             boss_encounter=boss_encounter,
             boss_info=boss_info,
             splash=_splash_to_dict(splash_result),
+            guild_modifier_set=guild_modifier_set,
         )
 
     # ------------------------------------------------------------------

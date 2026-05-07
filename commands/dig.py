@@ -2512,6 +2512,19 @@ class DigCommands(commands.Cog):
                     target_display_name=getattr(interaction.user, "display_name", None),
                 )
 
+            # Catastrophic cave-in: atmospheric public flame.
+            cave_in_detail_obj = getattr(result, "cave_in_detail", None)
+            cave_in_type_for_flame = ""
+            if cave_in_detail_obj is not None:
+                cave_in_type_for_flame = (
+                    cave_in_detail_obj.get("type", "")
+                    if isinstance(cave_in_detail_obj, dict)
+                    else getattr(cave_in_detail_obj, "type", "")
+                )
+            if cave_in_type_for_flame == "catastrophic" and interaction.channel is not None:
+                from services.dig_flame import post_catastrophic
+                post_catastrophic(interaction.channel)
+
         # Dispatch by result shape. Each branch handles its own reply + reactions.
         if getattr(result, "is_first_dig", False):
             await self._send_first_dig_welcome(interaction)
@@ -4394,6 +4407,11 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
                 "stun": "Stunned — next dig has longer cooldown!",
                 "injury": "Injured — reduced digging for several digs!",
                 "medical_bill": "",  # JC loss shown via jc_lost below
+                "gear_nick": "Gear took a hit — durability lost.",
+                "spilled_satchel": "An item slipped from your pack.",
+                "snuffed_light": "The light dimmed.",
+                "cracked_hat": "Hard hat charge damaged.",
+                "catastrophic": "Tunnel collapsed — milestone fallback.",
             }.get(cave_in_type, "")
             message = consequence
         else:
@@ -4404,7 +4422,7 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         if message:
             cave_in_text += f". {message}"
         embed.add_field(
-            name="Cave-in!",
+            name="CATASTROPHIC CAVE-IN!" if cave_in_type == "catastrophic" else "Cave-in!",
             value=cave_in_text,
             inline=False,
         )

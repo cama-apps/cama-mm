@@ -1981,3 +1981,34 @@ class ICurseRepository(ABC):
     ) -> int:
         """Number of unexpired curses on this target. Drives both is_cursed and stack_count."""
         ...
+
+
+class IDigGuildModifierRepository(ABC):
+    """Guild-wide dig modifiers with expiry (e.g. Helltide bell)."""
+
+    @abstractmethod
+    def set_modifier(
+        self,
+        guild_id: int | None,
+        modifier_id: str,
+        duration_seconds: int,
+        payload: dict | None = None,
+    ) -> int:
+        """Insert or extend a guild-wide modifier. Returns the resulting expires_at."""
+        ...
+
+    @abstractmethod
+    def get_active(self, guild_id: int | None, now: int | None = None) -> list[dict]:
+        """List active (unexpired) modifiers for a guild. Each row has
+        modifier_id, expires_at, payload (already-decoded dict)."""
+        ...
+
+    @abstractmethod
+    def is_active(self, guild_id: int | None, modifier_id: str, now: int | None = None) -> bool:
+        """Quick existence check for a single modifier."""
+        ...
+
+    @abstractmethod
+    def clear_expired(self, now: int | None = None) -> int:
+        """Delete expired rows globally. Returns count removed."""
+        ...
