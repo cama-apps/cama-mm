@@ -514,7 +514,6 @@ _BASE_GOLDEN_WHEEL_WEDGES = [
     ("OVEREXTENDED", -398, "#4a3000"),
     # Numeric wins — gold color palette, ascending value
     ("20", 20, "#b8860b"),
-    ("20", 20, "#b8860b"),
     ("30", 30, "#c8a000"),
     ("40", 40, "#daa520"),
     ("50", 50, "#d4a000"),
@@ -538,6 +537,8 @@ _BASE_GOLDEN_WHEEL_WEDGES = [
     ("TRICKLE", "TRICKLE_DOWN", "#5c7a00"),
     ("DIVIDEND", "DIVIDEND", "#4a7000"),
     ("TAKEOVER", "HOSTILE_TAKEOVER", "#6a2a80"),
+    # RECESSION — server-wide deflation; richer players lose more
+    ("RECESSION", "RECESSION", "#3a0a0a"),
 ]
 
 _GOLDEN_SPECIAL_WEDGE_EST_EVS: dict[str, float] = {}
@@ -554,6 +555,7 @@ def _load_golden_special_wedge_evs() -> None:
         WHEEL_GOLDEN_HEIST_EST_EV,
         WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV,
         WHEEL_GOLDEN_MARKET_CRASH_EST_EV,
+        WHEEL_GOLDEN_RECESSION_EST_EV,
         WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
     )
@@ -566,6 +568,7 @@ def _load_golden_special_wedge_evs() -> None:
         "TRICKLE_DOWN": WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
         "DIVIDEND": WHEEL_GOLDEN_DIVIDEND_EST_EV,
         "HOSTILE_TAKEOVER": WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV,
+        "RECESSION": WHEEL_GOLDEN_RECESSION_EST_EV,
     })
 
 
@@ -639,6 +642,7 @@ def compute_live_golden_wedges(
         LIGHTNING_BOLT_PCT_MAX,
         LIGHTNING_BOLT_PCT_MIN,
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_GOLDEN_RECESSION_TOP_PCT,
         WHEEL_GOLDEN_TARGET_EV,
         WHEEL_RED_SHELL_EST_EV,
     )
@@ -673,6 +677,11 @@ def compute_live_golden_wedges(
     else:
         hostile_ev = 40.0
 
+    # RECESSION: spinner is top-N, so they take the top-tier % loss themselves.
+    # EV here is the spinner's loss only (other players' losses don't shift
+    # spinner EV, but contribute to overall server deflation).
+    recession_ev = -float(max(0, int(max(0, spinner_balance) * WHEEL_GOLDEN_RECESSION_TOP_PCT)))
+
     live_evs: dict[str, float] = {
         "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
         "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
@@ -682,6 +691,7 @@ def compute_live_golden_wedges(
         "TRICKLE_DOWN": trickle_ev,
         "DIVIDEND": dividend_ev,
         "HOSTILE_TAKEOVER": hostile_ev,
+        "RECESSION": recession_ev,
     }
 
     num_wedges = len(_BASE_GOLDEN_WHEEL_WEDGES)

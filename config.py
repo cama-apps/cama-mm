@@ -221,7 +221,7 @@ LIGHTNING_BOLT_MIN_TAX = _parse_int("LIGHTNING_BOLT_MIN_TAX", 1)
 
 # Golden Wheel (exclusive to top N jopacoin balance holders)
 WHEEL_GOLDEN_TOP_N = _parse_int("WHEEL_GOLDEN_TOP_N", 3)
-WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", -50.0)
+WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", -75.0)
 # Estimated EVs for special golden wedges — used to calibrate OVEREXTENDED value
 # so the overall wheel EV stays at WHEEL_GOLDEN_TARGET_EV.
 WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 33.0)          # per wedge (×2)
@@ -230,6 +230,15 @@ WHEEL_GOLDEN_COMPOUND_EST_EV = _parse_float("WHEEL_GOLDEN_COMPOUND_EST_EV", 30.0
 WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV", 65.0)
 WHEEL_GOLDEN_DIVIDEND_EST_EV = _parse_float("WHEEL_GOLDEN_DIVIDEND_EST_EV", 10.0)
 WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV = _parse_float("WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV", 35.0)
+# RECESSION: server-wide deflation. Every positive-balance player loses a % of
+# their balance (richer = bigger loss in absolute terms); funds vanish into the
+# nonprofit fund. Spinner is included since they're top-N. EV here is from the
+# spinner's perspective only (their own loss); calibrated live in code.
+WHEEL_GOLDEN_RECESSION_EST_EV = _parse_float("WHEEL_GOLDEN_RECESSION_EST_EV", -200.0)
+WHEEL_GOLDEN_RECESSION_TOP_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_TOP_PCT", 0.06)
+WHEEL_GOLDEN_RECESSION_MID_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_MID_PCT", 0.035)
+WHEEL_GOLDEN_RECESSION_REST_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_REST_PCT", 0.02)
+WHEEL_GOLDEN_RECESSION_MID_RANK_END = _parse_int("WHEEL_GOLDEN_RECESSION_MID_RANK_END", 10)
 
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)

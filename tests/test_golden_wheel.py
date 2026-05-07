@@ -47,7 +47,8 @@ class TestGoldenWheelWedges:
         from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES
         values = {w[1] for w in GOLDEN_WHEEL_WEDGES}
         for mechanic in ("HEIST", "MARKET_CRASH", "COMPOUND_INTEREST",
-                         "TRICKLE_DOWN", "DIVIDEND", "HOSTILE_TAKEOVER"):
+                         "TRICKLE_DOWN", "DIVIDEND", "HOSTILE_TAKEOVER",
+                         "RECESSION"):
             assert mechanic in values, f"Missing golden mechanic: {mechanic}"
 
     def test_golden_wheel_contains_shell_mechanics(self):
@@ -93,6 +94,7 @@ class TestGoldenWheelWedges:
             "TRICKLE_DOWN": float(int(max(0, total_positive_balance - spinner_balance) * avg_trickle)),
             "DIVIDEND": float(max(10, int(total_positive_balance * 0.005))),
             "HOSTILE_TAKEOVER": float(max(1, int(rank_next_balance * 0.115))),
+            "RECESSION": -float(max(0, int(spinner_balance * config.WHEEL_GOLDEN_RECESSION_TOP_PCT))),
         }
 
         int_sum = sum(v for _, v, _ in wedges if isinstance(v, int))
