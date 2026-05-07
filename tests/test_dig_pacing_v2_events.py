@@ -95,9 +95,16 @@ class TestEventTraitMix:
     def _classify(self, event):
         risky = event.risky_option
         risky_failure = risky.failure
-        is_risky = bool(risky_failure) and (
-            risky_failure.jc < 0 or risky_failure.advance < 0 or risky_failure.cave_in
-        )
+        # Ambush events that intentionally have no escape (failure=None) are
+        # inherently risky — the player can't bail out.
+        if risky_failure is None:
+            is_risky = True
+        else:
+            is_risky = (
+                risky_failure.jc < 0
+                or risky_failure.advance < 0
+                or risky_failure.cave_in
+            )
         is_deflationary = (
             risky.success.jc < 0 or (risky_failure and risky_failure.jc < 0)
         )
@@ -200,3 +207,29 @@ class TestHelltideBellEndToEnd:
         assert result.get("success")
         # Yield never goes below zero from the tax.
         assert player_repository.get_balance(10001, guild_id) >= 0
+
+    def test_resolve_helltide_event_sets_modifier(self, dig_service, gm_repo, player_repository, guild_id, monkeypatch):
+        """Resolving the helltide_bell event on risky success must call
+        dig_guild_modifier_repo.set_modifier — closes the gap between
+        event definitions and the resolve_event hook."""
+        _register(player_repository, balance=10000)
+        # Force success_chance roll to succeed: random.random() < success_chance.
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        # Force a stable jc/advance jitter so it doesn't introduce noise.
+        monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+        monkeypatch.setattr(random, "randint", lambda a, b: 0)
+
+        # Need a tunnel for resolve_event to find.
+        dig_service.dig(10001, guild_id)
+
+        # Modifier must NOT be active yet.
+        assert gm_repo.is_active(guild_id, HELLTIDE_MODIFIER_ID) is False
+
+        result = dig_service.resolve_event(10001, guild_id, "helltide_bell", "risky")
+        assert result.get("success") is True
+        assert result.get("succeeded") is True
+        # The modifier should be set now.
+        assert gm_repo.is_active(guild_id, HELLTIDE_MODIFIER_ID) is True
+        gm_set = result.get("guild_modifier_set")
+        assert gm_set is not None
+        assert gm_set.get("id") == HELLTIDE_MODIFIER_ID

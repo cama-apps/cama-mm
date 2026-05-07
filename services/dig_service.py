@@ -2460,15 +2460,27 @@ class DigService:
         """
         # Catastrophic overrides the consequence pick entirely.
         if catastrophic:
-            # Catastrophic overrides block_loss with a hard roll-back to the
-            # nearest 25-multiple milestone strictly less than depth_before.
-            milestone = max(
-                0,
-                ((max(0, depth_before - 1)) // CAVE_IN_CATASTROPHIC_MILESTONE_STEP)
-                * CAVE_IN_CATASTROPHIC_MILESTONE_STEP,
-            )
-            new_depth = milestone
-            tunnel_updates["depth"] = new_depth
+            # Insurance keeps the player at depth — covers the rollback only,
+            # not the other catastrophic effects (medical bill, stun, gear).
+            now_ts = int(time.time())
+            insured = int(tunnel.get("insured_until") or 0) > now_ts
+            insurance_saved = False
+            if insured:
+                # Skip the rollback; depth stays at the block_loss-driven value
+                # already in tunnel_updates.
+                new_depth = int(tunnel_updates.get("depth", depth_before - block_loss))
+                insurance_saved = True
+            else:
+                # Catastrophic overrides block_loss with a hard roll-back to
+                # the nearest 25-multiple milestone strictly less than
+                # depth_before.
+                milestone = max(
+                    0,
+                    ((max(0, depth_before - 1)) // CAVE_IN_CATASTROPHIC_MILESTONE_STEP)
+                    * CAVE_IN_CATASTROPHIC_MILESTONE_STEP,
+                )
+                new_depth = milestone
+                tunnel_updates["depth"] = new_depth
             tunnel_updates["temp_buffs"] = None  # nukes any second_wind set above
 
             cmin, cmax = CAVE_IN_CATASTROPHIC_MEDICAL_BILL
@@ -2488,16 +2500,19 @@ class DigService:
                     break
 
             total_block_loss = max(block_loss, depth_before - new_depth)
+            insurance_note = " Insurance held the depth." if insurance_saved else ""
             detail = {
                 "type": "catastrophic",
                 "block_loss": total_block_loss,
                 "jc_lost": med_cost,
                 "stun_digs": stun_digs,
                 "depth_after": new_depth,
+                "insurance_saved": insurance_saved,
                 "message": (
                     f"CATASTROPHIC CAVE-IN! Tunnel folds in on itself. "
                     f"Lost {total_block_loss} blocks, paid {med_cost} JC, "
                     f"stunned for {stun_digs} digs, gear shattered."
+                    f"{insurance_note}"
                 ),
             }
             return detail, med_cost
@@ -3904,7 +3919,6 @@ class DigService:
                 loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
                 loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
                 cave_in_jc = random.randint(loot_min, loot_max)
-                self.player_repo.add_balance(discord_id, guild_id, cave_in_jc)
 
             if p["mutation_fx"].get("post_cave_in_advance"):
                 tunnel_updates["temp_buffs"] = json.dumps({
@@ -3928,8 +3942,12 @@ class DigService:
                 injury_bonus=injury_bonus,
                 tunnel_updates=tunnel_updates,
             )
-            if jc_debit > 0:
-                self.player_repo.add_balance(discord_id, guild_id, -jc_debit)
+            # Single net add_balance: loot credit minus consequence debit. The
+            # tunnel write below isn't atomic with this, but at least the
+            # balance side flips together.
+            net_delta = cave_in_jc - jc_debit
+            if net_delta != 0:
+                self.player_repo.add_balance(discord_id, guild_id, net_delta)
             if catastrophic:
                 new_depth = tunnel_updates["depth"]
 
