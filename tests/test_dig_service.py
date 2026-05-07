@@ -11,8 +11,7 @@ from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
     BOSSES,
-    CAVE_IN_BLOCK_LOSS_MAX,
-    CAVE_IN_BLOCK_LOSS_MIN,
+    CAVE_IN_BLOCK_LOSS_RANGES,
     CHEER_COOLDOWN_SECONDS,
     DIG_TIPS,
     FIRST_DIG_ADVANCE_MAX,
@@ -414,7 +413,9 @@ class TestCaveIn:
         assert result.get("cave_in")
         detail = result.get("cave_in_detail") or {}
         block_loss = int(detail.get("block_loss", -1))
-        assert CAVE_IN_BLOCK_LOSS_MIN <= block_loss <= CAVE_IN_BLOCK_LOSS_MAX
+        # Tunnel was set to depth=20 (shallow band).
+        shallow_min, shallow_max = CAVE_IN_BLOCK_LOSS_RANGES["shallow"]
+        assert shallow_min <= block_loss <= shallow_max
 
     def test_cave_in_depth_min_zero(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Depth never goes below 0 after cave-in."""

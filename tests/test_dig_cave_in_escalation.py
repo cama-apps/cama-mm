@@ -237,3 +237,31 @@ class TestEndToEndCaveInDeep:
             # JC lost is capped to balance, but with balance=10000 we should
             # always get the full random range.
             assert cmin <= jc_lost <= cmax
+
+    def test_insurance_protects_catastrophic_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Per plan §1d: insurance keeps depth on catastrophic. Other
+        consequences (medical bill, stun, gear) still fire."""
+        from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
+        _register(player_repository, balance=10000)
+        monkeypatch.setattr("time.time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        # Place at deep depth between boundaries; plant insurance valid for
+        # the next dig's wall-clock time.
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=240,
+            insured_until=1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 86400,
+        )
+        _clear_boss_blocks(dig_repo, 10001, guild_id)
+
+        monkeypatch.setattr("time.time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: 0.0001)
+        result = dig_service.dig(10001, guild_id)
+        detail = result.get("cave_in_detail") or {}
+        if detail.get("type") == "catastrophic":
+            tunnel = dig_repo.get_tunnel(10001, guild_id)
+            # Insurance held depth — must NOT roll back to the milestone.
+            # depth_after should be ≥ depth_before - max block_loss range.
+            assert detail.get("insurance_saved") is True
+            assert tunnel["depth"] >= 240 - 35  # generous range for endgame block loss
