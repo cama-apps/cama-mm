@@ -1230,13 +1230,15 @@ BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
 # simulation confirmed the resulting curve. Tune by editing entries.
 BOSS_TIER_BONUS: dict[int, dict[str, float]] = {
     # boundary depth: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
+    # Mid-late rows (150/200/275) are nudged a touch tougher — those tiers
+    # had become a bit too smooth once gear caught up.
     25:  {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.00},
     50:  {"hp": 1,  "hit": 0.00, "dmg": 0, "pen": 0.01},
     75:  {"hp": 2,  "hit": 0.01, "dmg": 0, "pen": 0.02},
     100: {"hp": 3,  "hit": 0.03, "dmg": 0, "pen": 0.04},
-    150: {"hp": 5,  "hit": 0.04, "dmg": 0, "pen": 0.05},
-    200: {"hp": 5,  "hit": 0.05, "dmg": 0, "pen": 0.06},
-    275: {"hp": 6,  "hit": 0.06, "dmg": 0, "pen": 0.06},
+    150: {"hp": 6,  "hit": 0.05, "dmg": 0, "pen": 0.06},
+    200: {"hp": 6,  "hit": 0.06, "dmg": 0, "pen": 0.07},
+    275: {"hp": 7,  "hit": 0.07, "dmg": 0, "pen": 0.07},
     350: {"hp": 9,  "hit": 0.10, "dmg": 0, "pen": 0.06},   # pinnacle: HP grind, no dmg cliff
 }
 BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
@@ -1311,9 +1313,9 @@ BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
     50:  (1.8, 3.3, 5.8),
     75:  (2.1, 4.3, 7.3),
     100: (2.4, 4.8, 8.4),
-    150: (2.9, 5.8, 9.8),
-    200: (3.3, 6.6, 11.3),
-    275: (3.6, 7.8, 12.0),
+    150: (2.9, 5.6, 9.4),
+    200: (3.2, 6.2, 10.4),
+    275: (3.5, 7.0, 11.0),
     350: (2.5, 3.8, 7.5),
 }
 

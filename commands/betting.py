@@ -780,6 +780,9 @@ class BettingCommands(commands.Cog):
         takeover_amount: int = 0,
         takeover_victim_name: str = "rank #4",
         takeover_missed: bool = False,
+        recession_total: int = 0,
+        recession_count: int = 0,
+        recession_self_loss: int = 0,
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
         label, value = result[0], result[1]  # (label, value, color)
@@ -1028,6 +1031,18 @@ class BettingCommands(commands.Cog):
                     f"Seized **{takeover_amount}** {JOPACOIN_EMOTE}.\n\n"
                     f"*So close to the top — and yet, so far.*"
                 )
+
+        elif value == "RECESSION":
+            title = "🩸 RECESSION! 🩸"
+            color = discord.Color.from_str("#3a0a0a")
+            description = (
+                f"**RECESSION**\n\n"
+                f"📉 The economy contracts. **{recession_count}** players lost a slice of their balance — "
+                f"the wealthier you are, the more you bleed.\n\n"
+                f"You lost **{recession_self_loss}** {JOPACOIN_EMOTE}.\n"
+                f"Total drained from the server: **{recession_total}** {JOPACOIN_EMOTE} (sent to nonprofit).\n\n"
+                f"*Pride goes before the fall — and it drags the rest down with it.*"
+            )
 
         # --- Mana bonus wedge embeds ---
         elif value == "ERUPTION":
@@ -2405,6 +2420,9 @@ class BettingCommands(commands.Cog):
         takeover_amount: int = 0
         takeover_victim_name: str = "rank #4"
         takeover_missed: bool = False
+        recession_total: int = 0
+        recession_count: int = 0
+        recession_self_loss: int = 0
 
         if result_value == "RETRIBUTION":
             # War effect: steal from attackers, LOSE for everyone else
@@ -2879,6 +2897,56 @@ class BettingCommands(commands.Cog):
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 40)
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
+        elif result_value == "RECESSION":
+            # Server-wide deflation: every positive-balance player loses a % of
+            # their balance, scaled by wealth tier. Funds vanish into nonprofit.
+            # Spinner is in top-N so they take the top-tier loss themselves.
+            from config import (
+                WHEEL_GOLDEN_RECESSION_MID_PCT,
+                WHEEL_GOLDEN_RECESSION_MID_RANK_END,
+                WHEEL_GOLDEN_RECESSION_REST_PCT,
+                WHEEL_GOLDEN_RECESSION_TOP_PCT,
+            )
+            all_players_rec = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            recession_total = 0
+            recession_count = 0
+            spinner_balance_before = new_balance
+            top_n = WHEEL_GOLDEN_TOP_N
+            mid_end = WHEEL_GOLDEN_RECESSION_MID_RANK_END
+            for rank_idx, p in enumerate(all_players_rec):
+                if p.jopacoin_balance <= 0:
+                    continue
+                if rank_idx < top_n:
+                    pct = WHEEL_GOLDEN_RECESSION_TOP_PCT
+                    min_loss = 50
+                elif rank_idx < mid_end:
+                    pct = WHEEL_GOLDEN_RECESSION_MID_PCT
+                    min_loss = 10
+                else:
+                    pct = WHEEL_GOLDEN_RECESSION_REST_PCT
+                    min_loss = 1
+                loss = min(p.jopacoin_balance, max(min_loss, int(p.jopacoin_balance * pct)))
+                if loss <= 0:
+                    continue
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, p.discord_id, guild_id, -loss
+                )
+                recession_total += loss
+                recession_count += 1
+            if self.loan_service and recession_total > 0:
+                try:
+                    await asyncio.to_thread(
+                        self.loan_service.add_to_nonprofit_fund, guild_id, recession_total
+                    )
+                except Exception:
+                    logger.warning("Failed to add recession losses to nonprofit fund")
+            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+            # Spinner's actual loss: derived from balance delta so we never
+            # report a misleading 0 if the leaderboard scan missed them.
+            recession_self_loss = max(0, spinner_balance_before - new_balance)
+
         elif result_value in ("EXTEND_1", "EXTEND_2"):
             # Bankruptcy penalty extension slices (only appear on bankrupt wheel)
             games_to_add = 1 if result_value == "EXTEND_1" else 2
@@ -2984,6 +3052,8 @@ class BettingCommands(commands.Cog):
             log_result = dividend_amount
         elif result_value == "HOSTILE_TAKEOVER":
             log_result = 0 if takeover_missed else takeover_amount
+        elif result_value == "RECESSION":
+            log_result = -recession_self_loss
         else:
             log_result = result_value if isinstance(result_value, int) else 0
 
@@ -3041,6 +3111,9 @@ class BettingCommands(commands.Cog):
             takeover_amount=takeover_amount,
             takeover_victim_name=takeover_victim_name,
             takeover_missed=takeover_missed,
+            recession_total=recession_total,
+            recession_count=recession_count,
+            recession_self_loss=recession_self_loss,
         )
 
         # Add Guardian Aura notification if it triggered
