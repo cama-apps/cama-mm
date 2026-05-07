@@ -190,11 +190,13 @@ def test_disbursement_events_credit_recipient_amount():
 
 
 def test_match_bonuses_collapse_to_one_event_per_match():
+    from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
+
     svc, repos = _build_service()
     # Pre-migration rows (bonus_jc IS NULL) fall back to current-config
     # reconstruction. Reality: only LOSERS get participation; winners only get
-    # the win reward. With JOPACOIN_PER_GAME=1, JOPACOIN_WIN_REWARD=2 the
-    # winner row contributes 2 and the loser row contributes 1.
+    # the win reward. The winner row contributes JOPACOIN_WIN_REWARD and the
+    # loser row contributes JOPACOIN_PER_GAME.
     repos["match_repo"].get_player_bonus_events.return_value = [
         {"match_id": 1, "match_time": 1000, "won": True, "bonus_jc": None},
         {"match_id": 2, "match_time": 2000, "won": False, "bonus_jc": None},
@@ -202,10 +204,11 @@ def test_match_bonuses_collapse_to_one_event_per_match():
     series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
     assert len(series) == 2
     deltas = [info["delta"] for _, _, info in series]
-    assert sum(deltas) == 3
-    assert totals.get(SOURCE_BONUS) == 3
+    expected_total = JOPACOIN_WIN_REWARD + JOPACOIN_PER_GAME
+    assert sum(deltas) == expected_total
+    assert totals.get(SOURCE_BONUS) == expected_total
     # First event (winner) breaks down to win-only.
-    assert series[0][2]["detail"]["components"] == {"participation": 0, "win": 2}
+    assert series[0][2]["detail"]["components"] == {"participation": 0, "win": JOPACOIN_WIN_REWARD}
 
 
 def test_match_bonuses_use_persisted_bonus_jc_when_present():

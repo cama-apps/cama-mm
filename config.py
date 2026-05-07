@@ -101,9 +101,9 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
 NEW_PLAYER_EXCLUSION_BOOST = _parse_int("NEW_PLAYER_EXCLUSION_BOOST", 4)
 RD_PRIORITY_WEIGHT = _parse_float("RD_PRIORITY_WEIGHT", 0.2)
 
-JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 1)
+JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 2)
 STREAMING_BONUS = _parse_int("STREAMING_BONUS", 1)  # JC awarded for Go Live + Dota 2
-FIRST_GAME_BONUS = _parse_int("FIRST_GAME_BONUS", 1)  # JC awarded to all players in first game after 5pm PST
+FIRST_GAME_BONUS = _parse_int("FIRST_GAME_BONUS", 2)  # JC awarded to all players in first game after 5pm PST
 FIRST_GAME_RESET_HOUR = _parse_int("FIRST_GAME_RESET_HOUR", 17)  # Hour (0-23) in America/Los_Angeles
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 2)
