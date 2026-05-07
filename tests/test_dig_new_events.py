@@ -296,8 +296,9 @@ class TestRumorPassEventShape:
 
 
 class TestPrestigeChainEncounter:
-    """The P8 lore-chain: three deterministic events linked via
-    next_event_id. Step 2 only fires from step 1 if prestige >= 8."""
+    """The P6 lore-chain: three deterministic events linked via
+    next_event_id. Each step's gate is the target event's own
+    min_prestige (currently 6 for the Hollow Court arc)."""
 
     HOLLOW_CHAIN_IDS = (
         "hollow_court_overture",
@@ -313,9 +314,9 @@ class TestPrestigeChainEncounter:
             assert any(e.id == cid for e in RANDOM_EVENTS)
             assert any(e["id"] == cid for e in EVENT_POOL)
 
-    def test_chain_events_gated_to_p8(self):
+    def test_chain_events_gated_to_p6(self):
         for cid in self.HOLLOW_CHAIN_IDS:
-            assert self._by_id(cid).min_prestige == 8
+            assert self._by_id(cid).min_prestige == 6
 
     def test_chain_links_are_deterministic(self):
         overture = self._by_id("hollow_court_overture")
@@ -325,7 +326,7 @@ class TestPrestigeChainEncounter:
         assert audience.next_event_id == recess.id
         assert recess.next_event_id is None
 
-    def test_p7_player_does_not_chain_into_step2(
+    def test_below_gate_player_does_not_chain_into_step2(
         self, dig_repo, player_repository, monkeypatch,
     ):
         from services.dig_service import DigService
@@ -335,12 +336,12 @@ class TestPrestigeChainEncounter:
         # Force the random-pool path to never fire so we only see deterministic
         monkeypatch.setattr(random, "random", lambda: 0.99)
         result = svc._chain_event(
-            depth=250, prestige_level=7, trigger_rarity="legendary",
+            depth=250, prestige_level=5, trigger_rarity="legendary",
             trigger_event_id="hollow_court_overture",
         )
         assert result is None
 
-    def test_p8_player_chains_into_step2(
+    def test_at_gate_player_chains_into_step2(
         self, dig_repo, player_repository, monkeypatch,
     ):
         from services.dig_service import DigService
@@ -349,14 +350,14 @@ class TestPrestigeChainEncounter:
         monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
         monkeypatch.setattr(random, "random", lambda: 0.99)  # block random pool
         result = svc._chain_event(
-            depth=250, prestige_level=8, trigger_rarity="legendary",
+            depth=250, prestige_level=6, trigger_rarity="legendary",
             trigger_event_id="hollow_court_overture",
         )
         assert result is not None
         assert result["id"] == "hollow_court_audience"
         assert result["chained"] is True
 
-    def test_p8_player_chains_into_step3(
+    def test_at_gate_player_chains_into_step3(
         self, dig_repo, player_repository, monkeypatch,
     ):
         from services.dig_service import DigService
@@ -365,13 +366,13 @@ class TestPrestigeChainEncounter:
         monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
         monkeypatch.setattr(random, "random", lambda: 0.99)
         result = svc._chain_event(
-            depth=250, prestige_level=8, trigger_rarity="legendary",
+            depth=250, prestige_level=6, trigger_rarity="legendary",
             trigger_event_id="hollow_court_audience",
         )
         assert result is not None
         assert result["id"] == "hollow_court_recess"
 
-    def test_p8_chain_terminates_at_step3(
+    def test_chain_terminates_at_step3(
         self, dig_repo, player_repository, monkeypatch,
     ):
         from services.dig_service import DigService
@@ -380,8 +381,23 @@ class TestPrestigeChainEncounter:
         monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
         monkeypatch.setattr(random, "random", lambda: 0.99)
         result = svc._chain_event(
-            depth=250, prestige_level=8, trigger_rarity="legendary",
+            depth=250, prestige_level=6, trigger_rarity="legendary",
             trigger_event_id="hollow_court_recess",
         )
         # No next_event_id and random roll blocks fallback chain
         assert result is None
+
+    def test_audience_and_recess_excluded_from_random_pool(self):
+        """audience and recess are chain-only — they must never appear in
+        the random roll pool, otherwise a P6 player could see step 2 or 3
+        as their first contact with the arc, breaking narrative order."""
+        from services.dig_service import DigService
+
+        svc = DigService.__new__(DigService)
+        for _ in range(200):
+            event = svc.roll_event(depth=250, luminosity=100, prestige_level=6)
+            if event is None:
+                continue
+            assert event["id"] not in (
+                "hollow_court_audience", "hollow_court_recess",
+            ), f"chain_only event {event['id']} leaked into random pool"

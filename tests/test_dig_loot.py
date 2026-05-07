@@ -563,7 +563,7 @@ class TestEventPoolInvariants:
 
     def test_rarity_weights_constant(self):
         from services.dig_service import RARITY_WEIGHTS
-        assert RARITY_WEIGHTS == {"common": 70, "uncommon": 20, "rare": 12, "legendary": 6}
+        assert RARITY_WEIGHTS == {"common": 70, "uncommon": 20, "rare": 15, "legendary": 10}
 
     def test_prestige_gates_unlocked(self):
         """infernal_gate, aghanim_trial, neow_blessing should be rollable

@@ -1952,6 +1952,222 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         safe_option_idx=1,
     ),
 
+    # ================================================================
+    # TIER 150 — late-prestige additions
+    # ================================================================
+    "xalatath_void_pull": BossMechanic(
+        id="xalatath_void_pull",
+        archetype="hook_pull",
+        trigger_round=4,
+        prompt_title="A seam opens. It pulls.",
+        prompt_description="The dark below your feet has a direction. Toward her.",
+        options=(
+            MechanicOption(
+                label="Anchor to the wall",
+                flavor="You drive your pick into stone.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -1, 0, None, None,             "You hold. Something brushes past your ankle."),
+                    OutcomeRoll(0.35, -2, 0, None, "silence",        "The pick slips. You hear yourself stop existing for a moment."),
+                ),
+            ),
+            MechanicOption(
+                label="Let the pull take you",
+                flavor="Use the momentum. Strike on the way in.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -3, None, None,            "You ride the seam. Your pick finds her ribs."),
+                    OutcomeRoll(0.55, -3, 0, None, "bleed",          "She closes the seam around you. Something tears."),
+                ),
+            ),
+            MechanicOption(
+                label="Speak her name back",
+                flavor="If she heard you, she might hesitate.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, 0, -2, None, "reveal",         "She pauses. The seam slackens. Her shape thins."),
+                    OutcomeRoll(0.60, -2, 0, None, "silence",        "You said it wrong. The name takes more than you offered."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "xalatath_whisper_madness": BossMechanic(
+        id="xalatath_whisper_madness",
+        archetype="reality_warp",
+        trigger_round=5,
+        prompt_title="A whisper, not in your ear",
+        prompt_description="It's already in your head. It's been there a while.",
+        options=(
+            MechanicOption(
+                label="Listen carefully",
+                flavor="Hear it out.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, 0, -2, None, "reveal",         "You catch a syllable that wasn't meant for you. She flinches."),
+                    OutcomeRoll(0.55, -2, 0, None, "silence",        "The whisper folds. You can't recall a word now."),
+                ),
+            ),
+            MechanicOption(
+                label="Cover your ears and hum",
+                flavor="Drown her out with noise.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,             "The hum holds. The whisper retreats — for now."),
+                    OutcomeRoll(0.40, -2, 0, "player", "silence",    "She whispered louder. The hum cracks. So does your nerve."),
+                ),
+            ),
+            MechanicOption(
+                label="Repeat the whisper aloud",
+                flavor="Give it back to her.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -1, -3, None, None,            "She didn't expect that. The whisper recoils into her."),
+                    OutcomeRoll(0.65, -3, 0, None, "silence",        "You said it. You shouldn't have. Something rearranges in your chest."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
+    # ================================================================
+    # TIER 200 — late-prestige additions
+    # ================================================================
+    "lilith_blood_nova": BossMechanic(
+        id="lilith_blood_nova",
+        archetype="channel_aoe",
+        trigger_round=3,
+        prompt_title="Blood lifts off the floor",
+        prompt_description="It hangs around her like a held breath.",
+        options=(
+            MechanicOption(
+                label="Take cover behind a column",
+                flavor="Let the wave pass.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70, -1, 0, None, None,             "The column splatters. Most of you stays dry."),
+                    OutcomeRoll(0.30, -2, 0, None, "bleed",          "It found a seam in the stone. It found yours too."),
+                ),
+            ),
+            MechanicOption(
+                label="Dive through the center",
+                flavor="Take the wave at her.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -2, -3, None, None,            "You break through. She's too close to escape your pick."),
+                    OutcomeRoll(0.60, -3, 0, None, "bleed",          "The wave is denser than it looks. You stagger out of it red."),
+                ),
+            ),
+            MechanicOption(
+                label="Stand still and let it find you",
+                flavor="Bleed back what's hers.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -1, -2, None, "reveal",        "She underestimated you. The blood reads your shape and reveals hers."),
+                    OutcomeRoll(0.70, -3, 0, "player", "bleed",      "The blood remembers you. Cycle bleed. You miss a beat."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "lilith_wing_descent": BossMechanic(
+        id="lilith_wing_descent",
+        archetype="aerial_slam",
+        trigger_round=5,
+        prompt_title="She rises on two black wings",
+        prompt_description="Higher than the ceiling should allow. She is going to come down.",
+        options=(
+            MechanicOption(
+                label="Roll under the descent",
+                flavor="Time the dodge.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, None,            "You roll. The crater misses. You hit her ankle going past."),
+                    OutcomeRoll(0.45, -3, 0, None, "bleed",          "Your timing was a half-beat off. The wing-edge clips you."),
+                ),
+            ),
+            MechanicOption(
+                label="Brace for the impact",
+                flavor="Plant and weather it.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -2, 0, None, None,             "The shockwave passes through you. You stay upright."),
+                    OutcomeRoll(0.35, -4, 0, None, None,             "She landed harder than the floor allowed. So did you."),
+                ),
+            ),
+            MechanicOption(
+                label="Throw your pick at her descent",
+                flavor="Interrupt mid-air.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, 0, -4, None, "reveal",         "The pick threads between her wings. She drops awkwardly."),
+                    OutcomeRoll(0.70, -3, 0, None, None,             "She caught it. Now you are unarmed, briefly. She is not."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
+    # ================================================================
+    # TIER 275 — late-prestige additions
+    # ================================================================
+    "underlord_pit_pull": BossMechanic(
+        id="underlord_pit_pull",
+        archetype="hook_pull",
+        trigger_round=4,
+        prompt_title="The floor opens beneath you",
+        prompt_description="A shaft drops into nothing. He's standing at the edge, waiting.",
+        options=(
+            MechanicOption(
+                label="Catch the lip and haul up",
+                flavor="Don't fall. Don't fall.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -1, 0, None, None,             "You catch the rim. Knuckles burn. You climb."),
+                    OutcomeRoll(0.35, -3, 0, None, "bleed",          "The rim gives. You eat stone on the way back up."),
+                ),
+            ),
+            MechanicOption(
+                label="Drop and strike on the way down",
+                flavor="If you're going down, take a piece of him.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -2, -4, None, None,            "You drop into him pick-first. He grunts. He didn't expect that."),
+                    OutcomeRoll(0.60, -4, 0, None, None,             "He stepped aside. You hit the bottom alone. The bottom is rude."),
+                ),
+            ),
+            MechanicOption(
+                label="Anchor your pick crosswise",
+                flavor="Wedge it across the shaft. Stop the fall.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, "reveal",         "The pick wedges. You hang there. He has to come to you."),
+                    OutcomeRoll(0.45, -2, 0, "player", None,         "The pick shears. You're below him now. He looks down at you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "underlord_firestorm": BossMechanic(
+        id="underlord_firestorm",
+        archetype="channel_aoe",
+        trigger_round=6,
+        prompt_title="He calls down a firestorm",
+        prompt_description="The ceiling forgets it's stone for a moment.",
+        options=(
+            MechanicOption(
+                label="Shelter under an outcrop",
+                flavor="Wait it out. Take the cooldown.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70, -1, 0, None, None,             "The rock holds. Heat washes past. You stay dry."),
+                    OutcomeRoll(0.30, -2, 0, None, "burn",           "An ember finds the gap. Smolders into your sleeve."),
+                ),
+            ),
+            MechanicOption(
+                label="Sprint through the storm at him",
+                flavor="Close the distance under fire.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -2, -3, None, None,            "You come out the other side smoking and swinging. He didn't move in time."),
+                    OutcomeRoll(0.60, -3, 0, None, "burn",           "The storm got most of you. The pick got air."),
+                ),
+            ),
+            MechanicOption(
+                label="Use the smoke to flank low",
+                flavor="Get under him.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -3, None, "reveal",        "You come up inside his guard. He takes a clean hit."),
+                    OutcomeRoll(0.55, -3, 0, None, "burn",           "He saw the smoke move. The pit lord knows smoke."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
 }
 
 

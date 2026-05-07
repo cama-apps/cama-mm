@@ -146,9 +146,12 @@ def _at_boss(dig_service, dig_repo, player_repository, monkeypatch, *, depth=24,
 class TestRosterShape:
     """Cross-referential invariants between BossDef, mechanics, and stingers."""
 
-    def test_three_bosses_per_tier(self):
+    def test_pool_size_per_tier(self):
+        # Tiers 25/50/75/100 have 3 bosses each. Tiers 150/200/275 have 4
+        # (the 4th is a late-prestige addition gated by prestige_required=3).
+        expected = {25: 3, 50: 3, 75: 3, 100: 3, 150: 4, 200: 4, 275: 4}
         for tier, pool in BOSSES_BY_TIER.items():
-            assert len(pool) == 3, f"tier {tier} has {len(pool)} bosses"
+            assert len(pool) == expected[tier], f"tier {tier} has {len(pool)} bosses"
 
     def test_grandfathered_first(self):
         """The first boss per tier is a grandfathered fantasy boss (by depth)."""
@@ -175,7 +178,8 @@ class TestRosterShape:
     def test_boss_ids_unique(self):
         all_ids = [b.boss_id for pool in BOSSES_BY_TIER.values() for b in pool]
         assert len(all_ids) == len(set(all_ids))
-        assert len(all_ids) == 21
+        # 21 base bosses + 3 late-prestige additions (prestige_required=3).
+        assert len(all_ids) == 24
 
 
 class TestMechanicInvariants:
