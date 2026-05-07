@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-from config import JOPACOIN_EXCLUSION_REWARD, JOPACOIN_WIN_REWARD
+from config import JOPACOIN_EXCLUSION_REWARD, JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from database import Database
 from domain.models.team import Team
 from rating_system import CamaRatingSystem
@@ -1238,8 +1238,8 @@ class TestLoanRepaymentOnMatchRecord:
         state = loan_service.get_state(borrower_id, guild_id=TEST_GUILD_ID)
         assert not state.has_outstanding_loan
 
-        # Balance: 0 + 50 loan - 60 repayment + 1 participation = -9 (debt)
-        assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == -9
+        # Balance: 0 + 50 loan - 60 repayment + JOPACOIN_PER_GAME participation
+        assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == -10 + JOPACOIN_PER_GAME
 
     def test_loan_not_repaid_if_not_participant(self, services, test_players):
         """Loan is NOT repaid if borrower doesn't participate in the match."""
@@ -1324,10 +1324,9 @@ class TestLoanRepaymentOnMatchRecord:
         state = loan_service.get_state(spectator_id, guild_id=TEST_GUILD_ID)
         assert not state.has_outstanding_loan
 
-        # Balance: 130 - 120 repayment + (1 if lost, 2 if won)
+        # Balance: 130 - 120 repayment + (participation if lost, win reward if won)
         balance = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
-        # Winners get +2 (win bonus), losers get +1 (participation)
-        assert balance in [11, 12]  # 130 - 120 + 1 = 11, or 130 - 120 + 2 = 12
+        assert balance in [10 + JOPACOIN_PER_GAME, 10 + JOPACOIN_WIN_REWARD]
 
     def test_loan_repayment_pushes_into_debt(self, services, test_players):
         """Loan repayment can push player into debt when they've spent the money."""
@@ -1353,9 +1352,9 @@ class TestLoanRepaymentOnMatchRecord:
         state = loan_service.get_state(borrower_id, guild_id=TEST_GUILD_ID)
         assert not state.has_outstanding_loan
 
-        # Balance: 0 - 120 + (1 if lost, 2 if won)
+        # Balance: 0 - 120 + (participation if lost, win reward if won)
         balance = player_repo.get_balance(borrower_id, TEST_GUILD_ID)
-        assert balance in [-119, -118]  # Lost: -119, Won: -118
+        assert balance in [-120 + JOPACOIN_PER_GAME, -120 + JOPACOIN_WIN_REWARD]
 
     def test_multiple_players_with_loans(self, services, test_players):
         """Multiple players have loans, all repaid after match."""
@@ -1381,17 +1380,12 @@ class TestLoanRepaymentOnMatchRecord:
         assert not loan_service.get_state(borrower1, guild_id=TEST_GUILD_ID).has_outstanding_loan
         assert not loan_service.get_state(borrower2, guild_id=TEST_GUILD_ID).has_outstanding_loan
 
-        # Balances: loan - repayment + reward
-        # Winners get +2 (JOPACOIN_WIN_REWARD), losers get +1 (participation)
-        # Borrower1: 50 - 60 + (2 if won, 1 if lost)
-        # Borrower2: 100 - 120 + (2 if won, 1 if lost)
+        # Balances: loan - repayment + reward (win reward if won, participation if lost)
         b1_balance = player_repo.get_balance(borrower1, TEST_GUILD_ID)
         b2_balance = player_repo.get_balance(borrower2, TEST_GUILD_ID)
 
-        # If won: loan - repayment + win_reward
-        # If lost: loan - repayment + participation
-        assert b1_balance in [-9, -8]  # 50 - 60 + 1 = -9, or 50 - 60 + 2 = -8
-        assert b2_balance in [-19, -18]  # 100 - 120 + 1 = -19, or 100 - 120 + 2 = -18
+        assert b1_balance in [-10 + JOPACOIN_PER_GAME, -10 + JOPACOIN_WIN_REWARD]
+        assert b2_balance in [-20 + JOPACOIN_PER_GAME, -20 + JOPACOIN_WIN_REWARD]
 
     def test_loan_repayment_fee_goes_to_nonprofit(self, services, test_players):
         """Verify the loan fee is added to nonprofit fund on repayment."""

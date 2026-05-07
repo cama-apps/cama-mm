@@ -38,8 +38,8 @@ _LAYERS_DEF: list[LayerDef] = [
     LayerDef("Magma",         76,  100, 0.25, 1,  3,  1, 2, "\U0001f525"),        # fire
     LayerDef("Abyss",         101, 150, 0.35, 1,  4,  1, 2, "\U0001f573\ufe0f"),  # hole
     LayerDef("Fungal Depths", 151, 200, 0.40, 1,  5,  1, 2, "\U0001f344"),        # mushroom
-    LayerDef("Frozen Core",   201, 275, 0.45, 2,  5,  1, 2, "\u2744\ufe0f"),      # snowflake
-    LayerDef("The Hollow",    276, None, 0.50, 2,  7,  1, 1, "\u26ab"),           # black circle
+    LayerDef("Frozen Core",   201, 275, 0.45, 2,  4,  1, 2, "\u2744\ufe0f"),      # snowflake
+    LayerDef("The Hollow",    276, None, 0.50, 2,  6,  1, 1, "\u26ab"),           # black circle
 ]
 
 LAYER_BOUNDARIES: list[int] = [25, 50, 75, 100, 150, 200, 275]

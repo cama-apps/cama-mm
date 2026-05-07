@@ -1,6 +1,6 @@
 import time
 
-from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD
+from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -68,9 +68,9 @@ def test_betting_flow_with_repos(repo_db_path):
     )
     assert player_repo.get_balance(bettor_id, guild_id=guild_id) == expected
 
-    # Losing side should have received participation (1 coin each)
+    # Losing side should have received participation (JOPACOIN_PER_GAME each)
     for pid in dire_team_ids:
-        assert player_repo.get_balance(pid, guild_id=guild_id) == 4  # initial 3 + 1 participation
+        assert player_repo.get_balance(pid, guild_id=guild_id) == 3 + JOPACOIN_PER_GAME
 
 
 def test_place_bet_atomic_debits_and_allows_same_team(repo_db_path):
