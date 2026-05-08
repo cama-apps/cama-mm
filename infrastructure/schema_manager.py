@@ -378,6 +378,9 @@ class SchemaManager:
             # Guild-wide modifiers (e.g. dig "bell" effects that bias all
             # diggers in a guild for a short window).
             ("create_dig_guild_modifiers_table", self._migration_create_dig_guild_modifiers_table),
+            # Per-(player, guild) Dota daily-play streak. Adds two columns and
+            # backfills consecutive prior play-days from match history.
+            ("add_dota_streak_to_players", self._migration_add_dota_streak_to_players),
         ]
 
     # --- Migrations ---
@@ -2011,6 +2014,80 @@ class SchemaManager:
             ON dig_guild_modifiers(guild_id, expires_at)
             """
         )
+
+    def _migration_add_dota_streak_to_players(self, cursor) -> None:
+        """Add Dota daily-play streak fields and backfill from match history.
+
+        ``dota_streak_days`` counts consecutive game-days the player recorded
+        ≥1 match (excluded/bench games never appear in match_participants, so
+        they're naturally filtered out). ``dota_last_played_date`` is the
+        most recent game-date string they played. Both reuse the same 4 AM PST
+        rollover that /dig uses, so the two systems can't drift on date math.
+
+        Backfill walks per-(player, guild) match history backward from the
+        most recent play-date. Stops on the first gap. Idempotent: re-running
+        is a no-op because the migration is recorded in schema_migrations.
+        """
+        import datetime as _dt
+
+        from utils.game_date import game_date_for, yesterday_of
+
+        self._add_column_if_not_exists(cursor, "players", "dota_streak_days", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "players", "dota_last_played_date", "TEXT")
+
+        rows = cursor.execute(
+            """
+            SELECT mp.discord_id, mp.guild_id, m.match_date
+            FROM match_participants mp
+            JOIN matches m ON m.match_id = mp.match_id
+            ORDER BY mp.discord_id, mp.guild_id, m.match_date DESC
+            """
+        ).fetchall()
+        if not rows:
+            return
+
+        per_player: dict[tuple[int, int], list[str]] = {}
+        for row in rows:
+            discord_id = row["discord_id"] if hasattr(row, "keys") else row[0]
+            guild_id = row["guild_id"] if hasattr(row, "keys") else row[1]
+            raw_date = row["match_date"] if hasattr(row, "keys") else row[2]
+            if guild_id is None:
+                guild_id = 0
+            if not raw_date:
+                continue
+            try:
+                if isinstance(raw_date, str):
+                    parsed = _dt.datetime.fromisoformat(raw_date.replace(" ", "T"))
+                else:
+                    parsed = raw_date
+            except (TypeError, ValueError):
+                continue
+            game_date = game_date_for(parsed)
+            key = (int(discord_id), int(guild_id))
+            dates = per_player.setdefault(key, [])
+            if not dates or dates[-1] != game_date:
+                dates.append(game_date)
+
+        for (discord_id, guild_id), dates_desc in per_player.items():
+            if not dates_desc:
+                continue
+            last_played = dates_desc[0]
+            streak = 1
+            prev = last_played
+            for d in dates_desc[1:]:
+                if d == yesterday_of(prev):
+                    streak += 1
+                    prev = d
+                else:
+                    break
+            cursor.execute(
+                """
+                UPDATE players
+                SET dota_streak_days = ?, dota_last_played_date = ?
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (streak, last_played, discord_id, guild_id),
+            )
 
     def _migration_create_trivia_sessions_table(self, cursor) -> None:
         """Create table for recording trivia session results (leaderboard)."""

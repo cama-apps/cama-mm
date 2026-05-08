@@ -193,7 +193,7 @@ class TestSplashSerialization:
 
 
 class TestEventRatesBumped:
-    """Regression guard against accidentally reverting the +25% frequency bump."""
+    """Regression guard that both event_rates dicts stay in sync."""
 
     def test_event_rates_bumped(self):
         # Read both event_rates dict literals from dig_service.py (there are two
@@ -201,12 +201,12 @@ class TestEventRatesBumped:
         from pathlib import Path
         src = Path(__file__).parent.parent / "services" / "dig_service.py"
         text = src.read_text()
-        # Both copies should contain the bumped values.
-        assert text.count('"Dirt": 0.25') == 2, (
-            "expected both event_rates dicts to use Dirt=0.25"
+        # Both copies should contain identical per-layer values.
+        assert text.count('"Dirt": 0.22') == 2, (
+            "expected both event_rates dicts to use Dirt=0.22"
         )
-        assert text.count('"The Hollow": 0.50') == 2, (
-            "expected both event_rates dicts to use The Hollow=0.50"
+        assert text.count('"The Hollow": 0.45') == 2, (
+            "expected both event_rates dicts to use The Hollow=0.45"
         )
 
 

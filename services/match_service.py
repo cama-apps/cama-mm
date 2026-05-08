@@ -628,10 +628,50 @@ class MatchService:
                 self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
             )
 
+        # Daily-play streak bonus. Only fires for actual players (winning_ids +
+        # losing_ids, never bench/excluded), and reuses the same 4 AM PST
+        # rollover that /dig uses so the two systems can't drift on day math.
+        streaks = self._award_dota_streak_bonuses(
+            winning_ids + losing_ids, guild_id, _accumulate
+        )
+        distributions["streaks"] = streaks
+
         if bonus_net and hasattr(self.match_repo, "update_participant_bonus_jc"):
             self.match_repo.update_participant_bonus_jc(match_id, guild_id, bonus_net)
 
         return distributions
+
+    def _award_dota_streak_bonuses(
+        self,
+        actual_player_ids: list[int],
+        guild_id: int | None,
+        accumulate,
+    ) -> dict[int, dict[str, int]]:
+        """Advance each player's Dota streak and credit the matching tier bonus.
+
+        Returns ``{discord_id: {"days": N, "bonus": JC}}``. Players without a
+        streak bonus (below the 3-day floor) are still included with bonus=0
+        so the embed can decide whether to render the line.
+        """
+        from services.dig_constants import STREAKS
+        from utils.game_date import get_game_date, streak_bonus_for, yesterday_of
+
+        if not actual_player_ids:
+            return {}
+        today = get_game_date()
+        yesterday = yesterday_of(today)
+
+        result: dict[int, dict[str, int]] = {}
+        for pid in actual_player_ids:
+            new_streak = self.player_repo.advance_dota_streak(
+                pid, guild_id, today, yesterday
+            )
+            bonus = streak_bonus_for(new_streak, STREAKS)
+            result[pid] = {"days": new_streak, "bonus": bonus}
+            if bonus > 0:
+                self.player_repo.add_balance(pid, guild_id, bonus)
+                accumulate({pid: {"net": bonus}})
+        return result
 
     def _repay_outstanding_loans(
         self, participant_ids: list[int], guild_id: int | None

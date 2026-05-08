@@ -256,12 +256,14 @@ class TestBettingServiceIntegration:
         pid = create_test_player(player_repo, 1001, balance=-200)
         bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
-        # Award win bonus (default 2 jopacoin)
+        # Award win bonus (current default JOPACOIN_WIN_REWARD)
+        from config import JOPACOIN_WIN_REWARD
         results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
 
         # Should get half due to penalty
-        assert results[pid]["bankruptcy_penalty"] == 1  # Half of 2 is 1
-        assert results[pid]["net"] == 1  # Gets only 1 instead of 2
+        expected_half = JOPACOIN_WIN_REWARD // 2
+        assert results[pid]["bankruptcy_penalty"] == expected_half
+        assert results[pid]["net"] == expected_half
 
     def test_final_penalty_win_is_still_penalized(self, db_and_repos):
         """The last bankruptcy-clearing win still receives reduced winnings."""

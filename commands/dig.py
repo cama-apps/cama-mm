@@ -265,6 +265,66 @@ def _backstory_text(result: dict) -> str:
     return result.get("backstory") or "Backstory not set."
 
 
+_READING_HINTS = {
+    "safe": [
+        "The walls whisper of patience here.",
+        "A familiar rhythm — caution holds today.",
+        "Stillness gathers along the safer passage.",
+    ],
+    "risky": [
+        "The stones hum louder beside the bolder path.",
+        "Something glints just past the edge of the dark.",
+        "An unseen pull tugs you onward.",
+    ],
+    "desperate": [
+        "Old bones remember reckless feet.",
+        "The rock itself seems to dare you forward.",
+        "A wild current beckons from the deepest dark.",
+    ],
+}
+
+
+def _reading_the_stone_hint(event_data: dict) -> str | None:
+    """Return an atmospheric whisper toward the highest-EV option, or None.
+
+    Computes a rough EV per option using the authored success_chance and
+    success/failure JC values. Picks the best option's direction (safe /
+    risky / desperate) and returns one of the flavor lines for that
+    direction. Players see only the line, never the math.
+    """
+    if not isinstance(event_data, dict):
+        return None
+
+    def _avg(jc):
+        if isinstance(jc, list) and jc:
+            return sum(jc) / len(jc)
+        if isinstance(jc, (int, float)):
+            return float(jc)
+        return 0.0
+
+    best_dir = None
+    best_ev = None
+    for key, direction in (
+        ("safe_option", "safe"),
+        ("risky_option", "risky"),
+        ("desperate_option", "desperate"),
+    ):
+        opt = event_data.get(key)
+        if not isinstance(opt, dict):
+            continue
+        sc = opt.get("success_chance", 1.0)
+        s = opt.get("success") or {}
+        f = opt.get("failure") or {}
+        ev = sc * _avg(s.get("jc", 0)) + (1.0 - sc) * _avg(f.get("jc", 0))
+        if best_ev is None or ev > best_ev:
+            best_ev = ev
+            best_dir = direction
+
+    if best_dir is None:
+        return None
+    return random.choice(_READING_HINTS[best_dir])
+
+
 async def _check_registered(interaction: discord.Interaction, bot: commands.Bot):
     """Return the Player if registered, else send an ephemeral error and return None."""
     guild_id = interaction.guild.id if interaction.guild else None
@@ -1608,13 +1668,21 @@ class PrestigePerksView(discord.ui.View):
         user_id: int,
         guild_id: int | None,
         perks: list[dict],
+        new_level: int = 0,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
-        self.perks = perks
-        for i, perk in enumerate(perks[:5]):
+        # Sample 4 random perks from the eligible pool, seeded by (user, level)
+        # so that closing and re-opening the picker shows the same options —
+        # otherwise players could re-roll until they got the perks they want.
+        # Hash the tuple into a 64-bit int because random.Random doesn't accept
+        # tuples directly.
+        rng = random.Random(hash((user_id, new_level)) & 0xFFFFFFFFFFFFFFFF)
+        sample_size = min(4, len(perks))
+        self.perks = rng.sample(perks, sample_size) if sample_size else []
+        for i, perk in enumerate(self.perks):
             button = discord.ui.Button(
                 label=perk.get("name", f"Perk {i+1}"),
                 style=discord.ButtonStyle.primary,
@@ -2752,18 +2820,15 @@ class DigCommands(commands.Cog):
         if event_file:
             event_embed.set_image(url=f"attachment://{event_file.filename}")
 
-        # Perk: reading_the_stone reveals odds for risky options
+        # Perk: reading_the_stone — atmospheric whisper toward the best-EV
+        # option. No numbers; relies on flavor so the mechanic stays in-fiction.
         has_reveal_perk = await asyncio.to_thread(
             self.dig_service.has_perk, interaction.user.id, guild_id, "reading_the_stone",
         )
         if has_reveal_perk:
-            odds_lines = []
-            for key, label in (("risky_option", "Risky"), ("desperate_option", "Desperate")):
-                opt = event_data.get(key) if isinstance(event_data, dict) else None
-                if isinstance(opt, dict) and "success_chance" in opt:
-                    odds_lines.append(f"{label}: {int(opt['success_chance'] * 100)}%")
-            if odds_lines:
-                event_embed.add_field(name="Odds", value="\n".join(odds_lines), inline=False)
+            hint = _reading_the_stone_hint(event_data)
+            if hint:
+                event_embed.add_field(name="​", value=f"_{hint}_", inline=False)
 
         _lum_info = getattr(result, "luminosity_info", None)
         _lum_val = (_lum_info.get("luminosity_after", 100) if isinstance(_lum_info, dict)
@@ -3788,8 +3853,10 @@ class DigCommands(commands.Cog):
         available_perks_raw = getattr(check, "available_perks", []) or []
         if isinstance(available_perks_raw, _DictObj):
             available_perks_raw = available_perks_raw._d if hasattr(available_perks_raw, "_d") else []
+        from services.dig_constants import perk_display_name
+
         perk_dicts = [
-            {"id": p, "name": p.replace("_", " ").title()}
+            {"id": p, "name": perk_display_name(p)}
             for p in available_perks_raw
         ]
 
@@ -3800,7 +3867,9 @@ class DigCommands(commands.Cog):
             )
             return
 
-        perks_view = PrestigePerksView(self.dig_service, interaction.user.id, guild_id, perk_dicts)
+        perks_view = PrestigePerksView(
+            self.dig_service, interaction.user.id, guild_id, perk_dicts, new_level=new_level,
+        )
 
         # P8+ mutation selection step
         mutation_info = getattr(check, "mutation_info", None)
@@ -3843,11 +3912,12 @@ class DigCommands(commands.Cog):
                     inline=False,
                 )
 
-                # Build a perk selection embed for after mutation choice
+                # Build a perk selection embed for after mutation choice.
+                # Only list the 4 perks the picker will actually offer.
                 perks_embed = discord.Embed(
                     title="Choose a Prestige Perk",
                     description="\n".join(
-                        f"**{p.get('name', '?')}**" for p in perk_dicts
+                        f"**{p.get('name', '?')}**" for p in perks_view.perks
                     ),
                     color=0xFFD700,
                 )
@@ -3859,10 +3929,11 @@ class DigCommands(commands.Cog):
                 await safe_followup(interaction, embed=embed, view=mutation_view)
                 return
 
-        # No mutations — go straight to perk selection
+        # No mutations — go straight to perk selection. Only list the 4
+        # perks the picker will actually offer.
         embed.add_field(
             name="Choose a Perk",
-            value="\n".join(f"**{p.get('name', '?')}**" for p in perk_dicts),
+            value="\n".join(f"**{p.get('name', '?')}**" for p in perks_view.perks),
             inline=False,
         )
         await safe_followup(interaction, embed=embed, view=perks_view)

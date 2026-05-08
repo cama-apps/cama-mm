@@ -879,9 +879,13 @@ class TestBettingEndToEnd:
         for pid in excluded_ids:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == JOPACOIN_EXCLUSION_REWARD
 
+        # Included players got participation (loser) or win bonus (winner).
+        # Either way, their balance must NOT match the exclusion-bonus path.
+        from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
+        allowed_for_included = {JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD}
         included_ids = set(player_ids) - set(excluded_ids)
         for pid in included_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) != JOPACOIN_EXCLUSION_REWARD
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) in allowed_for_included
 
     def test_max_lobby_14_players_4_excluded(self, test_db):
         """

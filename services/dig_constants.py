@@ -86,12 +86,13 @@ MILESTONES: dict[int, int] = {
     400: 150,
 }
 
-# Streak rewards: consecutive-day count -> JC bonus
+# Streak rewards: consecutive-day count -> JC bonus.
+# Shared by both /dig and Dota match payouts so the two systems can't drift.
 STREAKS: dict[int, int] = {
-    3: 2,
-    7: 5,
-    14: 10,
-    30: 15,
+    3: 1,
+    7: 3,
+    14: 6,
+    30: 10,
 }
 
 
@@ -6173,6 +6174,23 @@ PRESTIGE_PERKS: list[str] = [
     "steady_hands",
     "reading_the_stone",
 ]
+
+# Soft cap on how many times a single perk can be picked across prestiges.
+# At-cap perks are simply hidden from the random picker — players see only
+# perks they can still pick.
+PRESTIGE_PERK_STACK_CAP: int = 5
+
+# User-facing perk display names. Keys here override the default
+# title-case-the-id rendering. Internal IDs (PRESTIGE_PERKS keys) stay the
+# same — only the label changes — so existing prestige_perks JSON is intact.
+PRESTIGE_PERK_DISPLAY_NAMES: dict[str, str] = {
+    "loot_multiplier": "Loot Bonus",
+}
+
+
+def perk_display_name(perk_id: str) -> str:
+    """Return the user-facing label for a perk id."""
+    return PRESTIGE_PERK_DISPLAY_NAMES.get(perk_id) or perk_id.replace("_", " ").title()
 
 # Per-pick mechanical bonuses for each perk. The aggregator sums these
 # across all picked perks to produce the player's effective effect dict.
