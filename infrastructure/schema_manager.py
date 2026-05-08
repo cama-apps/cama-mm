@@ -2065,6 +2065,10 @@ class SchemaManager:
             game_date = game_date_for(parsed)
             key = (int(discord_id), int(guild_id))
             dates = per_player.setdefault(key, [])
+            # The SELECT above is ORDER BY match_date DESC, so rows arrive
+            # newest-first. Skip any same-day repeats by comparing against
+            # the most recent entry; the streak walk below also depends on
+            # this DESC ordering — don't change one without the other.
             if not dates or dates[-1] != game_date:
                 dates.append(game_date)
 
