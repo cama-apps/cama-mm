@@ -5,6 +5,9 @@ Both /dig and Dota match streaks roll over at 4 AM PST so they can't drift.
 import datetime
 import time
 
+# Intentionally fixed UTC-8 (no DST). The "PST" game-date convention skips
+# the PDT half of the year on purpose so streak math stays stable year-round
+# and a single Sunday in March doesn't compress into 23 hours.
 _PST = datetime.timezone(datetime.timedelta(hours=-8))
 
 

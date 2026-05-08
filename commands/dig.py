@@ -1677,9 +1677,14 @@ class PrestigePerksView(discord.ui.View):
         # Sample 4 random perks from the eligible pool, seeded by (user, level)
         # so that closing and re-opening the picker shows the same options —
         # otherwise players could re-roll until they got the perks they want.
-        # Hash the tuple into a 64-bit int because random.Random doesn't accept
-        # tuples directly.
-        rng = random.Random(hash((user_id, new_level)) & 0xFFFFFFFFFFFFFFFF)
+        # Use hashlib (not Python's salted built-in hash()) so the seed is
+        # stable across bot restarts; otherwise a deploy would silently
+        # re-roll mid-prestige.
+        import hashlib
+        import struct
+        digest = hashlib.sha256(f"{user_id}:{new_level}".encode()).digest()
+        seed = struct.unpack_from("<Q", digest)[0]
+        rng = random.Random(seed)
         sample_size = min(4, len(perks))
         self.perks = rng.sample(perks, sample_size) if sample_size else []
         for i, perk in enumerate(self.perks):
