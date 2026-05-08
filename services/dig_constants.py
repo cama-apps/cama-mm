@@ -1248,11 +1248,11 @@ BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
     0: {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.000},
     1: {"hp": 9,  "hit": 0.08, "dmg": 0, "pen": 0.030},   # Obsidian unlock cushion
     2: {"hp": 9,  "hit": 0.09, "dmg": 0, "pen": 0.050},
-    3: {"hp": 12, "hit": 0.12, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
-    4: {"hp": 14, "hit": 0.14, "dmg": 0, "pen": 0.110},
-    5: {"hp": 24, "hit": 0.20, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
-    6: {"hp": 26, "hit": 0.23, "dmg": 0, "pen": 0.165},
-    7: {"hp": 27, "hit": 0.25, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
+    3: {"hp": 12, "hit": 0.13, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
+    4: {"hp": 14, "hit": 0.15, "dmg": 0, "pen": 0.110},
+    5: {"hp": 24, "hit": 0.21, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
+    6: {"hp": 26, "hit": 0.24, "dmg": 0, "pen": 0.165},
+    7: {"hp": 27, "hit": 0.26, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
 }
 PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
 PLAYER_HIT_CEILING: float = 0.90                   # hard ceiling — luminosity already eats hit chance, so leave a wider cap
@@ -1314,9 +1314,9 @@ BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
     50:  (1.8, 3.3, 5.8),
     75:  (2.1, 4.3, 7.3),
     100: (2.4, 4.8, 8.4),
-    150: (2.9, 5.6, 9.4),
-    200: (3.2, 6.2, 10.4),
-    275: (3.5, 7.0, 11.0),
+    150: (2.7, 5.2, 8.8),
+    200: (3.0, 5.8, 9.7),
+    275: (3.3, 6.5, 10.3),
     350: (2.5, 3.8, 7.5),
 }
 
