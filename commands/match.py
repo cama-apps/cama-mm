@@ -1244,6 +1244,17 @@ class MatchCommands(commands.Cog):
 
             distribution_text += stake_text
 
+        # Daily-play streak bonuses (per actual player, not bench/excluded).
+        # Bonus tier comes from the unified STREAKS schedule (see services/dig_constants.py).
+        streaks = distributions.get("streaks", {})
+        streak_lines = [
+            f"<@{uid}>: +{info['bonus']} {JOPACOIN_EMOTE} ({info['days']}d)"
+            for uid, info in streaks.items()
+            if info.get("bonus", 0) > 0
+        ]
+        if streak_lines:
+            distribution_text += "\n\n🔥 **Streak Bonus:**\n" + "\n".join(streak_lines)
+
         # Generate AI flavor text — pick targets synchronously, fire LLM calls in parallel
         ai_flavor = None
         match_flavor = None

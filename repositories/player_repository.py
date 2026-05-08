@@ -578,6 +578,59 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return int(row["balance"]) if row else 0
 
+    def advance_dota_streak(
+        self, discord_id: int, guild_id: int, today: str, yesterday: str
+    ) -> int:
+        """Advance the player's Dota daily-play streak for today.
+
+        Returns the streak day-count after the update. If the player already
+        had ``today`` recorded, returns the existing streak unchanged (so
+        repeat matches the same day pull the same tier without double-counting
+        the day toward streak growth). Resets to 1 if the gap is >1 day.
+
+        Returns 0 if the player row doesn't exist.
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT dota_streak_days, dota_last_played_date FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            ).fetchone()
+            if row is None:
+                return 0
+
+            current = int(row["dota_streak_days"] or 0)
+            last_date = row["dota_last_played_date"]
+
+            if last_date == today:
+                return current
+
+            new_streak = current + 1 if last_date == yesterday else 1
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET dota_streak_days = ?, dota_last_played_date = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (new_streak, today, discord_id, guild_id),
+            )
+            return new_streak
+
+    def get_dota_streak(self, discord_id: int, guild_id: int) -> tuple[int, str | None]:
+        """Read (streak_days, last_played_date) for a player."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT dota_streak_days, dota_last_played_date FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            ).fetchone()
+            if row is None:
+                return 0, None
+            return int(row["dota_streak_days"] or 0), row["dota_last_played_date"]
+
     def update_balance(self, discord_id: int, guild_id: int, amount: int) -> None:
         """Set a player's jopacoin balance to a specific amount."""
         guild_id = self.normalize_guild_id(guild_id)

@@ -106,6 +106,7 @@ from services.dig_constants import (
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     PRESTIGE_HARD_CAP,
+    PRESTIGE_PERK_STACK_CAP,
     PRESTIGE_PERK_VALUES,
     PRESTIGE_PERKS,
     RELIC_SLOTS_BASE,
@@ -413,12 +414,8 @@ class DigService:
 
     def _get_game_date(self) -> str:
         """Get current game date (resets at 4 AM PST). Uses time.time() so tests can mock it."""
-        now_utc = datetime.datetime.fromtimestamp(time.time(), tz=datetime.UTC)
-        pst = datetime.timezone(datetime.timedelta(hours=-8))
-        now_pst = now_utc.astimezone(pst)
-        # Subtract 4 hours so the "day" starts at 4 AM PST
-        game_time = now_pst - datetime.timedelta(hours=4)
-        return game_time.strftime("%Y-%m-%d")
+        from utils.game_date import get_game_date
+        return get_game_date()
 
     def _get_cooldown_remaining(self, tunnel: dict) -> int:
         """Returns seconds remaining on free dig cooldown, 0 if ready."""
@@ -578,6 +575,37 @@ class DigService:
             for key, value in PRESTIGE_PERK_VALUES.get(perk, {}).items():
                 aggregated[key] = aggregated.get(key, 0.0) + float(value)
         return aggregated
+
+    def _eligible_perks(self, tunnel: dict) -> list[str]:
+        """Perks the player can still pick — duplicates allowed up to the cap."""
+        owned = self._get_prestige_perks(tunnel)
+        return [p for p in PRESTIGE_PERKS if owned.count(p) < PRESTIGE_PERK_STACK_CAP]
+
+    @staticmethod
+    def _event_has_risk(event: dict) -> bool:
+        """True if any outcome in the event can pay negative JC.
+
+        Used by the ``veteran_miner`` perk to decide whether a successful
+        resolution earns the risky-success bonus. Covers both the new-style
+        safe/risky/desperate option dicts and the legacy ``outcomes`` map.
+        """
+        def _has_negative_jc(payload: dict | None) -> bool:
+            if not payload:
+                return False
+            jc = payload.get("jc")
+            if isinstance(jc, list) and jc:
+                return any(v < 0 for v in jc)
+            if isinstance(jc, (int, float)):
+                return jc < 0
+            return False
+
+        for opt_key in ("safe_option", "risky_option", "desperate_option"):
+            opt = event.get(opt_key)
+            if not opt:
+                continue
+            if _has_negative_jc(opt.get("success")) or _has_negative_jc(opt.get("failure")):
+                return True
+        return any(_has_negative_jc(outcome) for outcome in (event.get("outcomes") or {}).values())
 
     def has_perk(self, discord_id: int, guild_id, perk_id: str) -> bool:
         """True if the player owns the given prestige perk."""
@@ -3260,10 +3288,10 @@ class DigService:
 
         # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
         event_rates = {
-            "Dirt": 0.25, "Stone": 0.25, "Crystal": 0.30, "Magma": 0.30,
-            "Abyss": 0.35, "Fungal Depths": 0.42, "Frozen Core": 0.35, "The Hollow": 0.50,
+            "Dirt": 0.22, "Stone": 0.22, "Crystal": 0.27, "Magma": 0.27,
+            "Abyss": 0.31, "Fungal Depths": 0.38, "Frozen Core": 0.31, "The Hollow": 0.45,
         }
-        event_chance = event_rates.get(layer_name, 0.24)
+        event_chance = event_rates.get(layer_name, 0.22)
         # Ascension event chance boost
         event_chance *= (1.0 + ascension.get("event_chance_multiplier", 0))
         # Weather event chance modifier
@@ -3694,11 +3722,11 @@ class DigService:
 
         # ── Event chance + eligible events ────────────────────────
         event_rates = {
-            "Dirt": 0.25, "Stone": 0.25, "Crystal": 0.30, "Magma": 0.30,
-            "Abyss": 0.35, "Fungal Depths": 0.42, "Frozen Core": 0.35,
-            "The Hollow": 0.50,
+            "Dirt": 0.22, "Stone": 0.22, "Crystal": 0.27, "Magma": 0.27,
+            "Abyss": 0.31, "Fungal Depths": 0.38, "Frozen Core": 0.31,
+            "The Hollow": 0.45,
         }
-        event_chance = event_rates.get(layer_name, 0.24)
+        event_chance = event_rates.get(layer_name, 0.22)
         event_chance *= 1.0 + ascension.get("event_chance_multiplier", 0)
         event_chance *= 1.0 + weather_fx.get("event_chance_multiplier", 0)
         event_chance *= 1.0 + mutation_fx.get("event_chance_bonus", 0)
@@ -7553,7 +7581,7 @@ class DigService:
             can_prestige=can,
             reason=reason,
             prestige_level=prestige_level,
-            available_perks=[p for p in PRESTIGE_PERKS if p not in self._get_prestige_perks(tunnel)],
+            available_perks=self._eligible_perks(tunnel),
             run_score=run_score,
             mutation_info=mutation_info,
         )
@@ -7579,8 +7607,10 @@ class DigService:
             return self._error(f"Invalid perk. Choose from: {', '.join(valid_perks)}")
 
         current_perks = self._get_prestige_perks(tunnel)
-        if perk_choice in current_perks:
-            return self._error("You already have that perk.")
+        # Stacks compound additively via _aggregate_perk_effects, capped at 5
+        # picks per perk to keep late-prestige scaling sane.
+        if current_perks.count(perk_choice) >= PRESTIGE_PERK_STACK_CAP:
+            return self._error("You've maxed that perk.")
 
         current_perks.append(perk_choice)
         prestige_level = (tunnel.get("prestige_level", 0) or 0) + 1
@@ -8111,6 +8141,8 @@ class DigService:
         luminosity = tunnel.get("luminosity", LUMINOSITY_MAX)
         prestige_level = tunnel.get("prestige_level", 0) or 0
         ascension = self._get_ascension_effects(prestige_level)
+        perks = self._get_prestige_perks(tunnel)
+        perk_fx = self._aggregate_perk_effects(perks)
         boss_encounter = False
         boss_info = None
 
@@ -8260,6 +8292,19 @@ class DigService:
             chain_mult = ascension.get("chain_jc_multiplier", 1.0)
             if chain_mult > 1.0:
                 jc = int(jc * chain_mult)
+
+        # Perk: tunnel_mastery — chained events pay more (per-stack additive).
+        if chained and jc > 0:
+            tm_bonus = perk_fx.get("expedition_reward_bonus", 0.0)
+            if tm_bonus > 0:
+                jc = int(jc * (1.0 + tm_bonus))
+
+        # Perk: veteran_miner — events with possible negative outcomes pay
+        # more on a successful (positive-JC) resolution.
+        if jc > 0 and self._event_has_risk(event):
+            vm_bonus = perk_fx.get("risky_success_bonus", 0.0)
+            if vm_bonus > 0:
+                jc = int(jc * (1.0 + vm_bonus))
 
         if advance > 0:
             boss_progress = self._get_boss_progress(tunnel)
