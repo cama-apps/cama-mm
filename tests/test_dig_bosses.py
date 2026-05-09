@@ -1190,3 +1190,96 @@ class TestLatePrestigeBossLocking:
         # Over 50 rolls of a 4-boss pool, the late-prestige boss should appear at least once
         # with overwhelming probability (P(missing) = 0.75^50 ≈ 5.7e-7).
         assert "lilith" in seen, "P3 player should be able to lock the P3 boss"
+
+
+# --- _DictObj nested-dict access (Bug: render crash on pinnacle relic) ----
+
+
+class TestDictObjGetOnNested:
+    """Pinnacle phase-3 win returns a result containing ``pinnacle_relic`` as a
+    nested dict. The result is wrapped with ``_DictObj`` so the embed builder
+    can use ``getattr``; that wrapper recursively wraps nested dicts, which
+    used to break the embed builder's ``relic.get('name')`` calls and crash
+    rendering *after* rewards had been persisted (player saw no result screen).
+    """
+
+    def test_get_on_wrapped_nested_dict_returns_value(self):
+        from commands.dig import _DictObj
+
+        d = {"pinnacle_relic": {"name": "Crown of Voids", "stats": ["s1", "s2"]}}
+        wrapped = _DictObj(d)
+        relic = getattr(wrapped, "pinnacle_relic", None)
+        assert relic is not None
+        # These calls used to raise AttributeError on _DictObj.
+        assert relic.get("name", "?") == "Crown of Voids"
+        assert relic.get("stats") == ["s1", "s2"]
+        assert relic.get("missing", "default") == "default"
+
+    def test_pinnacle_phase3_result_renders_to_embed(self):
+        """Build the full result embed for a phase-3 pinnacle win, including
+        ``pinnacle_relic`` — the path that was crashing in production."""
+        from commands.dig import _build_boss_fight_result_embed, _wrap
+
+        result_dict = {
+            "success": True,
+            "won": True,
+            "phase": 3,
+            "boss_name": "Hollowforged",
+            "boundary": PINNACLE_DEPTH,
+            "win_chance": 0.45,
+            "jc_delta": 5000,
+            "payout": 5000,
+            "is_pinnacle": True,
+            "pinnacle_defeated": True,
+            "pinnacle_relic": {
+                "name": "Knot of Voices",
+                "stats": ["Tougher skin", "Richer veins"],
+                "stat_ids": ["hp_plus_1", "jc_plus_5"],
+                "artifact_id": "pinnacle:Knot:of Voices:hp_plus_1:jc_plus_5",
+            },
+            "round_log": [],
+            "luminosity_display": "Lum: 100/100",
+        }
+        wrapped = _wrap(result_dict)
+        embed = _build_boss_fight_result_embed(
+            result=wrapped, risk_tier="bold", amount=100,
+        )
+        # The relic field must show up — confirms the unwrap worked end-to-end.
+        relic_fields = [f for f in embed.fields if f.name.startswith("Relic:")]
+        assert len(relic_fields) == 1
+        assert "Knot of Voices" in relic_fields[0].name
+
+
+# --- has_scout_lantern (Bug: scout button greyed out for owners) ----------
+
+
+class TestHasScoutLantern:
+    """The boss-encounter UI grays out Scout when the dig result's
+    ``has_lantern`` is False. Previously that flag tracked usage (only true
+    when the player queued a lantern *this* dig), so an owner who hadn't
+    queued one couldn't scout a freshly-encountered boss.
+    """
+
+    def test_returns_true_when_lantern_in_inventory(
+        self, dig_service, dig_repo, player_repository,
+    ):
+        _register(player_repository)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        assert dig_service.has_scout_lantern(10001, TEST_GUILD_ID) is False
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+        assert dig_service.has_scout_lantern(10001, TEST_GUILD_ID) is True
+
+    def test_returns_true_for_great_lantern_owner(
+        self, dig_service, dig_repo, player_repository,
+    ):
+        _register(player_repository)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "great_lantern")
+        assert dig_service.has_scout_lantern(10001, TEST_GUILD_ID) is True
+
+    def test_false_when_no_lantern_owned(
+        self, dig_service, player_repository,
+    ):
+        _register(player_repository)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        assert dig_service.has_scout_lantern(10001, TEST_GUILD_ID) is False
