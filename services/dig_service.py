@@ -262,6 +262,12 @@ class DigService:
         self.buff_service = buff_service
         self.slow_drip_repo = slow_drip_repo
         self.balance_history_service = balance_history_service
+        # Process-local cache of equipped relic IDs per (discord_id, guild_id).
+        # A single /dig invocation hits ``_has_relic`` ~15 times across yield,
+        # cave-in, advance, hazard, and color-dispatch sites; without this
+        # cache each call would round-trip to ``dig_repo.get_equipped_relics``.
+        # Invalidated on equip/unequip below.
+        self._relic_cache: dict[tuple[int, int], frozenset[str]] = {}
 
     def _mana_effects_or_none(self, discord_id: int, guild_id):
         """Resolve the player's active mana effects, swallowing lookup errors.
@@ -941,10 +947,31 @@ class DigService:
         """Get list of equipped relic artifacts from DB."""
         return self.dig_repo.get_equipped_relics(discord_id, guild_id)
 
+    def _equipped_relic_ids(self, discord_id: int, guild_id) -> frozenset[str]:
+        """Return frozenset of equipped relic IDs, cached per (player, guild)."""
+        key = (int(discord_id), self.player_repo.normalize_guild_id(guild_id))
+        cached = self._relic_cache.get(key)
+        if cached is not None:
+            return cached
+        relics = self._get_equipped_relics_for_player(discord_id, guild_id)
+        ids = frozenset(
+            r.get("artifact_id") for r in relics if r.get("artifact_id")
+        )
+        self._relic_cache[key] = ids
+        # Soft cap to prevent unbounded growth in long-lived bot processes.
+        if len(self._relic_cache) > 256:
+            self._relic_cache.pop(next(iter(self._relic_cache)))
+        return ids
+
+    def _invalidate_relic_cache(self, discord_id: int, guild_id) -> None:
+        """Drop the cached relic-id set for a (player, guild). Called after
+        equip / unequip mutations."""
+        key = (int(discord_id), self.player_repo.normalize_guild_id(guild_id))
+        self._relic_cache.pop(key, None)
+
     def _has_relic(self, discord_id: int, guild_id, relic_id: str) -> bool:
         """Check if a specific relic is equipped."""
-        relics = self._get_equipped_relics_for_player(discord_id, guild_id)
-        return any(r.get("artifact_id") == relic_id for r in relics)
+        return relic_id in self._equipped_relic_ids(discord_id, guild_id)
 
     # ── Boss-combat Gear ─────────────────────────────────────────────
 
@@ -1486,6 +1513,7 @@ class DigService:
                 f"You've hit your relic cap ({cap}). Unequip one first.",
             )
         self.dig_repo.equip_relic(int(artifact_db_id), True)
+        self._invalidate_relic_cache(discord_id, guild_id)
         return self._ok(artifact_id=target.get("artifact_id"), cap=cap)
 
     def unequip_relic_for_player(self, discord_id: int, guild_id, artifact_db_id: int) -> dict:
@@ -1495,6 +1523,7 @@ class DigService:
         if target is None:
             return self._error("That relic isn't in your inventory.")
         self.dig_repo.unequip_relic(int(artifact_db_id))
+        self._invalidate_relic_cache(discord_id, guild_id)
         return self._ok(artifact_id=target.get("artifact_id"))
 
     def _maybe_drop_gear(self, discord_id: int, guild_id, at_boss: int) -> dict | None:
@@ -5319,7 +5348,9 @@ class DigService:
 
         # Relic: Vendetta Coin — when the *target* has it, reflect 50% of
         # damage back at the attacker as JC pain + grant target a small JC
-        # bonus. Logged via dig_actions so /wrapped picks it up.
+        # bonus. Logged with action_type="vendetta_reflect" (defensive event
+        # owned by the target) so /wrapped doesn't misattribute the target as
+        # a saboteur on (action_type, discord_id) joins.
         vendetta_reflect = 0
         vendetta_bonus = 0
         if self._has_relic(target_id, guild_id, "vendetta_coin"):
@@ -5330,9 +5361,8 @@ class DigService:
                 self.player_repo.add_balance(target_id, guild_id, vendetta_bonus)
                 self.dig_repo.log_action(
                     discord_id=target_id, guild_id=guild_id,
-                    action_type="sabotage",
+                    action_type="vendetta_reflect",
                     details=json.dumps({
-                        "vendetta_reflect": True,
                         "attacker_id": actor_id,
                         "reflected": vendetta_reflect,
                         "target_bonus": vendetta_bonus,
@@ -8407,6 +8437,9 @@ class DigService:
             artifact_id=target_artifact["artifact_id"],
             unequip_artifact_db_ids=unequip_ids,
         )
+        # Both sides may have changed equipped sets — invalidate caches.
+        self._invalidate_relic_cache(giver_id, guild_id)
+        self._invalidate_relic_cache(receiver_id, guild_id)
 
         return self._ok(
             artifact_id=artifact_id,

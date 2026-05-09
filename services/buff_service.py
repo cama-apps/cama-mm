@@ -24,6 +24,7 @@ BUFF_SANCTUARY = "sanctuary"
 BUFF_BLOOD_PACT = "blood_pact"
 BUFF_DARK_BARGAIN = "dark_bargain"
 BUFF_FIRST_AEGIS_TODAY = "first_aegis_today"  # Auto-granted by White mana
+BUFF_COMMUNION_BLESSING = "communion_blessing"  # Single-charge +10% next match win
 
 # All PvP-defending buff types (any of these blocks Pyroclasm/Soul-Harvest/Sabotage/etc.)
 PVP_DEFENSE_BUFFS = (BUFF_COUNTERSPELL, BUFF_AEGIS, BUFF_SANCTUARY, BUFF_FIRST_AEGIS_TODAY)
@@ -112,6 +113,25 @@ class BuffService:
         Caller (mana assignment) is expected to grant once per day."""
         return self.buff_repo.grant(
             discord_id, guild_id, BUFF_FIRST_AEGIS_TODAY, self._expires(hours)
+        )
+
+    def grant_communion_blessing(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        match_win_bonus_pct: float = 0.10,
+    ) -> int:
+        """Manashop Communion: single-charge +10% next match-win bonus.
+
+        Consumed atomically by ``BettingService.award_win_bonus`` via
+        ``buff_repo.consume_atomic`` so concurrent match finalizations only
+        pay the bonus once.
+        """
+        return self.buff_repo.grant(
+            discord_id, guild_id, BUFF_COMMUNION_BLESSING,
+            self._expires(24),
+            data={"match_win_bonus_pct": match_win_bonus_pct},
         )
 
     # ------------------------------------------------------------------

@@ -1658,23 +1658,12 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Tier-specific gates
-        from services.mana_service import get_today_pst as _today_pst
-        today = _today_pst()
-        if tier == "mid":
-            already = await asyncio.to_thread(
-                mana_repo.was_item_used_today, user_id, guild_id, item_key, today,
-            )
-            if already:
-                await interaction.followup.send(
-                    f"**{display_name}** is once-per-day. Already used today.",
-                    ephemeral=True,
-                )
-                return
-
         # Validate target requirements upfront so we never charge for an
-        # invalid use.
+        # invalid use. ``insight`` permits self-target (peeking at your own
+        # stats is a no-op); ``sanctuary`` and ``blood_pact`` require an
+        # *other* player so the ally / victim role is meaningful.
         target_required_for = {"sanctuary", "blood_pact", "insight"}
+        no_self_target_items = {"sanctuary", "blood_pact"}
         if item_key in target_required_for:
             if not target:
                 await interaction.followup.send(
@@ -1682,14 +1671,15 @@ class ShopCommands(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            if target.id == user_id and item_key != "insight":
+            if target.id == user_id and item_key in no_self_target_items:
                 await interaction.followup.send(
                     f"**{display_name}** must target another player.",
                     ephemeral=True,
                 )
                 return
 
-        # Check balance
+        # Check balance up-front — we still want a clean "not enough JC"
+        # message before any side effect runs.
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
             await interaction.followup.send(
@@ -1698,34 +1688,39 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Charge cost (single deduction)
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-
-        async def _refund(reason: str) -> None:
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
-            await interaction.followup.send(reason, ephemeral=True)
-
-        # For ultimate items: tap mana atomically. If the tap fails, refund.
-        if tier == "ult":
-            tapped_now = await asyncio.to_thread(
-                mana_repo.mark_mana_consumed_atomic, user_id, guild_id,
-            )
-            if not tapped_now:
-                await _refund(
-                    "Your mana was already tapped this turn — refunded. Try again tomorrow.",
-                )
-                return
-
-        # Mid: claim daily-use atomically.
+        # Tier-specific atomic claim BEFORE charging so concurrent calls
+        # don't briefly deduct then refund. ``mark_*_atomic`` returns False
+        # if another caller already won the claim.
+        from services.mana_service import get_today_pst as _today_pst
+        today = _today_pst()
         if tier == "mid":
             claimed = await asyncio.to_thread(
                 mana_repo.mark_item_used_atomic, user_id, guild_id, item_key, today,
             )
             if not claimed:
-                await _refund(
-                    f"**{display_name}** was already used today (raced against another /manashop).",
+                await interaction.followup.send(
+                    f"**{display_name}** is once-per-day. Already used today.",
+                    ephemeral=True,
                 )
                 return
+        elif tier == "ult":
+            tapped_now = await asyncio.to_thread(
+                mana_repo.mark_mana_consumed_atomic, user_id, guild_id,
+            )
+            if not tapped_now:
+                await interaction.followup.send(
+                    "Your mana was already tapped this turn. Try again tomorrow.",
+                    ephemeral=True,
+                )
+                return
+
+        # Charge cost AFTER the claim won so failure paths don't show a
+        # charge-then-refund flicker.
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+
+        async def _refund(reason: str) -> None:
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+            await interaction.followup.send(reason, ephemeral=True)
 
         # Mana Conduit relic: refund 25% of tap-mana ultimate cost.
         ult_refund = 0
@@ -1841,18 +1836,15 @@ class ShopCommands(commands.Cog):
                     await asyncio.to_thread(loan_service.add_to_nonprofit_fund, guild_id, cost)
                 except Exception:
                     pass
-            # Grant a small "blessing" buff: +10% next match win bonus
+            # Grant a small "blessing" buff: +10% next match win bonus.
+            # Routed through BuffService so the buff_type key stays in one place.
             if buff_service is not None:
                 try:
                     await asyncio.to_thread(
-                        buff_service.buff_repo.grant,
-                        user_id, guild_id, "communion_blessing",
-                        int(time.time()) + 24 * 3600,
-                        target_id=None,
-                        data={"match_win_bonus_pct": 0.10},
+                        buff_service.grant_communion_blessing, user_id, guild_id,
                     )
                 except Exception:
-                    pass
+                    logger.exception("Communion blessing grant failed")
             await interaction.followup.send(
                 f"🌾🕊️ **COMMUNION** — {interaction.user.mention} gives {cost} {JOPACOIN_EMOTE} to the fund.\n"
                 f"A blessing settles on you: +10% on your next match-win bonus.\n"
@@ -1880,19 +1872,23 @@ class ShopCommands(commands.Cog):
         elif item_key == "dynamite_cache":
             # Mid: stash a 3-charge yield buff on the dig service.
             dig_service = getattr(self.bot, "dig_service", None)
-            if dig_service is not None:
-                try:
-                    await asyncio.to_thread(
-                        dig_service.set_temp_buff, user_id, guild_id,
-                        {
-                            "id": "dynamite_cache",
-                            "name": "Dynamite Cache",
-                            "duration_digs": 3,
-                            "effect": {"yield_multiplier": 1.30},
-                        },
-                    )
-                except Exception:
-                    pass
+            if dig_service is None:
+                await _refund("Dig system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    dig_service.set_temp_buff, user_id, guild_id,
+                    {
+                        "id": "dynamite_cache",
+                        "name": "Dynamite Cache",
+                        "duration_digs": 3,
+                        "effect": {"yield_multiplier": 1.30},
+                    },
+                )
+            except Exception:
+                logger.exception("Dynamite Cache buff write failed")
+                await _refund("Could not pack the cache; refunded.")
+                return
             await interaction.followup.send(
                 f"⛰️🧨 **DYNAMITE CACHE** — {interaction.user.mention} packs the next 3 digs hot.\n"
                 f"Yield +30% on your next 3 swings.\n"
@@ -1929,11 +1925,15 @@ class ShopCommands(commands.Cog):
             )
 
         elif item_key == "aegis":
-            if buff_service is not None:
-                try:
-                    await asyncio.to_thread(buff_service.grant_aegis, user_id, guild_id)
-                except Exception:
-                    pass
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(buff_service.grant_aegis, user_id, guild_id)
+            except Exception:
+                logger.exception("Aegis grant failed")
+                await _refund("Could not raise the ward; refunded.")
+                return
             await interaction.followup.send(
                 f"🌾🛡️ **AEGIS** — {interaction.user.mention} prepares a single-charge ward.\n"
                 f"The next sabotage / Pyroclasm / Soul Harvest aimed at you is absorbed.\n"
@@ -1981,11 +1981,15 @@ class ShopCommands(commands.Cog):
             )
 
         elif item_key == "counterspell":
-            if buff_service is not None:
-                try:
-                    await asyncio.to_thread(buff_service.grant_counterspell, user_id, guild_id)
-                except Exception:
-                    pass
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(buff_service.grant_counterspell, user_id, guild_id)
+            except Exception:
+                logger.exception("Counterspell grant failed")
+                await _refund("Could not weave the ward; refunded.")
+                return
             await interaction.followup.send(
                 f"🏝️🜨 **COUNTERSPELL** — {interaction.user.mention} weaves a 24h ward.\n"
                 f"All Pyroclasm / Soul Harvest / Sabotage / Blood Pact / Wildfire targeting you "
@@ -1994,11 +1998,15 @@ class ShopCommands(commands.Cog):
             )
 
         elif item_key == "overgrowth":
-            if buff_service is not None:
-                try:
-                    await asyncio.to_thread(buff_service.grant_overgrowth, user_id, guild_id)
-                except Exception:
-                    pass
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(buff_service.grant_overgrowth, user_id, guild_id)
+            except Exception:
+                logger.exception("Overgrowth grant failed")
+                await _refund("Could not seed the overgrowth; refunded.")
+                return
             await interaction.followup.send(
                 f"🌲🌳 **OVERGROWTH** — {interaction.user.mention} burns the day's mana into the soil.\n"
                 f"For 24h: every dig +5 JC, no /dig cooldown, hazard chances halved.\n"
@@ -2031,17 +2039,29 @@ class ShopCommands(commands.Cog):
             if buff_service is None:
                 await _refund("Buff system unavailable; refunded.")
                 return
+            # Write the debt FIRST. If the credit fails after the debt is
+            # recorded, the player is no worse off than skipping the item; if
+            # we credited first and the debt grant raised, the +800 would be
+            # leaked with no obligation to repay.
             try:
-                await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, 800,
-                )
                 await asyncio.to_thread(
                     buff_service.grant_dark_bargain_debt,
                     user_id, guild_id, amount_due=800, due_in_days=7,
                 )
             except Exception:
-                logger.exception("Dark Bargain grant failed")
+                logger.exception("Dark Bargain debt grant failed")
                 await _refund("Could not strike the bargain; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, 800,
+                )
+            except Exception:
+                logger.exception("Dark Bargain credit failed; debt remains active")
+                await _refund(
+                    "Could not credit the bargain; refunded. Debt note has been "
+                    "recorded — contact an admin if it doesn't clear.",
+                )
                 return
             await interaction.followup.send(
                 f"🌿💀 **DARK BARGAIN** — {interaction.user.mention} signs in red ink.\n"

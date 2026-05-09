@@ -376,14 +376,13 @@ class ServiceContainer:
             loan_service=c["loan_service"],
         )
         c["buff_service"] = BuffService(buff_repo=c["buff_repo"])
-        # Late-attach so the betting service can read manashop buffs at award time.
-        # BettingService is constructed in _init_economy_services (before
-        # _init_mana_service) so we wire the dependency back in after both exist.
+        # Late-attach so the betting service can read manashop buffs at award
+        # time. BettingService is constructed in _init_economy_services (which
+        # runs before _init_mana_service) so we set the dependency back here.
+        # Plain attribute assignment — any failure is a wiring bug worth
+        # surfacing, not silently swallowing.
         if c.get("betting_service") is not None:
-            try:
-                c["betting_service"].buff_service = c["buff_service"]
-            except Exception:
-                pass
+            c["betting_service"].buff_service = c["buff_service"]
 
     def _init_dig_service(self) -> None:
         """Tunnel digging minigame service."""
