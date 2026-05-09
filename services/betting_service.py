@@ -41,6 +41,7 @@ class BettingService:
         leverage_tiers: list[int] | None = None,
         max_debt: int | None = None,
         bankruptcy_service: "BankruptcyService | None" = None,
+        buff_service=None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
@@ -48,6 +49,7 @@ class BettingService:
         self.leverage_tiers = leverage_tiers if leverage_tiers is not None else LEVERAGE_TIERS
         self.max_debt = max_debt if max_debt is not None else MAX_DEBT
         self.bankruptcy_service = bankruptcy_service
+        self.buff_service = buff_service
 
     def _since_ts(self, pending_state: dict[str, Any] | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
@@ -224,6 +226,35 @@ class BettingService:
         if self.bankruptcy_service and winning_ids:
             for pid in winning_ids:
                 self.bankruptcy_service.on_game_won(pid, guild_id)
+
+        # Manashop buffs that boost win bonus: Sanctuary (+15% for 24h) and
+        # Communion blessing (+10% on the next match-win, single-charge).
+        if self.buff_service and winning_ids:
+            for pid in winning_ids:
+                bonus = 0
+                try:
+                    if self.buff_service.has_sanctuary_match_bonus(pid, guild_id):
+                        bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.15))
+                    blessing = self.buff_service.buff_repo.active_for(
+                        pid, guild_id, "communion_blessing"
+                    )
+                    if blessing:
+                        bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.10))
+                        # Consume the blessing so it only fires once
+                        try:
+                            self.buff_service.buff_repo.consume_atomic(blessing[0]["id"])
+                        except Exception:
+                            pass
+                except Exception:
+                    bonus = 0
+                if bonus > 0:
+                    try:
+                        self.player_repo.add_balance(pid, guild_id, bonus)
+                        results.setdefault(pid, {"gross": 0, "garnished": 0, "net": 0, "bankruptcy_penalty": 0})
+                        results[pid]["net"] = int(results[pid].get("net", 0)) + bonus
+                        results[pid]["manashop_bonus"] = bonus
+                    except Exception:
+                        pass
 
         return results
 

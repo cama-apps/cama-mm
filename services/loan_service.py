@@ -189,9 +189,21 @@ class LoanService(ILoanService):
     # The old dict-returning methods are kept for backward compatibility.
     # =========================================================================
 
-    def validate_loan(self, discord_id: int, amount: int, guild_id: int | None = None) -> Result[LoanApproval]:
+    def validate_loan(
+        self,
+        discord_id: int,
+        amount: int,
+        guild_id: int | None = None,
+        *,
+        fee_rate_override: float | None = None,
+        max_amount_override: int | None = None,
+    ) -> Result[LoanApproval]:
         """
         Check if a player can take a loan.
+
+        ``fee_rate_override`` / ``max_amount_override`` let callers (e.g. the
+        /loan command via ``ManaEffectsService``) substitute mana-adjusted
+        values without mutating the service singleton.
 
         Returns:
             Result.ok(LoanApproval) if allowed
@@ -205,6 +217,8 @@ class LoanService(ILoanService):
         """
         state = self.get_state(discord_id, guild_id)
         balance = self.player_repo.get_balance(discord_id, guild_id)
+        effective_fee_rate = fee_rate_override if fee_rate_override is not None else self.fee_rate
+        effective_max = max_amount_override if max_amount_override is not None else self.max_amount
 
         # Check if player already has an outstanding loan
         if state.has_outstanding_loan:
@@ -230,14 +244,14 @@ class LoanService(ILoanService):
                 code=error_codes.VALIDATION_ERROR,
             )
 
-        if amount > self.max_amount:
+        if amount > effective_max:
             return Result.fail(
-                f"Maximum loan amount is {self.max_amount}.",
+                f"Maximum loan amount is {effective_max}.",
                 code=error_codes.LOAN_AMOUNT_EXCEEDED,
             )
 
         # Calculate loan details
-        fee = int(amount * self.fee_rate)
+        fee = int(amount * effective_fee_rate)
         total_owed = amount + fee
         new_balance = balance + amount
 
@@ -251,7 +265,13 @@ class LoanService(ILoanService):
         )
 
     def execute_loan(
-        self, discord_id: int, amount: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        amount: int,
+        guild_id: int | None = None,
+        *,
+        fee_rate_override: float | None = None,
+        max_amount_override: int | None = None,
     ) -> Result[LoanResult]:
         """
         Take out a loan with deferred repayment.
@@ -267,8 +287,10 @@ class LoanService(ILoanService):
             Result.ok(LoanResult) on success
             Result.fail(error_message, code) on failure
         """
+        effective_fee_rate = fee_rate_override if fee_rate_override is not None else self.fee_rate
+        effective_max = max_amount_override if max_amount_override is not None else self.max_amount
         # Calculate fee for the atomic operation
-        fee = int(amount * self.fee_rate)
+        fee = int(amount * effective_fee_rate)
 
         try:
             # Atomic validation + execution in single transaction
@@ -278,7 +300,7 @@ class LoanService(ILoanService):
                 amount=amount,
                 fee=fee,
                 cooldown_seconds=self.cooldown_seconds,
-                max_amount=self.max_amount,
+                max_amount=effective_max,
             )
 
             return Result.ok(

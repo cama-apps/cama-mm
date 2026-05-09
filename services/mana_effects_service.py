@@ -40,7 +40,8 @@ class ManaEffectsService:
         """Get active mana effects for a player.
 
         Returns ManaEffects with all modifiers set based on current mana color.
-        If no mana assigned today, returns default (no effects).
+        If no mana assigned today, or if today's mana has been tapped on a
+        manashop ultimate, returns default (no effects).
         """
         mana = self.mana_service.get_current_mana(discord_id, guild_id)
         if mana is None:
@@ -49,6 +50,10 @@ class ManaEffectsService:
         # Only apply effects if mana was assigned today
         today = get_today_pst()
         if mana.get("assigned_date") != today:
+            return ManaEffects()
+
+        # Tap suppression: ultimates consume the day's color
+        if self.mana_service.is_mana_consumed(discord_id, guild_id):
             return ManaEffects()
 
         color = mana.get("color")
@@ -204,3 +209,112 @@ class ManaEffectsService:
         self.player_repo.add_balance(discord_id, guild_id, -tithe)
         self.loan_service.add_to_nonprofit_fund(guild_id, tithe)
         return tithe
+
+    # ------------------------------------------------------------------
+    # New cross-system mana modifiers
+    # ------------------------------------------------------------------
+
+    def apply_loan_modifiers(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        base_fee_rate: float,
+        base_limit: int,
+    ) -> dict:
+        """Compute mana-modified loan fee rate and limit.
+
+        Returns {"fee_rate": float, "limit": int, "color": str | None}.
+        """
+        effects = self.get_effects(discord_id, guild_id)
+        if effects.color is None:
+            return {"fee_rate": base_fee_rate, "limit": base_limit, "color": None}
+        return {
+            "fee_rate": max(0.0, base_fee_rate * effects.loan_fee_mult),
+            "limit": max(1, int(base_limit * effects.loan_limit_mult)),
+            "color": effects.color,
+        }
+
+    def apply_sabotage_modifiers(
+        self,
+        attacker_id: int,
+        guild_id: int | None,
+        *,
+        base_cost: int,
+    ) -> dict:
+        """Return mana-adjusted sabotage cost and PvP modifiers for attacker.
+
+        {"cost": int, "steal_depth_pct": float, "color": str | None}
+        """
+        effects = self.get_effects(attacker_id, guild_id)
+        if effects.color is None:
+            return {
+                "cost": base_cost,
+                "steal_depth_pct": 0.0,
+                "color": None,
+            }
+        return {
+            "cost": max(1, int(base_cost * effects.sabotage_cost_mult)),
+            "steal_depth_pct": effects.sabotage_steal_depth_pct,
+            "color": effects.color,
+        }
+
+    def get_boss_combat_modifiers(
+        self, discord_id: int, guild_id: int | None
+    ) -> dict:
+        """Return per-color boss-combat modifiers for the given player.
+
+        {damage_mult, dynamite_damage_mult, hp_mult, loot_mult, reveal_hp,
+         no_crit_against, color}
+        """
+        effects = self.get_effects(discord_id, guild_id)
+        return {
+            "damage_mult": effects.boss_damage_mult,
+            "dynamite_damage_mult": effects.boss_dynamite_damage_mult,
+            "hp_mult": effects.boss_hp_mult,
+            "loot_mult": effects.boss_loot_mult,
+            "reveal_hp": effects.boss_reveal_hp,
+            "no_crit_against": effects.boss_no_crit_against,
+            "color": effects.color,
+        }
+
+    def get_weather_combo_modifiers(
+        self, discord_id: int, guild_id: int | None, weather: str | None
+    ) -> dict:
+        """Return any active weather × mana combo modifiers for ``weather``.
+
+        ``weather`` is a lowercase code: 'storm', 'sunny', 'fog', 'heat',
+        'rain' (or None / unknown). Unknown weather returns identity-only
+        results.
+
+        {cooldown_mult, yield_mult, hazard_mult, dynamite_extra_chains,
+         recovery_mult, applied: bool}
+        """
+        effects = self.get_effects(discord_id, guild_id)
+        result = {
+            "cooldown_mult": 1.0,
+            "yield_mult": 1.0,
+            "hazard_mult": 1.0,
+            "dynamite_extra_chains": 0,
+            "recovery_mult": 1.0,
+            "applied": False,
+        }
+        if effects.color is None or not weather:
+            return result
+        w = weather.lower()
+        if w == "storm" and effects.color == "Blue":
+            result["cooldown_mult"] = effects.weather_combo_storm_cooldown_mult
+            result["applied"] = True
+        elif w == "sunny" and effects.color == "White":
+            result["yield_mult"] = effects.weather_combo_sunny_yield_mult
+            result["applied"] = True
+        elif w == "fog" and effects.color == "Black":
+            result["hazard_mult"] = effects.weather_combo_fog_hazard_mult
+            result["applied"] = True
+        elif w == "heat" and effects.color == "Red":
+            result["dynamite_extra_chains"] = effects.weather_combo_heat_dynamite_extra_chains
+            result["applied"] = True
+        elif w == "rain" and effects.color == "Green":
+            result["recovery_mult"] = effects.weather_combo_rain_recovery_mult
+            result["applied"] = True
+        return result

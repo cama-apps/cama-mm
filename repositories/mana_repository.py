@@ -77,14 +77,16 @@ class ManaRepository(BaseRepository, IManaRepository):
                 """
                 INSERT INTO player_mana (
                     discord_id, guild_id, current_land, assigned_date,
-                    bankrupt_insurance_used, bankrupt_reroll_used, updated_at
+                    bankrupt_insurance_used, bankrupt_reroll_used, consumed_today,
+                    updated_at
                 )
-                VALUES (?, ?, ?, ?, 0, 0, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 0, 0, 0, CURRENT_TIMESTAMP)
                 ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                     current_land            = excluded.current_land,
                     assigned_date           = excluded.assigned_date,
                     bankrupt_insurance_used = 0,
                     bankrupt_reroll_used    = 0,
+                    consumed_today          = 0,
                     updated_at              = CURRENT_TIMESTAMP
                 """,
                 (discord_id, gid, land, assigned_date),
@@ -130,6 +132,70 @@ class ManaRepository(BaseRepository, IManaRepository):
                 (discord_id, gid),
             )
             return True
+
+    def is_mana_consumed(self, discord_id: int, guild_id: int | None) -> bool:
+        """Return True if today's mana has been tapped (used on an ultimate)."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT consumed_today FROM player_mana "
+                "WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            )
+            row = cursor.fetchone()
+            return bool(row and row["consumed_today"])
+
+    def mark_mana_consumed_atomic(
+        self, discord_id: int, guild_id: int | None
+    ) -> bool:
+        """Atomically flip ``consumed_today`` 0→1.
+
+        Returns True if the flag flipped (claim succeeded), False if already
+        consumed today or no mana row exists. Uses BEGIN IMMEDIATE for
+        race-safety against two concurrent /manashop ultimate calls.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE player_mana SET consumed_today = 1, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE discord_id = ? AND guild_id = ? AND consumed_today = 0",
+                (discord_id, gid),
+            )
+            return cursor.rowcount > 0
+
+    def was_item_used_today(
+        self, discord_id: int, guild_id: int | None, item_id: str, used_date: str
+    ) -> bool:
+        """Return True if a row exists in manashop_daily_uses for the
+        (player, guild, item, date) tuple."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM manashop_daily_uses "
+                "WHERE discord_id = ? AND guild_id = ? "
+                "AND item_id = ? AND used_date = ?",
+                (discord_id, gid, item_id, used_date),
+            )
+            return cursor.fetchone() is not None
+
+    def mark_item_used_atomic(
+        self, discord_id: int, guild_id: int | None, item_id: str, used_date: str
+    ) -> bool:
+        """Atomically insert a daily-use row. Returns True on first use,
+        False if the (player, guild, item, date) row already exists."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO manashop_daily_uses "
+                "(discord_id, guild_id, item_id, used_date) VALUES (?, ?, ?, ?)",
+                (discord_id, gid, item_id, used_date),
+            )
+            return cursor.rowcount > 0
 
     def get_all_mana(self, guild_id: int | None) -> list[dict]:
         """Return all mana rows for the guild, ordered by current_land then discord_id."""

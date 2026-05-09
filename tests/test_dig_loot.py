@@ -421,8 +421,9 @@ class TestNewItemsAndArtifacts:
 
     def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
-        # 35 base + 3 P5-gated relics added in the prestige-pull pass
-        assert len(ALL_ARTIFACTS) == 38
+        # 35 base + 3 P5-gated relics + 8 new relics (mana / risk / social /
+        # weather themes added in the manashop+relic rework).
+        assert len(ALL_ARTIFACTS) == 46
 
     def test_fungal_artifacts_exist(self):
         from services.dig_constants import ALL_ARTIFACTS

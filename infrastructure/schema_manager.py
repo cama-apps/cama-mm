@@ -381,6 +381,12 @@ class SchemaManager:
             # Per-(player, guild) Dota daily-play streak. Adds two columns and
             # backfills consecutive prior play-days from match history.
             ("add_dota_streak_to_players", self._migration_add_dota_streak_to_players),
+            # Manashop rework: consumed-today tap flag, per-item daily use tracking,
+            # 24h buff store, slow-drip idle-income claims.
+            ("add_consumed_today_to_player_mana", self._migration_add_consumed_today_to_player_mana),
+            ("create_manashop_daily_uses_table", self._migration_create_manashop_daily_uses_table),
+            ("create_manashop_buffs_table", self._migration_create_manashop_buffs_table),
+            ("create_slow_drip_claims_table", self._migration_create_slow_drip_claims_table),
         ]
 
     # --- Migrations ---
@@ -1955,6 +1961,82 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "player_mana", "bankrupt_reroll_used", "INTEGER DEFAULT 0"
+        )
+
+    def _migration_add_consumed_today_to_player_mana(self, cursor) -> None:
+        """Tap flag: when a player spends their daily mana on an ultimate
+        manashop item, the column flips to 1 and all passive mana effects
+        deactivate for the day. Resets when claim_mana_atomic runs at next
+        4 AM PST."""
+        self._add_column_if_not_exists(
+            cursor, "player_mana", "consumed_today", "INTEGER DEFAULT 0"
+        )
+
+    def _migration_create_manashop_daily_uses_table(self, cursor) -> None:
+        """Track per-item per-day usage for mid-tier manashop items
+        (1/day cap independent of the 10s slash-command cooldown)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manashop_daily_uses (
+                discord_id INTEGER NOT NULL,
+                guild_id   INTEGER NOT NULL DEFAULT 0,
+                item_id    TEXT NOT NULL,
+                used_date  TEXT NOT NULL,
+                PRIMARY KEY (discord_id, guild_id, item_id, used_date)
+            )
+            """
+        )
+
+    def _migration_create_manashop_buffs_table(self, cursor) -> None:
+        """24h-duration buffs from manashop ultimates (Counterspell, Aegis,
+        Overgrowth, Sanctuary, Blood Pact, Dark Bargain debt). The original
+        ``mana_shop_items`` table was dropped earlier; this is its successor
+        with a focused buff-only schema."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manashop_buffs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                guild_id   INTEGER NOT NULL DEFAULT 0,
+                buff_type  TEXT NOT NULL,
+                target_id  INTEGER,
+                granted_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                triggered  INTEGER NOT NULL DEFAULT 0,
+                data       TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_manashop_buffs_active
+            ON manashop_buffs(guild_id, discord_id, buff_type, triggered, expires_at)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_manashop_buffs_target
+            ON manashop_buffs(guild_id, target_id, buff_type, triggered, expires_at)
+            """
+        )
+
+    def _migration_create_slow_drip_claims_table(self, cursor) -> None:
+        """Per-day idle-income claim totals for the Slow Drip relic.
+
+        ``claimed_today`` increments lazily on each /dig invocation. Resets
+        per (discord_id, guild_id, claim_date) — old rows pruned at convenience.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS slow_drip_claims (
+                discord_id     INTEGER NOT NULL,
+                guild_id       INTEGER NOT NULL DEFAULT 0,
+                claim_date     TEXT NOT NULL,
+                claimed_today  INTEGER NOT NULL DEFAULT 0,
+                last_claim_at  INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id, claim_date)
+            )
+            """
         )
 
     def _migration_create_curses_table(self, cursor) -> None:
