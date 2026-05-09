@@ -387,6 +387,9 @@ class SchemaManager:
             ("create_manashop_daily_uses_table", self._migration_create_manashop_daily_uses_table),
             ("create_manashop_buffs_table", self._migration_create_manashop_buffs_table),
             ("create_slow_drip_claims_table", self._migration_create_slow_drip_claims_table),
+            # Index for the dig leaderboard surface. ORDER BY prestige DESC,
+            # depth DESC scans guild_id-filtered rows; the composite covers it.
+            ("add_tunnels_leaderboard_index", self._migration_add_tunnels_leaderboard_index),
         ]
 
     # --- Migrations ---
@@ -2037,6 +2040,19 @@ class SchemaManager:
                 PRIMARY KEY (discord_id, guild_id, claim_date)
             )
             """
+        )
+
+    def _migration_add_tunnels_leaderboard_index(self, cursor) -> None:
+        """Composite index for the per-guild dig leaderboard.
+
+        ``get_top_tunnels`` and ``get_leaderboard`` both filter by guild_id
+        and sort by prestige DESC, depth DESC, discord_id ASC. The PK is
+        (discord_id, guild_id), which doesn't help these scans; this index
+        covers the filter + the entire sort without a temp b-tree.
+        """
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tunnels_guild_leaderboard "
+            "ON tunnels (guild_id, prestige_level DESC, depth DESC, discord_id)"
         )
 
     def _migration_create_curses_table(self, cursor) -> None:
