@@ -3120,7 +3120,11 @@ class DigCommands(commands.Cog):
         # Equipped relics
         relics = info.get("relics", []) if isinstance(info, dict) else []
         if relics:
-            relic_text = ", ".join(r.get("name", "?") if isinstance(r, dict) else str(r) for r in relics)
+            relic_text = ", ".join(
+                format_relic_label(r.get("artifact_id", ""))
+                if isinstance(r, dict) else str(r)
+                for r in relics
+            )
             embed.add_field(name="Relics", value=relic_text, inline=False)
 
         # Queued items
