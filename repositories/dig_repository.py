@@ -148,7 +148,10 @@ class DigRepository(BaseRepository, IDigRepository):
             )
 
     def get_leaderboard(self, guild_id: int, limit: int = 10) -> list[dict]:
-        """Get top tunnels by depth (descending)."""
+        """Top tunnels by raw depth (internal callers).
+
+        The user-facing leaderboard surface uses :meth:`get_top_tunnels`.
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -164,30 +167,41 @@ class DigRepository(BaseRepository, IDigRepository):
             return [self._normalize_tunnel(dict(row)) for row in cursor.fetchall()]
 
     def get_player_rank(self, discord_id: int, guild_id: int) -> int:
-        """Get player's rank by depth (1-indexed). Returns 0 if not found."""
+        """Player's 1-indexed rank against :meth:`get_top_tunnels`. 0 if not found."""
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT COUNT(*) + 1 as rank
-                FROM tunnels
-                WHERE guild_id = ? AND depth > (
-                    SELECT COALESCE(depth, 0) FROM tunnels
-                    WHERE discord_id = ? AND guild_id = ?
-                )
+                SELECT prestige_level, depth FROM tunnels
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (gid, discord_id, gid),
-            )
-            row = cursor.fetchone()
-            # If the player doesn't exist, the subquery returns NULL and rank is meaningless
-            cursor.execute(
-                "SELECT 1 FROM tunnels WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, gid),
             )
-            if not cursor.fetchone():
+            me = cursor.fetchone()
+            if me is None:
                 return 0
-            return row["rank"]
+            my_prestige = me["prestige_level"] or 0
+            my_depth = me["depth"] or 0
+            cursor.execute(
+                """
+                SELECT COUNT(*) + 1 AS rank
+                FROM tunnels
+                WHERE guild_id = ?
+                  AND (
+                    COALESCE(prestige_level, 0) > ?
+                    OR (COALESCE(prestige_level, 0) = ? AND COALESCE(depth, 0) > ?)
+                    OR (
+                      COALESCE(prestige_level, 0) = ?
+                      AND COALESCE(depth, 0) = ?
+                      AND discord_id < ?
+                    )
+                  )
+                """,
+                (gid, my_prestige, my_prestige, my_depth,
+                 my_prestige, my_depth, discord_id),
+            )
+            return cursor.fetchone()["rank"]
 
     def get_all_tunnels(self, guild_id: int) -> list[dict]:
         """Get all tunnels for a guild."""
@@ -1344,8 +1358,24 @@ class DigRepository(BaseRepository, IDigRepository):
             )
 
     def get_top_tunnels(self, guild_id: int, limit: int = 10) -> list[dict]:
-        """Alias for get_leaderboard."""
-        return self.get_leaderboard(guild_id, limit)
+        """Top tunnels for the user-facing leaderboard surface.
+
+        ``discord_id ASC`` is the final tiebreaker so the row order stays
+        deterministic and matches :meth:`get_player_rank`.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM tunnels
+                WHERE guild_id = ?
+                ORDER BY COALESCE(prestige_level, 0) DESC, depth DESC, discord_id ASC
+                LIMIT ?
+                """,
+                (gid, limit),
+            )
+            return [self._normalize_tunnel(dict(row)) for row in cursor.fetchall()]
 
     def get_hall_of_fame(self, guild_id: int) -> list[dict]:
         """Get top 10 tunnels by best_run_score for the guild."""
