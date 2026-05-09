@@ -385,6 +385,7 @@ class TestCommandLayerConstraints:
         allowed_pure_calls = {
             "self.dig_service._force_event_for.add",
             "self.disburse_service.METHOD_LABELS.get",
+            "disburse_service.METHOD_LABELS.get",
         }
 
         def reason_for_call(chain: list[str] | None) -> str | None:
