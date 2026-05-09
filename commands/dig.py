@@ -204,6 +204,13 @@ class _DictObj:
             return _DictObj(v) if isinstance(v, dict) else v
         except KeyError as err:
             raise AttributeError(name) from err
+    # Nested dict values are recursively wrapped, so embed-builder code that
+    # calls .get() on what it expects to be a plain dict (e.g. pinnacle_relic)
+    # would otherwise hit AttributeError and crash render mid-resolution after
+    # the service had already persisted rewards.
+    def get(self, key, default=None):
+        v = self._d.get(key, default)
+        return _DictObj(v) if isinstance(v, dict) else v
     def __repr__(self):
         return repr(self._d)
 
@@ -701,9 +708,12 @@ async def _post_phase_transition_followup(
     lum_line = getattr(next_info, "luminosity_display", None)
     if lum_line:
         encounter_embed.add_field(name="​", value=lum_line, inline=False)
+    has_lantern = await asyncio.to_thread(
+        dig_service.has_scout_lantern, user_id, guild_id,
+    )
     view = BossEncounterView(
         dig_service, user_id, guild_id, next_info,
-        getattr(next_info, "has_lantern", False),
+        has_lantern,
         dig_flavor_service=dig_flavor_service,
     )
     msg = await channel.send(embed=encounter_embed, view=view)
@@ -1104,7 +1114,18 @@ class BossDuelView(discord.ui.View):
             err = getattr(result, "error", "Duel resume failed.")
             await self._edit_message(content=err, embed=None, view=None)
             return
-        await self._render_resolution(result)
+        # Service-side state is already mutated by resume_boss_duel — if the
+        # render path raises, the user otherwise sees frozen buttons with no
+        # confirmation that their rewards/loss landed. Surface a fallback
+        # instead of swallowing.
+        try:
+            await self._render_resolution(result)
+        except Exception as e:
+            logger.error("Boss duel render failed: %s", e, exc_info=True)
+            await self._edit_message(
+                content="Fight resolved but display failed — check `/dig info` for your current state.",
+                embed=None, view=None,
+            )
 
     async def _render_resolution(self, result) -> None:
         """Render either a follow-up prompt or the final fight outcome."""
@@ -2645,7 +2666,12 @@ class DigCommands(commands.Cog):
     ) -> None:
         """Render a boss encounter embed and attach the interactive view."""
         boss_info = getattr(result, "boss_info", None)
-        has_lantern = getattr(result, "has_lantern", False)
+        # Scout button enables on lantern *ownership*, not on whether the
+        # player queued one this dig — otherwise owners who didn't /dig use
+        # the lantern see Scout greyed out on a freshly-encountered boss.
+        has_lantern = await asyncio.to_thread(
+            self.dig_service.has_scout_lantern, interaction.user.id, guild_id,
+        )
         embed = discord.Embed(
             title=f"Boss Encountered: {getattr(boss_info, 'name', 'Unknown Boss')}!",
             description=getattr(boss_info, "dialogue", "A fearsome guardian blocks your path!"),

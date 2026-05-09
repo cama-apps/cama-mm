@@ -746,6 +746,17 @@ class DigService:
             return False
         return perk_id in self._get_prestige_perks(dict(tunnel))
 
+    def has_scout_lantern(self, discord_id: int, guild_id) -> bool:
+        """True if the player can scout a boss right now.
+
+        Scouting accepts either a Lantern consumable (single-use) or the
+        persistent Great Lantern gear. The boss-encounter UI uses this to
+        decide whether the Scout button is enabled — ownership semantics,
+        not "did the player queue a lantern this dig".
+        """
+        inv = self.dig_repo.get_inventory(discord_id, guild_id)
+        return any(i.get("item_type") in ("lantern", "great_lantern") for i in inv)
+
     def _get_miner_stats(self, tunnel: dict) -> dict:
         """Return normalized miner S stats and available point budget."""
         strength = max(0, int(tunnel.get("stat_strength") or 0))
