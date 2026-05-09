@@ -106,6 +106,7 @@ class ServiceContainer:
     def _init_repositories(self) -> None:
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
+        from repositories.buff_repository import BuffRepository
         from repositories.curse_repository import CurseRepository
         from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
         from repositories.dig_repository import DigRepository
@@ -123,6 +124,7 @@ class ServiceContainer:
         from repositories.prediction_repository import PredictionRepository
         from repositories.rebellion_repository import RebellionRepository
         from repositories.recalibration_repository import RecalibrationRepository
+        from repositories.slow_drip_repository import SlowDripRepository
         from repositories.soft_avoid_repository import SoftAvoidRepository
         from repositories.tip_repository import TipRepository
         from repositories.wrapped_repository import WrappedRepository
@@ -147,6 +149,8 @@ class ServiceContainer:
             "wrapped_repo": WrappedRepository(p),
             "rebellion_repo": RebellionRepository(p),
             "mana_repo": ManaRepository(p),
+            "buff_repo": BuffRepository(p),
+            "slow_drip_repo": SlowDripRepository(p),
             "dig_repo": DigRepository(p),
             "notification_repo": NotificationRepository(p),
             "curse_repo": CurseRepository(p),
@@ -202,6 +206,7 @@ class ServiceContainer:
             bankruptcy_service=c["bankruptcy_service"],
             max_debt=self.max_debt,
             leverage_tiers=self.leverage_tiers,
+            buff_service=None,
         )
         c["disburse_service"] = DisburseService(
             c["disburse_repo"], c["player_repo"], c["loan_repo"]
@@ -352,6 +357,7 @@ class ServiceContainer:
         )
 
     def _init_mana_service(self) -> None:
+        from services.buff_service import BuffService
         from services.mana_effects_service import ManaEffectsService
         from services.mana_service import ManaService
 
@@ -369,6 +375,15 @@ class ServiceContainer:
             mana_repo=c["mana_repo"],
             loan_service=c["loan_service"],
         )
+        c["buff_service"] = BuffService(buff_repo=c["buff_repo"])
+        # Late-attach so the betting service can read manashop buffs at award time.
+        # BettingService is constructed in _init_economy_services (before
+        # _init_mana_service) so we wire the dependency back in after both exist.
+        if c.get("betting_service") is not None:
+            try:
+                c["betting_service"].buff_service = c["buff_service"]
+            except Exception:
+                pass
 
     def _init_dig_service(self) -> None:
         """Tunnel digging minigame service."""
@@ -381,6 +396,9 @@ class ServiceContainer:
             mana_effects_service=c.get("mana_effects_service"),
             bankruptcy_repo=c.get("bankruptcy_repo"),
             dig_guild_modifier_repo=c.get("dig_guild_modifier_repo"),
+            buff_service=c.get("buff_service"),
+            slow_drip_repo=c.get("slow_drip_repo"),
+            balance_history_service=c.get("balance_history_service"),
         )
 
         # Wire LLM flavor layer if AI is available
@@ -500,6 +518,9 @@ class ServiceContainer:
         bot.mana_service = c["mana_service"]
         bot.mana_repo = c["mana_repo"]
         bot.mana_effects_service = c["mana_effects_service"]
+        bot.buff_service = c["buff_service"]
+        bot.buff_repo = c["buff_repo"]
+        bot.slow_drip_repo = c["slow_drip_repo"]
         bot.dig_service = c["dig_service"]
         bot.dig_repo = c["dig_repo"]
         bot.dig_flavor_service = c.get("dig_flavor_service")

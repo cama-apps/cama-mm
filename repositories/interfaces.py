@@ -1469,6 +1469,34 @@ class IManaRepository(ABC):
         """Atomically mark the buff used for today. Returns True if claim succeeded."""
         ...
 
+    @abstractmethod
+    def is_mana_consumed(self, discord_id: int, guild_id: int | None) -> bool:
+        """Return True if today's mana has been tapped (consumed by an ultimate)."""
+        ...
+
+    @abstractmethod
+    def mark_mana_consumed_atomic(
+        self, discord_id: int, guild_id: int | None
+    ) -> bool:
+        """Atomically flip consumed_today 0→1. Returns True if claim succeeded."""
+        ...
+
+    @abstractmethod
+    def was_item_used_today(
+        self, discord_id: int, guild_id: int | None, item_id: str, used_date: str
+    ) -> bool:
+        """Return True if the named manashop item has already been used by this
+        player today (used_date is today's PST string)."""
+        ...
+
+    @abstractmethod
+    def mark_item_used_atomic(
+        self, discord_id: int, guild_id: int | None, item_id: str, used_date: str
+    ) -> bool:
+        """Atomically record that ``item_id`` was used for ``used_date``.
+        Returns True on first use, False if already recorded for that date."""
+        ...
+
 
 class IRebellionRepository(ABC):
     """Repository for wheel war (rebellion) data access."""

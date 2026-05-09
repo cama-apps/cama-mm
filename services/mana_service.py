@@ -89,7 +89,12 @@ class ManaService:
         return row["assigned_date"] == get_today_pst()
 
     def get_current_mana(self, discord_id: int, guild_id: int | None) -> dict | None:
-        """Return {land, color, assigned_date} or None if never assigned."""
+        """Return {land, color, assigned_date} or None if never assigned.
+
+        Always returns the assigned land regardless of tap (consumed) state —
+        callers who need to suppress effects should also check
+        :meth:`is_mana_consumed`.
+        """
         row = self.mana_repo.get_mana(discord_id, guild_id)
         if row is None:
             return None
@@ -100,6 +105,13 @@ class ManaService:
             "emoji": LAND_EMOJIS.get(land, "❓"),
             "assigned_date": row["assigned_date"],
         }
+
+    def is_mana_consumed(self, discord_id: int, guild_id: int | None) -> bool:
+        """Return True if today's mana has been tapped on a manashop ultimate.
+
+        Tapped mana suppresses all passive effects until the 4 AM PST reset.
+        """
+        return self.mana_repo.is_mana_consumed(discord_id, guild_id)
 
     def assign_all_daily_mana(
         self, guild_id: int | None, *, ash_fan_ids: set[int] | None = None

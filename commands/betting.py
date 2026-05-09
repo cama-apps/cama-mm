@@ -3684,9 +3684,35 @@ class BettingCommands(commands.Cog):
         # Defer early - AI flavor text calls below can take several seconds
         await interaction.response.defer()
 
+        # Mana modifies fee rate / max amount per-call without mutating the service.
+        mana_effects_service = getattr(self.bot, "mana_effects_service", None)
+        loan_fee_override: float | None = None
+        loan_max_override: int | None = None
+        if mana_effects_service is not None:
+            try:
+                _mana_loan = await asyncio.to_thread(
+                    mana_effects_service.apply_loan_modifiers,
+                    user_id,
+                    guild_id,
+                    base_fee_rate=self.loan_service.fee_rate,
+                    base_limit=self.loan_service.max_amount,
+                )
+                if _mana_loan["color"] is not None:
+                    loan_fee_override = _mana_loan["fee_rate"]
+                    loan_max_override = _mana_loan["limit"]
+            except Exception:
+                logger.debug("Mana loan modifier lookup failed", exc_info=True)
+
         # Check eligibility
         from services import error_codes as _ec
-        check = await asyncio.to_thread(self.loan_service.validate_loan, user_id, amount, guild_id)
+        check = await asyncio.to_thread(
+            functools.partial(
+                self.loan_service.validate_loan,
+                user_id, amount, guild_id,
+                fee_rate_override=loan_fee_override,
+                max_amount_override=loan_max_override,
+            ),
+        )
 
         if not check.success:
             if check.error_code == _ec.LOAN_ALREADY_EXISTS:
@@ -3740,7 +3766,14 @@ class BettingCommands(commands.Cog):
                 return
 
         # Take the loan
-        loan_result = await asyncio.to_thread(self.loan_service.execute_loan, user_id, amount, guild_id)
+        loan_result = await asyncio.to_thread(
+            functools.partial(
+                self.loan_service.execute_loan,
+                user_id, amount, guild_id,
+                fee_rate_override=loan_fee_override,
+                max_amount_override=loan_max_override,
+            ),
+        )
 
         if not loan_result.success:
             await interaction.followup.send(

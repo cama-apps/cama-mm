@@ -1542,17 +1542,30 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="manashop", description="Buy exclusive items from your mana color's shop")
+    @app_commands.command(name="manashop", description="Spend mana on color-exclusive items")
     @app_commands.describe(
         item="The mana item to purchase",
-        target="Target player (for Guardian Angel only)",
+        target="Target player (Sanctuary, Blood Pact, Insight)",
     )
     @app_commands.choices(item=[
-        app_commands.Choice(name="Pyroclasm (Red, 100 JC) - Destroy 10-30 JC from 3 random players", value="pyroclasm"),
-        app_commands.Choice(name="Mana Shield (Blue, 200 JC) - Reclaim 50% of your largest 24h loss", value="mana_shield"),
-        app_commands.Choice(name="Regrowth (Green, 100 JC) - Recover 25% of today's losses", value="regrowth"),
-        app_commands.Choice(name="Guardian Angel (Plains, 300 JC) - Send 125 JC to a target player", value="guardian_angel"),
-        app_commands.Choice(name="Soul Harvest (Swamp, 75 JC) - Drain 1 JC from all positive players", value="soul_harvest"),
+        # Cheap (unlimited, 10s cd)
+        app_commands.Choice(name="Cheap • Pyroclasm (Red, 60 JC) — destroy JC from 3 random players", value="pyroclasm"),
+        app_commands.Choice(name="Cheap • Insight (Blue, 40 JC) — peek at any digger's stats", value="insight"),
+        app_commands.Choice(name="Cheap • Sapling (Green, 50 JC) — shave 15min off /dig cooldown", value="sapling"),
+        app_commands.Choice(name="Cheap • Communion (White, 50 JC) — donate to nonprofit, +10% next match win", value="communion"),
+        app_commands.Choice(name="Cheap • Soul Harvest (Black, 75 JC) — drain 1 JC from every positive player", value="soul_harvest"),
+        # Mid (1/day)
+        app_commands.Choice(name="Mid • Dynamite Cache (Red, 150 JC, 1/day) — next 3 digs +30% yield", value="dynamite_cache"),
+        app_commands.Choice(name="Mid • Mana Shield (Blue, 150 JC, 1/day) — refund 50% of largest 24h loss", value="mana_shield"),
+        app_commands.Choice(name="Mid • Regrowth (Green, 100 JC, 1/day) — recover 25% of today's losses", value="regrowth"),
+        app_commands.Choice(name="Mid • Aegis (White, 150 JC, 1/day) — absorb the next PvP attack", value="aegis"),
+        app_commands.Choice(name="Mid • Blood Pact (Black, 150 JC, 1/day) — skim 10% of target's earnings 24h", value="blood_pact"),
+        # Ultimate (taps mana — consumes today's color)
+        app_commands.Choice(name="Ult • Wildfire (Red, 450 JC, taps mana) — drain JC from every positive player", value="wildfire"),
+        app_commands.Choice(name="Ult • Counterspell (Blue, 400 JC, taps mana) — 24h PvP immunity", value="counterspell"),
+        app_commands.Choice(name="Ult • Overgrowth (Green, 400 JC, taps mana) — 24h dig overdrive", value="overgrowth"),
+        app_commands.Choice(name="Ult • Sanctuary (White, 400 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
+        app_commands.Choice(name="Ult • Dark Bargain (Black, 350 JC, taps mana) — 800 JC instant 0%-fee debt", value="dark_bargain"),
     ])
     @app_commands.checks.cooldown(1, 10)
     async def manashop(
@@ -1573,23 +1586,56 @@ class ShopCommands(commands.Cog):
             await interaction.followup.send("You need to `/player register` first.", ephemeral=True)
             return
 
-        # Get mana effects
         mana_effects_service = getattr(self.bot, "mana_effects_service", None)
-        if not mana_effects_service:
+        mana_service = getattr(self.bot, "mana_service", None)
+        mana_repo = getattr(self.bot, "mana_repo", None)
+        buff_service = getattr(self.bot, "buff_service", None)
+        if not (mana_effects_service and mana_service and mana_repo):
             await interaction.followup.send("Mana system not available.", ephemeral=True)
             return
-        effects = await asyncio.to_thread(mana_effects_service.get_effects, user_id, guild_id)
-        if not effects.color:
-            await interaction.followup.send("You have no active mana today. Use `/mana` first!", ephemeral=True)
+
+        # Tap-state check: a tapped player has no active color, /manashop locked.
+        tapped = await asyncio.to_thread(mana_service.is_mana_consumed, user_id, guild_id)
+        if tapped:
+            await interaction.followup.send(
+                "Your mana is spent — today's ultimate consumed your color. "
+                "Come back tomorrow.",
+                ephemeral=True,
+            )
             return
 
-        # Item definitions: {item_key: (required_color, cost, display_name)}
-        MANA_ITEMS = {
-            "pyroclasm": ("Red", 100, "Pyroclasm"),
-            "mana_shield": ("Blue", 200, "Mana Shield"),
-            "regrowth": ("Green", 100, "Regrowth"),
-            "guardian_angel": ("White", 300, "Guardian Angel"),
-            "soul_harvest": ("Black", 75, "Soul Harvest"),
+        # Resolve effects (returns defaults if mana not assigned today).
+        effects = await asyncio.to_thread(mana_effects_service.get_effects, user_id, guild_id)
+        if not effects.color:
+            await interaction.followup.send(
+                "You have no active mana today. Use `/mana` first.",
+                ephemeral=True,
+            )
+            return
+
+        # Item catalog:
+        # tier:    "cheap" / "mid" / "ult"
+        # color:   required mana color
+        # cost:    JC cost
+        MANA_ITEMS: dict[str, dict] = {
+            # Cheap
+            "pyroclasm": {"tier": "cheap", "color": "Red", "cost": 60, "name": "Pyroclasm"},
+            "insight": {"tier": "cheap", "color": "Blue", "cost": 40, "name": "Insight"},
+            "sapling": {"tier": "cheap", "color": "Green", "cost": 50, "name": "Sapling"},
+            "communion": {"tier": "cheap", "color": "White", "cost": 50, "name": "Communion"},
+            "soul_harvest": {"tier": "cheap", "color": "Black", "cost": 75, "name": "Soul Harvest"},
+            # Mid
+            "dynamite_cache": {"tier": "mid", "color": "Red", "cost": 150, "name": "Dynamite Cache"},
+            "mana_shield": {"tier": "mid", "color": "Blue", "cost": 150, "name": "Mana Shield"},
+            "regrowth": {"tier": "mid", "color": "Green", "cost": 100, "name": "Regrowth"},
+            "aegis": {"tier": "mid", "color": "White", "cost": 150, "name": "Aegis"},
+            "blood_pact": {"tier": "mid", "color": "Black", "cost": 150, "name": "Blood Pact"},
+            # Ultimate (taps mana)
+            "wildfire": {"tier": "ult", "color": "Red", "cost": 450, "name": "Wildfire"},
+            "counterspell": {"tier": "ult", "color": "Blue", "cost": 400, "name": "Counterspell"},
+            "overgrowth": {"tier": "ult", "color": "Green", "cost": 400, "name": "Overgrowth"},
+            "sanctuary": {"tier": "ult", "color": "White", "cost": 400, "name": "Sanctuary"},
+            "dark_bargain": {"tier": "ult", "color": "Black", "cost": 350, "name": "Dark Bargain"},
         }
 
         item_key = item.value
@@ -1597,7 +1643,12 @@ class ShopCommands(commands.Cog):
             await interaction.followup.send("Unknown item.", ephemeral=True)
             return
 
-        required_color, cost, display_name = MANA_ITEMS[item_key]
+        spec = MANA_ITEMS[item_key]
+        required_color = spec["color"]
+        cost = int(spec["cost"])
+        display_name = spec["name"]
+        tier = spec["tier"]
+
         if effects.color != required_color:
             color_to_land = {"Red": "Mountain", "Blue": "Island", "Green": "Forest", "White": "Plains", "Black": "Swamp"}
             await interaction.followup.send(
@@ -1606,6 +1657,37 @@ class ShopCommands(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # Tier-specific gates
+        from services.mana_service import get_today_pst as _today_pst
+        today = _today_pst()
+        if tier == "mid":
+            already = await asyncio.to_thread(
+                mana_repo.was_item_used_today, user_id, guild_id, item_key, today,
+            )
+            if already:
+                await interaction.followup.send(
+                    f"**{display_name}** is once-per-day. Already used today.",
+                    ephemeral=True,
+                )
+                return
+
+        # Validate target requirements upfront so we never charge for an
+        # invalid use.
+        target_required_for = {"sanctuary", "blood_pact", "insight"}
+        if item_key in target_required_for:
+            if not target:
+                await interaction.followup.send(
+                    f"**{display_name}** requires a `target` player.",
+                    ephemeral=True,
+                )
+                return
+            if target.id == user_id and item_key != "insight":
+                await interaction.followup.send(
+                    f"**{display_name}** must target another player.",
+                    ephemeral=True,
+                )
+                return
 
         # Check balance
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
@@ -1616,22 +1698,65 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Deduct cost
+        # Charge cost (single deduction)
         await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
-        # Execute item effect
+        async def _refund(reason: str) -> None:
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+            await interaction.followup.send(reason, ephemeral=True)
+
+        # For ultimate items: tap mana atomically. If the tap fails, refund.
+        if tier == "ult":
+            tapped_now = await asyncio.to_thread(
+                mana_repo.mark_mana_consumed_atomic, user_id, guild_id,
+            )
+            if not tapped_now:
+                await _refund(
+                    "Your mana was already tapped this turn — refunded. Try again tomorrow.",
+                )
+                return
+
+        # Mid: claim daily-use atomically.
+        if tier == "mid":
+            claimed = await asyncio.to_thread(
+                mana_repo.mark_item_used_atomic, user_id, guild_id, item_key, today,
+            )
+            if not claimed:
+                await _refund(
+                    f"**{display_name}** was already used today (raced against another /manashop).",
+                )
+                return
+
+        # Mana Conduit relic: refund 25% of tap-mana ultimate cost.
+        ult_refund = 0
+        if tier == "ult":
+            dig_service = getattr(self.bot, "dig_service", None)
+            if dig_service is not None:
+                try:
+                    has_conduit = await asyncio.to_thread(
+                        dig_service._has_relic, user_id, guild_id, "mana_conduit",
+                    )
+                    if has_conduit:
+                        ult_refund = max(1, int(cost * 0.25))
+                        await asyncio.to_thread(
+                            self.player_service.adjust_balance, user_id, guild_id, ult_refund,
+                        )
+                except Exception:
+                    ult_refund = 0
+
+        # ── Execute item effect ───────────────────────────────────────
+        new_balance = balance - cost + ult_refund
+
         if item_key == "pyroclasm":
-            # Destroy 10-30 JC from 3 random players (JC destroyed, not transferred)
-            import random as _rand
             all_players = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
-            targets = _rand.sample(eligible, min(3, len(eligible)))
+            targets = random.sample(eligible, min(3, len(eligible)))
             total_destroyed = 0
             victim_lines = []
             for t in targets:
-                destroy_amt = _rand.randint(10, 30)
+                destroy_amt = random.randint(8, 20)
                 destroy_amt = min(destroy_amt, t.jopacoin_balance)
                 if destroy_amt > 0:
                     await asyncio.to_thread(self.player_service.adjust_balance, t.discord_id, guild_id, -destroy_amt)
@@ -1644,73 +1769,97 @@ class ShopCommands(commands.Cog):
                 f"**{total_destroyed} {JOPACOIN_EMOTE} destroyed** (cost: {cost} {JOPACOIN_EMOTE})"
             )
 
-        elif item_key == "mana_shield":
-            # Blue: refund 50% of the largest single loss in the past 24h, capped at 200 JC.
-            import time as _time_ms
-            now_ts = int(_time_ms.time())
-            cutoff = now_ts - 24 * 3600
-            largest_loss = await asyncio.to_thread(
-                self._compute_largest_recent_loss, user_id, guild_id, cutoff,
-            )
-            refund = min(200, largest_loss // 2)
-            if refund > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, refund)
-            new_balance = balance - cost + refund
-            await interaction.followup.send(
-                f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention} reclaims {refund} {JOPACOIN_EMOTE}.\n"
-                f"(50% of your largest loss in the past 24h, capped at 200. Cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
-
-        elif item_key == "regrowth":
-            # Green: refund 25% of cumulative losses since today's 4 AM PST, capped at 200 JC.
-            cutoff = _today_4am_pst_unix()
-            total_lost = await asyncio.to_thread(
-                self._compute_cumulative_recent_losses, user_id, guild_id, cutoff,
-            )
-            recovery = min(200, total_lost // 4)
-            if recovery > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
-            new_balance = balance - cost + recovery
-            await interaction.followup.send(
-                f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
-                f"(25% of today's losses, capped at 200. Cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
-            )
-
-        elif item_key == "guardian_angel":
-            if not target:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
-                await interaction.followup.send(
-                    "Guardian Angel requires a `target` player. Usage: `/manashop item:Guardian Angel target:@player`",
-                    ephemeral=True,
-                )
-                return
-            if target.id == user_id:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
-                await interaction.followup.send(
-                    "Guardian Angel must target a player other than yourself.",
-                    ephemeral=True,
-                )
-                return
+        elif item_key == "insight":
             recipient = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
             if not recipient:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+                await _refund(f"{target.mention} is not registered.")
+                return
+            dig_service = getattr(self.bot, "dig_service", None)
+            tunnel_info = None
+            if dig_service is not None:
+                try:
+                    tunnel_info = await asyncio.to_thread(
+                        dig_service.get_tunnel_info, target.id, guild_id,
+                    )
+                except Exception:
+                    tunnel_info = None
+            if tunnel_info is None:
                 await interaction.followup.send(
-                    f"{target.mention} is not registered.",
-                    ephemeral=True,
+                    f"🏝️🔍 **INSIGHT** — {target.mention} hasn't started digging.\n"
+                    f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
                 )
                 return
-            transfer_amount = 125
-            await asyncio.to_thread(
-                self.player_service.adjust_balance, target.id, guild_id, transfer_amount
-            )
-            new_balance = balance - cost
+            tunnel = tunnel_info.get("tunnel") or tunnel_info
+            relics = tunnel_info.get("relics") or []
+            relic_names = ", ".join(
+                r.get("name", r.get("artifact_id", "?")) for r in relics if r
+            ) or "—"
             await interaction.followup.send(
-                f"🌾👼 **GUARDIAN ANGEL** — {interaction.user.mention} sends {transfer_amount} {JOPACOIN_EMOTE} to {target.mention}.\n"
+                f"🏝️🔍 **INSIGHT** — {interaction.user.mention} reads the threads of fate.\n"
+                f"**{target.display_name}** depth `{tunnel.get('depth', 0)}` "
+                f"luminosity `{tunnel.get('luminosity', 0)}` "
+                f"prestige `{tunnel.get('prestige_level', 0)}`\n"
+                f"Equipped relics: {relic_names}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
+        elif item_key == "sapling":
+            dig_service = getattr(self.bot, "dig_service", None)
+            shaved_seconds = 0
+            if dig_service is not None:
+                try:
+                    shaved_seconds = await asyncio.to_thread(
+                        dig_service.dig_repo.shave_cooldown, user_id, guild_id, 15 * 60,
+                    )
+                except AttributeError:
+                    # Fallback: rewind last_dig_at on the tunnel directly.
+                    try:
+                        tunnel = await asyncio.to_thread(
+                            dig_service.dig_repo.get_tunnel, user_id, guild_id,
+                        )
+                        if tunnel and tunnel.get("last_dig_at"):
+                            new_last = max(0, int(tunnel["last_dig_at"]) - 15 * 60)
+                            await asyncio.to_thread(
+                                dig_service.dig_repo.update_tunnel,
+                                user_id, guild_id, last_dig_at=new_last,
+                            )
+                            shaved_seconds = 15 * 60
+                    except Exception:
+                        shaved_seconds = 0
+                except Exception:
+                    shaved_seconds = 0
+            await interaction.followup.send(
+                f"🌲🌱 **SAPLING** — {interaction.user.mention} accelerates growth.\n"
+                f"`/dig` cooldown reduced by {shaved_seconds // 60}m.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "communion":
+            loan_service = getattr(self.bot, "loan_service", None)
+            if loan_service is not None:
+                try:
+                    await asyncio.to_thread(loan_service.add_to_nonprofit_fund, guild_id, cost)
+                except Exception:
+                    pass
+            # Grant a small "blessing" buff: +10% next match win bonus
+            if buff_service is not None:
+                try:
+                    await asyncio.to_thread(
+                        buff_service.buff_repo.grant,
+                        user_id, guild_id, "communion_blessing",
+                        int(time.time()) + 24 * 3600,
+                        target_id=None,
+                        data={"match_win_bonus_pct": 0.10},
+                    )
+                except Exception:
+                    pass
+            await interaction.followup.send(
+                f"🌾🕊️ **COMMUNION** — {interaction.user.mention} gives {cost} {JOPACOIN_EMOTE} to the fund.\n"
+                f"A blessing settles on you: +10% on your next match-win bonus.\n"
+                f"(balance: {new_balance})"
+            )
+
         elif item_key == "soul_harvest":
-            # Drain 1 JC from every positive-balance player
             all_players = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
@@ -1721,12 +1870,183 @@ class ShopCommands(commands.Cog):
                 total_drained += 1
             if total_drained > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, total_drained)
-            new_balance = balance - cost + total_drained
             await interaction.followup.send(
                 f"🌿💀 **SOUL HARVEST** — {interaction.user.mention} drains the living!\n"
                 f"Drained **1 {JOPACOIN_EMOTE}** from **{total_drained}** players. "
                 f"Gained **{total_drained} {JOPACOIN_EMOTE}**.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + total_drained})"
+            )
+
+        elif item_key == "dynamite_cache":
+            # Mid: stash a 3-charge yield buff on the dig service.
+            dig_service = getattr(self.bot, "dig_service", None)
+            if dig_service is not None:
+                try:
+                    await asyncio.to_thread(
+                        dig_service.set_temp_buff, user_id, guild_id,
+                        {
+                            "id": "dynamite_cache",
+                            "name": "Dynamite Cache",
+                            "duration_digs": 3,
+                            "effect": {"yield_multiplier": 1.30},
+                        },
+                    )
+                except Exception:
+                    pass
+            await interaction.followup.send(
+                f"⛰️🧨 **DYNAMITE CACHE** — {interaction.user.mention} packs the next 3 digs hot.\n"
+                f"Yield +30% on your next 3 swings.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "mana_shield":
+            now_ts = int(time.time())
+            cutoff = now_ts - 24 * 3600
+            largest_loss = await asyncio.to_thread(
+                self._compute_largest_recent_loss, user_id, guild_id, cutoff,
+            )
+            refund = min(200, largest_loss // 2)
+            if refund > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, refund)
+            await interaction.followup.send(
+                f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention} reclaims {refund} {JOPACOIN_EMOTE}.\n"
+                f"(50% of your largest loss in the past 24h, capped at 200. "
+                f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + refund})"
+            )
+
+        elif item_key == "regrowth":
+            cutoff = _today_4am_pst_unix()
+            total_lost = await asyncio.to_thread(
+                self._compute_cumulative_recent_losses, user_id, guild_id, cutoff,
+            )
+            recovery = min(200, total_lost // 4)
+            if recovery > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
+            await interaction.followup.send(
+                f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
+                f"(25% of today's losses, capped at 200. "
+                f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + recovery})"
+            )
+
+        elif item_key == "aegis":
+            if buff_service is not None:
+                try:
+                    await asyncio.to_thread(buff_service.grant_aegis, user_id, guild_id)
+                except Exception:
+                    pass
+            await interaction.followup.send(
+                f"🌾🛡️ **AEGIS** — {interaction.user.mention} prepares a single-charge ward.\n"
+                f"The next sabotage / Pyroclasm / Soul Harvest aimed at you is absorbed.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "blood_pact":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    buff_service.grant_blood_pact, user_id, guild_id, target.id,
+                )
+            except Exception:
+                logger.exception("Blood Pact grant failed")
+                await _refund("Could not seal the pact; refunded.")
+                return
+            await interaction.followup.send(
+                f"🌿🩸 **BLOOD PACT** — {interaction.user.mention} marks {target.mention} for skim.\n"
+                f"For 24h, you receive 10% of {target.display_name}'s match/wheel/dig earnings (cap 50 JC).\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "wildfire":
+            all_players = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            total_drained = 0
+            for p in eligible:
+                drain = random.randint(4, 12)
+                drain = min(drain, p.jopacoin_balance)
+                if drain > 0:
+                    await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -drain)
+                    total_drained += drain
+            user_gain = int(total_drained * 0.35)
+            if user_gain > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, user_gain)
+            await interaction.followup.send(
+                f"⛰️🔥🔥 **WILDFIRE** — {interaction.user.mention} consumes the day's color in flame.\n"
+                f"Drained **{total_drained} {JOPACOIN_EMOTE}** from {len(eligible)} players. "
+                f"You claim **{user_gain} {JOPACOIN_EMOTE}** of the harvest.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + user_gain + ult_refund})"
+            )
+
+        elif item_key == "counterspell":
+            if buff_service is not None:
+                try:
+                    await asyncio.to_thread(buff_service.grant_counterspell, user_id, guild_id)
+                except Exception:
+                    pass
+            await interaction.followup.send(
+                f"🏝️🜨 **COUNTERSPELL** — {interaction.user.mention} weaves a 24h ward.\n"
+                f"All Pyroclasm / Soul Harvest / Sabotage / Blood Pact / Wildfire targeting you "
+                f"is repelled for the next 24 hours.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
+            )
+
+        elif item_key == "overgrowth":
+            if buff_service is not None:
+                try:
+                    await asyncio.to_thread(buff_service.grant_overgrowth, user_id, guild_id)
+                except Exception:
+                    pass
+            await interaction.followup.send(
+                f"🌲🌳 **OVERGROWTH** — {interaction.user.mention} burns the day's mana into the soil.\n"
+                f"For 24h: every dig +5 JC, no /dig cooldown, hazard chances halved.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
+            )
+
+        elif item_key == "sanctuary":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            recipient = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
+            if not recipient:
+                await _refund(f"{target.mention} is not registered; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    buff_service.grant_sanctuary, user_id, guild_id, target.id,
+                )
+            except Exception:
+                logger.exception("Sanctuary grant failed")
+                await _refund("Could not bind the sanctuary; refunded.")
+                return
+            await interaction.followup.send(
+                f"🌾🕊️ **SANCTUARY** — {interaction.user.mention} shelters {target.mention}.\n"
+                f"For 24h, both of you have PvP immunity AND +15% on match-win JC bonuses.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
+            )
+
+        elif item_key == "dark_bargain":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, 800,
+                )
+                await asyncio.to_thread(
+                    buff_service.grant_dark_bargain_debt,
+                    user_id, guild_id, amount_due=800, due_in_days=7,
+                )
+            except Exception:
+                logger.exception("Dark Bargain grant failed")
+                await _refund("Could not strike the bargain; refunded.")
+                return
+            await interaction.followup.send(
+                f"🌿💀 **DARK BARGAIN** — {interaction.user.mention} signs in red ink.\n"
+                f"+800 {JOPACOIN_EMOTE} now. 800 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + 800 + ult_refund})"
             )
 
 

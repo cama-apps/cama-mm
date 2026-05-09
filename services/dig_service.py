@@ -250,12 +250,18 @@ class DigService:
         mana_effects_service=None,
         bankruptcy_repo=None,
         dig_guild_modifier_repo=None,
+        buff_service=None,
+        slow_drip_repo=None,
+        balance_history_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
         self.mana_effects_service = mana_effects_service
         self.bankruptcy_repo = bankruptcy_repo
         self.dig_guild_modifier_repo = dig_guild_modifier_repo
+        self.buff_service = buff_service
+        self.slow_drip_repo = slow_drip_repo
+        self.balance_history_service = balance_history_service
 
     def _mana_effects_or_none(self, discord_id: int, guild_id):
         """Resolve the player's active mana effects, swallowing lookup errors.
@@ -407,6 +413,110 @@ class DigService:
             return base_chance
         return max(0.0, min(1.0, base_chance + effects.dig_hazard_modifier))
 
+    def _relic_jc_yield_multiplier(
+        self,
+        discord_id: int,
+        guild_id,
+        *,
+        weather_code: str | None = None,
+        include_random: bool = True,
+    ) -> float:
+        """Combined JC-yield multiplier from yield-affecting relics.
+
+        - Echo Lantern: ×1.15
+        - Bloodstone: 50/50 ×1.5 or ×0.75 (only when ``include_random`` is True
+          — preview paths pass False so the range stays representative)
+        - Stormcaller: storm weather ×1.5, sunny ×1.10, else ×1.0
+        """
+        mult = 1.0
+        if self._has_relic(discord_id, guild_id, "echo_lantern"):
+            mult *= 1.15
+        if include_random and self._has_relic(discord_id, guild_id, "bloodstone"):
+            mult *= 1.5 if random.random() < 0.5 else 0.75
+        if self._has_relic(discord_id, guild_id, "stormcaller"):
+            w = (weather_code or "").lower()
+            if w == "storm":
+                mult *= 1.5
+            elif w == "sunny":
+                mult *= 1.10
+        return mult
+
+    def _relic_storm_negates_hazard(
+        self, discord_id: int, guild_id, weather_code: str | None
+    ) -> bool:
+        """Stormcaller cancels the hazard penalty during storm weather."""
+        if not weather_code or weather_code.lower() != "storm":
+            return False
+        return self._has_relic(discord_id, guild_id, "stormcaller")
+
+    def _prism_heart_bonuses(
+        self, discord_id: int, guild_id
+    ) -> dict:
+        """Prism Heart relic — color-dispatched bonuses.
+
+        Returns flat bonuses applied at advance / JC / luminosity hook sites
+        when the player has Prism Heart equipped AND active mana. Defaults
+        (no relic / no mana / tapped mana) zero everything out.
+        """
+        zero = {"advance": 0, "jc_flat": 0, "lum_recovery": 0, "siphon_chance": 0.0}
+        if not self._has_relic(discord_id, guild_id, "prism_heart"):
+            return zero
+        effects = self._mana_effects_or_none(discord_id, guild_id)
+        if effects is None:
+            return zero
+        if effects.color == "Red":
+            return {"advance": 1, "jc_flat": 0, "lum_recovery": 0, "siphon_chance": 0.0}
+        if effects.color == "Blue":
+            return {"advance": 0, "jc_flat": 5, "lum_recovery": 0, "siphon_chance": 0.0}
+        if effects.color == "Green":
+            return {"advance": 0, "jc_flat": 0, "lum_recovery": 1, "siphon_chance": 0.0}
+        if effects.color == "White":
+            return {"advance": 1, "jc_flat": 5, "lum_recovery": 0, "siphon_chance": 0.0}
+        if effects.color == "Black":
+            return {"advance": 0, "jc_flat": 0, "lum_recovery": 0, "siphon_chance": 0.05}
+        return zero
+
+    def _claim_slow_drip(
+        self, discord_id: int, guild_id, *, last_dig_at: int | None
+    ) -> int:
+        """Slow Drip relic — credit lazy idle JC since the player's last dig.
+
+        Pays 0.5 JC per minute idle (capped at 100 JC/day). Returns the JC
+        credited (0 if relic not equipped, repo not wired, or cap hit).
+        """
+        if self.slow_drip_repo is None:
+            return 0
+        if not self._has_relic(discord_id, guild_id, "slow_drip"):
+            return 0
+        try:
+            today = self._get_game_date()
+            now = int(time.time())
+            state = self.slow_drip_repo.get_today(discord_id, guild_id, today)
+            already = int(state.get("claimed_today", 0) or 0)
+            if already >= 100:
+                self.slow_drip_repo.stamp_seen(discord_id, guild_id, today)
+                return 0
+            anchor = int(state.get("last_claim_at", 0) or 0)
+            if anchor == 0:
+                anchor = int(last_dig_at or 0)
+            if anchor == 0 or anchor >= now:
+                # No prior anchor — start the clock without crediting
+                self.slow_drip_repo.stamp_seen(discord_id, guild_id, today)
+                return 0
+            elapsed_min = (now - anchor) // 60
+            if elapsed_min <= 0:
+                return 0
+            cap_remaining = 100 - already
+            credit = min(int(elapsed_min // 2), cap_remaining)  # 0.5/min ≈ 1 per 2 min
+            if credit <= 0:
+                return 0
+            self.player_repo.add_balance(discord_id, guild_id, credit)
+            self.slow_drip_repo.add_claim(discord_id, guild_id, today, credit)
+            return credit
+        except Exception:
+            logger.debug("Slow Drip claim failed", exc_info=True)
+            return 0
+
 
     # ------------------------------------------------------------------
     # Helpers
@@ -552,6 +662,22 @@ class DigService:
                 if w:
                     return dict(w.effects)
         return {}
+
+    def _get_weather_code(self, guild_id, layer_name: str) -> str | None:
+        """Return the active weather id for ``layer_name`` (lowercase
+        keyword like 'storm', 'sunny', 'fog', 'heat', 'rain') or None.
+
+        Used by relics + mana × weather combos that key off the *kind* of
+        weather rather than its mechanical effects.
+        """
+        entries = self._ensure_weather(guild_id)
+        for entry in entries:
+            if entry.get("layer_name") == layer_name:
+                wid = entry.get("weather_id")
+                if wid is None:
+                    return None
+                return str(wid).lower()
+        return None
 
     def _get_prestige_perks(self, tunnel: dict) -> list[str]:
         """Get list of active prestige perks."""
@@ -1738,6 +1864,15 @@ class DigService:
             )
             tunnel["boss_progress"] = json.dumps(boss_progress)
 
+        # Mana: Blue reveals exact boss HP (info advantage).
+        mana_reveal_hp = False
+        if self.mana_effects_service is not None:
+            try:
+                _bf = self.mana_effects_service.get_effects(discord_id, guild_id)
+                mana_reveal_hp = bool(_bf.boss_reveal_hp)
+            except Exception:
+                mana_reveal_hp = False
+
         return {
             "boundary": boundary,
             "boss_id": boss.boss_id,
@@ -1745,6 +1880,7 @@ class DigService:
             "dialogue": rendered,
             "ascii_art": boss.ascii_art or BOSS_ASCII.get(boundary, ""),
             "luminosity_display": self._luminosity_combat_display(tunnel),
+            "mana_reveal_hp": mana_reveal_hp,
         }
 
     def _build_pinnacle_info(
@@ -2052,17 +2188,32 @@ class DigService:
             return LUMINOSITY_DARK_JC_MULTIPLIER
         return LUMINOSITY_PITCH_JC_MULTIPLIER
 
-    def _post_pinnacle_decay_factor(self, depth: int) -> float:
+    def _post_pinnacle_decay_factor(
+        self,
+        depth: int,
+        discord_id: int | None = None,
+        guild_id=None,
+    ) -> float:
         """Per-dig JC and artifact-rate multiplier past the pinnacle.
 
         Returns 1.0 at or below the pinnacle, then loses 5 percentage
         points per 25 depth beyond it, clamped at 0. Milestone bonuses
         and streak JC are not affected — only the per-dig roll.
+
+        Relics that slow decay (Root Network -25%, Frozen Clock halve)
+        scale the rate when ``discord_id`` is provided. Frozen Clock
+        supersedes Root Network if both are equipped.
         """
         if depth <= PINNACLE_DEPTH:
             return 1.0
         steps_past = (depth - PINNACLE_DEPTH) // 25
-        return max(0.0, 1.0 - 0.05 * steps_past)
+        rate = 0.05
+        if discord_id is not None:
+            if self._has_relic(discord_id, guild_id, "frozen_clock"):
+                rate = 0.025
+            elif self._has_relic(discord_id, guild_id, "root_network"):
+                rate = 0.0375
+        return max(0.0, 1.0 - rate * steps_past)
 
     # ------------------------------------------------------------------
     # Temp Buffs
@@ -2713,6 +2864,13 @@ class DigService:
         # 2. Apply lazy decay
         decay_info = self._apply_lazy_decay(tunnel, guild_id)
 
+        # 2a. Slow Drip relic: idle income since last dig (credited inline,
+        # surfaces only via balance change + audit log).
+        self._claim_slow_drip(
+            discord_id, guild_id,
+            last_dig_at=tunnel.get("last_dig_at"),
+        )
+
         depth_before = tunnel.get("depth", 0)
 
         # 2b. If the player is already parked at a boss boundary, surface the
@@ -2952,6 +3110,10 @@ class DigService:
         relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
         magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
+        # Prism Heart — color-dispatched bonuses (active only with mana)
+        prism = self._prism_heart_bonuses(discord_id, guild_id)
+        mole_claws_bonus += prism["advance"]
+        magma_heart_bonus += prism["jc_flat"]
         miner_stats = self._get_miner_stats(tunnel)
         stat_effects = self._get_stat_effects(miner_stats)
 
@@ -2960,8 +3122,13 @@ class DigService:
         cave_in_chance = layer.get("cave_in_pct", 0.10)
         # Ascension cave-in bonus
         cave_in_chance += ascension.get("cave_in_bonus", 0)
-        # Weather cave-in modifier
-        cave_in_chance += weather_fx.get("cave_in_bonus", 0)
+        # Weather cave-in modifier (negated during Storm if Stormcaller equipped)
+        weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
+        if weather_cave_in_bonus and self._relic_storm_negates_hazard(
+            discord_id, guild_id, self._get_weather_code(guild_id, layer_name)
+        ):
+            weather_cave_in_bonus = 0
+        cave_in_chance += weather_cave_in_bonus
         # Corruption cave-in bonus (one-dig)
         if corruption:
             cave_in_chance += corruption["effects"].get("cave_in_bonus", 0)
@@ -3034,6 +3201,11 @@ class DigService:
             steady_hands_reduction = perk_fx.get("cave_in_loss_reduction", 0.0)
             if steady_hands_reduction > 0:
                 block_loss = max(0, int(block_loss * (1.0 - steady_hands_reduction)))
+            # Relic: Patient Stone — -30% depth lost
+            if self._has_relic(discord_id, guild_id, "patient_stone"):
+                block_loss = max(0, int(block_loss * 0.7))
+            # Capture pre-grappling block_loss for Gambler's Charm
+            block_loss_pre_save = block_loss
             # Grappling hook prevents block loss
             if has_grappling_hook:
                 block_loss = 0
@@ -3041,6 +3213,13 @@ class DigService:
             elif pickaxe_tier >= 7:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
+            # Relic: Gambler's Charm — bonus JC equal to 50% of would-have-lost depth
+            gamblers_charm_bonus = 0
+            if (
+                block_loss_pre_save > 0
+                and self._has_relic(discord_id, guild_id, "gamblers_charm")
+            ):
+                gamblers_charm_bonus = max(1, int(block_loss_pre_save * 0.5))
 
             # Accumulate all cave-in writes into one atomic commit:
             # thick_skin_date, second_wind buff, injury_state, depth delta,
@@ -3064,6 +3243,11 @@ class DigService:
                 loot_max = int(mutation_fx.get("cave_in_loot_max", 3))
                 cave_in_jc = random.randint(loot_min, loot_max)
                 cave_in_balance_delta += cave_in_jc
+
+            # Relic: Gambler's Charm — bonus JC for surviving the cave-in
+            if gamblers_charm_bonus > 0:
+                cave_in_balance_delta += gamblers_charm_bonus
+                cave_in_jc += gamblers_charm_bonus
 
             # Mutation: second_wind — flag for next dig advance bonus
             if mutation_fx.get("post_cave_in_advance"):
@@ -3202,11 +3386,27 @@ class DigService:
         jc_earned = random.randint(jc_min, jc_max)
         # Ascension JC multiplier + weather JC multiplier
         jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0) + weather_fx.get("jc_multiplier", 0)
+        weather_code_now = self._get_weather_code(guild_id, layer_name)
+        relic_yield_mult = self._relic_jc_yield_multiplier(
+            discord_id, guild_id, weather_code=weather_code_now,
+        )
+        # Mana × weather combo: Sunny + White boosts yield.
+        weather_combo_yield = 1.0
+        if self.mana_effects_service is not None:
+            try:
+                _wc = self.mana_effects_service.get_weather_combo_modifiers(
+                    discord_id, guild_id, weather_code_now,
+                )
+                weather_combo_yield = _wc["yield_mult"]
+            except Exception:
+                weather_combo_yield = 1.0
         jc_earned = int(
             jc_earned
             * jc_mult
+            * relic_yield_mult
+            * weather_combo_yield
             * self._luminosity_jc_multiplier(luminosity)
-            * self._post_pinnacle_decay_factor(new_depth)
+            * self._post_pinnacle_decay_factor(new_depth, discord_id, guild_id)
         ) + magma_heart_bonus + int(perk_loot_flat + 0.5)
         # Weather: flat JC bonus/penalty
         jc_earned += int(weather_fx.get("jc_bonus", 0))
@@ -3322,6 +3522,11 @@ class DigService:
         if random.random() < event_chance:
             event = self.roll_event(new_depth, luminosity=luminosity,
                                      prestige_level=prestige_level)
+            # Relic: Hollow Eye — reveal all option outcomes upfront
+            if event is not None and self._has_relic(
+                discord_id, guild_id, "hollow_eye"
+            ):
+                event["hollow_eye_revealed"] = True
 
         # Sonar Pulse: preview what the next event would be
         event_preview = None
@@ -3633,6 +3838,10 @@ class DigService:
         relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
         magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
+        # Prism Heart — color-dispatched bonuses (active only with mana)
+        prism = self._prism_heart_bonuses(discord_id, guild_id)
+        mole_claws_bonus += prism["advance"]
+        magma_heart_bonus += prism["jc_flat"]
         miner_stats = self._get_miner_stats(tunnel)
         stat_effects = self._get_stat_effects(miner_stats)
 
@@ -3640,7 +3849,12 @@ class DigService:
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
         cave_in_chance = layer.get("cave_in_pct", 0.10)
         cave_in_chance += ascension.get("cave_in_bonus", 0)
-        cave_in_chance += weather_fx.get("cave_in_bonus", 0)
+        weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
+        if weather_cave_in_bonus and self._relic_storm_negates_hazard(
+            discord_id, guild_id, self._get_weather_code(guild_id, layer_name)
+        ):
+            weather_cave_in_bonus = 0
+        cave_in_chance += weather_cave_in_bonus
         if corruption:
             cave_in_chance += corruption["effects"].get("cave_in_bonus", 0)
         lum_cave_bonus = self._luminosity_cave_in_bonus(luminosity)
@@ -3711,7 +3925,13 @@ class DigService:
             + weather_fx.get("jc_multiplier", 0)
         )
         jc_mult *= self._luminosity_jc_multiplier(luminosity)
-        jc_mult *= self._post_pinnacle_decay_factor(depth_before)
+        jc_mult *= self._post_pinnacle_decay_factor(depth_before, discord_id, guild_id)
+        # Relic yield (deterministic only — preview shows static range)
+        jc_mult *= self._relic_jc_yield_multiplier(
+            discord_id, guild_id,
+            weather_code=self._get_weather_code(guild_id, layer_name),
+            include_random=False,
+        )
         if depth_before >= 276:
             jc_mult *= 0.83
         jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0)) + int(perk_loot_flat + 0.5)
@@ -3930,11 +4150,22 @@ class DigService:
             steady_hands_reduction = p.get("perk_fx", {}).get("cave_in_loss_reduction", 0.0)
             if steady_hands_reduction > 0:
                 block_loss = max(0, int(block_loss * (1.0 - steady_hands_reduction)))
+            # Relic: Patient Stone — -30% depth lost
+            if self._has_relic(discord_id, guild_id, "patient_stone"):
+                block_loss = max(0, int(block_loss * 0.7))
+            block_loss_pre_save = block_loss
             if p["has_grappling_hook"]:
                 block_loss = 0
             elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
+            # Relic: Gambler's Charm — bonus JC equal to 50% of would-have-lost depth
+            gamblers_charm_bonus = 0
+            if (
+                block_loss_pre_save > 0
+                and self._has_relic(discord_id, guild_id, "gamblers_charm")
+            ):
+                gamblers_charm_bonus = max(1, int(block_loss_pre_save * 0.5))
 
             tunnel_updates: dict = {
                 "depth": new_depth,
@@ -3951,6 +4182,8 @@ class DigService:
                 loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
                 loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
                 cave_in_jc = random.randint(loot_min, loot_max)
+            if gamblers_charm_bonus > 0:
+                cave_in_jc += gamblers_charm_bonus
 
             if p["mutation_fx"].get("post_cave_in_advance"):
                 tunnel_updates["temp_buffs"] = json.dumps({
@@ -4075,12 +4308,17 @@ class DigService:
             + p["ascension"].get("jc_multiplier", 0)
             + p["weather_fx"].get("jc_multiplier", 0)
         )
+        relic_yield_mult = self._relic_jc_yield_multiplier(
+            discord_id, guild_id,
+            weather_code=self._get_weather_code(guild_id, layer_name),
+        )
         jc_earned = (
             int(
                 jc_earned
                 * jc_mult
+                * relic_yield_mult
                 * self._luminosity_jc_multiplier(luminosity)
-                * self._post_pinnacle_decay_factor(new_depth)
+                * self._post_pinnacle_decay_factor(new_depth, discord_id, guild_id)
             )
             + p["magma_heart_bonus"]
             + int(p.get("perk_loot_flat", 0) + 0.5)
@@ -4155,6 +4393,10 @@ class DigService:
             event = self.roll_event(
                 new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
             )
+            if event is not None and self._has_relic(
+                discord_id, guild_id, "hollow_eye"
+            ):
+                event["hollow_eye_revealed"] = True
 
         event_preview = None
         if p["has_sonar_pulse"]:
@@ -4814,6 +5056,9 @@ class DigService:
         base_min = layer.get("advance_min", 1)
         base_max = layer.get("advance_max", 5)
         advance = random.randint(base_min, base_max)
+        # Relic: Mycelium Link — helper amplifies the advance they grant
+        if self._has_relic(helper_id, guild_id, "mycelium_link"):
+            advance += 1
 
         # Cap at boss boundary
         boss_progress = self._get_boss_progress(target_tunnel)
@@ -4822,6 +5067,14 @@ class DigService:
             advance = max(0, next_boss - 1 - target_depth)
 
         new_depth = target_depth + advance
+
+        # Relic: Mentor's Lantern — helper grants both sides a JC bump.
+        helper_jc_bonus = 1  # baseline help reward
+        target_jc_bonus = 0
+        mentor_active = self._has_relic(helper_id, guild_id, "mentors_lantern")
+        if mentor_active:
+            helper_jc_bonus += 10
+            target_jc_bonus = 10
 
         # Target depth + helper cooldown + helper reward + audit log commit
         # together. The old flow committed each step individually and could
@@ -4834,19 +5087,28 @@ class DigService:
             guild_id=guild_id,
             new_target_depth=new_depth,
             helper_last_dig_at=now,
-            helper_reward=1,
+            helper_reward=helper_jc_bonus,
             create_helper_tunnel_name=None if helper_tunnel else self.generate_tunnel_name(),
             log_detail={
                 "target_id": target_id, "advance": advance,
                 "target_depth_before": target_depth, "target_depth_after": new_depth,
+                "mentor_bonus": mentor_active,
             },
         )
+        if target_jc_bonus > 0:
+            try:
+                self.player_repo.add_balance(target_id, guild_id, target_jc_bonus)
+            except Exception:
+                logger.debug("Mentor's Lantern target bonus failed", exc_info=True)
+                target_jc_bonus = 0
 
         return self._ok(
             advance=advance,
             target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
             target_depth_after=new_depth,
             helper_cooldown_until=now + FREE_DIG_COOLDOWN,
+            mentor_helper_bonus=helper_jc_bonus if mentor_active else 0,
+            mentor_target_bonus=target_jc_bonus,
         )
 
     # ------------------------------------------------------------------
@@ -4873,9 +5135,52 @@ class DigService:
 
         # Cost
         cost = max(5, target_depth // 5)
+        # Mana modifier on attacker (Red halves cost)
+        if self.mana_effects_service is not None:
+            try:
+                _sab_mod = self.mana_effects_service.apply_sabotage_modifiers(
+                    actor_id, guild_id, base_cost=cost,
+                )
+                cost = _sab_mod["cost"]
+            except Exception:
+                pass
         balance = self.player_repo.get_balance(actor_id, guild_id)
         if balance < cost:
             return self._error(f"Sabotage costs {cost} JC but you only have {balance} JC.")
+
+        # PvP immunity buffs on the target absorb the entire sabotage attempt.
+        # Counterspell / Sanctuary block outright; a single Aegis charge is
+        # consumed when present.
+        if self.buff_service is not None:
+            try:
+                if self.buff_service.has_pvp_immunity(target_id, guild_id):
+                    return self._error(
+                        "Your target is shielded by an active manashop ward — "
+                        "the sabotage was repelled before you could land it."
+                    )
+                if self.buff_service.consume_aegis_charge(target_id, guild_id):
+                    # Charge absorbed — log the wasted attempt and refund cost.
+                    self.dig_repo.log_action(
+                        discord_id=actor_id, guild_id=guild_id,
+                        action_type="sabotage",
+                        details=json.dumps({
+                            "target_id": target_id, "absorbed": True, "cost": 0,
+                        }),
+                    )
+                    return self._ok(
+                        cost=0,
+                        damage=0,
+                        target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
+                        trap_triggered=False,
+                        trap_detail=None,
+                        clue=None,
+                        is_reveal=False,
+                        insurance_applied=False,
+                        damage_reduced=True,
+                        absorbed_by_aegis=True,
+                    )
+            except Exception:
+                logger.debug("PvP immunity / aegis check failed", exc_info=True)
 
         # 12h cooldown per target
         recent_sabotages = self.dig_repo.get_recent_actions(
@@ -4994,6 +5299,50 @@ class DigService:
             },
         )
 
+        # Mana: Black attackers also skim a slice of the victim's depth as
+        # a JC bonus (steal_depth_pct). Settled separately so the audit log
+        # already captured the base damage.
+        attacker_steal_jc = 0
+        if self.mana_effects_service is not None:
+            try:
+                _sab_mod = self.mana_effects_service.apply_sabotage_modifiers(
+                    actor_id, guild_id, base_cost=cost,
+                )
+                steal_pct = _sab_mod.get("steal_depth_pct", 0.0)
+                if steal_pct > 0 and target_depth > 0:
+                    attacker_steal_jc = max(1, int(target_depth * steal_pct * 0.5))
+                    self.player_repo.add_balance(
+                        actor_id, guild_id, attacker_steal_jc,
+                    )
+            except Exception:
+                logger.debug("Black sabotage steal failed", exc_info=True)
+
+        # Relic: Vendetta Coin — when the *target* has it, reflect 50% of
+        # damage back at the attacker as JC pain + grant target a small JC
+        # bonus. Logged via dig_actions so /wrapped picks it up.
+        vendetta_reflect = 0
+        vendetta_bonus = 0
+        if self._has_relic(target_id, guild_id, "vendetta_coin"):
+            vendetta_reflect = max(1, int(damage * 0.5))
+            vendetta_bonus = 5
+            try:
+                self.player_repo.add_balance(actor_id, guild_id, -vendetta_reflect)
+                self.player_repo.add_balance(target_id, guild_id, vendetta_bonus)
+                self.dig_repo.log_action(
+                    discord_id=target_id, guild_id=guild_id,
+                    action_type="sabotage",
+                    details=json.dumps({
+                        "vendetta_reflect": True,
+                        "attacker_id": actor_id,
+                        "reflected": vendetta_reflect,
+                        "target_bonus": vendetta_bonus,
+                    }),
+                )
+            except Exception:
+                logger.debug("Vendetta Coin reflect failed", exc_info=True)
+                vendetta_reflect = 0
+                vendetta_bonus = 0
+
         return self._ok(
             cost=cost,
             damage=damage,
@@ -5004,6 +5353,9 @@ class DigService:
             is_reveal=is_reveal,
             insurance_applied=total_reduction > 0,
             damage_reduced=total_reduction > 0,
+            mana_steal_jc=attacker_steal_jc,
+            vendetta_reflect=vendetta_reflect,
+            vendetta_bonus=vendetta_bonus,
         )
 
     def _generate_clue(self, actor_id: int, guild_id, clue_type: str) -> dict:
@@ -5256,6 +5608,16 @@ class DigService:
             echo_applied=echo_applied,
         )
         fresh_boss_hp = int(scaled["boss_hp"])
+        # Mana: Black inflates fresh boss HP (+30%) for the matching loot
+        # bonus applied at payout. White's damage bump is applied to player
+        # _dmg below — not here — to keep the symmetry visible in the duel.
+        if self.mana_effects_service is not None:
+            try:
+                _hp_effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+                if _hp_effects.color is not None and _hp_effects.boss_hp_mult != 1.0:
+                    fresh_boss_hp = max(1, int(fresh_boss_hp * _hp_effects.boss_hp_mult))
+            except Exception:
+                pass
         # Carry over persisted HP from prior unfinished engagements with regen.
         boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
             boss_progress, at_boss, fresh_boss_hp, now,
@@ -5292,9 +5654,17 @@ class DigService:
         player_hp = int(stats["player_hp"])
         player_dmg = int(stats["player_dmg"])
 
+        # Relic: Hollow Fang — +15% damage vs bosses
+        if self._has_relic(discord_id, guild_id, "hollow_fang"):
+            player_dmg = max(1, int(player_dmg * 1.15))
+
         # Silent mana variance modifier on damage values. Mountain bumps both
         # sides on a coin flip (more swing); Forest narrows on a coin flip
         # (steadier). Same EV in expectation; players see this as RNG.
+        # White +20% holy strike applies always; Black +30% HP applies to
+        # the boss's *fresh* HP (handled near boss_hp resolution); Black
+        # +25% loot is applied at payout time. Green nullifies boss crit
+        # bonus modifier.
         if self.mana_effects_service is not None:
             try:
                 _bf_effects = self.mana_effects_service.get_effects(discord_id, guild_id)
@@ -5306,6 +5676,12 @@ class DigService:
                     _scale = 1.0 + _bf_effects.boss_damage_variance_modifier
                     player_dmg = max(1, int(player_dmg * _scale))
                     boss_dmg = max(1, int(boss_dmg * _scale))
+                # Persistent damage multiplier (White holy strike)
+                if _bf_effects.color is not None and _bf_effects.boss_damage_mult != 1.0:
+                    player_dmg = max(1, int(player_dmg * _bf_effects.boss_damage_mult))
+                # Green: bosses can't crit you — neutralise lum_dmg_bonus
+                if _bf_effects.color is not None and _bf_effects.boss_no_crit_against:
+                    boss_dmg = max(1, boss_dmg - lum_dmg_bonus)
             except Exception:
                 pass
 
@@ -5464,7 +5840,17 @@ class DigService:
             new_depth = at_boss
             echo_payout_mult = 0.7 if echo_applied else 1.0
             base_jc = int(wager * multiplier) if wager > 0 else random.randint(8, 18)
-            jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
+            # Mana: Black boss loot bump (matches the +30% HP swelling earlier).
+            mana_loot_mult = 1.0
+            if self.mana_effects_service is not None:
+                try:
+                    _ml_eff = self.mana_effects_service.get_effects(discord_id, guild_id)
+                    mana_loot_mult = _ml_eff.boss_loot_mult
+                except Exception:
+                    mana_loot_mult = 1.0
+            jc_delta = int(
+                base_jc * boss_payout_mult * echo_payout_mult * mana_loot_mult
+            )
 
             # Persist outcome for future dialogue picks. close_win signals when
             # the player just barely won — the boss responds differently.
@@ -7050,7 +7436,16 @@ class DigService:
                     discord_id, guild_id,
                     stinger_curse=(json.dumps(curse) if curse else None),
                 )
-            jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
+            mana_loot_mult = 1.0
+            if self.mana_effects_service is not None:
+                try:
+                    _ml_eff = self.mana_effects_service.get_effects(discord_id, guild_id)
+                    mana_loot_mult = _ml_eff.boss_loot_mult
+                except Exception:
+                    mana_loot_mult = 1.0
+            jc_delta = int(
+                base_jc * boss_payout_mult * echo_payout_mult * mana_loot_mult
+            )
 
             # Mark defeated in the {boss_id, status} shape.
             existing_entry = boss_progress.get(str(at_boss))
@@ -7911,7 +8306,7 @@ class DigService:
         mutation_fx = self._apply_mutation_effects(mutations)
         rate_mod *= (1.0 + mutation_fx.get("artifact_chance_bonus", 0))
         # Post-pinnacle decay applies to artifact rate
-        rate_mod *= self._post_pinnacle_decay_factor(depth)
+        rate_mod *= self._post_pinnacle_decay_factor(depth, discord_id, guild_id)
 
         # Roll for each rarity tier
         tiers = [
