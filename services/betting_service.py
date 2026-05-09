@@ -229,22 +229,30 @@ class BettingService:
 
         # Manashop buffs that boost win bonus: Sanctuary (+15% for 24h) and
         # Communion blessing (+10% on the next match-win, single-charge).
+        # The blessing bonus is gated on the atomic consume so two concurrent
+        # match finalizations can't double-pay it.
         if self.buff_service and winning_ids:
+            from services.buff_service import BUFF_COMMUNION_BLESSING
             for pid in winning_ids:
                 bonus = 0
                 try:
                     if self.buff_service.has_sanctuary_match_bonus(pid, guild_id):
                         bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.15))
                     blessing = self.buff_service.buff_repo.active_for(
-                        pid, guild_id, "communion_blessing"
+                        pid, guild_id, BUFF_COMMUNION_BLESSING,
                     )
                     if blessing:
-                        bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.10))
-                        # Consume the blessing so it only fires once
+                        # Only the caller that wins consume_atomic gets to add
+                        # the bonus; the second concurrent caller observes
+                        # rowcount==0 and skips.
                         try:
-                            self.buff_service.buff_repo.consume_atomic(blessing[0]["id"])
+                            consumed = self.buff_service.buff_repo.consume_atomic(
+                                blessing[0]["id"]
+                            )
                         except Exception:
-                            pass
+                            consumed = False
+                        if consumed:
+                            bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.10))
                 except Exception:
                     bonus = 0
                 if bonus > 0:

@@ -3706,12 +3706,10 @@ class BettingCommands(commands.Cog):
         # Check eligibility
         from services import error_codes as _ec
         check = await asyncio.to_thread(
-            functools.partial(
-                self.loan_service.validate_loan,
-                user_id, amount, guild_id,
-                fee_rate_override=loan_fee_override,
-                max_amount_override=loan_max_override,
-            ),
+            self.loan_service.validate_loan,
+            user_id, amount, guild_id,
+            fee_rate_override=loan_fee_override,
+            max_amount_override=loan_max_override,
         )
 
         if not check.success:
@@ -3767,12 +3765,10 @@ class BettingCommands(commands.Cog):
 
         # Take the loan
         loan_result = await asyncio.to_thread(
-            functools.partial(
-                self.loan_service.execute_loan,
-                user_id, amount, guild_id,
-                fee_rate_override=loan_fee_override,
-                max_amount_override=loan_max_override,
-            ),
+            self.loan_service.execute_loan,
+            user_id, amount, guild_id,
+            fee_rate_override=loan_fee_override,
+            max_amount_override=loan_max_override,
         )
 
         if not loan_result.success:
