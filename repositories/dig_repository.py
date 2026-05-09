@@ -189,13 +189,9 @@ class DigRepository(BaseRepository, IDigRepository):
                 FROM tunnels
                 WHERE guild_id = ?
                   AND (
-                    COALESCE(prestige_level, 0) > ?
-                    OR (COALESCE(prestige_level, 0) = ? AND COALESCE(depth, 0) > ?)
-                    OR (
-                      COALESCE(prestige_level, 0) = ?
-                      AND COALESCE(depth, 0) = ?
-                      AND discord_id < ?
-                    )
+                    prestige_level > ?
+                    OR (prestige_level = ? AND depth > ?)
+                    OR (prestige_level = ? AND depth = ? AND discord_id < ?)
                   )
                 """,
                 (gid, my_prestige, my_prestige, my_depth,
@@ -1361,7 +1357,10 @@ class DigRepository(BaseRepository, IDigRepository):
         """Top tunnels for the user-facing leaderboard surface.
 
         ``discord_id ASC`` is the final tiebreaker so the row order stays
-        deterministic and matches :meth:`get_player_rank`.
+        deterministic and matches :meth:`get_player_rank`. ``prestige_level``
+        is ``NOT NULL DEFAULT 0`` in the schema, so the ORDER BY references
+        the column directly — letting ``idx_tunnels_guild_leaderboard``
+        cover the sort without a temp b-tree.
         """
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -1370,7 +1369,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 """
                 SELECT * FROM tunnels
                 WHERE guild_id = ?
-                ORDER BY COALESCE(prestige_level, 0) DESC, depth DESC, discord_id ASC
+                ORDER BY prestige_level DESC, depth DESC, discord_id ASC
                 LIMIT ?
                 """,
                 (gid, limit),
