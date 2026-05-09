@@ -386,9 +386,21 @@ class ServiceContainer:
 
     def _init_dig_service(self) -> None:
         """Tunnel digging minigame service."""
+        from services.dig_achievement_service import DigAchievementService
+        from services.dig_inventory_service import DigInventoryService
+        from services.dig_leaderboard_service import DigLeaderboardService
         from services.dig_service import DigService
+        from services.dig_tunnel_naming_service import DigTunnelNamingService
 
         c = self._components
+        c["dig_leaderboard_service"] = DigLeaderboardService(c["dig_repo"])
+        c["dig_achievement_service"] = DigAchievementService(
+            c["dig_repo"], c["player_repo"]
+        )
+        c["dig_tunnel_naming_service"] = DigTunnelNamingService()
+        c["dig_inventory_service"] = DigInventoryService(
+            c["dig_repo"], c["player_repo"]
+        )
         c["dig_service"] = DigService(
             dig_repo=c["dig_repo"],
             player_repo=c["player_repo"],
@@ -398,6 +410,10 @@ class ServiceContainer:
             buff_service=c.get("buff_service"),
             slow_drip_repo=c.get("slow_drip_repo"),
             balance_history_service=c.get("balance_history_service"),
+            leaderboard_service=c["dig_leaderboard_service"],
+            achievement_service=c["dig_achievement_service"],
+            tunnel_naming_service=c["dig_tunnel_naming_service"],
+            inventory_service=c["dig_inventory_service"],
         )
 
         # Wire LLM flavor layer if AI is available
