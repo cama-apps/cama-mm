@@ -15,7 +15,6 @@ from domain.models.dig_gear import GearLoadout, GearPiece, GearSlot
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.dig_constants import (
-    ACHIEVEMENTS,
     ARTIFACT_POOL,
     ASCENSION_MODIFIERS,
     BOSS_ARCHETYPE_BY_ID,
@@ -59,7 +58,6 @@ from services.dig_constants import (
     HELLTIDE_MODIFIER_ID,
     HELLTIDE_TAX_PER_DIG,
     INJURY_SLOW_COOLDOWN,
-    ITEM_PRICES,
     LAYER_WEATHER_POOL,
     LAYERS,
     LUMINOSITY_BRIGHT,
@@ -85,7 +83,6 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_HIT_PENALTY,
     LUMINOSITY_PITCH_JC_MULTIPLIER,
     LUMINOSITY_REFILL_PER_DAY,
-    MAX_INVENTORY_SIZE,
     MAX_PRESTIGE,
     MILESTONES,
     MUTATION_BY_ID,
@@ -114,10 +111,6 @@ from services.dig_constants import (
     RETREAT_BLOCK_LOSS_MIN,
     RETREAT_COOLDOWN_SECONDS,
     STREAKS,
-    TUNNEL_NAME_ADJECTIVES,
-    TUNNEL_NAME_NOUNS,
-    TUNNEL_NAME_SILLY,
-    TUNNEL_NAME_TITLES,
     WEATHER_BY_ID,
     WIN_CHANCE_CAP,
     WIN_CHANCE_FLOOR,
@@ -253,6 +246,10 @@ class DigService:
         buff_service=None,
         slow_drip_repo=None,
         balance_history_service=None,
+        leaderboard_service=None,
+        achievement_service=None,
+        tunnel_naming_service=None,
+        inventory_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -262,6 +259,26 @@ class DigService:
         self.buff_service = buff_service
         self.slow_drip_repo = slow_drip_repo
         self.balance_history_service = balance_history_service
+        # Sub-services for focused concerns. Defaults wire local instances so
+        # existing callers (and tests that construct DigService directly) keep
+        # working without having to pass anything new.
+        from services.dig_achievement_service import DigAchievementService
+        from services.dig_inventory_service import DigInventoryService
+        from services.dig_leaderboard_service import DigLeaderboardService
+        from services.dig_tunnel_naming_service import DigTunnelNamingService
+
+        self.leaderboard_service = leaderboard_service or DigLeaderboardService(
+            dig_repo
+        )
+        self.achievement_service = achievement_service or DigAchievementService(
+            dig_repo, player_repo
+        )
+        self.tunnel_naming_service = (
+            tunnel_naming_service or DigTunnelNamingService()
+        )
+        self.inventory_service = inventory_service or DigInventoryService(
+            dig_repo, player_repo
+        )
         # Process-local cache of equipped relic IDs per (discord_id, guild_id).
         # A single /dig invocation hits ``_has_relic`` ~15 times across yield,
         # cave-in, advance, hazard, and color-dispatch sites; without this
@@ -2460,17 +2477,7 @@ class DigService:
 
     def get_hall_of_fame(self, guild_id) -> dict:
         """Get guild leaderboard of best prestige run scores."""
-        rows = self.dig_repo.get_hall_of_fame(guild_id)
-        entries = []
-        for row in rows:
-            r = dict(row) if not isinstance(row, dict) else row
-            entries.append({
-                "discord_id": r.get("discord_id"),
-                "tunnel_name": r.get("tunnel_name", "Unknown"),
-                "prestige_level": r.get("prestige_level", 0),
-                "best_run_score": r.get("best_run_score", 0),
-            })
-        return self._ok(entries=entries)
+        return self.leaderboard_service.get_hall_of_fame(guild_id)
 
     def _error(self, msg: str) -> dict:
         """Return a standard error result."""
@@ -2491,15 +2498,7 @@ class DigService:
 
     def generate_tunnel_name(self) -> str:
         """Random name from 3 pool types (40% adj+noun, 35% title, 25% silly)."""
-        roll = random.random()
-        if roll < 0.40:
-            adj = random.choice(TUNNEL_NAME_ADJECTIVES)
-            noun = random.choice(TUNNEL_NAME_NOUNS)
-            return f"The {adj} {noun}"
-        elif roll < 0.75:
-            return random.choice(TUNNEL_NAME_TITLES)
-        else:
-            return random.choice(TUNNEL_NAME_SILLY)
+        return self.tunnel_naming_service.generate_tunnel_name()
 
     # ------------------------------------------------------------------
     # Lazy Decay
@@ -5499,25 +5498,7 @@ class DigService:
 
     def get_leaderboard(self, guild_id) -> dict:
         """Get top 10 tunnels and ASCII community mine view."""
-        tunnels = self.dig_repo.get_top_tunnels(guild_id, limit=10)
-        tunnels = [dict(t) for t in tunnels]
-
-        # Generate ASCII art
-        max_depth = max((t.get("depth", 0) for t in tunnels), default=1) or 1
-        lines = []
-        for i, t in enumerate(tunnels, 1):
-            depth = t.get("depth", 0)
-            bar_len = max(1, int(40 * depth / max_depth))
-            bar = "█" * bar_len
-            name = t.get("tunnel_name", "???")[:15]
-            lines.append(f"{i:>2}. {name:<15} {bar} {depth}m")
-
-        ascii_art = "\n".join(lines)
-
-        return {
-            "tunnels": tunnels,
-            "ascii_art": ascii_art,
-        }
+        return self.leaderboard_service.get_leaderboard(guild_id)
 
     # ------------------------------------------------------------------
     # Boss Methods
@@ -8153,101 +8134,19 @@ class DigService:
 
     def use_item(self, discord_id: int, guild_id, item_type: str) -> dict:
         """Queue an item for next dig."""
-        if item_type not in CONSUMABLE_ITEMS:
-            return self._error(f"Unknown item type: {item_type}")
-
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return self._error("You don't have a tunnel.")
-
-        tunnel = dict(tunnel)
-
-        # Check inventory
-        inventory = self.dig_repo.get_inventory(discord_id, guild_id)
-        has_item = any(i.get("item_type") == item_type for i in inventory)
-        if not has_item:
-            return self._error(f"You don't have a {CONSUMABLE_ITEMS[item_type]['name']}.")
-
-        # Check not already queued
-        queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
-        if any(q.get("type") == item_type for q in queued):
-            return self._error(f"{CONSUMABLE_ITEMS[item_type]['name']} is already queued.")
-
-        # Find the first non-queued item of this type and queue it
-        for inv_item in inventory:
-            if inv_item.get("item_type") == item_type and not inv_item.get("queued"):
-                self.dig_repo.queue_item(inv_item["id"])
-                break
-
-        return self._ok(
-            item=CONSUMABLE_ITEMS[item_type]["name"],
-            queued=True,
-        )
+        return self.inventory_service.use_item(discord_id, guild_id, item_type)
 
     def queue_item(self, discord_id: int, guild_id, item_id: int) -> dict:
         """Queue a specific inventory item by its database id."""
-        self.dig_repo.queue_item(item_id)
-        return self._ok(queued=True)
+        return self.inventory_service.queue_item(discord_id, guild_id, item_id)
 
     def buy_item(self, discord_id: int, guild_id, item_type: str) -> dict:
         """Buy an item from the shop."""
-        if item_type not in ITEM_PRICES:
-            return self._error(f"Unknown item type: {item_type}")
-
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return self._error("You don't have a tunnel. Dig first!")
-
-        # Check inventory capacity
-        inventory = self.dig_repo.get_inventory(discord_id, guild_id)
-        if len(inventory) >= MAX_INVENTORY_SIZE:
-            return self._error(f"Inventory full ({MAX_INVENTORY_SIZE} items max).")
-
-        price = ITEM_PRICES[item_type]
-        balance = self.player_repo.get_balance(discord_id, guild_id)
-        if balance < price:
-            return self._error(f"Costs {price} JC but you only have {balance} JC.")
-
-        # Debit + inventory insert commit together so a crash can't leave
-        # the player charged with no item added to inventory.
-        item_id = self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-price,
-            add_inventory_item=item_type,
-        )
-
-        item_name = CONSUMABLE_ITEMS.get(item_type, {}).get("name", item_type)
-
-        return self._ok(
-            item=item_name,
-            item_id=item_id,
-            cost=price,
-            balance_after=balance - price,
-        )
+        return self.inventory_service.buy_item(discord_id, guild_id, item_type)
 
     def get_inventory(self, discord_id: int, guild_id) -> list[dict]:
         """Return inventory items with names and queued status."""
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return []
-
-        tunnel = dict(tunnel)
-        items = self.dig_repo.get_inventory(discord_id, guild_id)
-        queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
-        queued_types = {q.get("type") for q in queued}
-
-        result = []
-        for item in items:
-            itype = item.get("item_type", "unknown")
-            info = CONSUMABLE_ITEMS.get(itype, {})
-            result.append({
-                "type": itype,
-                "name": info.get("name", itype),
-                "description": info.get("description", ""),
-                "queued": itype in queued_types,
-            })
-
-        return result
+        return self.inventory_service.get_inventory(discord_id, guild_id)
 
     # ------------------------------------------------------------------
     # Defense
@@ -8255,66 +8154,11 @@ class DigService:
 
     def set_trap(self, discord_id: int, guild_id) -> dict:
         """Set a trap on your tunnel."""
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return self._error("You don't have a tunnel.")
-
-        tunnel = dict(tunnel)
-
-        if tunnel.get("trap_active"):
-            return self._error("You already have an active trap.")
-
-        today = self._get_game_date()
-        trap_date = tunnel.get("trap_date")
-        trap_free_today = tunnel.get("trap_free_today", 0) or 0
-
-        cost = 0
-        if trap_date != today:
-            # Reset free trap for new day
-            trap_free_today = 0
-
-        if trap_free_today > 0:
-            # Already used free trap today — pay
-            cost = 5 + (tunnel.get("depth", 0) // 25)
-            balance = self.player_repo.get_balance(discord_id, guild_id)
-            if balance < cost:
-                return self._error(f"Trap costs {cost} JC but you only have {balance} JC.")
-
-        # Debit (if any) + trap fields commit together.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-cost if cost else 0,
-            tunnel_updates={
-                "trap_active": 1,
-                "trap_free_today": trap_free_today + 1,
-                "trap_date": today,
-            },
-        )
-
-        return self._ok(cost=cost, message="Trap set!")
+        return self.inventory_service.set_trap(discord_id, guild_id)
 
     def buy_insurance(self, discord_id: int, guild_id) -> dict:
         """Buy 24h sabotage insurance."""
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return self._error("You don't have a tunnel.")
-
-        depth = tunnel["depth"] if tunnel else 0
-        cost = 5 + depth // 25
-        balance = self.player_repo.get_balance(discord_id, guild_id)
-        if balance < cost:
-            return self._error(f"Insurance costs {cost} JC but you only have {balance} JC.")
-
-        now = int(time.time())
-        # Debit + insurance window set together: the old two-step flow could
-        # leave the player charged with no insurance applied.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-cost,
-            tunnel_updates={"insured_until": now + 86400},  # 24h
-        )
-
-        return self._ok(cost=cost, expires_at=now + 86400)
+        return self.inventory_service.buy_insurance(discord_id, guild_id)
 
     # ------------------------------------------------------------------
     # Artifacts
@@ -8459,15 +8303,7 @@ class DigService:
 
     def get_collection(self, discord_id: int, guild_id) -> dict:
         """Return all artifacts grouped by layer and rarity."""
-        artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
-        collection = {}
-        for a in artifacts:
-            a = dict(a)
-            rarity = a.get("rarity", "common")
-            if rarity not in collection:
-                collection[rarity] = []
-            collection[rarity].append(a)
-        return {"artifacts": collection, "total": len(artifacts)}
+        return self.leaderboard_service.get_collection(discord_id, guild_id)
 
     # ------------------------------------------------------------------
     # Museum
@@ -8475,32 +8311,7 @@ class DigService:
 
     def get_museum(self, guild_id) -> dict:
         """Return guild artifact registry with first finders and counts."""
-        entries = self.dig_repo.get_registry(guild_id)
-        entries = [dict(e) for e in entries]
-
-        # Group by layer
-        by_layer = {}
-        for e in entries:
-            # Look up artifact info from pool
-            art_info = next(
-                (a for a in ARTIFACT_POOL if a["id"] == e.get("artifact_id")),
-                None,
-            )
-            layer = "unknown"
-            if art_info:
-                layers = art_info.get("layers", [])
-                layer = layers[0] if layers else "unknown"
-
-            if layer not in by_layer:
-                by_layer[layer] = []
-            by_layer[layer].append(e)
-
-        return {
-            "entries": entries,
-            "by_layer": by_layer,
-            "total_discovered": len(entries),
-            "total_possible": len(ARTIFACT_POOL),
-        }
+        return self.leaderboard_service.get_museum(guild_id)
 
     # ------------------------------------------------------------------
     # Events
@@ -8871,62 +8682,9 @@ class DigService:
 
         context: dict with what just happened (action, advance, boss_win, etc.)
         """
-        existing = self.dig_repo.get_achievements(discord_id, guild_id)
-        existing_ids = {a.get("achievement_id") for a in existing}
-
-        newly_unlocked = []
-
-        for ach in ACHIEVEMENTS:
-            if ach["id"] in existing_ids:
-                continue
-
-            unlocked = False
-            condition = ach.get("condition", {})
-            ctype = condition.get("type")
-
-            if ctype == "depth":
-                if tunnel.get("depth", 0) >= condition.get("value", 0):
-                    unlocked = True
-            elif ctype == "total_digs":
-                if tunnel.get("total_digs", 0) >= condition.get("value", 0):
-                    unlocked = True
-            elif ctype == "streak":
-                if tunnel.get("streak_days", 0) >= condition.get("value", 0):
-                    unlocked = True
-            elif ctype == "boss_win":
-                if context.get("action") == "boss_win":
-                    unlocked = True
-            elif ctype == "all_bosses":
-                bp = context.get("boss_progress") or self._get_boss_progress(tunnel)
-                if all(
-                    (v.get("status") if isinstance(v, dict) else v) == "defeated"
-                    for v in bp.values()
-                ):
-                    unlocked = True
-            elif ctype == "prestige":
-                if tunnel.get("prestige_level", 0) >= condition.get("value", 0):
-                    unlocked = True
-            elif ctype == "cave_in" and context.get("action") == "cave_in":
-                unlocked = True
-
-            if unlocked:
-                self.dig_repo.add_achievement(
-                    discord_id, guild_id,
-                    achievement_id=ach["id"],
-                    name=ach["name"],
-                )
-                newly_unlocked.append({
-                    "id": ach["id"],
-                    "name": ach["name"],
-                    "description": ach.get("description", ""),
-                    "reward": ach.get("reward", 0),
-                })
-
-                # Award JC reward
-                if ach.get("reward", 0) > 0:
-                    self.player_repo.add_balance(discord_id, guild_id, ach["reward"])
-
-        return newly_unlocked
+        return self.achievement_service.check_achievements(
+            discord_id, guild_id, tunnel, context
+        )
 
     # ------------------------------------------------------------------
     # Abandon Tunnel
@@ -9019,39 +8777,4 @@ class DigService:
 
     def get_guild_stats(self, guild_id) -> dict:
         """Aggregate stats for the guild."""
-        tunnels = self.dig_repo.get_all_tunnels(guild_id)
-        tunnels = [dict(t) for t in tunnels]
-
-        if not tunnels:
-            return self._ok(
-                total_digs=0,
-                total_depth=0,
-                total_jc_earned=0,
-                most_active=None,
-                deepest=None,
-                tunnel_count=0,
-            )
-
-        total_digs = sum(t.get("total_digs", 0) or 0 for t in tunnels)
-        total_depth = sum(t.get("depth", 0) or 0 for t in tunnels)
-        total_jc = sum(t.get("total_jc_earned", 0) or 0 for t in tunnels)
-
-        most_active = max(tunnels, key=lambda t: t.get("total_digs", 0) or 0)
-        deepest = max(tunnels, key=lambda t: t.get("depth", 0) or 0)
-
-        return self._ok(
-            total_digs=total_digs,
-            total_depth=total_depth,
-            total_jc_earned=total_jc,
-            most_active={
-                "discord_id": most_active.get("discord_id"),
-                "name": most_active.get("tunnel_name"),
-                "total_digs": most_active.get("total_digs", 0),
-            },
-            deepest={
-                "discord_id": deepest.get("discord_id"),
-                "name": deepest.get("tunnel_name"),
-                "depth": deepest.get("depth", 0),
-            },
-            tunnel_count=len(tunnels),
-        )
+        return self.leaderboard_service.get_guild_stats(guild_id)
