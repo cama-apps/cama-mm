@@ -104,8 +104,8 @@ def test_betting_totals_only_include_pending_bets(services):
     pending1 = match_service.get_last_shuffle(TEST_GUILD_ID)
 
     # Ensure betting is still open
-    if pending1.get("bet_lock_until") is None or pending1["bet_lock_until"] <= int(time.time()):
-        pending1["bet_lock_until"] = int(time.time()) + 600
+    if pending1.bet_lock_until is None or pending1.bet_lock_until <= int(time.time()):
+        pending1.bet_lock_until = int(time.time()) + 600
 
     # Place bets on first match: 3 on radiant, 2 on dire
     betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 3, pending1)
@@ -120,7 +120,7 @@ def test_betting_totals_only_include_pending_bets(services):
     betting_service.settle_bets(100, TEST_GUILD_ID, "radiant", pending_state=pending1)
 
     # Clear the pending match (simulates what record_match does)
-    match_service.clear_last_shuffle(TEST_GUILD_ID, pending1.get("pending_match_id"))
+    match_service.clear_last_shuffle(TEST_GUILD_ID, pending1.pending_match_id)
 
     # After settling, totals should be 0 (no pending bets)
     totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending1)
@@ -154,8 +154,8 @@ def test_betting_totals_only_include_pending_bets(services):
     pending2 = match_service.get_last_shuffle(TEST_GUILD_ID)
 
     # Ensure betting is still open
-    if pending2.get("bet_lock_until") is None or pending2["bet_lock_until"] <= int(time.time()):
-        pending2["bet_lock_until"] = int(time.time()) + 600
+    if pending2.bet_lock_until is None or pending2.bet_lock_until <= int(time.time()):
+        pending2.bet_lock_until = int(time.time()) + 600
 
     # Place bet on second match: 6 on dire
     betting_service.place_bet(TEST_GUILD_ID, spectator3, "dire", 6, pending2)
@@ -208,10 +208,10 @@ def test_stale_pending_bets_do_not_show_or_block_new_match(services, monkeypatch
     # First shuffle + bet (will become stale)
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     pending_old = match_service.get_last_shuffle(TEST_GUILD_ID)
-    if pending_old.get("bet_lock_until") is None or pending_old["bet_lock_until"] <= int(
+    if pending_old.bet_lock_until is None or pending_old.bet_lock_until <= int(
         time.time()
     ):
-        pending_old["bet_lock_until"] = int(time.time()) + 600
+        pending_old.bet_lock_until = int(time.time()) + 600
     betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending_old)
 
     # No real sleep needed: the monkeypatched ``time.time`` advances on every
@@ -220,16 +220,16 @@ def test_stale_pending_bets_do_not_show_or_block_new_match(services, monkeypatch
 
     # Abort the first match (refund bets but don't settle)
     # This simulates the normal flow where a match must be completed or aborted before a new shuffle
-    betting_service.refund_pending_bets(TEST_GUILD_ID, pending_old, pending_old.get("pending_match_id"))
-    match_service.clear_last_shuffle(TEST_GUILD_ID, pending_old.get("pending_match_id"))
+    betting_service.refund_pending_bets(TEST_GUILD_ID, pending_old, pending_old.pending_match_id)
+    match_service.clear_last_shuffle(TEST_GUILD_ID, pending_old.pending_match_id)
 
     # Now shuffle again with the same players
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     pending_new = match_service.get_last_shuffle(TEST_GUILD_ID)
-    if pending_new.get("bet_lock_until") is None or pending_new["bet_lock_until"] <= int(
+    if pending_new.bet_lock_until is None or pending_new.bet_lock_until <= int(
         time.time()
     ):
-        pending_new["bet_lock_until"] = int(time.time()) + 600
+        pending_new.bet_lock_until = int(time.time()) + 600
 
     totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending_new)
     assert totals["radiant"] == 0 and totals["dire"] == 0, (
@@ -276,7 +276,7 @@ class TestBettingCore:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Place first bet
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)
@@ -360,7 +360,7 @@ class TestBettingCore:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Place bets with different leverage: 10@1x, 10@2x, 10@3x, 10@5x
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)  # 10 effective
@@ -412,9 +412,9 @@ class TestBlindBetsCore:
 
         result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
 
         # All 10 players should have blind bets
@@ -452,18 +452,18 @@ class TestBlindBetsCore:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Create blind bets
         betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
 
         # Check that bets are marked as blind
-        radiant_player = pending["radiant_team_ids"][0]
+        radiant_player = pending.radiant_team_ids[0]
         bets = betting_service.get_pending_bets(TEST_GUILD_ID, radiant_player, pending_state=pending)
         assert len(bets) == 1
         assert bets[0]["is_blind"] == 1
@@ -509,14 +509,14 @@ class TestBlindBetsCore:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Create blind bets
         betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
 
         # Add spectator bet
@@ -573,16 +573,16 @@ class TestBlindBetsCore:
 
         # The pending state (from get_last_shuffle) HAS the IDs and timestamp
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert "radiant_team_ids" in pending, "pending state must have radiant_team_ids"
-        assert "dire_team_ids" in pending, "pending state must have dire_team_ids"
-        assert "shuffle_timestamp" in pending, "pending state must have shuffle_timestamp"
+        assert pending.radiant_team_ids, "pending state must have radiant_team_ids"
+        assert pending.dire_team_ids, "pending state must have dire_team_ids"
+        assert pending.shuffle_timestamp is not None, "pending state must have shuffle_timestamp"
 
         # Verify they're actually lists of ints
-        assert isinstance(pending["radiant_team_ids"], list)
-        assert isinstance(pending["dire_team_ids"], list)
-        assert len(pending["radiant_team_ids"]) == 5
-        assert len(pending["dire_team_ids"]) == 5
-        assert all(isinstance(x, int) for x in pending["radiant_team_ids"])
+        assert isinstance(pending.radiant_team_ids, list)
+        assert isinstance(pending.dire_team_ids, list)
+        assert len(pending.radiant_team_ids) == 5
+        assert len(pending.dire_team_ids) == 5
+        assert all(isinstance(x, int) for x in pending.radiant_team_ids)
 
     def test_blind_bets_integration_like_shuffle_command(self, services):
         """Integration test that mimics commands/match.py shuffle flow.
@@ -621,9 +621,9 @@ class TestBlindBetsCore:
         # Step 3: Create blind bets (like commands/match.py line 206-211)
         blind_bets_result = betting_service.create_auto_blind_bets(
             guild_id=guild_id,
-            radiant_ids=pending_state["radiant_team_ids"],
-            dire_ids=pending_state["dire_team_ids"],
-            shuffle_timestamp=pending_state["shuffle_timestamp"],
+            radiant_ids=pending_state.radiant_team_ids,
+            dire_ids=pending_state.dire_team_ids,
+            shuffle_timestamp=pending_state.shuffle_timestamp,
         )
 
         # Verify blind bets were created successfully
@@ -637,23 +637,24 @@ class TestPendingMatchPersistence:
 
     def test_bomb_pot_flag_persisted_in_pending_match(self, services):
         """Verify is_bomb_pot flag is included in persisted pending match payload."""
+        from domain.models.pending_match_state import PendingMatchState
         match_service = services["match_service"]
 
         # Create a mock pending state with is_bomb_pot=True
-        pending_state = {
-            "radiant_team_ids": [1, 2, 3, 4, 5],
-            "dire_team_ids": [6, 7, 8, 9, 10],
-            "radiant_roles": ["1", "2", "3", "4", "5"],
-            "dire_roles": ["1", "2", "3", "4", "5"],
-            "radiant_value": 7500.0,
-            "dire_value": 7500.0,
-            "value_diff": 0.0,
-            "first_pick_team": "radiant",
-            "shuffle_timestamp": int(time.time()),
-            "bet_lock_until": int(time.time()) + 900,
-            "betting_mode": "pool",
-            "is_bomb_pot": True,
-        }
+        pending_state = PendingMatchState(
+            radiant_team_ids=[1, 2, 3, 4, 5],
+            dire_team_ids=[6, 7, 8, 9, 10],
+            radiant_roles=["1", "2", "3", "4", "5"],
+            dire_roles=["1", "2", "3", "4", "5"],
+            radiant_value=7500.0,
+            dire_value=7500.0,
+            value_diff=0.0,
+            first_pick_team="radiant",
+            shuffle_timestamp=int(time.time()),
+            bet_lock_until=int(time.time()) + 900,
+            betting_mode="pool",
+            is_bomb_pot=True,
+        )
 
         # Build payload using the service's method
         payload = match_service._build_pending_match_payload(pending_state)
@@ -663,82 +664,69 @@ class TestPendingMatchPersistence:
         assert payload["is_bomb_pot"] is True
 
         # Also verify non-bomb-pot matches work
-        pending_state["is_bomb_pot"] = False
-        payload = match_service._build_pending_match_payload(pending_state)
-        assert payload["is_bomb_pot"] is False
-
-        # And default case (missing key)
-        del pending_state["is_bomb_pot"]
+        pending_state.is_bomb_pot = False
         payload = match_service._build_pending_match_payload(pending_state)
         assert payload["is_bomb_pot"] is False
 
     def test_openskill_shuffle_flag_persisted_in_pending_match(self, services):
         """Verify is_openskill_shuffle flag is included in persisted pending match payload."""
+        from domain.models.pending_match_state import PendingMatchState
         match_service = services["match_service"]
 
-        pending_state = {
-            "radiant_team_ids": [1, 2, 3, 4, 5],
-            "dire_team_ids": [6, 7, 8, 9, 10],
-            "radiant_roles": ["1", "2", "3", "4", "5"],
-            "dire_roles": ["1", "2", "3", "4", "5"],
-            "radiant_value": 7500.0,
-            "dire_value": 7500.0,
-            "value_diff": 0.0,
-            "first_pick_team": "radiant",
-            "shuffle_timestamp": int(time.time()),
-            "bet_lock_until": int(time.time()) + 900,
-            "betting_mode": "pool",
-            "is_openskill_shuffle": True,
-        }
+        pending_state = PendingMatchState(
+            radiant_team_ids=[1, 2, 3, 4, 5],
+            dire_team_ids=[6, 7, 8, 9, 10],
+            radiant_roles=["1", "2", "3", "4", "5"],
+            dire_roles=["1", "2", "3", "4", "5"],
+            radiant_value=7500.0,
+            dire_value=7500.0,
+            value_diff=0.0,
+            first_pick_team="radiant",
+            shuffle_timestamp=int(time.time()),
+            bet_lock_until=int(time.time()) + 900,
+            betting_mode="pool",
+            is_openskill_shuffle=True,
+        )
 
         payload = match_service._build_pending_match_payload(pending_state)
         assert "is_openskill_shuffle" in payload
         assert payload["is_openskill_shuffle"] is True
 
         # Non-openskill shuffle
-        pending_state["is_openskill_shuffle"] = False
-        payload = match_service._build_pending_match_payload(pending_state)
-        assert payload["is_openskill_shuffle"] is False
-
-        # Default case (missing key)
-        del pending_state["is_openskill_shuffle"]
+        pending_state.is_openskill_shuffle = False
         payload = match_service._build_pending_match_payload(pending_state)
         assert payload["is_openskill_shuffle"] is False
 
     def test_balancing_rating_system_persisted_in_pending_match(self, services):
         """Verify balancing_rating_system is included in persisted pending match payload."""
+        from domain.models.pending_match_state import PendingMatchState
         match_service = services["match_service"]
 
-        pending_state = {
-            "radiant_team_ids": [1, 2, 3, 4, 5],
-            "dire_team_ids": [6, 7, 8, 9, 10],
-            "radiant_roles": ["1", "2", "3", "4", "5"],
-            "dire_roles": ["1", "2", "3", "4", "5"],
-            "radiant_value": 7500.0,
-            "dire_value": 7500.0,
-            "value_diff": 0.0,
-            "first_pick_team": "radiant",
-            "shuffle_timestamp": int(time.time()),
-            "bet_lock_until": int(time.time()) + 900,
-            "betting_mode": "pool",
-            "balancing_rating_system": "openskill",
-        }
+        pending_state = PendingMatchState(
+            radiant_team_ids=[1, 2, 3, 4, 5],
+            dire_team_ids=[6, 7, 8, 9, 10],
+            radiant_roles=["1", "2", "3", "4", "5"],
+            dire_roles=["1", "2", "3", "4", "5"],
+            radiant_value=7500.0,
+            dire_value=7500.0,
+            value_diff=0.0,
+            first_pick_team="radiant",
+            shuffle_timestamp=int(time.time()),
+            bet_lock_until=int(time.time()) + 900,
+            betting_mode="pool",
+            balancing_rating_system="openskill",
+        )
 
         payload = match_service._build_pending_match_payload(pending_state)
         assert "balancing_rating_system" in payload
         assert payload["balancing_rating_system"] == "openskill"
 
         # Glicko system
-        pending_state["balancing_rating_system"] = "glicko"
+        pending_state.balancing_rating_system = "glicko"
         payload = match_service._build_pending_match_payload(pending_state)
         assert payload["balancing_rating_system"] == "glicko"
 
         # Jopacoin system
-        pending_state["balancing_rating_system"] = "jopacoin"
+        pending_state.balancing_rating_system = "jopacoin"
         payload = match_service._build_pending_match_payload(pending_state)
         assert payload["balancing_rating_system"] == "jopacoin"
-
-        # Default case (missing key)
-        del pending_state["balancing_rating_system"]
-        payload = match_service._build_pending_match_payload(pending_state)
-        assert payload["balancing_rating_system"] == "glicko"

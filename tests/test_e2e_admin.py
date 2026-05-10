@@ -972,8 +972,7 @@ class TestE2ESoftAvoid:
                 # Check that effective_avoid_ids is stored in state
                 state = match_service.get_last_shuffle(guild_id)
                 assert state is not None
-                assert "effective_avoid_ids" in state
-                assert avoid.id in state["effective_avoid_ids"]
+                assert avoid.id in state.effective_avoid_ids
                 found = True
                 break
 

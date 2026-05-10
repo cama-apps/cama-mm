@@ -58,7 +58,7 @@ def test_bet_lock_enforced(services):
     player_repo.add_balance(1001, TEST_GUILD_ID, 10)
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-    pending["bet_lock_until"] = int(time.time()) - 1
+    pending.bet_lock_until = int(time.time()) - 1
 
     with pytest.raises(ValueError, match="closed"):
         betting_service.place_bet(TEST_GUILD_ID, 1001, "radiant", 5, pending)
@@ -84,7 +84,7 @@ def test_participant_can_only_bet_on_own_team(services):
         )
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-    participant = pending["radiant_team_ids"][0]
+    participant = pending.radiant_team_ids[0]
     spectator = 2000
     player_repo.add(
         discord_id=spectator,
@@ -96,8 +96,8 @@ def test_participant_can_only_bet_on_own_team(services):
     player_repo.add_balance(spectator, TEST_GUILD_ID, 20)
 
     # Ensure betting is still open
-    if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-        pending["bet_lock_until"] = int(time.time()) + 600  # 10 minutes in the future
+    if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+        pending.bet_lock_until = int(time.time()) + 600  # 10 minutes in the future
 
     with pytest.raises(ValueError, match="Participants on Radiant"):
         betting_service.place_bet(TEST_GUILD_ID, participant, "dire", 5, pending)
@@ -171,7 +171,7 @@ class TestMultipleBetsValidation:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Bet on radiant first
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)
@@ -211,7 +211,7 @@ class TestMultipleBetsValidation:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # First bet of 5 succeeds
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
@@ -247,10 +247,10 @@ class TestMultipleBetsValidation:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Get a participant from radiant team
-        radiant_player = pending["radiant_team_ids"][0]
+        radiant_player = pending.radiant_team_ids[0]
 
         # First bet on own team succeeds
         betting_service.place_bet(TEST_GUILD_ID, radiant_player, "radiant", 10, pending)
@@ -300,7 +300,7 @@ class TestMultipleBetsValidation:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Trying to bet 150 at 5x = 750 effective would go to -650 (past -500 MAX_DEBT)
         with pytest.raises(ValueError, match="exceed maximum debt"):
@@ -345,7 +345,7 @@ class TestMultipleBetsValidation:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Place leverage bet to go into debt
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 100, pending, leverage=5)
@@ -389,7 +389,7 @@ class TestMultipleBetsValidation:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Bet on dire first
         betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
@@ -434,9 +434,9 @@ class TestBlindBetsValidation:
 
         result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
 
         # Only 5 players (those with 100) should have blind bets
@@ -476,9 +476,9 @@ class TestBlindBetsValidation:
 
         result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
 
         # Only 5 non-debt players should have blind bets

@@ -63,21 +63,21 @@ class TestExtendBetting:
 
         # Get original lock time
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
-        original_lock = state["bet_lock_until"]
+        original_lock = state.bet_lock_until
 
         # Simulate extending by 10 minutes
         now_ts = int(time.time())
         extension_minutes = 10
         new_lock_until = max(original_lock, now_ts) + (extension_minutes * 60)
 
-        state["bet_lock_until"] = new_lock_until
+        state.bet_lock_until = new_lock_until
         match_service.set_last_shuffle(TEST_GUILD_ID, state)
         match_service._persist_match_state(TEST_GUILD_ID, state)
 
         # Verify state is updated
         updated_state = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert updated_state["bet_lock_until"] == new_lock_until
-        assert updated_state["bet_lock_until"] > original_lock
+        assert updated_state.bet_lock_until == new_lock_until
+        assert updated_state.bet_lock_until > original_lock
 
     def test_extended_betting_persists_to_database(self, db_path):
         """Test that extended betting window is saved to database."""
@@ -100,7 +100,7 @@ class TestExtendBetting:
         now_ts = int(time.time())
         new_lock_until = now_ts + 1800  # 30 minutes from now
 
-        state["bet_lock_until"] = new_lock_until
+        state.bet_lock_until = new_lock_until
         match_service.set_last_shuffle(TEST_GUILD_ID, state)
         match_service._persist_match_state(TEST_GUILD_ID, state)
 
@@ -130,7 +130,7 @@ class TestExtendBetting:
         now_ts = int(time.time())
         new_lock_until = now_ts + 3600  # 1 hour from now
 
-        state["bet_lock_until"] = new_lock_until
+        state.bet_lock_until = new_lock_until
         match_service_1.set_last_shuffle(TEST_GUILD_ID, state)
         match_service_1._persist_match_state(TEST_GUILD_ID, state)
 
@@ -146,7 +146,7 @@ class TestExtendBetting:
         # Verify extended time is restored
         restored_state = match_service_2.get_last_shuffle(TEST_GUILD_ID)
         assert restored_state is not None
-        assert restored_state["bet_lock_until"] == new_lock_until
+        assert restored_state.bet_lock_until == new_lock_until
 
     def test_extend_reopens_closed_betting_window(self, db_path):
         """Test that extending betting allows new bets after window was closed."""
@@ -183,8 +183,8 @@ class TestExtendBetting:
         # Set betting window to expired (in the past)
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
         now_ts = int(time.time())
-        state["bet_lock_until"] = now_ts - 60  # Expired 1 minute ago
-        state["shuffle_timestamp"] = now_ts - 600  # Shuffled 10 minutes ago
+        state.bet_lock_until = now_ts - 60  # Expired 1 minute ago
+        state.shuffle_timestamp = now_ts - 600  # Shuffled 10 minutes ago
         match_service._persist_match_state(TEST_GUILD_ID, state)
 
         # Verify betting is closed
@@ -199,7 +199,7 @@ class TestExtendBetting:
 
         # Extend betting by 10 minutes
         new_lock_until = now_ts + 600
-        state["bet_lock_until"] = new_lock_until
+        state.bet_lock_until = new_lock_until
         match_service._persist_match_state(TEST_GUILD_ID, state)
 
         # Now betting should work
@@ -231,7 +231,7 @@ class TestExtendBetting:
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
         now_ts = int(time.time())
         expired_lock = now_ts - 300  # Expired 5 minutes ago
-        state["bet_lock_until"] = expired_lock
+        state.bet_lock_until = expired_lock
 
         # Calculate new lock using max(current_lock, now) + extension
         # This mirrors the logic in /extendbetting command
@@ -260,21 +260,21 @@ class TestExtendBetting:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
-        original_lock = state["bet_lock_until"]
+        original_lock = state.bet_lock_until
 
         # First extension: +5 minutes
         now_ts = int(time.time())
         first_extension = max(original_lock, now_ts) + 300
-        state["bet_lock_until"] = first_extension
+        state.bet_lock_until = first_extension
         match_service._persist_match_state(TEST_GUILD_ID, state)
 
         # Second extension: +5 more minutes (from the first extended time)
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
-        second_extension = max(state["bet_lock_until"], now_ts) + 300
-        state["bet_lock_until"] = second_extension
+        second_extension = max(state.bet_lock_until, now_ts) + 300
+        state.bet_lock_until = second_extension
         match_service._persist_match_state(TEST_GUILD_ID, state)
 
         # Verify total extension
         final_state = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert final_state["bet_lock_until"] == second_extension
-        assert final_state["bet_lock_until"] >= original_lock + 600  # At least 10 min more
+        assert final_state.bet_lock_until == second_extension
+        assert final_state.bet_lock_until >= original_lock + 600  # At least 10 min more

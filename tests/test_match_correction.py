@@ -77,8 +77,8 @@ class TestMatchCorrection:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        radiant_ids = pending["radiant_team_ids"]
-        dire_ids = pending["dire_team_ids"]
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
 
         # Record with Radiant winning (incorrectly)
         match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
@@ -127,8 +127,8 @@ class TestMatchCorrection:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        radiant_ids = pending["radiant_team_ids"]
-        dire_ids = pending["dire_team_ids"]
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
 
         # Store original ratings
         original_ratings = {}
@@ -201,10 +201,10 @@ class TestMatchCorrection:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        radiant_ids = pending["radiant_team_ids"]
+        radiant_ids = pending.radiant_team_ids
 
         # Ensure betting is open
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Place bets: spectator bets on Dire
         betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
@@ -245,8 +245,8 @@ class TestMatchCorrection:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        radiant_ids = pending["radiant_team_ids"]
-        dire_ids = pending["dire_team_ids"]
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
 
         # Record with Radiant winning
         match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
@@ -357,8 +357,8 @@ class TestMatchCorrection:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        radiant_ids = pending["radiant_team_ids"]
-        dire_ids = pending["dire_team_ids"]
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
 
         # Record with Radiant winning
         match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)

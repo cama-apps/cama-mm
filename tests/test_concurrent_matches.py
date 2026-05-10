@@ -86,7 +86,7 @@ def _create_two_concurrent_matches(services, players1, players2, guild_id=TEST_G
         states.append(state)
 
     # Return states in order: first contains players1, second contains players2
-    state_players_0 = set(states[0]["radiant_team_ids"] + states[0]["dire_team_ids"])
+    state_players_0 = set(states[0].radiant_team_ids + states[0].dire_team_ids)
     if state_players_0 == set(players1):
         return states[0], states[1]
     else:
@@ -198,8 +198,8 @@ class TestConcurrentMatchCreation:
         assert state1 is not None
         assert state2 is not None
         # Match players to the correct state based on who's in each
-        state1_players = set(state1["radiant_team_ids"] + state1["dire_team_ids"])
-        state2_players = set(state2["radiant_team_ids"] + state2["dire_team_ids"])
+        state1_players = set(state1.radiant_team_ids + state1.dire_team_ids)
+        state2_players = set(state2.radiant_team_ids + state2.dire_team_ids)
 
         # One state should have match1 players, other should have match2 players
         assert (state1_players == set(players_match1) and state2_players == set(players_match2)) or \
@@ -316,8 +316,8 @@ class TestConcurrentMatchRecordingIsolation:
         players_match2 = list(range(2000, 2010))
         state1, state2 = _create_two_concurrent_matches(services, players_match1, players_match2)
 
-        pmid1 = state1["pending_match_id"]
-        pmid2 = state2["pending_match_id"]
+        pmid1 = state1.pending_match_id
+        pmid2 = state2.pending_match_id
 
         # Record match 1
         match_service.record_match(
@@ -329,7 +329,7 @@ class TestConcurrentMatchRecordingIsolation:
         # Verify match 2 is still pending
         state2_after = match_service.get_last_shuffle(TEST_GUILD_ID, pending_match_id=pmid2)
         assert state2_after is not None
-        assert state2_after["pending_match_id"] == pmid2
+        assert state2_after.pending_match_id == pmid2
 
         # Verify match 1 is gone
         state1_after = match_service.get_last_shuffle(TEST_GUILD_ID, pending_match_id=pmid1)
@@ -358,11 +358,11 @@ class TestConcurrentMatchRecordingIsolation:
         match_service.record_match(
             "radiant",
             guild_id=TEST_GUILD_ID,
-            pending_match_id=state1["pending_match_id"],
+            pending_match_id=state1.pending_match_id,
         )
 
         # Verify match 2's bet is still pending (refresh state from DB)
-        state2_fresh = match_service.get_last_shuffle(TEST_GUILD_ID, state2["pending_match_id"])
+        state2_fresh = match_service.get_last_shuffle(TEST_GUILD_ID, state2.pending_match_id)
         bet2 = betting_service.get_pending_bet(TEST_GUILD_ID, spectator2, state2_fresh)
         assert bet2 is not None
         # Pending bets have match_id = None (not yet settled to a match)
@@ -393,9 +393,9 @@ class TestConcurrentMatchRecordingIsolation:
 
         # Refund match 1's bets (simulate abort)
         betting_service.refund_pending_bets(
-            TEST_GUILD_ID, state1, pending_match_id=state1["pending_match_id"]
+            TEST_GUILD_ID, state1, pending_match_id=state1.pending_match_id
         )
-        match_service.clear_last_shuffle(TEST_GUILD_ID, state1["pending_match_id"])
+        match_service.clear_last_shuffle(TEST_GUILD_ID, state1.pending_match_id)
 
         # Spectator1 should be refunded
         final_balance1 = player_repo.get_balance(spectator1, TEST_GUILD_ID)
@@ -449,13 +449,13 @@ class TestConcurrentMatchPlayerConstraints:
         player_in_match1 = players_match1[0]
         found = match_service.state_service.get_pending_match_for_player(TEST_GUILD_ID, player_in_match1)
         assert found is not None
-        assert found["pending_match_id"] == state1["pending_match_id"]
+        assert found.pending_match_id == state1.pending_match_id
 
         # Lookup player from match 2
         player_in_match2 = players_match2[0]
         found = match_service.state_service.get_pending_match_for_player(TEST_GUILD_ID, player_in_match2)
         assert found is not None
-        assert found["pending_match_id"] == state2["pending_match_id"]
+        assert found.pending_match_id == state2.pending_match_id
 
         # Lookup spectator (not in any match)
         spectator = 9999
@@ -480,8 +480,8 @@ class TestConcurrentMatchCleanupIsolation:
         players_match2 = list(range(2000, 2010))
         state1, state2 = _create_two_concurrent_matches(services, players_match1, players_match2)
 
-        pmid1 = state1["pending_match_id"]
-        pmid2 = state2["pending_match_id"]
+        pmid1 = state1.pending_match_id
+        pmid2 = state2.pending_match_id
 
         # Clear only match 1
         match_service.clear_last_shuffle(TEST_GUILD_ID, pending_match_id=pmid1)
@@ -493,7 +493,7 @@ class TestConcurrentMatchCleanupIsolation:
         # Match 2 should still exist
         state2_after = match_service.get_last_shuffle(TEST_GUILD_ID, pending_match_id=pmid2)
         assert state2_after is not None
-        assert state2_after["pending_match_id"] == pmid2
+        assert state2_after.pending_match_id == pmid2
 
     def test_clear_all_matches_removes_all(self, services):
         """Clearing without specific ID removes all pending matches."""

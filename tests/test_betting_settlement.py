@@ -53,12 +53,12 @@ def test_settle_bets_pays_out_on_house(services):
         )
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
     pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-    participant = pending["radiant_team_ids"][0]
+    participant = pending.radiant_team_ids[0]
     player_repo.add_balance(participant, TEST_GUILD_ID, 20)
 
     # Ensure betting is still open
-    if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-        pending["bet_lock_until"] = int(time.time()) + 600  # 10 minutes in the future
+    if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+        pending.bet_lock_until = int(time.time()) + 600  # 10 minutes in the future
 
     betting_service.place_bet(TEST_GUILD_ID, participant, "radiant", 5, pending)
     distributions = betting_service.settle_bets(123, TEST_GUILD_ID, "radiant", pending_state=pending)
@@ -98,8 +98,8 @@ def test_refund_pending_bets_on_abort(services):
 
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-    if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-        pending["bet_lock_until"] = int(time.time()) + 600
+    if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+        pending.bet_lock_until = int(time.time()) + 600
 
     betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 7, pending)
     # Starting balance 3 + 12 top-up - 7 bet = 8 remaining
@@ -152,10 +152,10 @@ class TestPoolBettingSettlement:
         # Shuffle with pool mode
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert pending["betting_mode"] == "pool"
+        assert pending.betting_mode == "pool"
 
-        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-            pending["bet_lock_until"] = int(time.time()) + 600
+        if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+            pending.bet_lock_until = int(time.time()) + 600
 
         # Place bets: 100 on radiant (spectator1), 200 on dire (spectator2 + spectator3)
         betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 100, pending)
@@ -212,8 +212,8 @@ class TestPoolBettingSettlement:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-            pending["bet_lock_until"] = int(time.time()) + 600
+        if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+            pending.bet_lock_until = int(time.time()) + 600
 
         # Place bets: 50 on radiant (spectator1), 50 on radiant (spectator2), 100 on dire (spectator3)
         betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 50, pending)
@@ -264,8 +264,8 @@ class TestPoolBettingSettlement:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
-        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-            pending["bet_lock_until"] = int(time.time()) + 600
+        if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+            pending.bet_lock_until = int(time.time()) + 600
 
         # Both bet on dire
         betting_service.place_bet(TEST_GUILD_ID, spectator1, "dire", 30, pending)
@@ -320,10 +320,10 @@ class TestPoolBettingSettlement:
         # Shuffle with house mode explicitly
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert pending["betting_mode"] == "house"
+        assert pending.betting_mode == "house"
 
-        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
-            pending["bet_lock_until"] = int(time.time()) + 600
+        if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+            pending.bet_lock_until = int(time.time()) + 600
 
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 20, pending)
 
@@ -372,7 +372,7 @@ class TestPoolBettingSettlement:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Bets: 10 + 10 + 10 = 30 on radiant, 70 on dire (from a participant)
         # Total pool = 100
@@ -382,7 +382,7 @@ class TestPoolBettingSettlement:
         betting_service.place_bet(TEST_GUILD_ID, spectators[2], "radiant", 10, pending)
 
         # Add a dire bet to create a pool
-        dire_bettor = pending["dire_team_ids"][0]
+        dire_bettor = pending.dire_team_ids[0]
         player_repo.add_balance(dire_bettor, TEST_GUILD_ID, 100)
         betting_service.place_bet(TEST_GUILD_ID, dire_bettor, "dire", 70, pending)
 
@@ -442,7 +442,7 @@ class TestPoolBettingSettlement:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Single bettor: one 50 JC bet (equivalent to 10x 5 JC)
         betting_service.place_bet(TEST_GUILD_ID, single_bettor, "radiant", 50, pending)
@@ -506,7 +506,7 @@ class TestMultipleBetsSettlement:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Place multiple bets: 10 at 1x, 10 at 2x
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)
@@ -559,7 +559,7 @@ class TestMultipleBetsSettlement:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Spectator1: 20 + 30 = 50 effective on radiant
         betting_service.place_bet(TEST_GUILD_ID, spectator1, "radiant", 20, pending)
@@ -610,7 +610,7 @@ class TestMultipleBetsSettlement:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Place multiple bets: 10 + 20 at 2x = 50 effective
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)
@@ -668,9 +668,9 @@ class TestBlindBetsSettlement:
 
         result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
 
         # All should have blind bets (all >= 50)
@@ -706,17 +706,17 @@ class TestBlindBetsSettlement:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending["bet_lock_until"] = int(time.time()) + 600
+        pending.bet_lock_until = int(time.time()) + 600
 
         # Record initial balances (after blind bets)
-        radiant_player = pending["radiant_team_ids"][0]
+        radiant_player = pending.radiant_team_ids[0]
 
         # Create blind bets (5 jopacoin each, 25 per team)
         blind_result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending["radiant_team_ids"],
-            dire_ids=pending["dire_team_ids"],
-            shuffle_timestamp=pending["shuffle_timestamp"],
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
         )
         assert blind_result["total_radiant"] == 25
         assert blind_result["total_dire"] == 25
@@ -779,9 +779,9 @@ class TestBlindBetsSettlement:
 
         blind_result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending_state["radiant_team_ids"],
-            dire_ids=pending_state["dire_team_ids"],
-            shuffle_timestamp=pending_state["shuffle_timestamp"],
+            radiant_ids=pending_state.radiant_team_ids,
+            dire_ids=pending_state.dire_team_ids,
+            shuffle_timestamp=pending_state.shuffle_timestamp,
         )
         assert blind_result["created"] == 10
 
@@ -835,13 +835,13 @@ class TestBlindBetsSettlement:
         # Shuffle and create blind bets
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending_state = match_service.get_last_shuffle(TEST_GUILD_ID)
-        pending_state["bet_lock_until"] = int(time.time()) + 600
+        pending_state.bet_lock_until = int(time.time()) + 600
 
         betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
-            radiant_ids=pending_state["radiant_team_ids"],
-            dire_ids=pending_state["dire_team_ids"],
-            shuffle_timestamp=pending_state["shuffle_timestamp"],
+            radiant_ids=pending_state.radiant_team_ids,
+            dire_ids=pending_state.dire_team_ids,
+            shuffle_timestamp=pending_state.shuffle_timestamp,
         )
 
         # Spectator places manual bet

@@ -22,6 +22,7 @@ from config import (
     LEVERAGE_TIERS,
     MAX_DEBT,
 )
+from domain.models.pending_match_state import PendingMatchState
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 
@@ -51,11 +52,11 @@ class BettingService:
         self.bankruptcy_service = bankruptcy_service
         self.buff_service = buff_service
 
-    def _since_ts(self, pending_state: dict[str, Any] | None) -> int | None:
+    def _since_ts(self, pending_state: PendingMatchState | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
         if not pending_state:
             return None
-        return pending_state.get("shuffle_timestamp")
+        return pending_state.shuffle_timestamp
 
     def place_bet(
         self,
@@ -63,7 +64,7 @@ class BettingService:
         discord_id: int,
         team: str,
         amount: int,
-        pending_state: dict[str, Any],
+        pending_state: PendingMatchState,
         leverage: int = 1,
     ) -> None:
         """Place a bet after verifying timing and participant/team rules."""
@@ -72,7 +73,7 @@ class BettingService:
 
         now_ts = int(time.time())
         # Fast/strict check first (also preserves test behavior where pending_state is mutated).
-        lock_until = pending_state.get("bet_lock_until")
+        lock_until = pending_state.bet_lock_until
         if lock_until is None or now_ts >= lock_until:
             raise ValueError("Betting is closed for the current match.")
 
@@ -93,7 +94,7 @@ class BettingService:
             raise ValueError(f"Invalid leverage. Valid tiers: 1 (none), {valid_tiers}")
 
         # Get pending_match_id for concurrent match support
-        pending_match_id = pending_state.get("pending_match_id")
+        pending_match_id = pending_state.pending_match_id
 
         # Calculate odds at placement
         current_totals = self.bet_repo.get_total_bets_by_guild(
@@ -181,7 +182,7 @@ class BettingService:
         return results
 
     def settle_bets(
-        self, match_id: int, guild_id: int | None, winning_team: str, pending_state: dict[str, Any]
+        self, match_id: int, guild_id: int | None, winning_team: str, pending_state: PendingMatchState
     ) -> dict[str, list[dict]]:
         """
         Settle bets based on betting mode.
@@ -194,8 +195,8 @@ class BettingService:
             # If no pending state, treat as no bets to avoid pulling stale wagers.
             return {"winners": [], "losers": []}
 
-        betting_mode = pending_state.get("betting_mode", "pool")
-        pending_match_id = pending_state.get("pending_match_id")
+        betting_mode = pending_state.betting_mode
+        pending_match_id = pending_state.pending_match_id
 
         # Atomic settlement (payouts + bet tagging in one DB transaction)
         return self.bet_repo.settle_pending_bets_atomic(
@@ -380,43 +381,43 @@ class BettingService:
         return results
 
     def get_pot_odds(
-        self, guild_id: int | None, pending_state: dict[str, Any] | None = None
+        self, guild_id: int | None, pending_state: PendingMatchState | None = None
     ) -> dict[str, int]:
         """Return current bet totals by team for odds calculation."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return dict.fromkeys(self.bet_repo.VALID_TEAMS, 0)
-        pending_match_id = pending_state.get("pending_match_id")
+        pending_match_id = pending_state.pending_match_id
         return self.bet_repo.get_total_bets_by_guild(
             guild_id, since_ts=since_ts, pending_match_id=pending_match_id
         )
 
     def get_pending_bet(
-        self, guild_id: int | None, discord_id: int, pending_state: dict[str, Any] | None = None
+        self, guild_id: int | None, discord_id: int, pending_state: PendingMatchState | None = None
     ) -> dict | None:
         """Get the pending bet for a player."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return None
-        pending_match_id = pending_state.get("pending_match_id")
+        pending_match_id = pending_state.pending_match_id
         return self.bet_repo.get_player_pending_bet(
             guild_id, discord_id, since_ts=since_ts, pending_match_id=pending_match_id
         )
 
     def get_pending_bets(
-        self, guild_id: int | None, discord_id: int, pending_state: dict[str, Any] | None = None
+        self, guild_id: int | None, discord_id: int, pending_state: PendingMatchState | None = None
     ) -> list[dict]:
         """Get all pending bets for a player, ordered by bet_time."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return []
-        pending_match_id = pending_state.get("pending_match_id")
+        pending_match_id = pending_state.pending_match_id
         return self.bet_repo.get_player_pending_bets(
             guild_id, discord_id, since_ts=since_ts, pending_match_id=pending_match_id
         )
 
     def refund_pending_bets(
-        self, guild_id: int | None, pending_state: dict[str, Any] | None,
+        self, guild_id: int | None, pending_state: PendingMatchState | None,
         pending_match_id: int | None = None
     ) -> int:
         """
@@ -424,7 +425,7 @@ class BettingService:
 
         Args:
             guild_id: Guild ID
-            pending_state: The pending match state dict
+            pending_state: The pending match state
             pending_match_id: Optional specific match ID for concurrent match support
 
         Returns the number of bets refunded.
@@ -434,7 +435,7 @@ class BettingService:
             return 0
         # Get pending_match_id from state if not provided
         if pending_match_id is None:
-            pending_match_id = pending_state.get("pending_match_id")
+            pending_match_id = pending_state.pending_match_id
 
         return self.bet_repo.refund_pending_bets_atomic(
             guild_id=guild_id, since_ts=int(since_ts), pending_match_id=pending_match_id
@@ -614,13 +615,13 @@ class BettingService:
         return result
 
     def get_all_pending_bets(
-        self, guild_id: int | None, pending_state: dict[str, Any] | None = None
+        self, guild_id: int | None, pending_state: PendingMatchState | None = None
     ) -> list[dict]:
         """Get all pending bets for a guild (for /bets command)."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return []
-        pending_match_id = pending_state.get("pending_match_id")
+        pending_match_id = pending_state.pending_match_id
         return self.bet_repo.get_bets_for_pending_match(
             guild_id, since_ts=since_ts, pending_match_id=pending_match_id
         )

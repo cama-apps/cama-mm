@@ -97,7 +97,7 @@ async def bet_action(
                 pending_state = player_match
             else:
                 # User is a spectator with multiple matches - require explicit selection
-                match_list = ", ".join(f"Match #{m.get('pending_match_id')}" for m in all_pending if m.get('pending_match_id'))
+                match_list = ", ".join(f"Match #{m.pending_match_id}" for m in all_pending if m.pending_match_id)
                 await interaction.followup.send(
                     f"❌ Multiple matches in progress ({match_list}). "
                     "Please specify which match to bet on using the `match` parameter.",
@@ -109,7 +109,7 @@ async def bet_action(
         await interaction.followup.send("❌ No active match to bet on.", ephemeral=True)
         return
 
-    pending_match_id = pending_state.get("pending_match_id")
+    pending_match_id = pending_state.pending_match_id
 
     # Unified betting through BettingService (works for both shuffle and draft modes)
     lev = leverage.value if leverage else 1
@@ -161,7 +161,7 @@ async def bet_action(
     await cog._update_shuffle_message_wagers(guild_id, pending_match_id)
 
     # Build response message
-    betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
+    betting_mode = pending_state.betting_mode if pending_state else "pool"
     pool_warning = ""
     if betting_mode == "pool":
         pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
@@ -204,7 +204,7 @@ async def bet_action(
             # Compute seconds remaining for last-second check
             seconds_remaining = 0
             if pending_state:
-                lock_time = pending_state.get("lock_time", 0)
+                lock_time = pending_state.lock_time or 0
                 import time as _time
                 seconds_remaining = max(0, int(lock_time - _time.time()))
 
@@ -288,7 +288,7 @@ async def mybets_action(
     all_pending = await asyncio.to_thread(
         cog.match_service.state_service.get_all_pending_matches, guild_id
     )
-    pending_by_id = {m.get("pending_match_id"): m for m in all_pending if m.get("pending_match_id")}
+    pending_by_id = {m.pending_match_id: m for m in all_pending if m.pending_match_id}
 
     # Group bets by pending_match_id
     bets_by_match: dict[int | None, list[dict]] = {}
@@ -344,7 +344,7 @@ async def mybets_action(
         section_msg = header + "\n" + "\n".join(bet_lines)
 
         # Add EV info for pool mode
-        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
+        betting_mode = pending_state.betting_mode if pending_state else "pool"
         if betting_mode == "pool" and pending_state:
             totals = await asyncio.to_thread(
                 functools.partial(cog.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
@@ -443,7 +443,7 @@ async def bets_action(
                 pending_state = player_match
             else:
                 # User is a spectator with multiple matches - require explicit selection
-                match_list = ", ".join(f"Match #{m.get('pending_match_id')}" for m in all_pending if m.get('pending_match_id'))
+                match_list = ", ".join(f"Match #{m.pending_match_id}" for m in all_pending if m.pending_match_id)
                 await interaction.followup.send(
                     f"❌ Multiple matches in progress ({match_list}). "
                     "Please specify which match to view using the `match` parameter.",
@@ -455,7 +455,7 @@ async def bets_action(
         await interaction.followup.send("No active match to show bets for.", ephemeral=True)
         return
 
-    pending_match_id = pending_state.get("pending_match_id")
+    pending_match_id = pending_state.pending_match_id
 
     all_bets = await asyncio.to_thread(
         functools.partial(cog.betting_service.get_all_pending_bets, guild_id, pending_state=pending_state)
@@ -480,7 +480,7 @@ async def bets_action(
     )
 
     # Current odds header
-    lock_until = pending_state.get("bet_lock_until")
+    lock_until = pending_state.bet_lock_until
     radiant_odds_str = f"{radiant_mult:.2f}x" if radiant_mult else "—"
     dire_odds_str = f"{dire_mult:.2f}x" if dire_mult else "—"
     odds_text = (

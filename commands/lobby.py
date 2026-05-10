@@ -620,8 +620,8 @@ class LobbyCommands(commands.Cog):
         )
         if not success:
             if reason == "in_pending_match" and pending_info:
-                pending_match_id = pending_info.get("pending_match_id")
-                jump_url = pending_info.get("shuffle_message_jump_url")
+                pending_match_id = pending_info.pending_match_id
+                jump_url = pending_info.shuffle_message_jump_url
                 message_text = f"❌ You're already in a pending match (Match #{pending_match_id})!"
                 if jump_url:
                     message_text += f" [View your match]({jump_url}) and use `/record` to complete it first."
@@ -750,7 +750,7 @@ class LobbyCommands(commands.Cog):
             pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
             if pending_match:
                 if can_respond:
-                    jump_url = pending_match.get("shuffle_message_jump_url")
+                    jump_url = pending_match.shuffle_message_jump_url
                     message_text = "❌ There's a pending match that needs to be recorded!"
                     if jump_url:
                         message_text += (

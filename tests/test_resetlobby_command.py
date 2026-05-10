@@ -116,9 +116,11 @@ async def test_resetlobby_allows_creator(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resetlobby_blocks_pending_match(monkeypatch):
+    from domain.models.pending_match_state import PendingMatchState
+
     class PendingMatchService:
         def get_last_shuffle(self, _guild_id):
-            return {"shuffle_message_jump_url": "http://example.com"}
+            return PendingMatchState(shuffle_message_jump_url="http://example.com")
 
     lobby_manager, lobby_service = make_lobby_service()
     lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
