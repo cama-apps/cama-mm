@@ -221,22 +221,24 @@ class TestMatchServiceWinLoss:
     def _set_last_shuffle(self, service, radiant_ids, dire_ids):
         """Helper to set shuffle state and persist to database."""
         import time
+
+        from domain.models.pending_match_state import PendingMatchState
         now_ts = int(time.time())
-        state = {
-            "radiant_team_ids": radiant_ids,
-            "dire_team_ids": dire_ids,
-            "excluded_player_ids": [],
-            "radiant_roles": ["1", "2", "3", "4", "5"],
-            "dire_roles": ["1", "2", "3", "4", "5"],
-            "radiant_value": 7500.0,
-            "dire_value": 7500.0,
-            "value_diff": 0.0,
-            "first_pick_team": "Radiant",
-            "record_submissions": {},
-            "shuffle_timestamp": now_ts,
-            "bet_lock_until": now_ts + 900,
-            "betting_mode": "pool",
-        }
+        state = PendingMatchState(
+            radiant_team_ids=radiant_ids,
+            dire_team_ids=dire_ids,
+            excluded_player_ids=[],
+            radiant_roles=["1", "2", "3", "4", "5"],
+            dire_roles=["1", "2", "3", "4", "5"],
+            radiant_value=7500.0,
+            dire_value=7500.0,
+            value_diff=0.0,
+            first_pick_team="Radiant",
+            record_submissions={},
+            shuffle_timestamp=now_ts,
+            bet_lock_until=now_ts + 900,
+            betting_mode="pool",
+        )
         # Set in-memory and persist to database
         service.set_last_shuffle(TEST_GUILD_ID, state)
         service._persist_match_state(TEST_GUILD_ID, state)

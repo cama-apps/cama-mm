@@ -66,9 +66,10 @@ class TestAbortLobbySleepRemoved:
         mock_bot.get_channel = MagicMock(return_value=mock_thread)
 
         # Setup pending state with thread ID
-        mock_match_service.get_last_shuffle.return_value = {
-            "thread_shuffle_thread_id": 12345
-        }
+        from domain.models.pending_match_state import PendingMatchState
+        mock_match_service.get_last_shuffle.return_value = PendingMatchState(
+            thread_shuffle_thread_id=12345,
+        )
         mock_lobby_service.get_lobby_thread_id.return_value = 12345
 
         # Create the cog
@@ -124,9 +125,10 @@ class TestAbortLobbySleepRemoved:
         mock_bot.fetch_channel = AsyncMock(return_value=mock_thread)
 
         # Setup pending state
-        mock_match_service.get_last_shuffle.return_value = {
-            "thread_shuffle_thread_id": 12345
-        }
+        from domain.models.pending_match_state import PendingMatchState
+        mock_match_service.get_last_shuffle.return_value = PendingMatchState(
+            thread_shuffle_thread_id=12345,
+        )
         mock_lobby_service.get_lobby_thread_id.return_value = 12345
 
         cog = MatchCommands(

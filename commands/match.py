@@ -153,7 +153,7 @@ class MatchCommands(commands.Cog):
                 guild_id,
                 pending_match_id=pending_match_id,
             )
-            thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
+            thread_id = pending_state.thread_shuffle_thread_id if pending_state else None
         if not thread_id:
             # No thread_id means we can't safely update any thread
             logger.debug("No thread_id available for finalize_lobby_thread")
@@ -186,7 +186,7 @@ class MatchCommands(commands.Cog):
         pending_state = await asyncio.to_thread(
             self.match_service.get_last_shuffle, guild_id, pending_match_id
         )
-        thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
+        thread_id = pending_state.thread_shuffle_thread_id if pending_state else None
         if not thread_id:
             # No thread_id means we can't safely update any thread
             logger.debug("No thread_id available for abort_lobby_thread")
@@ -601,8 +601,8 @@ class MatchCommands(commands.Cog):
             pending_match_id=pending_match_id,
         )
         if pending_state:
-            pending_state["is_bomb_pot"] = is_bomb_pot
-            pending_state["is_openskill_shuffle"] = is_openskill_shuffle
+            pending_state.is_bomb_pot = is_bomb_pot
+            pending_state.is_openskill_shuffle = is_openskill_shuffle
             # Persist to DB so bomb pot and openskill shuffle survive bot restart
             await asyncio.to_thread(
                 self.match_service._persist_match_state, guild_id, pending_state
@@ -626,16 +626,16 @@ class MatchCommands(commands.Cog):
                         guild_id,
                         pending_match_id=pending_match_id,
                     )
-                    state_pmid = pending_state.get("pending_match_id") if pending_state else None
+                    state_pmid = pending_state.pending_match_id if pending_state else None
                     logger.debug(f"Blind bets: state={pending_state is not None}, state_pmid={state_pmid}")
                     blind_bets_result = await asyncio.to_thread(
                         functools.partial(betting_service.create_auto_blind_bets,
                             guild_id=guild_id,
-                            radiant_ids=pending_state["radiant_team_ids"],
-                            dire_ids=pending_state["dire_team_ids"],
-                            shuffle_timestamp=pending_state["shuffle_timestamp"],
+                            radiant_ids=pending_state.radiant_team_ids,
+                            dire_ids=pending_state.dire_team_ids,
+                            shuffle_timestamp=pending_state.shuffle_timestamp,
                             is_bomb_pot=is_bomb_pot,
-                            pending_match_id=pending_state.get("pending_match_id"),
+                            pending_match_id=pending_state.pending_match_id,
                         )
                     )
                     if blind_bets_result["created"] > 0:
@@ -772,7 +772,7 @@ class MatchCommands(commands.Cog):
                 pending_match_id=pending_match_id,
             )
             if pending_state:
-                pending_state["excluded_conditional_player_ids"] = excluded_conditional_ids
+                pending_state.excluded_conditional_player_ids = excluded_conditional_ids
                 await asyncio.to_thread(
                     self.match_service.set_last_shuffle, guild_id, pending_state
                 )
@@ -839,7 +839,7 @@ class MatchCommands(commands.Cog):
             totals = await asyncio.to_thread(
                 betting_service.get_pot_odds, guild_id, pending_state=pending_state
             )
-            lock_until = pending_state.get("bet_lock_until") if pending_state else None
+            lock_until = pending_state.bet_lock_until if pending_state else None
 
         wager_field_name, wager_field_value = format_betting_display(
             totals["radiant"], totals["dire"], mode, lock_until
@@ -919,14 +919,12 @@ class MatchCommands(commands.Cog):
             guild_id,
             pending_match_id=pending_match_id,
         )
-        bet_lock_until = pending_state.get("bet_lock_until") if pending_state else None
+        bet_lock_until = pending_state.bet_lock_until if pending_state else None
         await self._schedule_betting_reminders(guild_id, bet_lock_until, pending_match_id=pending_match_id)
 
         included_ids = []
         if pending_state:
-            included_ids = pending_state.get("radiant_team_ids", []) + pending_state.get(
-                "dire_team_ids", []
-            )
+            included_ids = list(pending_state.radiant_team_ids) + list(pending_state.dire_team_ids)
         await self._lock_lobby_thread(
             guild_id,
             shuffle_embed=embed,
@@ -1024,7 +1022,7 @@ class MatchCommands(commands.Cog):
                 pending_state = player_match
             else:
                 # Voter not in any match - they can't vote
-                match_ids = ", ".join(f"#{m.get('pending_match_id')}" for m in all_pending)
+                match_ids = ", ".join(f"#{m.pending_match_id}" for m in all_pending)
                 await interaction.followup.send(
                     f"❌ Multiple pending matches exist ({match_ids}) but you're not a participant in any of them. "
                     "Only match participants can vote on the result.",
@@ -1032,7 +1030,7 @@ class MatchCommands(commands.Cog):
                 )
                 return
 
-        pending_match_id = pending_state.get("pending_match_id")
+        pending_match_id = pending_state.pending_match_id
         logger.info(f"Recording for pending_match_id={pending_match_id}")
 
         is_admin = has_admin_permission(interaction)
@@ -1085,7 +1083,7 @@ class MatchCommands(commands.Cog):
         # Save thread_id before record_match clears the pending state
         # Use the specific pending_match_id we've been working with
         thread_id_for_finalize = (
-            pending_state.get("thread_shuffle_thread_id") if pending_state else None
+            pending_state.thread_shuffle_thread_id if pending_state else None
         )
 
         # Check first-game-of-night BEFORE recording (0 matches since boundary = first game)
@@ -1872,7 +1870,7 @@ class MatchCommands(commands.Cog):
             )
             if not state:
                 return
-            current_lock = state.get("bet_lock_until")
+            current_lock = state.bet_lock_until
             if not current_lock or (lock_until and current_lock != lock_until):
                 return
 

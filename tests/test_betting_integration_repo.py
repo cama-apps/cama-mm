@@ -45,8 +45,8 @@ def test_betting_flow_with_repos(repo_db_path):
     assert pending["radiant_team"]
 
     shuffle_state = match_service.get_last_shuffle(guild_id)
-    radiant_team_ids = shuffle_state["radiant_team_ids"]
-    dire_team_ids = shuffle_state["dire_team_ids"]
+    radiant_team_ids = shuffle_state.radiant_team_ids
+    dire_team_ids = shuffle_state.dire_team_ids
 
     bettor_id = radiant_team_ids[0]
     bet_amount = 2
@@ -162,12 +162,12 @@ def test_place_bet_against_pending_match_enforces_team_and_lock(repo_db_path):
 
     # Ensure betting open for the first check (and persist the updated lock into DB)
     now_ts = int(time.time())
-    state["bet_lock_until"] = now_ts + 600
-    pending_match_id = state.get("pending_match_id")
+    state.bet_lock_until = now_ts + 600
+    pending_match_id = state.pending_match_id
     assert pending_match_id is not None, "Shuffle should set pending_match_id"
     match_repo.update_pending_match(pending_match_id, match_service._build_pending_match_payload(state))  # type: ignore[attr-defined]
 
-    radiant_pid = state["radiant_team_ids"][0]
+    radiant_pid = state.radiant_team_ids[0]
     # Radiant participant betting on Dire must be rejected (enforced via DB payload).
     try:
         bet_repo.place_bet_against_pending_match_atomic(
@@ -182,7 +182,7 @@ def test_place_bet_against_pending_match_enforces_team_and_lock(repo_db_path):
         assert "Participants on Radiant" in str(exc)
 
     # Lock enforcement via DB payload (without relying on in-memory pending_state)
-    state["bet_lock_until"] = now_ts - 1
+    state.bet_lock_until = now_ts - 1
     match_repo.update_pending_match(pending_match_id, match_service._build_pending_match_payload(state))  # type: ignore[attr-defined]
     try:
         bet_repo.place_bet_against_pending_match_atomic(

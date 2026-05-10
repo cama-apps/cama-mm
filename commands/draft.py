@@ -15,6 +15,7 @@ from discord.ext import commands
 
 from config import BET_LOCK_SECONDS, BOMB_POT_CHANCE, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
+from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
 from services.permissions import has_admin_permission
@@ -454,7 +455,7 @@ class DraftCommands(commands.Cog):
         # Clear any pending match if one was created from the draft
         if self.match_service:
             pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
-            if pending_state and pending_state.get("is_draft"):
+            if pending_state and pending_state.is_draft:
                 await asyncio.to_thread(self.match_service.clear_last_shuffle, guild_id)
 
         # Clear the draft state
@@ -1797,7 +1798,7 @@ class DraftCommands(commands.Cog):
 
                 # === NEW: Create auto-blind bets (same as shuffle mode) ===
                 betting_service = getattr(self.bot, "betting_service", None)
-                is_bomb_pot = pending_state.get("is_bomb_pot", False) if pending_state else False
+                is_bomb_pot = pending_state.is_bomb_pot if pending_state else False
                 if betting_service and pending_state:
                     try:
                         blind_result = await asyncio.to_thread(
@@ -1806,14 +1807,14 @@ class DraftCommands(commands.Cog):
                                 guild_id=guild_id,
                                 radiant_ids=state.radiant_player_ids,
                                 dire_ids=state.dire_player_ids,
-                                shuffle_timestamp=pending_state.get("shuffle_timestamp"),
+                                shuffle_timestamp=pending_state.shuffle_timestamp,
                                 is_bomb_pot=is_bomb_pot,
-                                pending_match_id=pending_state.get("pending_match_id"),
+                                pending_match_id=pending_state.pending_match_id,
                             )
                         )
                         if blind_result and blind_result.get("created", 0) > 0:
                             # Store blind bets result in pending state for embed display
-                            pending_state["blind_bets_result"] = blind_result
+                            pending_state.blind_bets_result = blind_result
                             await asyncio.to_thread(
                                 self.match_service.set_last_shuffle, guild_id, pending_state
                             )
@@ -1869,7 +1870,7 @@ class DraftCommands(commands.Cog):
                                 channel_id=original_message.channel.id,
                                 jump_url=original_message.jump_url,
                                 origin_channel_id=state.draft_channel_id,
-                                pending_match_id=pending_state.get("pending_match_id") if pending_state else None,
+                                pending_match_id=pending_state.pending_match_id if pending_state else None,
                             )
                         )
                 except Exception as exc:
@@ -1881,8 +1882,8 @@ class DraftCommands(commands.Cog):
                     try:
                         await match_cog._schedule_betting_reminders(
                             guild_id,
-                            pending_state.get("bet_lock_until"),
-                            pending_match_id=pending_state.get("pending_match_id"),
+                            pending_state.bet_lock_until if pending_state else None,
+                            pending_match_id=pending_state.pending_match_id if pending_state else None,
                         )
                     except Exception as exc:
                         logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
@@ -2001,37 +2002,35 @@ class DraftCommands(commands.Cog):
         if is_bomb_pot:
             logger.info(f"💣 BOMB POT triggered for draft in guild {guild_id}")
 
-        # Create shuffle state dict compatible with match_service
+        # Create shuffle state compatible with match_service
         # Note: Draft mode does NOT decrement avoids/deals - those only apply to shuffle
-        shuffle_state = {
-            "radiant_team_ids": state.radiant_player_ids,
-            "dire_team_ids": state.dire_player_ids,
-            "excluded_player_ids": state.excluded_player_ids,
-            "radiant_team": None,  # No Team objects for draft
-            "dire_team": None,
-            "radiant_roles": [],  # No role assignments for draft
-            "dire_roles": [],
-            "radiant_value": radiant_value,
-            "dire_value": dire_value,
-            "value_diff": value_diff,
-            "first_pick_team": first_pick_team,
-            "record_submissions": {},
-            "shuffle_timestamp": now_ts,
-            "bet_lock_until": now_ts + BET_LOCK_SECONDS,
-            "shuffle_message_jump_url": None,
-            "shuffle_message_id": state.draft_message_id,
-            "shuffle_channel_id": state.draft_channel_id,
-            "origin_channel_id": state.draft_channel_id,  # For betting reminders
-            "betting_mode": "pool",  # Default to pool mode for drafts
-            "is_draft": True,  # Mark as draft for any special handling
-            "is_bomb_pot": is_bomb_pot,  # Bomb pot mode for higher stakes
-        }
+        shuffle_state = PendingMatchState(
+            radiant_team_ids=state.radiant_player_ids,
+            dire_team_ids=state.dire_player_ids,
+            excluded_player_ids=state.excluded_player_ids,
+            radiant_roles=[],  # No role assignments for draft
+            dire_roles=[],
+            radiant_value=radiant_value,
+            dire_value=dire_value,
+            value_diff=value_diff,
+            first_pick_team=first_pick_team,
+            record_submissions={},
+            shuffle_timestamp=now_ts,
+            bet_lock_until=now_ts + BET_LOCK_SECONDS,
+            shuffle_message_jump_url=None,
+            shuffle_message_id=state.draft_message_id,
+            shuffle_channel_id=state.draft_channel_id,
+            origin_channel_id=state.draft_channel_id,  # For betting reminders
+            betting_mode="pool",  # Default to pool mode for drafts
+            is_draft=True,  # Mark as draft for any special handling
+            is_bomb_pot=is_bomb_pot,  # Bomb pot mode for higher stakes
+        )
 
         # persist_state handles both DB persistence and in-memory cache update
         await asyncio.to_thread(self.match_service._persist_match_state, guild_id, shuffle_state)
 
-        # After persist_state, shuffle_state["pending_match_id"] is set via mutation
-        pending_match_id = shuffle_state.get("pending_match_id")
+        # After persist_state, shuffle_state.pending_match_id is set via mutation
+        pending_match_id = shuffle_state.pending_match_id
         logger.info(
             f"Created pending match #{pending_match_id} from draft for guild {guild_id}: "
             f"Radiant={state.radiant_player_ids}, Dire={state.dire_player_ids}"
@@ -2042,7 +2041,7 @@ class DraftCommands(commands.Cog):
         self,
         guild: discord.Guild | None,
         state: DraftState,
-        pending_state: dict | None = None,
+        pending_state: PendingMatchState | None = None,
     ) -> discord.Embed:
         """Build the draft complete embed."""
         # Get all players for role display
@@ -2101,7 +2100,7 @@ class DraftCommands(commands.Cog):
         first_pick_emoji = "🟢" if first_hero_team == "Radiant" else "🔴"
 
         # Check for bomb pot
-        is_bomb_pot = pending_state.get("is_bomb_pot", False) if pending_state else False
+        is_bomb_pot = pending_state.is_bomb_pot if pending_state else False
 
         # Build embed with bomb pot banner if applicable
         if is_bomb_pot:
@@ -2161,7 +2160,7 @@ class DraftCommands(commands.Cog):
         # Betting info (if betting service available)
         betting_service = getattr(self.bot, "betting_service", None)
         if betting_service and pending_state:
-            betting_mode = pending_state.get("betting_mode", "pool")
+            betting_mode = pending_state.betting_mode
 
             # Betting instructions
             if betting_mode == "pool":
@@ -2177,7 +2176,7 @@ class DraftCommands(commands.Cog):
             embed.add_field(name="📝 How to Bet", value=betting_note, inline=False)
 
             # Blind bets summary (if any)
-            blind_bets = pending_state.get("blind_bets_result")
+            blind_bets = pending_state.blind_bets_result
             if blind_bets and blind_bets.get("created", 0) > 0:
                 if is_bomb_pot:
                     blind_note = (
@@ -2198,7 +2197,7 @@ class DraftCommands(commands.Cog):
             # Current wagers (same display as shuffle mode)
             guild_id = state.guild_id
             totals = await asyncio.to_thread(functools.partial(betting_service.get_pot_odds, guild_id, pending_state=pending_state))
-            lock_until = pending_state.get("bet_lock_until")
+            lock_until = pending_state.bet_lock_until
             wager_field_name, wager_field_value = format_betting_display(
                 totals["radiant"], totals["dire"], betting_mode, lock_until
             )

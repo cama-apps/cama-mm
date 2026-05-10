@@ -41,8 +41,8 @@ async def update_shuffle_message_wagers(
     totals = await asyncio.to_thread(
         functools.partial(cog.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
     )
-    lock_until = pending_state.get("bet_lock_until")
-    betting_mode = pending_state.get("betting_mode", "pool")
+    lock_until = pending_state.bet_lock_until
+    betting_mode = pending_state.betting_mode
     field_name, field_value = format_betting_display(
         totals["radiant"], totals["dire"], betting_mode, lock_until
     )
@@ -63,8 +63,8 @@ async def update_shuffle_message_wagers(
         await update_embed_betting_field(cog, cmd_channel_id, cmd_message_id, field_name, field_value)
 
     # Update thread message if it exists
-    thread_message_id = pending_state.get("thread_shuffle_message_id")
-    thread_id = pending_state.get("thread_shuffle_thread_id")
+    thread_message_id = pending_state.thread_shuffle_message_id
+    thread_id = pending_state.thread_shuffle_thread_id
     if thread_message_id and thread_id:
         await update_embed_betting_field(cog, thread_id, thread_message_id, field_name, field_value)
 
@@ -150,7 +150,7 @@ async def send_betting_reminder(
     totals = await asyncio.to_thread(
         functools.partial(cog.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
     )
-    betting_mode = pending_state.get("betting_mode", "pool")
+    betting_mode = pending_state.betting_mode
 
     # Format bets with odds for pool mode
     _, totals_text = format_betting_display(

@@ -69,9 +69,8 @@ class TestFirstpickAssignment:
         # Get the persisted state
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
         assert state is not None
-        assert "first_pick_team" in state
-        assert state["first_pick_team"] in ("Radiant", "Dire")
-        assert state["first_pick_team"] == result["first_pick_team"]
+        assert state.first_pick_team in ("Radiant", "Dire")
+        assert state.first_pick_team == result["first_pick_team"]
 
     def test_firstpick_randomization_statistical(self, match_service, test_db, test_players):
         """
@@ -131,8 +130,8 @@ class TestFirstpickAssignment:
 
         assert state1 is not None
         assert state2 is not None
-        assert state1["first_pick_team"] == result1["first_pick_team"]
-        assert state2["first_pick_team"] == result2["first_pick_team"]
+        assert state1.first_pick_team == result1["first_pick_team"]
+        assert state2.first_pick_team == result2["first_pick_team"]
 
 
 class TestFirstpickEndToEnd:
@@ -188,7 +187,7 @@ class TestFirstpickEndToEnd:
         # Verify firstpick is in the stored state
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
         assert state is not None
-        assert state["first_pick_team"] == first_pick
+        assert state.first_pick_team == first_pick
 
         # Record the match (state should be cleared after)
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)

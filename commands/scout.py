@@ -163,8 +163,8 @@ class ScoutCommands(commands.Cog):
             try:
                 last_shuffle = self.match_service.get_last_shuffle(guild_id)
                 if last_shuffle:
-                    radiant_ids = last_shuffle.get("radiant_team_ids") or []
-                    dire_ids = last_shuffle.get("dire_team_ids") or []
+                    radiant_ids = last_shuffle.radiant_team_ids
+                    dire_ids = last_shuffle.dire_team_ids
 
                     if radiant_ids or dire_ids:
                         if team_filter == "radiant":

@@ -4,6 +4,10 @@ Match state management service.
 Handles pending match state: shuffle results, message metadata, and persistence.
 Supports multiple concurrent pending matches per guild.
 
+The in-memory and on-the-wire form is :class:`PendingMatchState` (a typed
+dataclass). Persistence still goes through the repo as JSON; this service
+wraps the conversion so the rest of the codebase only sees typed objects.
+
 Thread Safety:
     All public methods that read or modify state are protected by _shuffle_state_lock.
     For operations requiring atomic read-modify-write cycles (like voting), use the
@@ -15,8 +19,21 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
+from domain.models.pending_match_state import PendingMatchState
 from repositories.interfaces import IMatchRepository
 from utils.guild import normalize_guild_id
+
+
+def _row_to_state(row: dict[str, Any] | None) -> PendingMatchState | None:
+    """Convert a repo row (JSON-loaded payload + injected pending_match_id) to a typed state."""
+    if not row:
+        return None
+    state = PendingMatchState.from_dict(row)
+    # Repo injects pending_match_id from the row PK after json.loads — preserve it.
+    pmid = row.get("pending_match_id")
+    if pmid is not None:
+        state.pending_match_id = pmid
+    return state
 
 
 class MatchStateService:
@@ -28,7 +45,7 @@ class MatchStateService:
     - Persistence of state to database
     - Message metadata storage for Discord UI updates
 
-    Structure: dict[guild_id, dict[pending_match_id, state]]
+    Structure: dict[guild_id, dict[pending_match_id, PendingMatchState]]
     """
 
     def __init__(self, match_repo: IMatchRepository):
@@ -39,8 +56,8 @@ class MatchStateService:
             match_repo: Repository for match data persistence
         """
         self.match_repo = match_repo
-        # Nested dict: guild_id -> pending_match_id -> state
-        self._last_shuffle_by_guild: dict[int, dict[int, dict]] = {}
+        # Nested dict: guild_id -> pending_match_id -> PendingMatchState
+        self._last_shuffle_by_guild: dict[int, dict[int, PendingMatchState]] = {}
         self._shuffle_state_lock = threading.RLock()
 
     @contextmanager
@@ -64,7 +81,7 @@ class MatchStateService:
         with self._shuffle_state_lock:
             yield
 
-    def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> dict | None:
+    def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> PendingMatchState | None:
         """
         Get the pending shuffle state for a guild.
 
@@ -76,7 +93,7 @@ class MatchStateService:
                              the single match if only one exists.
 
         Returns:
-            Pending match state dict or None if no pending shuffle
+            Pending match state or None if no pending shuffle
         """
         with self._shuffle_state_lock:
             normalized = normalize_guild_id(guild_id)
@@ -87,27 +104,25 @@ class MatchStateService:
                 if state:
                     return state
                 # Try to load from DB
-                persisted = self.match_repo.get_pending_match_by_id(pending_match_id)
-                if persisted:
+                row = self.match_repo.get_pending_match_by_id(pending_match_id)
+                state = _row_to_state(row)
+                if state:
                     if normalized not in self._last_shuffle_by_guild:
                         self._last_shuffle_by_guild[normalized] = {}
-                    self._last_shuffle_by_guild[normalized][pending_match_id] = persisted
-                    return persisted
-                return None
+                    self._last_shuffle_by_guild[normalized][pending_match_id] = state
+                return state
 
             # Always check database for authoritative count (fixes stale cache issue)
             # get_pending_match returns single match only if exactly one exists in DB
-            persisted = self.match_repo.get_pending_match(guild_id)
-            if persisted:
-                pmid = persisted.get("pending_match_id")
-                if pmid:
-                    if normalized not in self._last_shuffle_by_guild:
-                        self._last_shuffle_by_guild[normalized] = {}
-                    self._last_shuffle_by_guild[normalized][pmid] = persisted
-                return persisted
-            return None
+            row = self.match_repo.get_pending_match(guild_id)
+            state = _row_to_state(row)
+            if state and state.pending_match_id is not None:
+                if normalized not in self._last_shuffle_by_guild:
+                    self._last_shuffle_by_guild[normalized] = {}
+                self._last_shuffle_by_guild[normalized][state.pending_match_id] = state
+            return state
 
-    def get_all_pending_matches(self, guild_id: int | None = None) -> list[dict]:
+    def get_all_pending_matches(self, guild_id: int | None = None) -> list[PendingMatchState]:
         """
         Get all pending match states for a guild.
 
@@ -115,26 +130,28 @@ class MatchStateService:
             guild_id: Guild ID to look up
 
         Returns:
-            List of pending match state dicts
+            List of pending match states
         """
         with self._shuffle_state_lock:
             normalized = normalize_guild_id(guild_id)
 
             # Load from database
-            persisted = self.match_repo.get_pending_matches(guild_id)
+            rows = self.match_repo.get_pending_matches(guild_id)
 
             # Update in-memory cache
             if normalized not in self._last_shuffle_by_guild:
                 self._last_shuffle_by_guild[normalized] = {}
 
-            for match in persisted:
-                pmid = match.get("pending_match_id")
-                if pmid:
-                    self._last_shuffle_by_guild[normalized][pmid] = match
+            results: list[PendingMatchState] = []
+            for row in rows:
+                state = _row_to_state(row)
+                if state and state.pending_match_id is not None:
+                    self._last_shuffle_by_guild[normalized][state.pending_match_id] = state
+                if state:
+                    results.append(state)
+            return results
 
-            return persisted
-
-    def get_pending_match_for_player(self, guild_id: int | None, discord_id: int) -> dict | None:
+    def get_pending_match_for_player(self, guild_id: int | None, discord_id: int) -> PendingMatchState | None:
         """
         Find the pending match that contains a specific player.
 
@@ -146,8 +163,8 @@ class MatchStateService:
             Pending match state if player is a participant, None otherwise
         """
         with self._shuffle_state_lock:
-            # Use repository method which checks payload
-            return self.match_repo.get_pending_match_for_player(guild_id, discord_id)
+            row = self.match_repo.get_pending_match_for_player(guild_id, discord_id)
+            return _row_to_state(row)
 
     def get_all_pending_player_ids(self, guild_id: int | None = None) -> set[int]:
         """
@@ -159,7 +176,7 @@ class MatchStateService:
         with self._shuffle_state_lock:
             return self.match_repo.get_all_pending_match_player_ids(guild_id)
 
-    def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
+    def set_last_shuffle(self, guild_id: int | None, state: PendingMatchState) -> None:
         """
         Set the pending shuffle state for a guild.
 
@@ -167,10 +184,10 @@ class MatchStateService:
 
         Args:
             guild_id: Guild ID
-            payload: The pending match state dict (must have pending_match_id)
+            state: The pending match state (must have pending_match_id)
         """
         with self._shuffle_state_lock:
-            pending_match_id = payload.get("pending_match_id")
+            pending_match_id = state.pending_match_id
             if pending_match_id is None:
                 # Legacy single-match mode - use 0 as placeholder
                 pending_match_id = 0
@@ -178,7 +195,7 @@ class MatchStateService:
             normalized = normalize_guild_id(guild_id)
             if normalized not in self._last_shuffle_by_guild:
                 self._last_shuffle_by_guild[normalized] = {}
-            self._last_shuffle_by_guild[normalized][pending_match_id] = payload
+            self._last_shuffle_by_guild[normalized][pending_match_id] = state
 
     def set_shuffle_message_url(self, guild_id: int | None, jump_url: str, pending_match_id: int | None = None) -> None:
         """
@@ -231,21 +248,21 @@ class MatchStateService:
             if not state:
                 return
             if message_id is not None:
-                state["shuffle_message_id"] = message_id
+                state.shuffle_message_id = message_id
             if channel_id is not None:
-                state["shuffle_channel_id"] = channel_id
+                state.shuffle_channel_id = channel_id
             if jump_url is not None:
-                state["shuffle_message_jump_url"] = jump_url
+                state.shuffle_message_jump_url = jump_url
             if thread_message_id is not None:
-                state["thread_shuffle_message_id"] = thread_message_id
+                state.thread_shuffle_message_id = thread_message_id
             if thread_id is not None:
-                state["thread_shuffle_thread_id"] = thread_id
+                state.thread_shuffle_thread_id = thread_id
             if origin_channel_id is not None:
-                state["origin_channel_id"] = origin_channel_id
+                state.origin_channel_id = origin_channel_id
             if cmd_message_id is not None:
-                state["cmd_shuffle_message_id"] = cmd_message_id
+                state.cmd_shuffle_message_id = cmd_message_id
             if cmd_channel_id is not None:
-                state["cmd_shuffle_channel_id"] = cmd_channel_id
+                state.cmd_shuffle_channel_id = cmd_channel_id
             self.persist_state(guild_id, state)
 
     def get_shuffle_message_info(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int | None]:
@@ -261,17 +278,29 @@ class MatchStateService:
             origin_channel_id, cmd_message_id, cmd_channel_id
         """
         with self._shuffle_state_lock:
-            state = self.get_last_shuffle(guild_id, pending_match_id) or {}
+            state = self.get_last_shuffle(guild_id, pending_match_id)
+            if not state:
+                return {
+                    "message_id": None,
+                    "channel_id": None,
+                    "jump_url": None,
+                    "thread_message_id": None,
+                    "thread_id": None,
+                    "origin_channel_id": None,
+                    "pending_match_id": None,
+                    "cmd_message_id": None,
+                    "cmd_channel_id": None,
+                }
             return {
-                "message_id": state.get("shuffle_message_id"),
-                "channel_id": state.get("shuffle_channel_id"),
-                "jump_url": state.get("shuffle_message_jump_url"),
-                "thread_message_id": state.get("thread_shuffle_message_id"),
-                "thread_id": state.get("thread_shuffle_thread_id"),
-                "origin_channel_id": state.get("origin_channel_id"),
-                "pending_match_id": state.get("pending_match_id"),
-                "cmd_message_id": state.get("cmd_shuffle_message_id"),
-                "cmd_channel_id": state.get("cmd_shuffle_channel_id"),
+                "message_id": state.shuffle_message_id,
+                "channel_id": state.shuffle_channel_id,
+                "jump_url": state.shuffle_message_jump_url,
+                "thread_message_id": state.thread_shuffle_message_id,
+                "thread_id": state.thread_shuffle_thread_id,
+                "origin_channel_id": state.origin_channel_id,
+                "pending_match_id": state.pending_match_id,
+                "cmd_message_id": state.cmd_shuffle_message_id,
+                "cmd_channel_id": state.cmd_shuffle_channel_id,
             }
 
     def clear_last_shuffle(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
@@ -300,7 +329,7 @@ class MatchStateService:
                 self._last_shuffle_by_guild.pop(normalized, None)
                 self.match_repo.clear_pending_match(guild_id)
 
-    def ensure_pending_state(self, guild_id: int | None, pending_match_id: int | None = None) -> dict:
+    def ensure_pending_state(self, guild_id: int | None, pending_match_id: int | None = None) -> PendingMatchState:
         """
         Get the pending state, raising an error if none exists.
 
@@ -309,7 +338,7 @@ class MatchStateService:
             pending_match_id: Optional specific match ID
 
         Returns:
-            The pending match state dict
+            The pending match state
 
         Raises:
             ValueError: If no recent shuffle found
@@ -319,74 +348,43 @@ class MatchStateService:
             raise ValueError("No recent shuffle found.")
         return state
 
-    def ensure_record_submissions(self, state: dict) -> dict[int, dict[str, Any]]:
+    def ensure_record_submissions(self, state: PendingMatchState) -> dict[int, dict[str, Any]]:
         """
-        Ensure record_submissions dict exists in state.
+        Ensure record_submissions dict has integer keys.
 
         JSON serialization converts integer keys to strings, so we need to
         normalize the keys back to integers when loading from the database.
+        ``from_dict`` does this on read; this method is kept for parity with
+        callers that mutate the dict in place after acquiring the state lock.
 
         Args:
-            state: The pending match state dict
+            state: The pending match state
 
         Returns:
             The record_submissions dict with integer keys
         """
-        if "record_submissions" not in state:
-            state["record_submissions"] = {}
-        else:
-            # Normalize string keys to integers (JSON serialization converts int keys to str)
-            submissions = state["record_submissions"]
-            normalized = {}
-            for key, value in submissions.items():
-                # Convert string keys to integers
-                int_key = int(key) if isinstance(key, str) else key
-                normalized[int_key] = value
-            state["record_submissions"] = normalized
-        return state["record_submissions"]
+        normalized: dict[int, dict[str, Any]] = {}
+        for key, value in state.record_submissions.items():
+            int_key = int(key) if isinstance(key, str) else key
+            normalized[int_key] = value
+        state.record_submissions = normalized
+        return state.record_submissions
 
-    def build_pending_match_payload(self, state: dict) -> dict:
+    def build_pending_match_payload(self, state: PendingMatchState) -> dict:
         """
         Build a clean payload for database persistence from state.
 
+        Strict on write: only known fields. Excludes pending_match_id (row PK).
+
         Args:
-            state: The full in-memory state dict
+            state: The full in-memory state
 
         Returns:
             A dict with only the fields needed for persistence
         """
-        return {
-            "radiant_team_ids": state["radiant_team_ids"],
-            "dire_team_ids": state["dire_team_ids"],
-            "radiant_roles": state["radiant_roles"],
-            "dire_roles": state["dire_roles"],
-            "radiant_value": state["radiant_value"],
-            "dire_value": state["dire_value"],
-            "value_diff": state["value_diff"],
-            "first_pick_team": state["first_pick_team"],
-            "excluded_player_ids": state.get("excluded_player_ids", []),
-            "record_submissions": state.get("record_submissions", {}),
-            "shuffle_timestamp": state.get("shuffle_timestamp"),
-            "bet_lock_until": state.get("bet_lock_until"),
-            "shuffle_message_jump_url": state.get("shuffle_message_jump_url"),
-            "shuffle_message_id": state.get("shuffle_message_id"),
-            "shuffle_channel_id": state.get("shuffle_channel_id"),
-            "cmd_shuffle_message_id": state.get("cmd_shuffle_message_id"),
-            "cmd_shuffle_channel_id": state.get("cmd_shuffle_channel_id"),
-            "thread_shuffle_message_id": state.get("thread_shuffle_message_id"),
-            "thread_shuffle_thread_id": state.get("thread_shuffle_thread_id"),
-            "origin_channel_id": state.get("origin_channel_id"),
-            "betting_mode": state.get("betting_mode", "pool"),
-            "is_draft": state.get("is_draft", False),
-            "effective_avoid_ids": state.get("effective_avoid_ids", []),
-            "effective_deal_ids": state.get("effective_deal_ids", []),
-            "is_bomb_pot": state.get("is_bomb_pot", False),
-            "is_openskill_shuffle": state.get("is_openskill_shuffle", False),
-            "balancing_rating_system": state.get("balancing_rating_system", "glicko"),
-            "pending_match_id": state.get("pending_match_id"),
-        }
+        return state.to_dict()
 
-    def persist_state(self, guild_id: int | None, state: dict) -> int:
+    def persist_state(self, guild_id: int | None, state: PendingMatchState) -> int:
         """
         Persist the pending match state to database.
 
@@ -394,13 +392,13 @@ class MatchStateService:
 
         Args:
             guild_id: Guild ID
-            state: The state dict to persist
+            state: The state to persist
 
         Returns:
             pending_match_id: The ID of the persisted match
         """
         payload = self.build_pending_match_payload(state)
-        pending_match_id = state.get("pending_match_id")
+        pending_match_id = state.pending_match_id
 
         if pending_match_id is not None:
             # Update existing match
@@ -408,8 +406,7 @@ class MatchStateService:
         else:
             # Create new match
             pending_match_id = self.match_repo.save_pending_match(guild_id, payload)
-            state["pending_match_id"] = pending_match_id
-            payload["pending_match_id"] = pending_match_id
+            state.pending_match_id = pending_match_id
 
         # Update in-memory cache to keep it in sync
         self.set_last_shuffle(guild_id, state)

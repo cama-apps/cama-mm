@@ -180,7 +180,7 @@ class BettingCommands(commands.Cog):
 
         choices = []
         for match in pending:
-            pmid = match.get("pending_match_id")
+            pmid = match.pending_match_id
             if pmid is None:
                 continue
             match_label = f"Match #{pmid}"

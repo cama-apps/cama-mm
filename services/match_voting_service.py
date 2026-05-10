@@ -45,10 +45,9 @@ class MatchVotingService:
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return False
-        submissions = state.get("record_submissions", {})
         return any(
             sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
-            for sub in submissions.values()
+            for sub in state.record_submissions.values()
         )
 
     def has_admin_abort_submission(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
@@ -65,9 +64,8 @@ class MatchVotingService:
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return False
-        submissions = state.get("record_submissions", {})
         return any(
-            sub.get("is_admin") and sub.get("result") == "abort" for sub in submissions.values()
+            sub.get("is_admin") and sub.get("result") == "abort" for sub in state.record_submissions.values()
         )
 
     def add_record_submission(
@@ -105,7 +103,7 @@ class MatchVotingService:
             # Allow conflicting votes - requires MIN_NON_ADMIN_SUBMISSIONS matching submissions
             submissions[user_id] = {"result": result, "is_admin": is_admin}
             self.state_service.persist_state(guild_id, state)
-            pmid = state.get("pending_match_id")
+            pmid = state.pending_match_id
             vote_counts = self.get_vote_counts(guild_id, pmid)
             return {
                 "non_admin_count": self.get_non_admin_submission_count(guild_id, pmid),
@@ -130,10 +128,9 @@ class MatchVotingService:
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return 0
-        submissions = state.get("record_submissions", {})
         return sum(
             1
-            for sub in submissions.values()
+            for sub in state.record_submissions.values()
             if not sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
         )
 
@@ -151,10 +148,9 @@ class MatchVotingService:
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return 0
-        submissions = state.get("record_submissions", {})
         return sum(
             1
-            for sub in submissions.values()
+            for sub in state.record_submissions.values()
             if not sub.get("is_admin") and sub.get("result") == "abort"
         )
 
@@ -203,7 +199,7 @@ class MatchVotingService:
                 raise ValueError("You already submitted a different result.")
             submissions[user_id] = {"result": "abort", "is_admin": is_admin}
             self.state_service.persist_state(guild_id, state)
-            pmid = state.get("pending_match_id")
+            pmid = state.pending_match_id
             return {
                 "non_admin_count": self.get_abort_submission_count(guild_id, pmid),
                 "total_count": len(submissions),
@@ -225,9 +221,8 @@ class MatchVotingService:
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return {"radiant": 0, "dire": 0}
-        submissions = state.get("record_submissions", {})
         counts = {"radiant": 0, "dire": 0}
-        for sub in submissions.values():
+        for sub in state.record_submissions.values():
             if not sub.get("is_admin"):
                 result = sub.get("result")
                 if result in counts:
@@ -251,10 +246,9 @@ class MatchVotingService:
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return None
-        submissions = state.get("record_submissions", {})
 
         # If there's an admin submission (radiant/dire), use that result
-        for sub in submissions.values():
+        for sub in state.record_submissions.values():
             result = sub.get("result")
             if sub.get("is_admin") and result in ("radiant", "dire"):
                 return result

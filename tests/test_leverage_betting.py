@@ -187,13 +187,14 @@ class TestLeverageBetting:
         )
         player_repo.update_balance(1005, TEST_GUILD_ID, 100)
 
+        from domain.models.pending_match_state import PendingMatchState
         now_ts = int(time.time())
-        pending_state = {
-            "shuffle_timestamp": now_ts - 1,
-            "bet_lock_until": now_ts + 600,
-            "radiant_team_ids": [],
-            "dire_team_ids": [],
-        }
+        pending_state = PendingMatchState(
+            shuffle_timestamp=now_ts - 1,
+            bet_lock_until=now_ts + 600,
+            radiant_team_ids=[],
+            dire_team_ids=[],
+        )
 
         with pytest.raises(ValueError, match="Invalid leverage"):
             betting_service.place_bet(

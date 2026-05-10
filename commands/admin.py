@@ -1180,7 +1180,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        current_lock = pending_state.get("bet_lock_until")
+        current_lock = pending_state.bet_lock_until
         if not current_lock:
             await interaction.response.send_message(
                 "❌ No betting window found for the current match.",
@@ -1194,7 +1194,7 @@ class AdminCommands(commands.Cog):
         new_lock_until = base_time + (minutes * 60)
 
         # Update state
-        pending_state["bet_lock_until"] = new_lock_until
+        pending_state.bet_lock_until = new_lock_until
         await asyncio.to_thread(match_service.set_last_shuffle, guild_id, pending_state)
         await asyncio.to_thread(
             match_service._persist_match_state, guild_id, pending_state
@@ -1208,8 +1208,8 @@ class AdminCommands(commands.Cog):
             await match_cog._schedule_betting_reminders(guild_id, new_lock_until)
 
         # Update the shuffle embed if we can find it
-        message_id = pending_state.get("shuffle_message_id")
-        channel_id = pending_state.get("shuffle_channel_id")
+        message_id = pending_state.shuffle_message_id
+        channel_id = pending_state.shuffle_channel_id
         embed_updated = False
 
         if message_id and channel_id:
@@ -1223,7 +1223,7 @@ class AdminCommands(commands.Cog):
                         # Find and update the betting field
                         betting_service = getattr(self.bot, "betting_service", None)
                         totals = {"radiant": 0, "dire": 0}
-                        betting_mode = pending_state.get("betting_mode", "pool")
+                        betting_mode = pending_state.betting_mode
 
                         if betting_service:
                             totals = await asyncio.to_thread(
@@ -1264,7 +1264,7 @@ class AdminCommands(commands.Cog):
                 logger.warning(f"Failed to update shuffle embed after extending betting: {exc}")
 
         # Send public announcement
-        jump_url = pending_state.get("shuffle_message_jump_url", "")
+        jump_url = pending_state.shuffle_message_jump_url or ""
         jump_link = f" [View match]({jump_url})" if jump_url else ""
 
         await interaction.response.send_message(

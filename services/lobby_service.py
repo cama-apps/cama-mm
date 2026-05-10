@@ -5,6 +5,7 @@ Lobby orchestration and embed helpers.
 import asyncio
 
 from domain.models.lobby import Lobby
+from domain.models.pending_match_state import PendingMatchState
 from repositories.interfaces import IPlayerRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from utils.embeds import create_lobby_embed
@@ -54,7 +55,7 @@ class LobbyService:
 
     def join_lobby(
         self, discord_id: int, guild_id: int | None = 0
-    ) -> tuple[bool, str, dict | None]:
+    ) -> tuple[bool, str, PendingMatchState | None]:
         """
         Join a player to the lobby.
 
@@ -66,8 +67,7 @@ class LobbyService:
             Tuple of (success, reason, pending_info):
             - success: True if joined, False otherwise
             - reason: "" on success, or one of: "in_pending_match", "lobby_full", "already_joined"
-            - pending_info: Dict with pending_match_id and shuffle_message_jump_url if blocked,
-                           None otherwise
+            - pending_info: PendingMatchState if blocked by an existing match, None otherwise
         """
         # Check if player is in a pending match FIRST
         if self.match_state_service:
@@ -92,7 +92,7 @@ class LobbyService:
 
     def join_lobby_conditional(
         self, discord_id: int, guild_id: int | None = 0
-    ) -> tuple[bool, str, dict | None]:
+    ) -> tuple[bool, str, PendingMatchState | None]:
         """
         Add a player to the conditional (frogling) queue.
         """
