@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from utils.drawing import draw_hero_grid
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -101,6 +102,7 @@ class HeroGridCommands(commands.Cog):
             app_commands.Choice(name="All Players", value="all"),
         ]
     )
+    @require_guild
     async def herogrid(
         self,
         interaction: discord.Interaction,
@@ -113,7 +115,7 @@ class HeroGridCommands(commands.Cog):
             return
 
         source_value = source.value if source else "auto"
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Determine player list via priority chain
         player_ids, source_label = await asyncio.to_thread(

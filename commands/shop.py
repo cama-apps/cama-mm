@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from config import (
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
     PACKAGE_DEAL_GAMES_DURATION,
@@ -215,6 +216,7 @@ class ShopCommands(commands.Cog):
         hero="Hero to protect from bans (required for 'Protect Hero' option)",
     )
     @app_commands.autocomplete(item=item_autocomplete, hero=hero_autocomplete)
+    @require_guild
     async def shop(
         self,
         interaction: discord.Interaction,
@@ -223,11 +225,10 @@ class ShopCommands(commands.Cog):
         hero: str | None = None,
     ):
         """Buy items from the shop with jopacoin."""
-        guild = interaction.guild if interaction.guild else None
-        rl_gid = guild.id if guild else 0
+        guild_id = interaction.guild.id
         rl = GLOBAL_RATE_LIMITER.check(
             scope="shop",
-            guild_id=rl_gid,
+            guild_id=guild_id,
             user_id=interaction.user.id,
             limit=3,
             per_seconds=60,
@@ -299,7 +300,6 @@ class ShopCommands(commands.Cog):
             await self._handle_recalibrate(interaction)
         elif item == "recalibrate_cooldown":
             # User selected the ON COOLDOWN item — block with cooldown info
-            guild_id = interaction.guild.id if interaction.guild else None
             if self.recalibration_service:
                 check = await asyncio.to_thread(
                     self.recalibration_service.can_recalibrate,
@@ -1465,10 +1465,11 @@ class ShopCommands(commands.Cog):
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="myavoids", description="View your active soft avoids")
+    @require_guild
     async def myavoids(self, interaction: discord.Interaction):
         """View your active soft avoids."""
         user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check if soft_avoid_service is available
         soft_avoid_service = getattr(self.bot, "soft_avoid_service", None)
@@ -1504,10 +1505,11 @@ class ShopCommands(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="mydeals", description="View your active package deals")
+    @require_guild
     async def mydeals(self, interaction: discord.Interaction):
         """View your active package deals."""
         user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check if package_deal_service is available
         package_deal_service = getattr(self.bot, "package_deal_service", None)
@@ -1568,6 +1570,7 @@ class ShopCommands(commands.Cog):
         app_commands.Choice(name="Ult • Dark Bargain (Black, 350 JC, taps mana) — 800 JC instant 0%-fee debt", value="dark_bargain"),
     ])
     @app_commands.checks.cooldown(1, 10)
+    @require_guild
     async def manashop(
         self,
         interaction: discord.Interaction,
@@ -1577,7 +1580,7 @@ class ShopCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         user_id = interaction.user.id
 
         # Check registration

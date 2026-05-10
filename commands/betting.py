@@ -97,7 +97,7 @@ from commands.betting_helpers.wheel_views import (
     TownTrialView,
     WheelRerollView,
 )
-from commands.checks import require_gamba_channel
+from commands.checks import require_gamba_channel, require_guild
 from config import (
     LIGHTNING_BOLT_MIN_TAX,
     LIGHTNING_BOLT_PCT_MAX,
@@ -303,12 +303,13 @@ class BettingCommands(commands.Cog):
     async def balance(self, interaction: discord.Interaction):
         await _balance_action(self, interaction)
     @app_commands.command(name="gamba", description="Spin the Wheel of Fortune! (once per day)")
+    @require_guild
     async def gamba(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
 
         user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         now = time.time()
 
         # Check if player is registered
@@ -1724,6 +1725,7 @@ class BettingCommands(commands.Cog):
             app_commands.Choice(name="execute", value="execute"),
         ]
     )
+    @require_guild
     async def disburse(
         self,
         interaction: discord.Interaction,
@@ -1736,7 +1738,7 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         action_value = action.value if action else "status"
 
         if action_value == "propose":

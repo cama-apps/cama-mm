@@ -73,11 +73,12 @@ class FakeChannel:
 
 
 class FakeInteraction:
-    def __init__(self, user_id=1, message=None):
+    def __init__(self, user_id=1, message=None, guild_id=9000):
         self.user = SimpleNamespace(id=user_id, mention=f"<@{user_id}>")
-        self.guild = None
+        self.guild = SimpleNamespace(id=guild_id) if guild_id is not None else None
         self.channel = FakeChannel(message or FakeMessage())
         self.followup = FakeFollowup()
+        self.response = AsyncMock()
 
 
 def make_lobby_service():
@@ -96,13 +97,13 @@ def make_bot(channel=None):
 @pytest.mark.asyncio
 async def test_kick_removes_reaction_and_updates_message(monkeypatch):
     lobby_manager, lobby_service = make_lobby_service()
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=9000)
     lobby.add_player(42)
-    lobby_service.set_lobby_message_id(message_id=12345, channel_id=100)
+    lobby_service.set_lobby_message_id(message_id=12345, channel_id=100, guild_id=9000)
 
     fake_message = FakeMessage()
     fake_channel = FakeChannel(fake_message)
-    interaction = FakeInteraction(user_id=1, message=fake_message)
+    interaction = FakeInteraction(user_id=1, message=fake_message, guild_id=9000)
     kicked_player = SimpleNamespace(id=42, mention="<@42>", display_name="TestPlayer")
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))

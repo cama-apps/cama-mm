@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from config import (
     MMR_MODAL_RETRY_LIMIT,
     MMR_MODAL_TIMEOUT_MINUTES,
@@ -42,6 +43,7 @@ class RegistrationCommands(commands.Cog):
 
     @player.command(name="register", description="Register yourself as a player")
     @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
+    @require_guild
     async def register(self, interaction: discord.Interaction, steam_id: int):
         """Register a new player."""
         logger.info(
@@ -52,7 +54,7 @@ class RegistrationCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         async def _finalize_register(mmr_override: int | None = None):
             result = await asyncio.to_thread(
@@ -196,6 +198,7 @@ class RegistrationCommands(commands.Cog):
         steam_id="Steam32 ID (found in your Dotabuff URL)",
         set_primary="Set as your primary Steam account (default: False)",
     )
+    @require_guild
     async def linksteam(
         self,
         interaction: discord.Interaction,
@@ -215,7 +218,7 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send("❌ Player service not available.", ephemeral=True)
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check if player is registered
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
@@ -290,6 +293,7 @@ class RegistrationCommands(commands.Cog):
 
     @player.command(name="unlink", description="Remove a linked Steam account")
     @app_commands.describe(steam_id="Steam32 ID to remove")
+    @require_guild
     async def unlinksteam(self, interaction: discord.Interaction, steam_id: int):
         """Remove a linked Steam ID from your account."""
         logger.info(
@@ -304,7 +308,7 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send("❌ Player service not available.", ephemeral=True)
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check if player is registered
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
@@ -361,6 +365,7 @@ class RegistrationCommands(commands.Cog):
             )
 
     @player.command(name="steamids", description="View your linked Steam accounts")
+    @require_guild
     async def mysteamids(self, interaction: discord.Interaction):
         """View all Steam IDs linked to your account."""
         logger.info(f"MySteamIds command: User {interaction.user.id} ({interaction.user})")
@@ -372,7 +377,7 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send("❌ Player service not available.", ephemeral=True)
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check if player is registered
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
@@ -412,6 +417,7 @@ class RegistrationCommands(commands.Cog):
 
     @player.command(name="roles", description="Set your preferred roles")
     @app_commands.describe(roles="Roles (1-5, e.g., '123' or '1,2,3' for carry, mid, offlane)")
+    @require_guild
     async def set_roles(self, interaction: discord.Interaction, roles: str):
         """Set player's preferred roles."""
         logger.info(
@@ -445,7 +451,7 @@ class RegistrationCommands(commands.Cog):
             # Deduplicate roles while preserving order
             role_list = list(dict.fromkeys(role_list))
 
-            guild_id = interaction.guild.id if interaction.guild else None
+            guild_id = interaction.guild.id
             await asyncio.to_thread(self.player_service.set_roles, interaction.user.id, guild_id, role_list)
 
             role_display = ", ".join([format_role_display(r) for r in role_list])
@@ -461,12 +467,13 @@ class RegistrationCommands(commands.Cog):
             )
 
     @player.command(name="exclusion", description="Check your exclusion factor")
+    @require_guild
     async def exclusion(self, interaction: discord.Interaction):
         """Show the player's current exclusion count."""
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         player = await asyncio.to_thread(
             self.player_service.get_player, interaction.user.id, guild_id

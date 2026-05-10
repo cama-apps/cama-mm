@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from services.match_enrichment_service import MatchEnrichmentService
 from services.opendota_player_service import OpenDotaPlayerService
 from services.permissions import has_admin_permission
@@ -54,6 +55,7 @@ class EnrichmentCommands(commands.Cog):
         name="setleague", description="Set the Valve league ID for this server (Admin)"
     )
     @app_commands.describe(league_id="The Valve/Dota 2 league ID")
+    @require_guild
     async def setleague(self, interaction: discord.Interaction, league_id: int):
         """Set the league ID for match discovery."""
         logger.info(f"Setleague command: User {interaction.user.id} setting league to {league_id}")
@@ -65,14 +67,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
-        if not guild_id:
-            await safe_followup(
-                interaction,
-                content="This command must be used in a server.",
-                ephemeral=True,
-            )
-            return
+        guild_id = interaction.guild.id
 
         await asyncio.to_thread(self.guild_config_service.set_league_id, guild_id, league_id)
         await safe_followup(
@@ -90,6 +85,7 @@ class EnrichmentCommands(commands.Cog):
         valve_match_id="The Dota 2 match ID (optional - defaults to enriching most recent match)",
         internal_match_id="Our internal match ID (optional - defaults to most recent)",
     )
+    @require_guild
     async def enrichmatch(
         self,
         interaction: discord.Interaction,
@@ -114,7 +110,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Determine which internal match to enrich
         if internal_match_id:
@@ -259,6 +255,7 @@ class EnrichmentCommands(commands.Cog):
         )
 
     @enrich.command(name="config", description="Show current server configuration")
+    @require_guild
     async def showconfig(self, interaction: discord.Interaction):
         """Show the current configuration for this server."""
         logger.info(f"Showconfig command: User {interaction.user.id}")
@@ -266,14 +263,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
-        if not guild_id:
-            await safe_followup(
-                interaction,
-                content="This command must be used in a server.",
-                ephemeral=True,
-            )
-            return
+        guild_id = interaction.guild.id
 
         config = await asyncio.to_thread(self.guild_config_service.get_config, guild_id)
 
@@ -304,6 +294,7 @@ class EnrichmentCommands(commands.Cog):
         user="Player to view history for (defaults to yourself)",
         limit="Number of matches to show (default: 5, max: 10)",
     )
+    @require_guild
     async def matchhistory(
         self,
         interaction: discord.Interaction,
@@ -321,7 +312,7 @@ class EnrichmentCommands(commands.Cog):
 
         target_id = user.id if user else interaction.user.id
         target_name = user.display_name if user else interaction.user.display_name
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Validate player exists
         player = await asyncio.to_thread(self.player_service.get_player, target_id, guild_id)
@@ -489,6 +480,7 @@ class EnrichmentCommands(commands.Cog):
         match_id="Internal match ID to view (defaults to most recent)",
         user="Player whose most recent match to view (if no match_id)",
     )
+    @require_guild
     async def viewmatch(
         self,
         interaction: discord.Interaction,
@@ -498,7 +490,7 @@ class EnrichmentCommands(commands.Cog):
         """View detailed stats for a specific match with the enriched embed."""
         target_id = user.id if user else interaction.user.id
         target_name = user.display_name if user else interaction.user.display_name
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         logger.info(
             f"Viewmatch command: User {interaction.user.id}, match_id={match_id}, target={target_id}"
@@ -635,6 +627,7 @@ class EnrichmentCommands(commands.Cog):
         dry_run="Preview only, don't apply enrichments (default: False)",
         refill_fantasy="Re-enrich matches that have enrichment but no fantasy data",
     )
+    @require_guild
     async def autodiscover(
         self,
         interaction: discord.Interaction,
@@ -658,9 +651,10 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        guild_id = interaction.guild.id
+
         # Handle refill_fantasy mode - re-enrich matches that have valve_match_id but no fantasy data
         if refill_fantasy:
-            guild_id = interaction.guild.id if interaction.guild else None
             await self._refill_fantasy_data(interaction, dry_run, guild_id)
             return
 
@@ -679,8 +673,6 @@ class EnrichmentCommands(commands.Cog):
             content=f"Starting match discovery (dry_run={dry_run})... This may take a while.",
             ephemeral=True,
         )
-
-        guild_id = interaction.guild.id if interaction.guild else None
         results = await asyncio.to_thread(
             functools.partial(
                 discovery_service.discover_all_matches,
@@ -827,6 +819,7 @@ class EnrichmentCommands(commands.Cog):
         name="wipeall",
         description="[Admin] Wipe all match enrichments",
     )
+    @require_guild
     async def wipediscovered(self, interaction: discord.Interaction):
         """Clear all match enrichments so they can be re-discovered."""
         if not has_admin_permission(interaction):
@@ -842,7 +835,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         enriched_count = await asyncio.to_thread(self.match_service.get_enriched_count, guild_id)
 
         if enriched_count == 0:
