@@ -16,6 +16,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from utils.drawing import draw_scout_report
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -239,6 +240,7 @@ class ScoutCommands(commands.Cog):
             app_commands.Choice(name="Dire", value="dire"),
         ]
     )
+    @require_guild
     async def scout(
         self,
         interaction: discord.Interaction,
@@ -249,7 +251,7 @@ class ScoutCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         team_value = team.value if team else None
 
         # Determine player IDs

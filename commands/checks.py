@@ -3,8 +3,48 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import types
 
 import discord
+
+
+def require_guild(handler):
+    """Guard a slash command handler against DM context.
+
+    Wraps a method ``async def handler(self, interaction, *args, **kwargs)``.
+    If ``interaction.guild`` is ``None`` (DM), responds with an ephemeral
+    error and returns early without invoking the wrapped handler. Otherwise
+    delegates to the handler unchanged — handlers can safely read
+    ``interaction.guild.id`` without a None-check inside the body.
+
+    Must run before ``interaction.response`` is used (i.e., before any
+    deferral); the wrapper sends the error via ``response.send_message``.
+
+    The returned wrapper is rebound to the handler's ``__globals__`` so
+    discord.py's annotation resolution (which uses
+    ``callback.__globals__``) sees the symbols imported by the handler's
+    own module rather than this module's.
+    """
+
+    async def _impl(self, interaction: discord.Interaction, *args, **kwargs):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+        return await handler(self, interaction, *args, **kwargs)
+
+    wrapper = types.FunctionType(
+        _impl.__code__,
+        handler.__globals__,
+        name=handler.__name__,
+        argdefs=_impl.__defaults__,
+        closure=_impl.__closure__,
+    )
+    functools.update_wrapper(wrapper, handler)
+    return wrapper
 
 
 async def require_gamba_channel(

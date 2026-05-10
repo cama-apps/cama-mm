@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -81,9 +82,10 @@ class RollCommands(commands.Cog):
 
     @app_commands.command(name="roll", description="Roll the cosmic dice and risk your jopacoins!")
     @app_commands.describe(value="A positive integer to roll up to, or 'doggeh' for mystical prophecy")
+    @require_guild
     async def roll(self, interaction: discord.Interaction, value: str):
         user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Registration check
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)

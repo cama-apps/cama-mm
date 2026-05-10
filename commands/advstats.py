@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from services.pairings_service import PairingsService
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -38,6 +39,7 @@ class AdvancedStatsCommands(commands.Cog):
         player1="First player",
         player2="Second player",
     )
+    @require_guild
     async def matchup(
         self,
         interaction: discord.Interaction,
@@ -63,7 +65,7 @@ class AdvancedStatsCommands(commands.Cog):
             return
 
         # Verify both players are registered
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         p1 = await asyncio.to_thread(self.player_service.get_player, player1.id, guild_id)
         p2 = await asyncio.to_thread(self.player_service.get_player, player2.id, guild_id)
 

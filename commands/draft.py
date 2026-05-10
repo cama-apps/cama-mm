@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from config import BET_LOCK_SECONDS, BOMB_POT_CHANCE, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
 from domain.models.pending_match_state import PendingMatchState
@@ -376,6 +377,7 @@ class DraftCommands(commands.Cog):
             app_commands.Choice(name="No", value="no"),
         ]
     )
+    @require_guild
     async def setcaptain(
         self,
         interaction: discord.Interaction,
@@ -387,7 +389,7 @@ class DraftCommands(commands.Cog):
             f"setting eligible={eligible.value}"
         )
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check if user is registered
         player = await asyncio.to_thread(self.player_repo.get_by_id, interaction.user.id, guild_id)
@@ -421,12 +423,13 @@ class DraftCommands(commands.Cog):
         name="restart",
         description="Restart the current Immortal Draft (preserves lobby)",
     )
+    @require_guild
     async def restartdraft(
         self,
         interaction: discord.Interaction,
     ):
         """Restart an active draft. Only captains or admins can restart."""
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         user_id = interaction.user.id
 
         logger.info(
@@ -482,6 +485,7 @@ class DraftCommands(commands.Cog):
         name="sampleinprogress",
         description="[Admin] Show sample draft UI mid-draft for testing",
     )
+    @require_guild
     async def sampledraftinprogress(self, interaction: discord.Interaction):
         """Show a sample draft in progress for UI testing."""
         if not has_admin_permission(interaction):
@@ -489,7 +493,7 @@ class DraftCommands(commands.Cog):
             return
 
         # Create a mock draft state
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         state = DraftState(guild_id=guild_id)
 
         # Use fake player IDs (negative) for the sample
@@ -546,6 +550,7 @@ class DraftCommands(commands.Cog):
         name="samplecomplete",
         description="[Admin] Show sample draft complete UI for testing",
     )
+    @require_guild
     async def sampledraftcomplete(self, interaction: discord.Interaction):
         """Show a sample completed draft for UI testing."""
         if not has_admin_permission(interaction):
@@ -553,7 +558,7 @@ class DraftCommands(commands.Cog):
             return
 
         # Create a mock completed draft state
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         state = DraftState(guild_id=guild_id)
 
         state.captain1_id = -101
@@ -1001,6 +1006,7 @@ class DraftCommands(commands.Cog):
         captain1="(Optional) Specify first captain",
         captain2="(Optional) Specify second captain",
     )
+    @require_guild
     async def startdraft(
         self,
         interaction: discord.Interaction,
@@ -1008,7 +1014,7 @@ class DraftCommands(commands.Cog):
         captain2: discord.Member | None = None,
     ):
         """Start an Immortal Draft session."""
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         logger.info(
             f"Startdraft command: User {interaction.user.id} ({interaction.user}) "
             f"in guild {guild_id}, captain1={captain1}, captain2={captain2}"

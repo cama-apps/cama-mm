@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from services.wrapped_service import get_random_flavor
 from utils.hero_lookup import get_hero_name
 from utils.interaction_safety import safe_defer, safe_followup
@@ -448,6 +449,7 @@ class WrappedCog(commands.Cog):
         user="View another user's wrapped",
     )
     @app_commands.checks.cooldown(1, 60)
+    @require_guild
     async def wrapped(
         self,
         interaction: discord.Interaction,
@@ -464,7 +466,7 @@ class WrappedCog(commands.Cog):
             return
 
         year = datetime.now(UTC).year
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         target_user = user or interaction.user
 
         try:

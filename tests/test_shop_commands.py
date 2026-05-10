@@ -18,12 +18,12 @@ from commands.shop import (
 )
 
 
-def _make_interaction(user_id: int = 1001):
+def _make_interaction(user_id: int = 1001, guild_id: int | None = None):
     interaction = MagicMock()
     interaction.user = SimpleNamespace(id=user_id, mention=f"<@{user_id}>", display_name="Buyer")
     interaction.response = AsyncMock()
     interaction.followup = AsyncMock()
-    interaction.guild = None
+    interaction.guild = SimpleNamespace(id=guild_id) if guild_id is not None else None
     interaction.channel = None
     return interaction
 
@@ -34,7 +34,7 @@ async def test_shop_requires_target_for_announce_target(monkeypatch):
     player_service = MagicMock()
     commands = ShopCommands(bot, player_service)
 
-    interaction = _make_interaction()
+    interaction = _make_interaction(guild_id=9000)
 
     monkeypatch.setattr(
         "commands.shop.GLOBAL_RATE_LIMITER.check",
@@ -233,7 +233,7 @@ async def test_shop_mystery_gift_routes_to_handler(monkeypatch):
     player_service.get_player.return_value = None
 
     commands = ShopCommands(bot, player_service)
-    interaction = _make_interaction()
+    interaction = _make_interaction(guild_id=9000)
 
     monkeypatch.setattr(
         "commands.shop.GLOBAL_RATE_LIMITER.check",
@@ -254,7 +254,7 @@ async def test_shop_jopa_coin_routes_to_handler(monkeypatch):
     player_service.get_player.return_value = None
 
     commands = ShopCommands(bot, player_service)
-    interaction = _make_interaction()
+    interaction = _make_interaction(guild_id=9000)
 
     monkeypatch.setattr(
         "commands.shop.GLOBAL_RATE_LIMITER.check",
@@ -276,7 +276,7 @@ async def test_handle_witchs_curse_requires_target(monkeypatch):
     bot = MagicMock()
     player_service = MagicMock()
     commands = ShopCommands(bot, player_service)
-    interaction = _make_interaction()
+    interaction = _make_interaction(guild_id=9000)
 
     monkeypatch.setattr(
         "commands.shop.GLOBAL_RATE_LIMITER.check",

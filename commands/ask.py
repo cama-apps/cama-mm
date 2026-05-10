@@ -14,6 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import RateLimiter
 
@@ -44,6 +45,7 @@ class AskCommands(commands.Cog):
     @app_commands.describe(
         question="Your question (e.g., 'who has the highest win rate?', 'how many matches have been played?')"
     )
+    @require_guild
     async def ask(
         self,
         interaction: discord.Interaction,
@@ -61,12 +63,12 @@ class AskCommands(commands.Cog):
         - "Who plays pos 1 the most?"
         - "What's the best team duo?"
         """
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Rate limit check
         rl_result = AI_RATE_LIMITER.check(
             scope="ai_query",
-            guild_id=guild_id or 0,
+            guild_id=guild_id,
             user_id=interaction.user.id,
             limit=10,  # 10 requests
             per_seconds=60,  # per minute

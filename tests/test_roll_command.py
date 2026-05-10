@@ -142,7 +142,7 @@ class FakeInteraction:
         FakeInteraction._next_id += 1
         self.id = FakeInteraction._next_id
         self.user = types.SimpleNamespace(id=user_id, mention=f"<@{user_id}>")
-        self.guild = guild
+        self.guild = guild if guild is not None else FakeGuild()
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.channel = None
