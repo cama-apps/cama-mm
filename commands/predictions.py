@@ -20,7 +20,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from commands.checks import require_gamba_channel
+from commands.checks import require_gamba_channel, require_guild
 from config import (
     PREDICTION_CONTRACT_VALUE,
     PREDICTION_INITIAL_FAIR_DEFAULT,
@@ -854,6 +854,7 @@ class PredictionCommands(commands.Cog):
         question="The question to predict on",
         initial_fair=f"Starting price (= % implied probability), default {PREDICTION_INITIAL_FAIR_DEFAULT}",
     )
+    @require_guild
     async def create(
         self,
         interaction: discord.Interaction,
@@ -877,7 +878,7 @@ class PredictionCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         try:
             result = await asyncio.to_thread(
                 functools.partial(
@@ -1106,6 +1107,7 @@ class PredictionCommands(commands.Cog):
     @app_commands.describe(
         show_all="Include resolved/cancelled markets",
     )
+    @require_guild
     async def list_markets(
         self,
         interaction: discord.Interaction,
@@ -1116,7 +1118,7 @@ class PredictionCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         open_preds = await asyncio.to_thread(
             self.prediction_service.list_open_orderbook_markets, guild_id
         )
@@ -1293,13 +1295,14 @@ class PredictionCommands(commands.Cog):
     # -- /predict mine ---
 
     @predict.command(name="mine", description="Your open positions across markets")
+    @require_guild
     async def mine(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         positions = await asyncio.to_thread(
             self.prediction_service.get_user_open_positions,
             interaction.user.id, guild_id,
@@ -1406,6 +1409,7 @@ class PredictionCommands(commands.Cog):
         name="refresh_status",
         description="Show refresh state for all open markets in this guild (admin)",
     )
+    @require_guild
     async def refresh_status(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1417,7 +1421,7 @@ class PredictionCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         opens = await asyncio.to_thread(
             self.prediction_service.list_open_orderbook_markets, guild_id
         )

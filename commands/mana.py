@@ -16,7 +16,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from commands.checks import require_gamba_channel
+from commands.checks import require_gamba_channel, require_guild
 from services.mana_service import LAND_COLORS, LAND_EMOJIS, LAND_ORDER, get_today_pst
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -82,6 +82,7 @@ class ManaCommands(commands.Cog):
         all="Roll everyone's mana for today and show the full guild list",
     )
     @app_commands.checks.cooldown(rate=3, per=10)
+    @require_guild
     async def mana(
         self,
         interaction: discord.Interaction,
@@ -93,7 +94,7 @@ class ManaCommands(commands.Cog):
 
         await safe_defer(interaction, ephemeral=False)
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         mana_service: ManaService = interaction.client.mana_service
 
         # --- Guild board: roll everyone then paginate ---

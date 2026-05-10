@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from services.permissions import has_admin_permission
 from utils.drawing import (
     draw_calibration_curve,
@@ -52,6 +53,7 @@ class RatingAnalysisCommands(commands.Cog):
             app_commands.Choice(name="player - Show player's OpenSkill rating details", value="player"),
         ]
     )
+    @require_guild
     async def ratinganalysis(
         self,
         interaction: discord.Interaction,

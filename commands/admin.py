@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS, format_betting_display
@@ -61,14 +62,14 @@ class AdminCommands(commands.Cog):
         count="Number of fake users to add (1-10)",
         captain_eligible="Make fake users captain-eligible for Immortal Draft testing",
     )
+    @require_guild
     async def addfake(
         self,
         interaction: discord.Interaction,
         count: int = 1,
         captain_eligible: bool = False,
     ):
-        guild = interaction.guild if interaction.guild else None
-        rl_gid = guild.id if guild else 0
+        rl_gid = interaction.guild.id
         rl = GLOBAL_RATE_LIMITER.check(
             scope="addfake",
             guild_id=rl_gid,
@@ -129,7 +130,7 @@ class AdminCommands(commands.Cog):
             return
 
         # guild_id for fake users - use None for global (they're not guild-specific)
-        addfake_guild_id = interaction.guild.id if interaction.guild else None
+        addfake_guild_id = interaction.guild.id
 
         lobby = await asyncio.to_thread(
             functools.partial(self.lobby_service.get_or_create_lobby, guild_id=addfake_guild_id)
@@ -232,6 +233,7 @@ class AdminCommands(commands.Cog):
     @app_commands.describe(
         captain_eligible="Make fake users captain-eligible for Immortal Draft testing",
     )
+    @require_guild
     async def filllobbytest(
         self,
         interaction: discord.Interaction,
@@ -245,7 +247,7 @@ class AdminCommands(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         # guild_id for fake users
-        fill_guild_id = interaction.guild.id if interaction.guild else None
+        fill_guild_id = interaction.guild.id
 
         lobby = await asyncio.to_thread(
             functools.partial(self.lobby_service.get_or_create_lobby, guild_id=fill_guild_id)
@@ -352,12 +354,12 @@ class AdminCommands(commands.Cog):
         name="resetuser", description="Reset a specific user's account (Admin only)"
     )
     @app_commands.describe(user="The user whose account to reset")
+    @require_guild
     async def resetuser(self, interaction: discord.Interaction, user: discord.Member):
-        guild = interaction.guild if interaction.guild else None
-        rl_gid = guild.id if guild else 0
+        guild_id = interaction.guild.id
         rl = GLOBAL_RATE_LIMITER.check(
             scope="resetuser",
-            guild_id=rl_gid,
+            guild_id=guild_id,
             user_id=interaction.user.id,
             limit=2,
             per_seconds=60,
@@ -379,7 +381,6 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await safe_followup(
@@ -417,6 +418,7 @@ class AdminCommands(commands.Cog):
         steam_id="Steam32 ID (found in Dotabuff URL)",
         mmr="Optional MMR override (0-12000)",
     )
+    @require_guild
     async def registeruser(
         self,
         interaction: discord.Interaction,
@@ -424,11 +426,10 @@ class AdminCommands(commands.Cog):
         steam_id: int,
         mmr: int = None,
     ):
-        guild = interaction.guild if interaction.guild else None
-        rl_gid = guild.id if guild else 0
+        guild_id = interaction.guild.id
         rl = GLOBAL_RATE_LIMITER.check(
             scope="registeruser",
-            guild_id=rl_gid,
+            guild_id=guild_id,
             user_id=interaction.user.id,
             limit=5,
             per_seconds=60,
@@ -469,8 +470,6 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
-
         try:
             result = await asyncio.to_thread(
                 functools.partial(
@@ -508,9 +507,9 @@ class AdminCommands(commands.Cog):
             )
 
     @admin.command(name="sync", description="Force sync commands (Admin only)")
+    @require_guild
     async def sync(self, interaction: discord.Interaction):
-        guild = interaction.guild if interaction.guild else None
-        rl_gid = guild.id if guild else 0
+        rl_gid = interaction.guild.id
         rl = GLOBAL_RATE_LIMITER.check(
             scope="sync",
             guild_id=rl_gid,
@@ -559,6 +558,7 @@ class AdminCommands(commands.Cog):
         amount="Amount to give (can be negative to take)",
         nonprofit="Give to the nonprofit fund instead of a user",
     )
+    @require_guild
     async def givecoin(
         self,
         interaction: discord.Interaction,
@@ -589,7 +589,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Handle nonprofit fund target
         if nonprofit:
@@ -675,6 +675,7 @@ class AdminCommands(commands.Cog):
         name="resetloancooldown", description="Reset a user's loan cooldown (Admin only)"
     )
     @app_commands.describe(user="The user whose loan cooldown to reset")
+    @require_guild
     async def resetloancooldown(self, interaction: discord.Interaction, user: discord.Member):
         """Admin command to reset a user's loan cooldown."""
         if not has_admin_permission(interaction):
@@ -691,7 +692,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -719,6 +720,7 @@ class AdminCommands(commands.Cog):
         description="Reset a user's bankruptcy cooldown (Admin only)",
     )
     @app_commands.describe(user="The user whose bankruptcy cooldown to reset")
+    @require_guild
     async def resetbankruptcycooldown(self, interaction: discord.Interaction, user: discord.Member):
         """Admin command to reset a user's bankruptcy cooldown."""
         if not has_admin_permission(interaction):
@@ -735,7 +737,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -770,6 +772,7 @@ class AdminCommands(commands.Cog):
         user="Player to adjust (must have few games)",
         rating="Initial rating (0-3000)",
     )
+    @require_guild
     async def setinitialrating(
         self, interaction: discord.Interaction, user: discord.Member, rating: float
     ):
@@ -788,7 +791,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -838,6 +841,7 @@ class AdminCommands(commands.Cog):
         user="Player to adjust",
         rating="New rating (0-3000)",
     )
+    @require_guild
     async def adjust_rating(
         self, interaction: discord.Interaction, user: discord.Member, rating: float
     ):
@@ -856,7 +860,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -895,6 +899,7 @@ class AdminCommands(commands.Cog):
         user="Player to adjust",
         rd="New rating deviation / uncertainty (0-350)",
     )
+    @require_guild
     async def adjust_rd(
         self, interaction: discord.Interaction, user: discord.Member, rd: float
     ):
@@ -913,7 +918,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -951,6 +956,7 @@ class AdminCommands(commands.Cog):
         name="recalibrate", description="Reset rating uncertainty for a player (Admin only)"
     )
     @app_commands.describe(user="The player to recalibrate")
+    @require_guild
     async def recalibrate(
         self, interaction: discord.Interaction, user: discord.Member
     ):
@@ -969,7 +975,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         result = await asyncio.to_thread(
             self.recalibration_service.can_recalibrate, user.id, guild_id
         )
@@ -1043,6 +1049,7 @@ class AdminCommands(commands.Cog):
     @app_commands.describe(
         amount="RD increase amount (default 100, max 350)"
     )
+    @require_guild
     async def bumprd(
         self, interaction: discord.Interaction, amount: int = 100
     ):
@@ -1062,7 +1069,7 @@ class AdminCommands(commands.Cog):
             return
 
         await safe_defer(interaction, ephemeral=True)
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         result = await asyncio.to_thread(self.player_service.bump_glicko_rds, guild_id, amount)
         if result is None:
@@ -1086,6 +1093,7 @@ class AdminCommands(commands.Cog):
         name="resetrecalibrationcooldown", description="Reset a user's recalibration cooldown (Admin only)"
     )
     @app_commands.describe(user="The user whose recalibration cooldown to reset")
+    @require_guild
     async def resetrecalibrationcooldown(
         self, interaction: discord.Interaction, user: discord.Member
     ):
@@ -1104,7 +1112,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -1144,6 +1152,7 @@ class AdminCommands(commands.Cog):
         description="Extend the betting window for the current match (Admin only)",
     )
     @app_commands.describe(minutes="Number of minutes to extend betting (1-60)")
+    @require_guild
     async def extendbetting(self, interaction: discord.Interaction, minutes: int):
         """Admin command to extend the betting window for an active match."""
         if not has_admin_permission(interaction):
@@ -1169,7 +1178,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check for pending match
         pending_state = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
@@ -1292,6 +1301,7 @@ class AdminCommands(commands.Cog):
             app_commands.Choice(name="Dire", value="dire"),
         ]
     )
+    @require_guild
     async def correctmatch(
         self,
         interaction: discord.Interaction,
@@ -1326,7 +1336,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         try:
             result = await asyncio.to_thread(
@@ -1407,6 +1417,7 @@ class AdminCommands(commands.Cog):
         steam_id="Steam32 ID to add",
         set_primary="Set as primary account (default: False)",
     )
+    @require_guild
     async def adminaddsteamid(
         self,
         interaction: discord.Interaction,
@@ -1422,7 +1433,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -1474,6 +1485,7 @@ class AdminCommands(commands.Cog):
         user="The user to remove the Steam ID from",
         steam_id="Steam32 ID to remove",
     )
+    @require_guild
     async def adminremovesteamid(
         self,
         interaction: discord.Interaction,
@@ -1488,7 +1500,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -1538,6 +1550,7 @@ class AdminCommands(commands.Cog):
         user="The user to set primary Steam ID for",
         steam_id="Steam32 ID to set as primary (must already be linked)",
     )
+    @require_guild
     async def adminsetprimarysteam(
         self,
         interaction: discord.Interaction,
@@ -1552,7 +1565,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -1589,6 +1602,7 @@ class AdminCommands(commands.Cog):
         name="seedherogrid",
         description="Seed fake players with enriched match data for /herogrid testing (Admin only)",
     )
+    @require_guild
     async def seedherogrid(self, interaction: discord.Interaction):
         """Create 20 fake players with ~30 enriched matches for hero grid testing."""
         if not has_admin_permission(interaction):
@@ -1617,7 +1631,7 @@ class AdminCommands(commands.Cog):
             pool_size = random.randint(4, 6)
             player_hero_pools[i] = random.sample(HERO_POOL, k=pool_size)
 
-        seed_guild_id = interaction.guild.id if interaction.guild else None
+        seed_guild_id = interaction.guild.id
 
         def _seed_data():
             # 1. Create fake players

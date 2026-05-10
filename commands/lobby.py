@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_guild
 from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
@@ -337,12 +338,13 @@ class LobbyCommands(commands.Cog):
         return True, None
 
     @app_commands.command(name="lobby", description="Create or view the matchmaking lobby")
+    @require_guild
     async def lobby(self, interaction: discord.Interaction):
         logger.info(f"Lobby command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await safe_followup(
@@ -500,12 +502,13 @@ class LobbyCommands(commands.Cog):
         description="Kick a player from the lobby (Admin or lobby creator only)",
     )
     @app_commands.describe(player="The player to kick from the lobby")
+    @require_guild
     async def kick(self, interaction: discord.Interaction, player: discord.Member):
         logger.info(f"Kick command: User {interaction.user.id} kicking {player.id}")
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
         if not lobby:
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
@@ -583,13 +586,14 @@ class LobbyCommands(commands.Cog):
             await safe_followup(interaction, content=f"❌ Failed to kick {player.mention}.", ephemeral=True)
 
     @app_commands.command(name="join", description="Join the matchmaking lobby")
+    @require_guild
     async def join(self, interaction: discord.Interaction):
         """Join the matchmaking lobby from any channel."""
         logger.info(f"Join command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
 
         # Check registration
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
@@ -662,9 +666,9 @@ class LobbyCommands(commands.Cog):
 
                 is_ready = await asyncio.to_thread(self.lobby_service.is_ready, lobby)
                 if not is_ready:
-                    await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
+                    await notify_lobby_rally(channel, thread, lobby, guild_id)
                 else:
-                    await notify_lobby_ready(channel, lobby, guild_id=guild_id or 0)
+                    await notify_lobby_ready(channel, lobby, guild_id=guild_id)
             except Exception as exc:
                 logger.warning(f"Failed to send rally/ready notification: {exc}")
 
@@ -691,13 +695,14 @@ class LobbyCommands(commands.Cog):
             logger.debug(f"Neon lobby join hook error: {e}")
 
     @app_commands.command(name="leave", description="Leave the matchmaking lobby")
+    @require_guild
     async def leave(self, interaction: discord.Interaction):
         """Leave the matchmaking lobby from any channel."""
         logger.info(f"Leave command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
         if not lobby:
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
@@ -739,12 +744,13 @@ class LobbyCommands(commands.Cog):
         name="resetlobby",
         description="Reset the current lobby (Admin or lobby creator only)",
     )
+    @require_guild
     async def resetlobby(self, interaction: discord.Interaction):
         """Allow admins or lobby creators to reset/abort an unfilled lobby."""
         logger.info(f"Reset lobby command: User {interaction.user.id} ({interaction.user})")
         can_respond = await safe_defer(interaction, ephemeral=True)
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild_id = interaction.guild.id
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
             pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
@@ -816,7 +822,7 @@ class LobbyCommands(commands.Cog):
 
         # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
-        clear_lobby_rally_cooldowns(guild_id or 0)
+        clear_lobby_rally_cooldowns(guild_id)
 
         logger.info(f"Lobby reset by user {interaction.user.id}")
         if can_respond:
@@ -830,13 +836,14 @@ class LobbyCommands(commands.Cog):
         name="readycheck",
         description="Check lobby players' online status and ping those who are away",
     )
+    @require_guild
     async def readycheck(self, interaction: discord.Interaction):
         logger.info(f"Readycheck command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=False):
             return
 
         guild = interaction.guild
-        guild_id = guild.id if guild else None
+        guild_id = guild.id
         status, info = await self._execute_readycheck(guild, guild_id)
 
         if status == "no_lobby":
