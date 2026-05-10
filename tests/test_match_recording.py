@@ -810,7 +810,7 @@ class TestBettingEndToEnd:
         player_ids = test_players[:10]
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        participant = pending["radiant_team_ids"][0]
+        participant = pending.radiant_team_ids[0]
         spectator = 9000
         player_repo.add(
             discord_id=spectator,
@@ -867,7 +867,7 @@ class TestBettingEndToEnd:
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        excluded_ids = pending["excluded_player_ids"]
+        excluded_ids = pending.excluded_player_ids
         assert len(excluded_ids) == 2
 
         # Start everyone at zero for deterministic balance checks
@@ -933,10 +933,10 @@ class TestBettingEndToEnd:
 
         # Verify exclusion IDs are stored in pending state
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
-        assert pending["excluded_player_ids"] == excluded_ids
+        assert pending.excluded_player_ids == excluded_ids
 
         # Verify radiant + dire + excluded = all players
-        all_in_match = set(pending["radiant_team_ids"] + pending["dire_team_ids"])
+        all_in_match = set(pending.radiant_team_ids + pending.dire_team_ids)
         all_excluded = set(excluded_ids)
         assert len(all_in_match) == 10
         assert len(all_excluded) == 4
@@ -1047,7 +1047,7 @@ class TestBettingEndToEnd:
         )
 
         # Verify the bet was recorded correctly
-        bet = bet_repo.get_player_pending_bet(TEST_GUILD_ID, spectator3, since_ts=pending2["shuffle_timestamp"])
+        bet = bet_repo.get_player_pending_bet(TEST_GUILD_ID, spectator3, since_ts=pending2.shuffle_timestamp)
         assert bet is not None, "Bet should exist"
         assert bet["amount"] == 6, "Bet amount should be 6"
         assert bet["team_bet_on"] == "dire", "Bet should be on Dire"
@@ -1187,11 +1187,11 @@ class TestLoanRepaymentOnMatchRecord:
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         # Make sure borrower is on radiant for predictable test
-        if borrower_id not in pending["radiant_team_ids"]:
+        if borrower_id not in pending.radiant_team_ids:
             # Swap teams so borrower is on winning side
-            pending["radiant_team_ids"], pending["dire_team_ids"] = (
-                pending["dire_team_ids"],
-                pending["radiant_team_ids"],
+            pending.radiant_team_ids, pending.dire_team_ids = (
+                pending.dire_team_ids,
+                pending.radiant_team_ids,
             )
             # Persist the swapped state
             match_service._persist_match_state(TEST_GUILD_ID, pending)
@@ -1227,10 +1227,10 @@ class TestLoanRepaymentOnMatchRecord:
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         # Make sure borrower is on dire (losing side)
-        if borrower_id not in pending["dire_team_ids"]:
-            pending["radiant_team_ids"], pending["dire_team_ids"] = (
-                pending["dire_team_ids"],
-                pending["radiant_team_ids"],
+        if borrower_id not in pending.dire_team_ids:
+            pending.radiant_team_ids, pending.dire_team_ids = (
+                pending.dire_team_ids,
+                pending.radiant_team_ids,
             )
             # Persist the swapped state
             match_service._persist_match_state(TEST_GUILD_ID, pending)

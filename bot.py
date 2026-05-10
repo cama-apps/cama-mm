@@ -907,8 +907,8 @@ async def on_raw_reaction_add(payload):
                 pass
             if reason == "in_pending_match" and pending_info:
                 try:
-                    pending_match_id = pending_info.get("pending_match_id")
-                    jump_url = pending_info.get("shuffle_message_jump_url")
+                    pending_match_id = pending_info.pending_match_id
+                    jump_url = pending_info.shuffle_message_jump_url
                     msg = f"{user.mention} ❌ You're in a pending match (Match #{pending_match_id})!"
                     if jump_url:
                         msg += f" [View your match]({jump_url}) and use `/record` to complete it first."

@@ -69,8 +69,8 @@ class TestRestartResilience:
         # Get the persisted state which has team IDs
         persisted_state = match_service_1.get_last_shuffle(guild_id)
         assert persisted_state is not None
-        original_radiant = persisted_state["radiant_team_ids"]
-        original_dire = persisted_state["dire_team_ids"]
+        original_radiant = persisted_state.radiant_team_ids
+        original_dire = persisted_state.dire_team_ids
 
         # --- Phase 2: Simulate restart (new service instances) ---
         player_repo_2 = PlayerRepository(db_path)
@@ -84,8 +84,8 @@ class TestRestartResilience:
         # Verify state is restored from database (lazy load)
         restored_state = match_service_2.get_last_shuffle(guild_id)
         assert restored_state is not None, "Pending match should be restored after restart"
-        assert restored_state["radiant_team_ids"] == original_radiant
-        assert restored_state["dire_team_ids"] == original_dire
+        assert restored_state.radiant_team_ids == original_radiant
+        assert restored_state.dire_team_ids == original_dire
 
     def test_bets_survive_restart_and_settle_correctly(self, db_path):
         """Test that bets placed before restart are correctly settled after restart."""
@@ -130,8 +130,8 @@ class TestRestartResilience:
 
         # Extend betting window to allow bets
         now_ts = int(time.time())
-        pending_state["bet_lock_until"] = now_ts + 600
-        pending_state["shuffle_timestamp"] = now_ts - 10
+        pending_state.bet_lock_until = now_ts + 600
+        pending_state.shuffle_timestamp = now_ts - 10
         # Use match_service to persist (handles Team object serialization)
         match_service_1._persist_match_state(guild_id, pending_state)
 
@@ -288,8 +288,8 @@ class TestRestartResilience:
 
         # Extend betting window
         now_ts = int(time.time())
-        pending_state["bet_lock_until"] = now_ts + 600
-        pending_state["shuffle_timestamp"] = now_ts - 10
+        pending_state.bet_lock_until = now_ts + 600
+        pending_state.shuffle_timestamp = now_ts - 10
         # Use match_service to persist (handles Team object serialization)
         match_service_1._persist_match_state(guild_id, pending_state)
 
@@ -338,8 +338,8 @@ class TestRestartResilience:
         # Verify all state restored
         restored_match = match_service_2.get_last_shuffle(guild_id)
         assert restored_match is not None, "Pending match not restored!"
-        assert restored_match["radiant_team_ids"] == pending_state["radiant_team_ids"]
-        assert restored_match["dire_team_ids"] == pending_state["dire_team_ids"]
+        assert restored_match.radiant_team_ids == pending_state.radiant_team_ids
+        assert restored_match.dire_team_ids == pending_state.dire_team_ids
 
         restored_bets_r = bet_repo_2.get_player_pending_bets(guild_id, spectator_radiant)
         restored_bets_d = bet_repo_2.get_player_pending_bets(guild_id, spectator_dire)

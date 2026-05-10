@@ -376,9 +376,10 @@ def _make_cog(
 class TestResolvePlayerIds:
     def test_resolve_lobby_priority(self):
         """Lobby with players is highest priority."""
+        from domain.models.pending_match_state import PendingMatchState
         cog = _make_cog(
             lobby_players=[1, 2, 3],
-            shuffle_state={"radiant_team_ids": [10, 11], "dire_team_ids": [20, 21]},
+            shuffle_state=PendingMatchState(radiant_team_ids=[10, 11], dire_team_ids=[20, 21]),
         )
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
         assert set(ids) == {1, 2, 3}
@@ -386,11 +387,12 @@ class TestResolvePlayerIds:
 
     def test_resolve_pending_match_fallback(self):
         """No lobby, pending match exists -> uses match IDs."""
+        from domain.models.pending_match_state import PendingMatchState
         cog = _make_cog(
-            shuffle_state={
-                "radiant_team_ids": [1, 2, 3, 4, 5],
-                "dire_team_ids": [6, 7, 8, 9, 10],
-            },
+            shuffle_state=PendingMatchState(
+                radiant_team_ids=[1, 2, 3, 4, 5],
+                dire_team_ids=[6, 7, 8, 9, 10],
+            ),
         )
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
         assert set(ids) == set(range(1, 11))
@@ -419,9 +421,10 @@ class TestResolvePlayerIds:
 
     def test_resolve_priority_order(self):
         """Lobby AND pending match both present -> lobby wins."""
+        from domain.models.pending_match_state import PendingMatchState
         cog = _make_cog(
             lobby_players=[1, 2],
-            shuffle_state={"radiant_team_ids": [10], "dire_team_ids": [20]},
+            shuffle_state=PendingMatchState(radiant_team_ids=[10], dire_team_ids=[20]),
             last_match_ids=[50, 51],
         )
         ids, label = cog._resolve_player_ids("auto", guild_id=99)

@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from config import BET_LOCK_SECONDS, CALIBRATION_RD_THRESHOLD, FIRST_GAME_RESET_HOUR
+from domain.models.pending_match_state import PendingMatchState
 from domain.models.player import Player
 from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
@@ -95,13 +96,13 @@ class MatchService:
     # ==================== State Management (delegated to MatchStateService) ====================
 
 
-    def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> dict | None:
+    def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> PendingMatchState | None:
         """Get the pending shuffle state (delegates to state_service)."""
         return self.state_service.get_last_shuffle(guild_id, pending_match_id)
 
-    def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
+    def set_last_shuffle(self, guild_id: int | None, state: PendingMatchState) -> None:
         """Set the pending shuffle state (delegates to state_service)."""
-        self.state_service.set_last_shuffle(guild_id, payload)
+        self.state_service.set_last_shuffle(guild_id, state)
 
     def set_shuffle_message_url(self, guild_id: int | None, jump_url: str) -> None:
         """Store the message link for the current pending shuffle (delegates to state_service)."""
@@ -142,19 +143,19 @@ class MatchService:
         """Clear the pending shuffle state (delegates to state_service)."""
         self.state_service.clear_last_shuffle(guild_id, pending_match_id)
 
-    def _ensure_pending_state(self, guild_id: int | None) -> dict:
+    def _ensure_pending_state(self, guild_id: int | None) -> PendingMatchState:
         """Get the pending state, raising error if none exists (delegates to state_service)."""
         return self.state_service.ensure_pending_state(guild_id)
 
-    def _ensure_record_submissions(self, state: dict) -> dict[int, dict[str, Any]]:
+    def _ensure_record_submissions(self, state: PendingMatchState) -> dict[int, dict[str, Any]]:
         """Ensure record_submissions dict exists in state (delegates to state_service)."""
         return self.state_service.ensure_record_submissions(state)
 
-    def _build_pending_match_payload(self, state: dict) -> dict:
+    def _build_pending_match_payload(self, state: PendingMatchState) -> dict:
         """Build payload for database persistence (delegates to state_service)."""
         return self.state_service.build_pending_match_payload(state)
 
-    def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
+    def _persist_match_state(self, guild_id: int | None, state: PendingMatchState) -> None:
         """Persist the pending match state (delegates to state_service)."""
         self.state_service.persist_state(guild_id, state)
 
@@ -493,30 +494,28 @@ class MatchService:
 
         # Persist last shuffle for recording
         now_ts = int(time.time())
-        shuffle_state = {
-            "radiant_team_ids": radiant_team_ids,
-            "dire_team_ids": dire_team_ids,
-            "excluded_player_ids": excluded_ids,
-            "radiant_team": radiant_team,
-            "dire_team": dire_team,
-            "radiant_roles": radiant_roles,
-            "dire_roles": dire_roles,
-            "radiant_value": radiant_value,
-            "dire_value": dire_value,
-            "value_diff": value_diff,
-            "first_pick_team": first_pick_team,
-            "record_submissions": {},
-            "shuffle_timestamp": now_ts,
-            "bet_lock_until": now_ts + BET_LOCK_SECONDS,
-            "shuffle_message_jump_url": None,
-            "shuffle_message_id": None,
-            "shuffle_channel_id": None,
-            "betting_mode": betting_mode,
-            "is_draft": False,
-            "balancing_rating_system": rating_system,
-            "effective_avoid_ids": effective_avoid_ids,  # Avoids to decrement on record
-            "effective_deal_ids": effective_deal_ids,  # Package deals to decrement on record
-        }
+        shuffle_state = PendingMatchState(
+            radiant_team_ids=radiant_team_ids,
+            dire_team_ids=dire_team_ids,
+            excluded_player_ids=excluded_ids,
+            radiant_roles=radiant_roles,
+            dire_roles=dire_roles,
+            radiant_value=radiant_value,
+            dire_value=dire_value,
+            value_diff=value_diff,
+            first_pick_team=first_pick_team,
+            record_submissions={},
+            shuffle_timestamp=now_ts,
+            bet_lock_until=now_ts + BET_LOCK_SECONDS,
+            shuffle_message_jump_url=None,
+            shuffle_message_id=None,
+            shuffle_channel_id=None,
+            betting_mode=betting_mode,
+            is_draft=False,
+            balancing_rating_system=rating_system,
+            effective_avoid_ids=effective_avoid_ids,  # Avoids to decrement on record
+            effective_deal_ids=effective_deal_ids,  # Package deals to decrement on record
+        )
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
 
@@ -534,7 +533,7 @@ class MatchService:
             "glicko_radiant_win_prob": glicko_radiant_win_prob,
             "openskill_radiant_win_prob": openskill_radiant_win_prob,
             "balancing_rating_system": rating_system,
-            "pending_match_id": shuffle_state.get("pending_match_id"),
+            "pending_match_id": shuffle_state.pending_match_id,
         }
 
     def _load_glicko_player(self, player_id: int, guild_id: int | None = None) -> tuple[Player, int]:
@@ -584,7 +583,7 @@ class MatchService:
         winning_ids: list[int],
         losing_ids: list[int],
         excluded_player_ids: list[int],
-        last_shuffle: dict,
+        last_shuffle: PendingMatchState,
         guild_id: int | None,
     ) -> dict:
         """Pay participation, win, bomb-pot, and exclusion bonuses, then settle
@@ -593,7 +592,7 @@ class MatchService:
         if not self.betting_service:
             return distributions
 
-        is_bomb_pot = last_shuffle.get("is_bomb_pot", False)
+        is_bomb_pot = last_shuffle.is_bomb_pot
         # Track actual net JC paid per player so we can persist it on
         # match_participants. Without this, balance-history reconstruction
         # would silently drift if reward constants or penalty rules change.
@@ -622,7 +621,7 @@ class MatchService:
             _accumulate(
                 self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
             )
-        excluded_conditional_ids = last_shuffle.get("excluded_conditional_player_ids", [])
+        excluded_conditional_ids = last_shuffle.excluded_conditional_player_ids
         if excluded_conditional_ids:
             _accumulate(
                 self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
@@ -791,7 +790,7 @@ class MatchService:
             last_shuffle = self.get_last_shuffle(guild_id, pending_match_id)
             if not last_shuffle:
                 raise ValueError("No recent shuffle found.")
-            pending_match_id = last_shuffle.get("pending_match_id")
+            pending_match_id = last_shuffle.pending_match_id
             lock_key = (normalized_gid, pending_match_id)
             if lock_key in self._recording_in_progress:
                 match_note = f" (Match #{pending_match_id})" if pending_match_id else ""
@@ -803,9 +802,9 @@ class MatchService:
             if winning_team not in ("radiant", "dire"):
                 raise ValueError("winning_team must be 'radiant' or 'dire'.")
 
-            radiant_team_ids = last_shuffle["radiant_team_ids"]
-            dire_team_ids = last_shuffle["dire_team_ids"]
-            excluded_player_ids = last_shuffle.get("excluded_player_ids", [])
+            radiant_team_ids = last_shuffle.radiant_team_ids
+            dire_team_ids = last_shuffle.dire_team_ids
+            excluded_player_ids = last_shuffle.excluded_player_ids
 
             all_match_ids = set(radiant_team_ids + dire_team_ids)
             if set(excluded_player_ids).intersection(all_match_ids):
@@ -816,9 +815,9 @@ class MatchService:
             losing_ids = dire_team_ids if winning_team == "radiant" else radiant_team_ids
 
             # Determine lobby type from pending state (draft sets is_draft=True)
-            lobby_type = "draft" if last_shuffle.get("is_draft") else "shuffle"
-            balancing_rating_system = last_shuffle.get("balancing_rating_system", "glicko")
-            betting_mode = last_shuffle.get("betting_mode", "pool")
+            lobby_type = "draft" if last_shuffle.is_draft else "shuffle"
+            balancing_rating_system = last_shuffle.balancing_rating_system
+            betting_mode = last_shuffle.betting_mode
 
             # ---- PURE COMPUTATION (reads only; safe to run before the atomic block) ----
             radiant_glicko = [self._load_glicko_player(pid, guild_id) for pid in radiant_team_ids]
@@ -953,11 +952,11 @@ class MatchService:
             # Consumable charges: only consumed for shuffle mode (not draft).
             effective_avoid_ids: list[int] = []
             effective_deal_ids: list[int] = []
-            if not last_shuffle.get("is_draft"):
+            if not last_shuffle.is_draft:
                 if self.soft_avoid_repo:
-                    effective_avoid_ids = list(last_shuffle.get("effective_avoid_ids") or [])
+                    effective_avoid_ids = list(last_shuffle.effective_avoid_ids)
                 if self.package_deal_repo:
-                    effective_deal_ids = list(last_shuffle.get("effective_deal_ids") or [])
+                    effective_deal_ids = list(last_shuffle.effective_deal_ids)
 
             # ---- ATOMIC WRITE: match + participants + wins/losses + glicko +
             # OpenSkill + last_match_date + first_calibrated_at + match_prediction
@@ -1037,7 +1036,7 @@ class MatchService:
                 "winning_player_ids": winning_ids,
                 "losing_player_ids": losing_ids,
                 "excluded_player_ids": excluded_player_ids,
-                "excluded_conditional_player_ids": last_shuffle.get("excluded_conditional_player_ids", []),
+                "excluded_conditional_player_ids": last_shuffle.excluded_conditional_player_ids,
                 "bet_distributions": distributions,
                 "loan_repayments": loan_repayments,
                 "notable_streak": notable_streak,

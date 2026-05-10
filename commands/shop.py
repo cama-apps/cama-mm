@@ -735,8 +735,8 @@ class ShopCommands(commands.Cog):
             return
 
         # Check if player is in the shuffle
-        radiant_ids = pending_state.get("radiant_team_ids", [])
-        dire_ids = pending_state.get("dire_team_ids", [])
+        radiant_ids = pending_state.radiant_team_ids
+        dire_ids = pending_state.dire_team_ids
         all_player_ids = radiant_ids + dire_ids
 
         if user_id not in all_player_ids:
@@ -793,7 +793,7 @@ class ShopCommands(commands.Cog):
         content = f"{mentions}"
 
         # Post to the shuffle thread if it exists
-        thread_id = pending_state.get("thread_shuffle_thread_id")
+        thread_id = pending_state.thread_shuffle_thread_id
         if thread_id:
             try:
                 thread = self.bot.get_channel(thread_id)
@@ -806,7 +806,7 @@ class ShopCommands(commands.Cog):
 
         # Post to the shuffle channel if it's different from both the thread
         # and the channel where the command was invoked (to avoid double-posting)
-        channel_id = pending_state.get("shuffle_channel_id")
+        channel_id = pending_state.shuffle_channel_id
         interaction_channel_id = interaction.channel.id if interaction.channel else None
         if channel_id and channel_id != thread_id and channel_id != interaction_channel_id:
             try:
