@@ -11,6 +11,7 @@ from repositories.mana_repository import ManaRepository
 from repositories.slow_drip_repository import SlowDripRepository
 from services.buff_service import (
     BUFF_COUNTERSPELL,
+    BUFF_OVERGROWTH,
     BuffService,
 )
 from tests.conftest import TEST_GUILD_ID
@@ -146,6 +147,20 @@ def test_overgrowth_active_for_user_only(buff_service):
     buff_service.grant_overgrowth(USER, TEST_GUILD_ID)
     assert buff_service.has_overgrowth(USER, TEST_GUILD_ID) is True
     assert buff_service.has_overgrowth(ALLY, TEST_GUILD_ID) is False
+
+
+def test_overgrowth_regrant_refreshes_not_extends(buff_service, buff_repo):
+    """Re-granting overgrowth while active must leave exactly one row alive
+    (the new one), so the timer resets to 12h rather than stacking."""
+    buff_service.grant_overgrowth(USER, TEST_GUILD_ID)
+    first_active = buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_OVERGROWTH)
+    assert len(first_active) == 1
+    first_id = first_active[0]["id"]
+
+    buff_service.grant_overgrowth(USER, TEST_GUILD_ID)
+    second_active = buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_OVERGROWTH)
+    assert len(second_active) == 1
+    assert second_active[0]["id"] != first_id
 
 
 def test_cleanup_expired_prunes_old_rows(buff_service, buff_repo):
