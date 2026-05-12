@@ -233,6 +233,15 @@ def _get_events_with_art() -> set[str]:
     return _EVENTS_WITH_ART
 
 
+def _prestige_cave_in_multiplier(prestige_level: int) -> float:
+    """Soft prestige scaling on cave-in chance.
+
+    P0 → 0.90×, P3 → 0.99× (~current), P10 → 1.20×. Stacks multiplicatively
+    with relic / lantern / OVERGROWTH halving.
+    """
+    return 0.9 + max(0, prestige_level) * 0.03
+
+
 class DigService:
     """Encapsulates all tunnel digging minigame logic."""
 
@@ -2886,6 +2895,11 @@ class DigService:
         now = int(time.time())
         today = self._get_game_date()
 
+        overgrowth_active = bool(
+            self.buff_service
+            and self.buff_service.has_overgrowth(discord_id, guild_id)
+        )
+
         # 1. Get or create tunnel
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         is_first_dig = False
@@ -2942,6 +2956,8 @@ class DigService:
             cooldown_remaining = self._apply_mana_cooldown_reduction(
                 discord_id, guild_id, self._get_cooldown_remaining(tunnel)
             )
+            if overgrowth_active:
+                cooldown_remaining = 0
             if cooldown_remaining > 0:
                 if not paid:
                     pd = tunnel.get("paid_dig_date")
@@ -3187,6 +3203,9 @@ class DigService:
         if has_lantern:
             cave_in_chance *= 0.50
         cave_in_chance *= relic_cavein_mod
+        cave_in_chance *= _prestige_cave_in_multiplier(prestige_level)
+        if overgrowth_active:
+            cave_in_chance *= 0.5
         cave_in_chance = max(0.01, cave_in_chance)
 
         # Silent mana hazard modifier (Forest -, Mountain/Black +).
@@ -3467,6 +3486,8 @@ class DigService:
         # Mana variance + steady bonus on base loot only — protects deterministic
         # milestone/streak from a Mountain "zero" roll.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
+        if overgrowth_active:
+            jc_earned += 5
 
         # 14. Check milestones (with ascension milestone multiplier).
         # Only award milestones that extend the tunnel's all-time high
@@ -3681,6 +3702,11 @@ class DigService:
         now = int(time.time())
         today = self._get_game_date()
 
+        overgrowth_active = bool(
+            self.buff_service
+            and self.buff_service.has_overgrowth(discord_id, guild_id)
+        )
+
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         is_first_dig = False
         if tunnel is None:
@@ -3711,6 +3737,8 @@ class DigService:
         paid_dig_cost = 0
         if not is_first_dig:
             cooldown_remaining = self._get_cooldown_remaining(tunnel)
+            if overgrowth_active:
+                cooldown_remaining = 0
             if cooldown_remaining > 0:
                 if not paid:
                     pd = tunnel.get("paid_dig_date")
@@ -3909,6 +3937,9 @@ class DigService:
         if has_lantern:
             cave_in_chance *= 0.50
         cave_in_chance *= relic_cavein_mod
+        cave_in_chance *= _prestige_cave_in_multiplier(prestige_level)
+        if overgrowth_active:
+            cave_in_chance *= 0.5
         cave_in_chance = max(0.01, cave_in_chance)
 
         # Silent mana hazard modifier (Forest -, Mountain/Black +).
@@ -4139,6 +4170,7 @@ class DigService:
             "sabotage_karma": sabotage_karma,
             "sabotage_sympathy": sabotage_sympathy,
             "help_event_bonus": help_event_bonus,
+            "overgrowth_active": overgrowth_active,
         }
         return None, preconditions
 
@@ -4376,6 +4408,8 @@ class DigService:
 
         # Mana variance + steady bonus on base loot only.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
+        if p.get("overgrowth_active"):
+            jc_earned += 5
 
         # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0

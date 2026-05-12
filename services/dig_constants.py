@@ -60,8 +60,8 @@ def get_layer(depth: int) -> LayerDef:
 FREE_DIG_COOLDOWN_SECONDS: int = 7_200           # 2 hours
 CHEER_COOLDOWN_SECONDS: int = 30                 # short anti-spam, independent of dig
 
-PAID_DIG_COSTS_PER_DAY: list[int] = [3, 6, 12, 24, 48]
-PAID_DIG_COST_CAP: int = 48
+PAID_DIG_COSTS_PER_DAY: list[int] = [3, 5, 10, 20, 40]
+PAID_DIG_COST_CAP: int = 40
 
 # First dig guarantees
 FIRST_DIG_ADVANCE_MIN: int = 3
