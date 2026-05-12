@@ -163,6 +163,23 @@ def test_overgrowth_regrant_refreshes_not_extends(buff_service, buff_repo):
     assert second_active[0]["id"] != first_id
 
 
+def test_overgrowth_regrant_collapses_pre_existing_duplicates(buff_service, buff_repo):
+    """Models the post-race state: two active overgrowth rows already exist
+    (e.g. from a concurrent re-purchase under an older non-atomic
+    implementation). A subsequent grant must collapse them down to one
+    rather than letting the older rows stay alive."""
+    future = int(time.time()) + 12 * 3600
+    leaked_a = buff_repo.grant(USER, TEST_GUILD_ID, BUFF_OVERGROWTH, future)
+    leaked_b = buff_repo.grant(USER, TEST_GUILD_ID, BUFF_OVERGROWTH, future)
+    assert len(buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_OVERGROWTH)) == 2
+
+    new_id = buff_service.grant_overgrowth(USER, TEST_GUILD_ID)
+    surviving = buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_OVERGROWTH)
+    assert len(surviving) == 1
+    assert surviving[0]["id"] == new_id
+    assert new_id not in (leaked_a, leaked_b)
+
+
 def test_cleanup_expired_prunes_old_rows(buff_service, buff_repo):
     # Manually grant a buff with a past expiry
     buff_repo.grant(

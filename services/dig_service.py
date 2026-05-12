@@ -4120,8 +4120,10 @@ class DigService:
             help_event_bonus = 0.05
             event_chance += help_event_bonus
 
-        # Re-clamp after social modifiers
-        cave_in_chance = max(0.01, cave_in_chance)
+        # Re-clamp after social modifiers, unless thick_skin intentionally
+        # zeroed cave-in for the day (the floor would otherwise undo it).
+        if not thick_skin_saved:
+            cave_in_chance = max(0.01, cave_in_chance)
         event_chance = min(event_chance, 0.75)
 
         preconditions = {
