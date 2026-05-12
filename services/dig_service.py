@@ -3206,12 +3206,14 @@ class DigService:
         cave_in_chance *= _prestige_cave_in_multiplier(prestige_level)
         if overgrowth_active:
             cave_in_chance *= 0.5
-        cave_in_chance = max(0.01, cave_in_chance)
 
         # Silent mana hazard modifier (Forest -, Mountain/Black +).
         cave_in_chance = self._apply_mana_hazard_modifier(
             discord_id, guild_id, cave_in_chance
         )
+        # Floor lives below the mana modifier so Forest can't zero out cave-in
+        # entirely; thick_skin below intentionally bypasses this.
+        cave_in_chance = max(0.01, cave_in_chance)
 
         # Mutation: thick_skin — first cave-in each day prevented
         thick_skin_saved = False
@@ -3736,7 +3738,9 @@ class DigService:
         # Cooldown / paid dig check — normal digs only.
         paid_dig_cost = 0
         if not is_first_dig:
-            cooldown_remaining = self._get_cooldown_remaining(tunnel)
+            cooldown_remaining = self._apply_mana_cooldown_reduction(
+                discord_id, guild_id, self._get_cooldown_remaining(tunnel)
+            )
             if overgrowth_active:
                 cooldown_remaining = 0
             if cooldown_remaining > 0:
@@ -3745,7 +3749,10 @@ class DigService:
                     pc = tunnel.get("paid_digs_today") or 0
                     if pd != today:
                         pc = 0
-                    preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
+                    preview_cost = self._apply_mana_paid_cost_modifier(
+                        discord_id, guild_id,
+                        self._calculate_paid_dig_cost(tunnel, pc),
+                    )
                     return {
                         "success": False,
                         "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
@@ -3758,7 +3765,10 @@ class DigService:
                 paid_count = tunnel.get("paid_digs_today") or 0
                 if paid_date != today:
                     paid_count = 0
-                paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
+                paid_dig_cost = self._apply_mana_paid_cost_modifier(
+                    discord_id, guild_id,
+                    self._calculate_paid_dig_cost(tunnel, paid_count),
+                )
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 if balance < paid_dig_cost:
                     return self._error(
@@ -3940,12 +3950,14 @@ class DigService:
         cave_in_chance *= _prestige_cave_in_multiplier(prestige_level)
         if overgrowth_active:
             cave_in_chance *= 0.5
-        cave_in_chance = max(0.01, cave_in_chance)
 
         # Silent mana hazard modifier (Forest -, Mountain/Black +).
         cave_in_chance = self._apply_mana_hazard_modifier(
             discord_id, guild_id, cave_in_chance
         )
+        # Floor lives below the mana modifier so Forest can't zero out cave-in
+        # entirely; thick_skin below intentionally bypasses this.
+        cave_in_chance = max(0.01, cave_in_chance)
 
         thick_skin_saved = False
         if mutation_fx.get("daily_cave_in_shield"):
