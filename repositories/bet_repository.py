@@ -1612,3 +1612,20 @@ class BetRepository(BaseRepository, IBetRepository):
                     bet["profit"] = -effective_bet
                 results.append(bet)
             return results
+
+    def has_recent_bet(
+        self, discord_id: int, guild_id: int | None, since_ts: int,
+    ) -> bool:
+        """Return True if the player placed any bet at or after ``since_ts``."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM bets
+                 WHERE discord_id = ? AND guild_id = ? AND bet_time >= ?
+                 LIMIT 1
+                """,
+                (discord_id, gid, int(since_ts)),
+            )
+            return cursor.fetchone() is not None

@@ -259,6 +259,7 @@ class DigService:
         achievement_service=None,
         tunnel_naming_service=None,
         inventory_service=None,
+        quest_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -288,6 +289,10 @@ class DigService:
         self.inventory_service = inventory_service or DigInventoryService(
             dig_repo, player_repo
         )
+        # Quest progression service. Optional — when None, quest events are
+        # treated as always-excluded so the existing flow continues to work
+        # in test fixtures and prod paths that haven't wired quests yet.
+        self.quest_service = quest_service
         # Process-local cache of equipped relic IDs per (discord_id, guild_id).
         # A single /dig invocation hits ``_has_relic`` ~15 times across yield,
         # cave-in, advance, hazard, and color-dispatch sites; without this
@@ -2441,6 +2446,9 @@ class DigService:
             and e.get("rarity", "common") in allowed_rarities
             and prestige_level >= e.get("min_prestige", 0)
             and not e.get("chain_only", False)
+            # Quest events ride only the primary roll_event filter so we don't
+            # leak quest flavor to players who aren't on the matching stage.
+            and not e.get("quest_id")
         ]
         if not eligible:
             return None
@@ -3583,7 +3591,9 @@ class DigService:
         event = None
         if random.random() < event_chance:
             event = self.roll_event(new_depth, luminosity=luminosity,
-                                     prestige_level=prestige_level)
+                                     prestige_level=prestige_level,
+                                     discord_id=discord_id, guild_id=guild_id,
+                                     in_boss=boss_encounter, tunnel=tunnel)
             # Relic: Hollow Eye — reveal all option outcomes upfront
             if event is not None and self._has_relic(
                 discord_id, guild_id, "hollow_eye"
@@ -3594,7 +3604,9 @@ class DigService:
         event_preview = None
         if has_sonar_pulse:
             preview = self.roll_event(new_depth, luminosity=luminosity,
-                                      prestige_level=prestige_level)
+                                      prestige_level=prestige_level,
+                                      discord_id=discord_id, guild_id=guild_id,
+                                      in_boss=boss_encounter, tunnel=tunnel)
             if preview:
                 event_preview = {
                     "name": preview.get("name"),
@@ -4049,6 +4061,8 @@ class DigService:
 
         is_pitch_black = luminosity <= 0
         art_ids = _get_events_with_art()
+        # Quest events are excluded here too, mirroring roll_event/_chain_event,
+        # so the LLM context never sees quest event ids it shouldn't suggest.
         available_events = [
             {
                 "id": e["id"],
@@ -4062,6 +4076,7 @@ class DigService:
             and (e.get("layer") is None or e["layer"] == layer_name)
             and (not e.get("requires_dark") or is_pitch_black)
             and prestige_level >= e.get("min_prestige", 0)
+            and not e.get("quest_id")
         ]
 
         # ── Social Modifiers ──────────────────────────────────────
@@ -4479,6 +4494,8 @@ class DigService:
         if random.random() < p["event_chance"]:
             event = self.roll_event(
                 new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
+                discord_id=discord_id, guild_id=guild_id, in_boss=boss_encounter,
+                tunnel=tunnel,
             )
             if event is not None and self._has_relic(
                 discord_id, guild_id, "hollow_eye"
@@ -4489,6 +4506,8 @@ class DigService:
         if p["has_sonar_pulse"]:
             preview = self.roll_event(
                 new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
+                discord_id=discord_id, guild_id=guild_id, in_boss=boss_encounter,
+                tunnel=tunnel,
             )
             if preview:
                 event_preview = {
@@ -4782,6 +4801,8 @@ class DigService:
             if p["has_sonar_pulse"]:
                 preview = self.roll_event(
                     new_depth, luminosity=p["luminosity"], prestige_level=p["prestige_level"],
+                    discord_id=discord_id, guild_id=guild_id, in_boss=boss_encounter,
+                    tunnel=tunnel,
                 )
                 if preview:
                     event_preview = {
@@ -8366,20 +8387,55 @@ class DigService:
     # ------------------------------------------------------------------
 
     def roll_event(self, depth: int, luminosity: int = 100,
-                   prestige_level: int = 0) -> dict | None:
+                   prestige_level: int = 0,
+                   *,
+                   discord_id: int | None = None,
+                   guild_id: int | None = None,
+                   in_boss: bool = False,
+                   tunnel: dict | None = None) -> dict | None:
         """
         Roll for a random event with layer-specific rates, rarity, and prestige gating.
 
         Returns event info dict, or None if no event triggers.
+
+        ``discord_id``/``guild_id`` and ``in_boss`` are optional player context
+        used to filter quest-tagged events. When omitted, all quest events are
+        excluded (preserves backward compatibility for tests / non-player call
+        sites). When supplied, only the player's current eligible quest stage
+        event (or the stage-1 event of every starter they qualify for, if
+        idle) competes in the pool — and never during boss-fight digs.
+
+        ``tunnel`` is forwarded to the quest eligibility check to avoid a
+        second DB fetch when the caller already has it in scope.
         """
         layer = self._get_layer(depth)
         layer_name = layer.get("name", "Dirt")
         is_pitch_black = luminosity <= 0
         ascension = self._get_ascension_effects(prestige_level)
 
+        # Resolve the set of quest event ids this player is currently allowed
+        # to roll. Quest events are excluded entirely during a boss-fight dig
+        # or when no quest_service / no player context is available.
+        # ``getattr`` defends against tests that bypass __init__ via __new__.
+        eligible_quest_ids: set[str] = set()
+        quest_service = getattr(self, "quest_service", None)
+        if (
+            not in_boss
+            and quest_service is not None
+            and discord_id is not None
+        ):
+            try:
+                eligible_quest_ids = quest_service.eligible_quest_event_ids(
+                    discord_id, guild_id, tunnel=tunnel,
+                )
+            except Exception:
+                logger.debug("quest eligibility resolution failed", exc_info=True)
+                eligible_quest_ids = set()
+
         # Filter eligible events by depth, layer, darkness, prestige, and
         # chain-only flag (chain_only events are reachable only via
         # deterministic chain from a predecessor, never the random pool).
+        # Quest events are filtered to the player's currently eligible set.
         eligible = [
             e for e in EVENT_POOL
             if depth >= (e.get("min_depth") or 0)
@@ -8388,6 +8444,10 @@ class DigService:
             and (not e.get("requires_dark") or is_pitch_black)
             and prestige_level >= e.get("min_prestige", 0)
             and not e.get("chain_only", False)
+            and (
+                not e.get("quest_id")
+                or e["id"] in eligible_quest_ids
+            )
         ]
 
         # Non-darkness events are excluded at pitch black if darkness events exist
@@ -8704,6 +8764,25 @@ class DigService:
             trigger_event_id=event_id,
         )
 
+        # Quest progression: a successful *desperate* choice on a quest-tagged
+        # event advances the player's active arc. If this resolves the final
+        # stage, the quest service runs the finale handler (relic grant or
+        # JC + guild modifier window) inline.
+        quest_finale = None
+        quest_service = getattr(self, "quest_service", None)
+        if (
+            event.get("quest_id")
+            and choice == "desperate"
+            and succeeded
+            and quest_service is not None
+        ):
+            try:
+                quest_finale = quest_service.advance_on_desperate_success(
+                    discord_id, guild_id, event_id,
+                )
+            except Exception:
+                logger.exception("quest advance_on_desperate_success failed")
+
         return self._ok(
             event_name=event.get("name", "Unknown Event"),
             choice=choice,
@@ -8718,6 +8797,7 @@ class DigService:
             boss_info=boss_info,
             splash=_splash_to_dict(splash_result),
             guild_modifier_set=guild_modifier_set,
+            quest_finale=quest_finale,
         )
 
     # ------------------------------------------------------------------
