@@ -1864,6 +1864,12 @@ class RandomEvent:
     # reachable via deterministic chain (``next_event_id`` from a predecessor).
     # Use for narrative arc successors that should not appear out of order.
     chain_only: bool = False
+    # Quest tagging: when set, this event is one stage of a multi-dig narrative
+    # arc. It is filtered out of the random pool unless the player is on the
+    # matching active stage (or eligible to start the quest at stage 1).
+    # Advances on successful *desperate* choice only.
+    quest_id: str | None = None
+    quest_step: int | None = None
 
 
 def pick_description(event: Any) -> str:
@@ -5834,7 +5840,624 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="uncommon",
         splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=12, trigger="success", mode="burn"),
     ),
+
+    # --- Quest: Aghanim's Lost Trial (depth >=25; C C U U R) -----------------
+
+    RandomEvent(
+        id="agh_s1",
+        name="Etched Tile",
+        description=(
+            "A flat tile of dark glass juts from the wall, faint glyphs scored across its face. It is warm to the touch.",
+            "Among the dirt you find a fragment of patterned glass, glyphs half-rubbed clean. It hums when you breathe on it.",
+        ),
+        min_depth=25, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it where it lies",
+            success=EventOutcome("You let it be. The hum follows you a few steps and stops.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pry it loose and pocket it",
+            success=EventOutcome("It comes free with a clean click. Useful weight.", 1, 6, False),
+            failure=EventOutcome("It shatters in your hand. Shards bite.", -2, 0, False),
+            success_chance=0.55,
+        ),
+        desperate_option=EventChoice(
+            "Press your palm against the glyphs",
+            success=EventOutcome("The tile reads you back. A pattern lodges in your head and stays.", 2, 8, False),
+            failure=EventOutcome("Heat lances up your arm. You drop it; the glyphs go dark.", -3, -3, False),
+            success_chance=0.35,
+        ),
+        rarity="common",
+        quest_id="agh_lost_trial", quest_step=1,
+    ),
+    RandomEvent(
+        id="agh_s2",
+        name="Brass Coupling",
+        description=(
+            "Half-buried in the wall, a piece of dark brass — a coupling, jointed like a finger. Same glyph-set as the tile.",
+            "You strike something that does not break. Brass, articulated. The same hand made the tile.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Step around it",
+            success=EventOutcome("You move on. It clicks once behind you.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Work it loose with your pickaxe",
+            success=EventOutcome("It comes free in your palm, articulating against itself.", 1, 7, False),
+            failure=EventOutcome("The pickaxe slips. You leave skin on the brass.", -2, 0, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Fit it to the tile in your pack",
+            success=EventOutcome("Brass meets glass. Both go warm. The pattern is one step closer to whole.", 2, 10, False),
+            failure=EventOutcome("Both pieces seize. You almost lose them in the dirt.", -3, -4, False),
+            success_chance=0.32,
+        ),
+        rarity="common",
+        quest_id="agh_lost_trial", quest_step=2,
+    ),
+    RandomEvent(
+        id="agh_s3",
+        name="Reagent Vial",
+        description=(
+            "A stoppered vial, somehow unbroken, lying as if placed. The liquid inside moves on its own.",
+            "You uncover a small vial, its contents reading the room — pooling toward whichever wall is nearer.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Bury it back",
+            success=EventOutcome("You pack the dirt over it. The liquid stills.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Open it and pour out a drop",
+            success=EventOutcome("A bead of it lands on your glove. It evaporates upward, smelling of rain.", 2, 10, False),
+            failure=EventOutcome("The vial pops in your hand. The reagent reaches for you.", -3, -6, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Pour the whole vial onto the brass",
+            success=EventOutcome("Brass drinks. The pattern flares — somewhere a tunnel coughs in sympathy.", 3, 14, False),
+            failure=EventOutcome("The reagent burns through everything in your pack.", -4, -10, False),
+            success_chance=0.30,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=1, penalty_jc=2,
+            trigger="success", mode="burn",
+        ),
+        quest_id="agh_lost_trial", quest_step=3,
+    ),
+    RandomEvent(
+        id="agh_s4",
+        name="Glyphed Door",
+        description=(
+            "The tunnel opens into a chamber that should not be here. A door, half-sized, set with the brass and glass you have been gathering.",
+            "A door waits, fitted with sockets in the shape of every piece you have collected. It opens to whatever you choose to do.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Note its location and leave",
+            success=EventOutcome("You memorize the door. It hums politely as you go.", 0, 4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Fit the pieces and turn the lock",
+            success=EventOutcome("Tumblers fall. Something inside the door pays attention.", 2, 14, False),
+            failure=EventOutcome("The pieces refuse each other. The door grows cold.", -3, -8, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Force the door open while it's still warm",
+            success=EventOutcome("It gives, reluctantly. A long corridor breathes in welcome.", 4, 18, False),
+            failure=EventOutcome("The door rejects you. Heat lashes the chamber.", -6, -14, True),
+            success_chance=0.28,
+        ),
+        rarity="uncommon",
+        quest_id="agh_lost_trial", quest_step=4,
+    ),
+    RandomEvent(
+        id="agh_s5",
+        name="The Inner Room",
+        description=(
+            "The corridor ends at a workshop, abandoned mid-experiment, every surface dusted in reagent. A larger contraption hangs over a bench, expectant.",
+            "You step into a room that has been waiting. Tools on the bench are arranged for one more user. The contraption above hums on a frequency you have learned to hear.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Take what you can carry and leave",
+            success=EventOutcome("You pocket what is loose and go. The room stays patient.", 1, 10, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sit at the bench and try the simplest joining",
+            success=EventOutcome("Reagent meets brass meets glass. The room exhales gold.", 3, 30, False),
+            failure=EventOutcome("Your joining fails loudly. The bench scorches.", -6, -20, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Trigger the whole contraption",
+            success=EventOutcome("Reagent floods the chamber and rolls outward through every tunnel. The guild's mine drinks it for an hour.", 6, 75, False),
+            failure=EventOutcome("The contraption fires in the wrong direction. Most of the reagent is wasted.", -8, -25, True),
+            success_chance=0.25,
+        ),
+        rarity="rare",
+        quest_id="agh_lost_trial", quest_step=5,
+    ),
+
+    # --- Quest: The Necropolis Below (prestige >=2; C C U U R) ---------------
+
+    RandomEvent(
+        id="necro_s1",
+        name="Bone Fragment",
+        description=(
+            "Something small and white in the dirt. Too pale for stone. The shape of a finger.",
+            "You uncover a bone splinter, polished as if it has been waiting.",
+        ),
+        min_depth=None, max_depth=None,
+        min_prestige=2,
+        safe_option=EventChoice(
+            "Rebury it respectfully",
+            success=EventOutcome("You cover the bone. The air thanks you in a way you cannot name.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pocket it for luck",
+            success=EventOutcome("Cold against your hip. Heavier than it should be.", 1, 7, False),
+            failure=EventOutcome("It crumbles to powder. The air goes thin.", -2, 0, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Whisper a name to it",
+            success=EventOutcome("Something far below sits up to listen.", 2, 11, False),
+            failure=EventOutcome("Wrong name. Wrong everything. The dirt tightens around your ankles.", -3, -5, False),
+            success_chance=0.35,
+        ),
+        rarity="common",
+        quest_id="necropolis_below", quest_step=1,
+    ),
+    RandomEvent(
+        id="necro_s2",
+        name="Wight Scout",
+        description=(
+            "A figure in the dark, watching from where there should be no figure. Rags. No face. Patient.",
+            "It does not block your path. It only stands there and counts your breaths.",
+        ),
+        min_depth=None, max_depth=None,
+        min_prestige=2,
+        safe_option=EventChoice(
+            "Pass with eyes down",
+            success=EventOutcome("You walk past. It does not turn its head.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Offer a coin",
+            success=EventOutcome("It accepts. The coin disappears. Your pack feels noticed.", 2, 9, False),
+            failure=EventOutcome("It does not want coin. It wants a name. You do not give one.", -2, -3, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Ask who sent it",
+            success=EventOutcome("It gestures further down. A road opens that was not there before.", 2, 12, False),
+            failure=EventOutcome("It turns its facelessness fully on you. You forget several minutes.", -4, -8, False),
+            success_chance=0.32,
+        ),
+        rarity="common",
+        quest_id="necropolis_below", quest_step=2,
+    ),
+    RandomEvent(
+        id="necro_s3",
+        name="Lich's Emissary",
+        description=(
+            "Robes that move on their own breeze. A crown of teeth. Polite as a clerk and twice as patient.",
+            "An emissary, clearly. He has a ledger. He is checking your name against something.",
+        ),
+        min_depth=None, max_depth=None,
+        min_prestige=2,
+        safe_option=EventChoice(
+            "Plead unworthiness",
+            success=EventOutcome("He marks something and waves you on. The ledger sighs.", 0, 4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sign the ledger",
+            success=EventOutcome("He smiles. The signature pays for itself somewhere down the line.", 2, 12, False),
+            failure=EventOutcome("Your hand cramps on the page. Something is taken in the gap.", -3, -8, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Steal a page from the ledger",
+            success=EventOutcome("The page comes loose; another digger's name fades from a wall somewhere.", 3, 14, False),
+            failure=EventOutcome("He catches your wrist. The ledger drinks from you in payment.", -5, -12, False),
+            success_chance=0.28,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=1, penalty_jc=3,
+            trigger="success", mode="steal",
+        ),
+        quest_id="necropolis_below", quest_step=3,
+    ),
+    RandomEvent(
+        id="necro_s4",
+        name="Raise or Banish",
+        description=(
+            "A circle of bones laid out by someone careful. In the center, a small skull, expectant.",
+            "Inside the circle, a question without words. You can wake what is here. You can also send it away.",
+        ),
+        min_depth=None, max_depth=None,
+        min_prestige=2,
+        safe_option=EventChoice(
+            "Scatter the circle",
+            success=EventOutcome("Bones roll into dirt. The chamber relaxes.", 1, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Banish what is inside",
+            success=EventOutcome("Something thin slips out and out and out until it isn't.", 2, 13, False),
+            failure=EventOutcome("Banishing requires conviction. You lacked it.", -4, -10, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Raise it and ask its name",
+            success=EventOutcome("It rises and gives a name. You write it where you'll find it again.", 3, 17, False),
+            failure=EventOutcome("What rises is not what was buried.", -6, -16, True),
+            success_chance=0.28,
+        ),
+        rarity="uncommon",
+        quest_id="necropolis_below", quest_step=4,
+    ),
+    RandomEvent(
+        id="necro_s5",
+        name="Audience with the Necromancer",
+        description=(
+            "A long room of standing dead, all turned toward a chair at the far end. The chair is occupied. The occupant has been waiting.",
+            "You arrive in a hall too big for the tunnels. Cold light. A figure on a throne, who has read every page of the ledger and chosen which to keep.",
+        ),
+        min_depth=None, max_depth=None,
+        min_prestige=2,
+        safe_option=EventChoice(
+            "Bow and back away",
+            success=EventOutcome("You retreat. He does not begrudge it. The hall stays for next time.", 1, 8, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Offer service in exchange for safe passage",
+            success=EventOutcome("He accepts a small service. The room marks you as useful.", 3, 25, False),
+            failure=EventOutcome("He laughs. The standing dead laugh with him.", -8, -30, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Demand a token of his authority",
+            success=EventOutcome("He is delighted by the impertinence. He hands you a cloak from his own shoulders. It moves of its own accord.", 5, 50, False),
+            failure=EventOutcome("Impertinence has a price. He extracts it from your bones.", -10, -40, True),
+            success_chance=0.25,
+        ),
+        rarity="rare",
+        quest_id="necropolis_below", quest_step=5,
+    ),
+
+    # --- Quest: Bolas' Hidden Vault (bet within 7 days; C C U U R) -----------
+
+    RandomEvent(
+        id="bolas_s1",
+        name="Hieroglyph in the Dirt",
+        description=(
+            "A glyph etched into the tunnel wall, fresh enough that it should not be here. The shape of a dragon, mid-coil.",
+            "Someone has been scratching dragons into the rock. The lines are too clean for a digger's hand.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Smear it out and move on",
+            success=EventOutcome("You wipe the glyph; the wall keeps the memory of it.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Trace it with your finger",
+            success=EventOutcome("The line completes under your touch and stays warm.", 1, 7, False),
+            failure=EventOutcome("Your finger cuts on the glyph; the cut does not bleed for a while.", -2, -2, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Spit on it and rub the spit in",
+            success=EventOutcome("The dragon takes a small interest in you. A coin appears at your feet.", 2, 11, False),
+            failure=EventOutcome("The wall takes the spit and gives nothing back.", -3, -5, False),
+            success_chance=0.34,
+        ),
+        rarity="common",
+        quest_id="bolas_hidden_vault", quest_step=1,
+    ),
+    RandomEvent(
+        id="bolas_s2",
+        name="Coin That Refuses",
+        description=(
+            "A coin in the dirt, the wrong shape and the wrong metal. It refuses to be picked up at first.",
+            "You bend for what looks like jopacoin and find your hand will not close on it.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it",
+            success=EventOutcome("You walk on. The coin keeps refusing whoever passes.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Wedge a tool under it",
+            success=EventOutcome("Leverage works where fingers did not. The coin yields, sullenly.", 1, 8, False),
+            failure=EventOutcome("The coin bites the tool. Your grip rings for an hour.", -2, -3, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Promise it something",
+            success=EventOutcome("You promise the next thing you find. The coin lifts itself into your hand.", 2, 12, False),
+            failure=EventOutcome("It accepts the wrong promise. You feel poorer in a way coin cannot fix.", -3, -7, False),
+            success_chance=0.32,
+        ),
+        rarity="common",
+        quest_id="bolas_hidden_vault", quest_step=2,
+    ),
+    RandomEvent(
+        id="bolas_s3",
+        name="Hoarded Pile",
+        description=(
+            "A small mound of coins someone has been adding to, one at a time. Other diggers' work. Not yours.",
+            "You stumble into a deposit that was meant to grow into something. The pile is not yours, but the chamber is empty.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Add one of your own coins, take none",
+            success=EventOutcome("Your tithe lands on top. The pile leans toward you.", 0, 4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Skim a few coins off the top",
+            success=EventOutcome("You take a few. The pile remembers the shape of the hand that took them.", 1, 9, False),
+            failure=EventOutcome("The pile collapses and yours collapses with it.", -3, -8, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Take the whole pile",
+            success=EventOutcome("You scoop it all. The chamber chooses someone else to feel the lack.", 2, 18, False),
+            failure=EventOutcome("The pile remembers everything you took and forgets nothing.", -5, -14, False),
+            success_chance=0.28,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=1, penalty_jc=4,
+            trigger="success", mode="steal",
+        ),
+        quest_id="bolas_hidden_vault", quest_step=3,
+    ),
+    RandomEvent(
+        id="bolas_s4",
+        name="Draconic Tribute",
+        description=(
+            "An altar. The dragon glyph again, larger now, scaled in coin. A space cleared in front of it for whatever you bring.",
+            "The altar is patient. It accepts. It has been accepting from people for longer than you have been alive.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Leave a small token",
+            success=EventOutcome("A coin disappears into the altar. You feel lighter and slightly observed.", 1, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Offer a meaningful share",
+            success=EventOutcome("You give what stings. The altar warms. Something in you marks the loss as deposit.", 2, 14, False),
+            failure=EventOutcome("Your share is judged inadequate. You leave it anyway.", -3, -10, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Empty your pack onto the altar",
+            success=EventOutcome("You pour out everything. The altar approves in a register reserved for fools and heirs.", 3, 22, False),
+            failure=EventOutcome("Generosity is taken for weakness. The altar takes more than you offered.", -5, -18, True),
+            success_chance=0.27,
+        ),
+        rarity="uncommon",
+        quest_id="bolas_hidden_vault", quest_step=4,
+    ),
+    RandomEvent(
+        id="bolas_s5",
+        name="The Inner Vault",
+        description=(
+            "A door of dragon-shaped brass at the back of a chamber you should not have found. The altar's payments have all been going somewhere.",
+            "The vault, finally. The door knows your name from the ledger of every tribute you have left.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Note the door and retreat",
+            success=EventOutcome("You record the location in your head and back out. It will be here.", 1, 10, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Knock and announce yourself",
+            success=EventOutcome("The door opens politely. A modest sample of the hoard is yours.", 3, 28, False),
+            failure=EventOutcome("Your name does not match the ledger today.", -6, -20, False),
+            success_chance=0.42,
+        ),
+        desperate_option=EventChoice(
+            "Take the hoard",
+            success=EventOutcome("The door yields what it has been holding. Something with teeth nods at the bargain.", 5, 55, False),
+            failure=EventOutcome("Hoards object. This one objects with teeth.", -10, -35, True),
+            success_chance=0.25,
+        ),
+        rarity="rare",
+        quest_id="bolas_hidden_vault", quest_step=5,
+    ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Quests
+#
+# Multi-dig narrative arcs of exactly 5 stages each. Each stage is a normal
+# RandomEvent tagged with ``quest_id`` and ``quest_step`` (1-indexed). The
+# player advances to the next stage by picking the *desperate* option and
+# succeeding; any other outcome leaves them parked. Stage rarity must be
+# monotonic non-increasing across stages. Completion (per-guild, lifetime
+# one-shot) triggers a finale handler in DigQuestService.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QuestStarterPrereq:
+    """Eligibility criteria for a quest's stage-1 event.
+
+    ``min_depth`` and ``min_prestige`` are checked against the player's
+    tunnel state. ``system_predicate`` is an optional key resolved by
+    DigQuestService against other services (e.g. ``"bet_within_7d"``
+    looks up recent betting activity). Multiple criteria are AND-ed.
+    """
+    min_depth: int = 0
+    min_prestige: int = 0
+    system_predicate: str | None = None
+
+
+@dataclass(frozen=True)
+class QuestDef:
+    """Immutable definition of a 5-stage quest arc."""
+    quest_id: str
+    name: str                              # internal label (logs/admin); not shown to players
+    starter_prereq: QuestStarterPrereq
+    step_event_ids: tuple[str, ...]        # ordered; must be length 5
+    finale_kind: str                       # "jc_plus_guild_modifier" | "relic_grant"
+    finale_payload: dict                   # kind-specific finale config
+
+
+# Curated, weaker sub-pool of PINNACLE_RELIC_STAT_POOL ids for quest relic
+# finales. Tuned modest so quest relics feel rewarding without eclipsing
+# pinnacle drops (which roll across the full pool).
+_NECROPOLIS_RELIC_STAT_POOL: tuple[str, ...] = (
+    "boss_hp_minus_10",   # bosses arrive weakened
+    "dmg_plus_per_100",   # damage scales with depth
+    "boss_hit_minus",     # bosses miss more often
+    "hp_plus_1",          # tougher skin (survive longer)
+    "streak_immunity",    # streak persists once per delve
+)
+
+_BOLAS_RELIC_STAT_POOL: tuple[str, ...] = (
+    "jc_plus_5",          # richer veins
+    "boss_payout_5",      # bosses pay better
+    "inventory_plus_1",   # roomier pack
+    "cheer_buff",         # cheers ring louder
+    "lum_refill_2",       # brighter mornings (more digs per delve)
+)
+
+
+QUESTS: tuple[QuestDef, ...] = (
+    QuestDef(
+        quest_id="agh_lost_trial",
+        name="Aghanim's Lost Trial",
+        starter_prereq=QuestStarterPrereq(min_depth=25),
+        step_event_ids=("agh_s1", "agh_s2", "agh_s3", "agh_s4", "agh_s5"),
+        finale_kind="jc_plus_guild_modifier",
+        finale_payload={
+            "personal_jc": 75,
+            "modifier_id": "reagent_spill",
+            "duration_seconds": 1800,
+            "modifier_payload": {"jc_event_bonus_pct": 25},
+        },
+    ),
+    QuestDef(
+        quest_id="necropolis_below",
+        name="The Necropolis Below",
+        starter_prereq=QuestStarterPrereq(min_prestige=2),
+        step_event_ids=("necro_s1", "necro_s2", "necro_s3", "necro_s4", "necro_s5"),
+        finale_kind="relic_grant",
+        finale_payload={
+            "relic_base": "Cloak of the Necropolis",
+            "relic_suffix": "Long Silence",
+            "stat_pool": _NECROPOLIS_RELIC_STAT_POOL,
+            "roll_count": 2,
+        },
+    ),
+    QuestDef(
+        quest_id="bolas_hidden_vault",
+        name="Bolas' Hidden Vault",
+        starter_prereq=QuestStarterPrereq(system_predicate="bet_within_7d"),
+        step_event_ids=("bolas_s1", "bolas_s2", "bolas_s3", "bolas_s4", "bolas_s5"),
+        finale_kind="relic_grant",
+        finale_payload={
+            "relic_base": "Hoard of Bolas",
+            "relic_suffix": "Scheming Hand",
+            "stat_pool": _BOLAS_RELIC_STAT_POOL,
+            "roll_count": 2,
+        },
+    ),
+)
+
+
+_QUEST_RARITY_RANK = {"common": 0, "uncommon": 1, "rare": 2, "legendary": 3}
+_QUEST_VALID_FINALE_KINDS = frozenset({"jc_plus_guild_modifier", "relic_grant"})
+_QUEST_STAGE_COUNT = 5
+
+
+def validate_quests(quests, events) -> None:
+    """Validate every QuestDef against the event registry.
+
+    Checks per quest:
+    - Stage count is exactly 5.
+    - Every step_event_id exists in ``events``.
+    - Each referenced event is tagged with the matching quest_id/quest_step.
+    - Each referenced event has a ``desperate_option`` (the advancement path).
+    - Stage rarity is monotonic non-increasing across stages.
+    - ``finale_kind`` is recognized.
+
+    Raises ValueError on the first violation. Empty quest tuple is a no-op.
+    """
+    event_by_id = {e.id: e for e in events}
+    for q in quests:
+        if len(q.step_event_ids) != _QUEST_STAGE_COUNT:
+            raise ValueError(
+                f"Quest {q.quest_id!r}: must have exactly "
+                f"{_QUEST_STAGE_COUNT} stages, got {len(q.step_event_ids)}"
+            )
+        prev_rank = -1
+        for i, eid in enumerate(q.step_event_ids, start=1):
+            event = event_by_id.get(eid)
+            if event is None:
+                raise ValueError(
+                    f"Quest {q.quest_id!r} stage {i}: event id {eid!r} "
+                    "not found in RANDOM_EVENTS"
+                )
+            if event.quest_id != q.quest_id:
+                raise ValueError(
+                    f"Quest {q.quest_id!r} stage {i}: event {eid!r}.quest_id "
+                    f"is {event.quest_id!r}, expected {q.quest_id!r}"
+                )
+            if event.quest_step != i:
+                raise ValueError(
+                    f"Quest {q.quest_id!r} stage {i}: event {eid!r}.quest_step "
+                    f"is {event.quest_step!r}, expected {i}"
+                )
+            if event.desperate_option is None:
+                raise ValueError(
+                    f"Quest {q.quest_id!r} stage {i}: event {eid!r} has no "
+                    "desperate_option; quest events advance only on "
+                    "desperate-success and must offer it"
+                )
+            rank = _QUEST_RARITY_RANK.get(event.rarity, -1)
+            if rank < 0:
+                raise ValueError(
+                    f"Quest {q.quest_id!r} stage {i}: event {eid!r} has "
+                    f"unrecognized rarity {event.rarity!r}"
+                )
+            if rank < prev_rank:
+                raise ValueError(
+                    f"Quest {q.quest_id!r} stage {i}: rarity {event.rarity!r} "
+                    f"is more common than previous stage; rarity must be "
+                    "monotonic non-increasing across stages"
+                )
+            prev_rank = rank
+        if q.finale_kind not in _QUEST_VALID_FINALE_KINDS:
+            raise ValueError(
+                f"Quest {q.quest_id!r}: unknown finale_kind {q.finale_kind!r}"
+            )
+
+
+validate_quests(QUESTS, RANDOM_EVENTS)
 
 
 # ---------------------------------------------------------------------------
@@ -8637,6 +9260,8 @@ EVENT_POOL: list[dict] = [
             "mode": e.splash.mode,
         } if e.splash else None,
         "guild_modifier_on_success": dict(e.guild_modifier_on_success) if e.guild_modifier_on_success else None,
+        "quest_id": e.quest_id,
+        "quest_step": e.quest_step,
     }
     for e in RANDOM_EVENTS
 ]

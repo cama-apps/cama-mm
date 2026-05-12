@@ -390,6 +390,7 @@ class SchemaManager:
             # Index for the dig leaderboard surface. ORDER BY prestige DESC,
             # depth DESC scans guild_id-filtered rows; the composite covers it.
             ("add_tunnels_leaderboard_index", self._migration_add_tunnels_leaderboard_index),
+            ("create_dig_quests_table", self._migration_create_dig_quests_table),
         ]
 
     # --- Migrations ---
@@ -2110,6 +2111,28 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_dig_guild_modifiers_active
             ON dig_guild_modifiers(guild_id, expires_at)
+            """
+        )
+
+    def _migration_create_dig_quests_table(self, cursor) -> None:
+        """Per-(player, guild) quest progression state.
+
+        ``active_quest_id``/``active_quest_step`` hold the in-progress arc
+        (NULL when none). ``completed_quests`` is a JSON array of quest ids
+        the player has already finished in this guild — completed quests
+        never re-fire. State persists across prestige resets.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_quests (
+                discord_id        INTEGER NOT NULL,
+                guild_id          INTEGER NOT NULL,
+                active_quest_id   TEXT,
+                active_quest_step INTEGER,
+                completed_quests  TEXT NOT NULL DEFAULT '[]',
+                last_updated_at   INTEGER,
+                PRIMARY KEY (discord_id, guild_id)
+            )
             """
         )
 
