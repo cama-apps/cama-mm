@@ -101,6 +101,41 @@ class BuffRepository(BaseRepository):
                 row["data"] = safe_json_loads(row.get("data"), {}, context="manashop_buffs.data")
             return rows
 
+    def refresh_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        buff_type: str,
+        expires_at: int,
+        *,
+        target_id: int | None = None,
+        data: dict | None = None,
+    ) -> int:
+        """Atomically expire all active buffs of ``buff_type`` for the player
+        and insert a fresh one. Closes the consume-then-grant race so
+        concurrent re-purchases cannot leave two active rows.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        granted_at = int(time.time())
+        data_json = json.dumps(data) if data else None
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE manashop_buffs SET triggered = 1 "
+                "WHERE discord_id = ? AND guild_id = ? AND buff_type = ? "
+                "AND triggered = 0 AND expires_at > ?",
+                (discord_id, gid, buff_type, granted_at),
+            )
+            cursor.execute(
+                """
+                INSERT INTO manashop_buffs
+                (discord_id, guild_id, buff_type, target_id, granted_at, expires_at, triggered, data)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+                """,
+                (discord_id, gid, buff_type, target_id, granted_at, expires_at, data_json),
+            )
+            return int(cursor.lastrowid or 0)
+
     def consume_atomic(self, buff_id: int) -> bool:
         """Atomically mark a buff as triggered. Returns True if the flag
         flipped (claim succeeded), False if it was already triggered or the

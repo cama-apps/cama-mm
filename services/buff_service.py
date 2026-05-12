@@ -61,14 +61,11 @@ class BuffService:
     def grant_overgrowth(self, discord_id: int, guild_id: int | None) -> int:
         """12h dig boost (read by dig service).
 
-        Re-granting while active refreshes the timer rather than extending:
-        any existing active overgrowth row is consumed before the new grant.
+        Re-granting refreshes the timer rather than extending: any existing
+        active overgrowth row is expired in the same transaction as the new
+        grant so concurrent re-purchases can't both leave a row alive.
         """
-        for existing in self.buff_repo.active_for(
-            discord_id, guild_id, BUFF_OVERGROWTH
-        ):
-            self.buff_repo.consume_atomic(existing["id"])
-        return self.buff_repo.grant(
+        return self.buff_repo.refresh_atomic(
             discord_id, guild_id, BUFF_OVERGROWTH, self._expires(12)
         )
 
