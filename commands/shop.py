@@ -1565,7 +1565,7 @@ class ShopCommands(commands.Cog):
         # Ultimate (taps mana — consumes today's color)
         app_commands.Choice(name="Ult • Wildfire (Red, 450 JC, taps mana) — drain JC from every positive player", value="wildfire"),
         app_commands.Choice(name="Ult • Counterspell (Blue, 400 JC, taps mana) — 24h PvP immunity", value="counterspell"),
-        app_commands.Choice(name="Ult • Overgrowth (Green, 400 JC, taps mana) — 24h dig overdrive", value="overgrowth"),
+        app_commands.Choice(name="Ult • Overgrowth (Green, 400 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
         app_commands.Choice(name="Ult • Sanctuary (White, 400 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
         app_commands.Choice(name="Ult • Dark Bargain (Black, 350 JC, taps mana) — 800 JC instant 0%-fee debt", value="dark_bargain"),
     ])
@@ -2012,7 +2012,7 @@ class ShopCommands(commands.Cog):
                 return
             await interaction.followup.send(
                 f"🌲🌳 **OVERGROWTH** — {interaction.user.mention} burns the day's mana into the soil.\n"
-                f"For 24h: every dig +5 JC, no /dig cooldown, hazard chances halved.\n"
+                f"For 12h: every dig +5 JC, no /dig cooldown, cave-in chance halved.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
             )
 

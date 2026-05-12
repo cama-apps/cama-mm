@@ -23,6 +23,7 @@ from services.dig_constants import (
     INSURANCE_COST_DEPTH_DIVISOR,
     INSURANCE_DURATION_SECONDS,
     MILESTONES,
+    PAID_DIG_COST_CAP,
     PAID_DIG_COSTS_PER_DAY,
     PICKAXE_TIERS,
     PINNACLE_DEPTH,
@@ -33,7 +34,7 @@ from services.dig_constants import (
     SABOTAGE_DAMAGE_MIN,
     STREAKS,
 )
-from services.dig_service import DigService
+from services.dig_service import DigService, _prestige_cave_in_multiplier
 
 
 @pytest.fixture
@@ -65,6 +66,27 @@ def _register_player(player_repository, discord_id=10001, guild_id=12345, balanc
     if balance != 3:  # default is 3
         player_repository.update_balance(discord_id, guild_id, balance)
     return discord_id
+
+
+class TestDigConstants:
+    """Pure-data assertions on tunable constants."""
+
+    def test_paid_dig_ramp(self):
+        assert PAID_DIG_COSTS_PER_DAY == [3, 5, 10, 20, 40]
+
+    def test_paid_dig_cost_cap(self):
+        assert PAID_DIG_COST_CAP == 40
+
+
+class TestPrestigeCaveInMultiplier:
+    """Pure math: prestige scales cave-in chance 0.9× → 1.2×."""
+
+    @pytest.mark.parametrize(
+        "prestige,expected",
+        [(0, 0.9), (3, 0.99), (10, 1.20)],
+    )
+    def test_multiplier_anchors(self, prestige, expected):
+        assert _prestige_cave_in_multiplier(prestige) == pytest.approx(expected)
 
 
 class TestCoreDig:
@@ -172,7 +194,7 @@ class TestCooldown:
         assert result["success"]
 
     def test_paid_dig_escalating_cost(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Paid dig costs escalate: 3, 6, 12, 24, 48."""
+        """Paid dig costs escalate per PAID_DIG_COSTS_PER_DAY."""
         _register_player(player_repository, balance=500)
         base_time = 1_000_000
         monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
@@ -181,7 +203,7 @@ class TestCooldown:
         monkeypatch.setattr(time, "time", lambda: base_time)
         dig_service.dig(10001, guild_id)
 
-        expected_costs = PAID_DIG_COSTS_PER_DAY  # [3, 6, 12, 24, 48]
+        expected_costs = PAID_DIG_COSTS_PER_DAY
         for i, expected_cost in enumerate(expected_costs):
             monkeypatch.setattr(time, "time", lambda i=i: base_time + 60 * (i + 1))
             result = dig_service.dig(10001, guild_id, paid=True)

@@ -3187,6 +3187,9 @@ class DigCommands(commands.Cog):
             status_parts.append("Insured")
         if now < reinforced_until:
             status_parts.append("Reinforced")
+        hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
+        if hard_hat_charges > 0:
+            status_parts.append(f"Hard Hat ({hard_hat_charges})")
         if status_parts:
             embed.add_field(name="Protection", value=", ".join(status_parts), inline=True)
 

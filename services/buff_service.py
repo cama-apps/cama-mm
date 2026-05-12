@@ -59,9 +59,17 @@ class BuffService:
         )
 
     def grant_overgrowth(self, discord_id: int, guild_id: int | None) -> int:
-        """24h dig boost (read by dig service)."""
+        """12h dig boost (read by dig service).
+
+        Re-granting while active refreshes the timer rather than extending:
+        any existing active overgrowth row is consumed before the new grant.
+        """
+        for existing in self.buff_repo.active_for(
+            discord_id, guild_id, BUFF_OVERGROWTH
+        ):
+            self.buff_repo.consume_atomic(existing["id"])
         return self.buff_repo.grant(
-            discord_id, guild_id, BUFF_OVERGROWTH, self._expires(24)
+            discord_id, guild_id, BUFF_OVERGROWTH, self._expires(12)
         )
 
     def grant_sanctuary(
