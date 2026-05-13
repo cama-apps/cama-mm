@@ -470,6 +470,58 @@ class TestCaveIn:
         if result.get("stun_hours"):
             assert result["stun_hours"] >= 1
 
+    def test_reinforcement_caps_cave_in_block_loss_at_eight(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """When Reinforcement window is active, cave-in block_loss clamps to 8
+        even if the random roll would put it higher.
+
+        Uses a shallow-band depth where block_loss range tops out at 14 and
+        catastrophic_pct is 0 — so a single ``random=0.001`` forces a normal
+        cave-in (not a catastrophic one, which has its own depth-rollback path)
+        and `randint=b` rolls the upper bound, giving block_loss=14 pre-cap.
+        Reinforcement should clamp that to 8.
+        """
+        _register_player(player_repository, balance=300)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        dig_service.dig(10001, guild_id)
+        # Stay in the shallow band (< 50) and mark the depth-25 boss defeated
+        # so the test dig doesn't park there.
+        bp_defeated = json.dumps({"25": "defeated"})
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=40,
+            boss_progress=bp_defeated,
+            reinforced_until=1_000_000 + 48 * 3600,
+        )
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: 0.001)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        result = dig_service.dig(10001, guild_id)
+        assert result.get("cave_in"), "expected a forced cave-in"
+        detail = result.get("cave_in_detail") or {}
+        block_loss = int(detail.get("block_loss", -1))
+        assert 0 <= block_loss <= 8, f"block_loss {block_loss} exceeded cap"
+
+        # Sanity check: without Reinforcement on the same setup, block_loss
+        # should land in the uncapped shallow range (6..14). Guards against a
+        # cap that fires regardless of the window.
+        _register_player(player_repository, discord_id=10099, balance=300)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10099, guild_id)
+        dig_repo.update_tunnel(
+            10099, guild_id, depth=40, boss_progress=bp_defeated,
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: 0.001)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        result_no_reinf = dig_service.dig(10099, guild_id)
+        detail_no_reinf = result_no_reinf.get("cave_in_detail") or {}
+        assert int(detail_no_reinf.get("block_loss", 0)) > 8
+
     def test_cave_in_medical_bill(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Medical bill costs depth/10 JC."""
         _register_player(player_repository, balance=200)
@@ -802,6 +854,61 @@ class TestSabotage:
 
         result = dig_service.sabotage_tunnel(10001, 10001, guild_id)
         assert not result["success"]
+
+    def test_sabotage_attacker_block_reward_by_depth_tier(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Successful sabotage gives the attacker +3/+5/+7 advance scaled by
+        victim's depth bracket (<100 / 100-250 / 250+).
+
+        Uses a fresh victim per iteration to avoid the 12h per-target cooldown.
+        """
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        _register_player(player_repository, discord_id=29999, balance=2000)
+        dig_service.dig(29999, guild_id)
+
+        for i, (victim_depth, expected_reward) in enumerate(
+            [(50, 3), (150, 5), (300, 7)],
+        ):
+            victim_id = 20100 + i
+            _register_player(player_repository, discord_id=victim_id)
+            dig_service.dig(victim_id, guild_id)
+            dig_repo.update_tunnel(victim_id, guild_id, depth=victim_depth)
+            attacker_pre = dig_repo.get_tunnel(29999, guild_id)
+
+            result = dig_service.sabotage_tunnel(29999, victim_id, guild_id)
+            assert result["success"]
+            assert result.get("attacker_block_reward") == expected_reward
+            attacker_post = dig_repo.get_tunnel(29999, guild_id)
+            assert attacker_post["depth"] == attacker_pre["depth"] + expected_reward
+
+    def test_blocked_sabotage_credits_victim_jc_tip(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Trap-blocked sabotage credits the victim a small JC tip on top of
+        the existing trap_steal -> target_jc_credit flow."""
+        _register_player(player_repository, discord_id=10001, balance=100)
+        _register_player(player_repository, discord_id=10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=200)
+
+        # Victim sets a trap so the attacker's attempt is blocked.
+        dig_service.set_trap(10001, guild_id)
+
+        victim_balance_before = player_repository.get_balance(10001, guild_id)
+        result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
+        assert result.get("trapped")
+        victim_balance_after = player_repository.get_balance(10001, guild_id)
+        # Trap_steal (cost*2) + victim tip (max(25, cost//2)). Victim gain is
+        # strictly larger than the bare trap_steal, which is what the buff is for.
+        cost = max(5, 200 // 5)
+        bare_trap_credit = cost
+        assert victim_balance_after - victim_balance_before > bare_trap_credit
 
 
 class TestTrap:

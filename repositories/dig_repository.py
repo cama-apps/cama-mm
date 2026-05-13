@@ -20,6 +20,7 @@ class DigRepository(BaseRepository, IDigRepository):
         "prestige_level", "trap_active", "trap_free_today", "insured_until",
         "reinforced_until", "paid_digs_today", "revenge_target", "revenge_until",
         "hard_hat_charges", "void_bait_digs", "luminosity", "boss_attempts",
+        "grappling_hook_charges", "sonar_skip_pending",
         "best_run_score", "current_run_jc", "current_run_artifacts",
         "current_run_events", "total_prestige_score", "stat_strength",
         "stat_smarts", "stat_stamina", "stat_points",
@@ -117,6 +118,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "pinnacle_last_engaged_at",
         # boss revamp: retreat cooldown
         "retreat_cooldown_until",
+        # dig_buff_fun_charges migration
+        "grappling_hook_charges", "sonar_skip_pending",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
