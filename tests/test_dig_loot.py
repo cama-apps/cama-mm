@@ -228,6 +228,45 @@ class TestItems:
         # but the key should be present
         assert "event_preview" in result
 
+    def test_sonar_pulse_auto_skips_next_event(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Sonar Pulse queues a sonar_skip_pending flag; on the NEXT dig the
+        triggered event is suppressed and ``sonar_skipped`` is True."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=20)
+
+        # Dig 1: consume Sonar Pulse — primes sonar_skip_pending.
+        dig_service.buy_item(10001, guild_id, "sonar_pulse")
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+        monkeypatch.setattr(
+            time, "time",
+            lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        dig_service.dig(10001, guild_id)
+        tunnel_after_prime = dig_repo.get_tunnel(10001, guild_id)
+        assert int(tunnel_after_prime.get("sonar_skip_pending") or 0) == 1
+
+        # Dig 2: random.random = 0.15 — too high to trigger cave-in (~5-10%)
+        # but below event_chance (~22% baseline for Dirt). That forces the
+        # event branch which is where the Sonar skip is wired.
+        monkeypatch.setattr(
+            time, "time",
+            lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 2,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.15)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert not result.get("cave_in"), "sonar test expects no cave-in path"
+        assert result.get("event") is None
+        assert result.get("sonar_skipped") is True
+        tunnel_after_skip = dig_repo.get_tunnel(10001, guild_id)
+        assert int(tunnel_after_skip.get("sonar_skip_pending") or 0) == 0
+
     def test_queue_item_for_next_dig(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Queued item consumed on next dig."""
         _register_player(player_repository, balance=200)

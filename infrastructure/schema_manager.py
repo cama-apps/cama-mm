@@ -391,6 +391,8 @@ class SchemaManager:
             # depth DESC scans guild_id-filtered rows; the composite covers it.
             ("add_tunnels_leaderboard_index", self._migration_add_tunnels_leaderboard_index),
             ("create_dig_quests_table", self._migration_create_dig_quests_table),
+            # Multi-charge Grappling Hook + pending Sonar Pulse skip flag.
+            ("dig_buff_fun_charges", self._migration_dig_buff_fun_charges),
         ]
 
     # --- Migrations ---
@@ -3180,4 +3182,19 @@ class SchemaManager:
             "WHERE mechanic_id IN ("
             "  'pinnacle_arithmetic_challenge', 'pinnacle_riddle_challenge'"
             ")"
+        )
+
+    def _migration_dig_buff_fun_charges(self, cursor) -> None:
+        """Multi-charge Grappling Hook + pending Sonar Pulse skip flag.
+
+        ``grappling_hook_charges`` mirrors ``hard_hat_charges``: each purchase
+        grants N charges that consume on cave-in (zeroing block_loss + stun).
+        ``sonar_skip_pending`` is a one-shot bool that causes the next
+        triggered event to pass by harmlessly.
+        """
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "grappling_hook_charges", "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "sonar_skip_pending", "INTEGER NOT NULL DEFAULT 0",
         )

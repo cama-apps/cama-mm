@@ -385,29 +385,33 @@ CONSUMABLES: dict[str, Consumable] = {
         id="dynamite",
         name="Dynamite",
         cost=5,
-        description="+5 bonus blocks, 10% mini cave-in (-2 blocks)",
-        params={"bonus_blocks": 5, "mini_cave_in_pct": 0.10, "mini_cave_in_loss": 2},
+        description="+5 bonus blocks on next dig.",
+        params={"bonus_blocks": 5},
     ),
     "hard_hat": Consumable(
         id="hard_hat",
         name="Hard Hat",
         cost=8,
-        description="Prevent cave-in for next 3 digs",
-        params={"uses": 3},
+        description="Absorbs the next 3 cave-ins. Each absorb costs a little light.",
+        params={"uses": 3, "luminosity_drain_per_absorb": 10},
     ),
     "lantern": Consumable(
         id="lantern",
         name="Lantern",
         cost=4,
-        description="Full scan + -50% cave-in next dig",
-        params={"cave_in_reduction": 0.50, "scan": 1},
+        description="-50% cave-in next dig. Reveals what's stirring nearby.",
+        params={"cave_in_reduction": 0.50, "scan": 1, "boss_scout_blocks": 10},
     ),
     "reinforcement": Consumable(
         id="reinforcement",
         name="Reinforcement",
         cost=6,
-        description="Prevent decay 48h + 25% sabotage reduction",
-        params={"decay_prevent_hours": 48, "sabotage_reduction": 0.25},
+        description="48h: half damage from sabotage, big cave-ins are capped.",
+        params={
+            "decay_prevent_hours": 48,
+            "sabotage_reduction": 0.50,
+            "cave_in_loss_cap": 8,
+        },
     ),
     "torch": Consumable(
         id="torch",
@@ -420,29 +424,34 @@ CONSUMABLES: dict[str, Consumable] = {
         id="grappling_hook",
         name="Grappling Hook",
         cost=10,
-        description="Prevents block loss on next cave-in",
-        params={"prevent_cave_in_loss": 1},
+        description="Cushions the next 5 cave-ins: no block loss, no stun.",
+        params={"uses": 5},
     ),
     "sonar_pulse": Consumable(
         id="sonar_pulse",
         name="Sonar Pulse",
         cost=8,
-        description="Reveals next event before it triggers",
-        params={"event_preview": 1},
+        description="Reveals the next event and lets it pass you by once.",
+        params={"event_preview": 1, "skip": 1},
     ),
     "depth_charge": Consumable(
         id="depth_charge",
         name="Depth Charge",
         cost=15,
-        description="+8 advance but triggers mini cave-in (-3). Net +5.",
-        params={"bonus_blocks": 8, "mini_cave_in_loss": 3},
+        description="+10 bonus blocks on next dig. A louder, deeper blast than Dynamite.",
+        params={"bonus_blocks": 10},
     ),
     "void_bait": Consumable(
         id="void_bait",
         name="Void Bait",
         cost=20,
-        description="Doubles event chance for 3 digs",
-        params={"event_multiplier": 2.0, "duration_digs": 3},
+        description="3 digs: 2x event chance, with a thumb on the scale for rare finds.",
+        params={
+            "event_multiplier": 2.0,
+            "duration_digs": 3,
+            "rare_weight_mult": 1.25,
+            "legendary_weight_mult": 1.5,
+        },
     ),
 }
 
@@ -1220,9 +1229,9 @@ def get_boss_by_id(boss_id: str) -> BossDef | None:
 # PLAYER_HIT_FLOOR (0.10 * BOSS_FREE_FIGHT_ACCURACY_MOD = 0.06, floored to
 # 0.05) which is intentionally near-impossible: high-stakes wager only.
 BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
-    "cautious": {"player_hp": 5, "boss_hp": 4, "player_hit": 0.60, "player_dmg": 1, "boss_hit": 0.30, "boss_dmg": 1},
-    "bold":     {"player_hp": 3, "boss_hp": 5, "player_hit": 0.35, "player_dmg": 2, "boss_hit": 0.45, "boss_dmg": 1},
-    "reckless": {"player_hp": 2, "boss_hp": 6, "player_hit": 0.10, "player_dmg": 3, "boss_hit": 0.60, "boss_dmg": 1},
+    "cautious": {"player_hp": 5, "boss_hp": 4, "player_hit": 0.60, "player_dmg": 1, "boss_hit": 0.30, "boss_dmg": 1, "crit_chance": 0.00, "crit_bonus": 0},
+    "bold":     {"player_hp": 3, "boss_hp": 5, "player_hit": 0.42, "player_dmg": 2, "boss_hit": 0.45, "boss_dmg": 1, "crit_chance": 0.15, "crit_bonus": 1},
+    "reckless": {"player_hp": 2, "boss_hp": 6, "player_hit": 0.18, "player_dmg": 3, "boss_hit": 0.60, "boss_dmg": 1, "crit_chance": 0.30, "crit_bonus": 1},
 }
 
 # Boss difficulty curve — hand-tuned lookup tables. Replaces the prior
@@ -7639,9 +7648,10 @@ RETREAT_COOLDOWN_SECONDS: int = 30 * 60   # 30 minutes
 # ---------------------------------------------------------------------------
 # Persisted boss HP / regen (boss revamp)
 # ---------------------------------------------------------------------------
-# Halved from "1 HP / hour" so damage actually persists across the new
-# shorter free-dig cycle. A 24h hiatus now regens half a phase, not a full one.
-BOSS_HP_REGEN_PER_2_HOURS: int = 1
+# Slowed to "1 HP per 3 hours" so soften-and-retreat damage actually sticks
+# between fights — under the prior 1/2h rate a single dig-cooldown gap was
+# already regenning half of a hard-won softening.
+BOSS_HP_REGEN_PER_3_HOURS: int = 1
 
 
 # ---------------------------------------------------------------------------

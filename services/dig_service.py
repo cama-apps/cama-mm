@@ -25,7 +25,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE_V2,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
-    BOSS_HP_REGEN_PER_2_HOURS,
+    BOSS_HP_REGEN_PER_3_HOURS,
     BOSS_NAMES,
     BOSS_PAYOUTS,
     BOSS_PHASE2,
@@ -159,6 +159,7 @@ def _approx_duel_win_prob(
     *, player_hp: int, boss_hp: int,
     player_hit: float, player_dmg: int,
     boss_hit: float, boss_dmg: int,
+    crit_chance: float = 0.0, crit_bonus: int = 0,
     trials: int = 500,
 ) -> float:
     """Estimate the probability the player wins a boss HP duel.
@@ -178,7 +179,10 @@ def _approx_duel_win_prob(
         php, bhp = player_hp, boss_hp
         while True:
             if rng.random() < player_hit:
-                bhp -= player_dmg
+                dmg = player_dmg
+                if crit_chance > 0 and rng.random() < crit_chance:
+                    dmg += crit_bonus
+                bhp -= dmg
             if bhp <= 0:
                 wins += 1
                 break
@@ -1084,7 +1088,7 @@ class DigService:
         (the freshly-computed scaled boss HP for this fight) so the boss can
         regen back to it. ``starting_hp`` is:
           - ``hp_remaining`` from the last unfinished engagement, plus regen
-            of ``BOSS_HP_REGEN_PER_2_HOURS`` per two-hour block since
+            of ``BOSS_HP_REGEN_PER_3_HOURS`` per three-hour block since
             ``last_engaged_at``, capped at ``hp_max``;
           - ``fresh_hp`` if no persisted HP exists.
 
@@ -1106,10 +1110,10 @@ class DigService:
         last_engaged = entry.get("last_engaged_at")
         if last_engaged is not None:
             try:
-                two_hour_blocks = max(0, (now - int(last_engaged)) // 7200)
+                three_hour_blocks = max(0, (now - int(last_engaged)) // 10800)
             except (TypeError, ValueError):
-                two_hour_blocks = 0
-            hp_remaining = min(hp_max, hp_remaining + two_hour_blocks * BOSS_HP_REGEN_PER_2_HOURS)
+                three_hour_blocks = 0
+            hp_remaining = min(hp_max, hp_remaining + three_hour_blocks * BOSS_HP_REGEN_PER_3_HOURS)
         return max(1, hp_remaining), hp_max
 
     def build_next_boss_encounter(self, discord_id: int, guild_id) -> dict | None:
@@ -3052,6 +3056,12 @@ class DigService:
         has_sonar_pulse = _item_flags["has_sonar_pulse"]
         has_void_bait = _item_flags["has_void_bait"]
 
+        # Snapshot the pre-dig Sonar Pulse skip flag BEFORE granting items.
+        # Sonar Pulse primes the flag for the *next* dig, not the dig where
+        # it's consumed — so the active-this-dig value is whatever was on the
+        # tunnel before we touch it.
+        sonar_skip_active_this_dig = int(tunnel.get("sonar_skip_pending") or 0) > 0
+
         # Hard hat: grant 3 charges of full cave-in prevention
         if has_hard_hat:
             existing_charges = tunnel.get("hard_hat_charges", 0) or 0
@@ -3061,7 +3071,25 @@ class DigService:
             )
             tunnel["hard_hat_charges"] = existing_charges + 3
 
-        # Reinforcement: prevent decay for 48h and reduce sabotage damage
+        # Grappling Hook: grant 5 charges that cushion the next cave-ins
+        # (zero block_loss + no stun). Stacks across purchases.
+        if has_grappling_hook:
+            existing_gh = tunnel.get("grappling_hook_charges", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                grappling_hook_charges=existing_gh + 5,
+            )
+            tunnel["grappling_hook_charges"] = existing_gh + 5
+
+        # Sonar Pulse: prime the skip flag — it fires on the NEXT dig, not
+        # this one (the dig where the item is consumed just sets the flag).
+        if has_sonar_pulse:
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, sonar_skip_pending=1,
+            )
+            tunnel["sonar_skip_pending"] = 1
+
+        # Reinforcement: 48h window — half sabotage damage + cave-in block_loss cap
         if has_reinforcement:
             reinforced_until_ts = now + 48 * 3600
             self.dig_repo.update_tunnel(
@@ -3231,10 +3259,20 @@ class DigService:
                 cave_in_chance = 0.0
                 thick_skin_saved = True
 
-        # Hard hat charges prevent cave-in entirely
+        # Hard hat charges prevent cave-in entirely. Each absorb drains
+        # 10 luminosity — the helmet keeps you safe, but the cavern remembers.
+        # Single atomic update so a crash can't decrement the charge without
+        # also paying the luminosity cost.
         if hard_hat_charges > 0:
             cave_in = False
-            self.dig_repo.update_tunnel(discord_id, guild_id, hard_hat_charges=hard_hat_charges - 1)
+            luminosity = max(0, luminosity - 10)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                hard_hat_charges=hard_hat_charges - 1,
+                luminosity=luminosity,
+            )
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] = lum_info.get("drained", 0) + 10
         else:
             cave_in = random.random() < cave_in_chance
         cave_in_detail = None
@@ -3272,11 +3310,24 @@ class DigService:
             # Relic: Patient Stone — -30% depth lost
             if self._has_relic(discord_id, guild_id, "patient_stone"):
                 block_loss = max(0, int(block_loss * 0.7))
+            # Reinforcement window: cap cave-in block_loss so a single
+            # catastrophic roll can't erase a long grind.
+            reinforced_until_for_cap = tunnel.get("reinforced_until") or 0
+            if now < int(reinforced_until_for_cap):
+                block_loss = min(block_loss, 8)
             # Capture pre-grappling block_loss for Gambler's Charm
             block_loss_pre_save = block_loss
-            # Grappling hook prevents block loss
-            if has_grappling_hook:
+            # Grappling hook absorbs the cave-in (zero block_loss + cushion the
+            # stun via grappling_absorbed below). Consumes 1 charge.
+            grappling_hook_charges = int(tunnel.get("grappling_hook_charges") or 0)
+            grappling_absorbed = False
+            if grappling_hook_charges > 0:
                 block_loss = 0
+                grappling_absorbed = True
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    grappling_hook_charges=grappling_hook_charges - 1,
+                )
             # Void-Touched pickaxe: salvage 1 block on cave-in
             elif pickaxe_tier >= 7:
                 block_loss = max(1, block_loss - 1)
@@ -3328,23 +3379,34 @@ class DigService:
             # Mutation: fragile — injuries last longer
             injury_bonus = int(mutation_fx.get("injury_duration_bonus", 0))
             balance = self.player_repo.get_balance(discord_id, guild_id)
-            catastrophic = roll_catastrophic_cave_in(band)
-            cave_in_detail, jc_debit = self._apply_cave_in_consequence(
-                discord_id=discord_id,
-                guild_id=guild_id,
-                tunnel=tunnel,
-                depth_before=depth_before,
-                band=band,
-                block_loss=block_loss,
-                catastrophic=catastrophic,
-                balance=balance,
-                injury_bonus=injury_bonus,
-                tunnel_updates=cave_in_tunnel_updates,
-            )
-            cave_in_balance_delta -= jc_debit
-            # Catastrophic depth roll-back overrides new_depth.
-            if catastrophic:
-                new_depth = cave_in_tunnel_updates["depth"]
+            # Grappling hook absorbed: skip consequence roll entirely so the
+            # player doesn't get stunned/injured by a cave-in their gear caught.
+            if grappling_absorbed:
+                catastrophic = False
+                cave_in_detail = {
+                    "type": "cushioned",
+                    "block_loss": 0,
+                    "message": "Cave-in! Your grappling line snapped taut and absorbed the impact.",
+                }
+                jc_debit = 0
+            else:
+                catastrophic = roll_catastrophic_cave_in(band)
+                cave_in_detail, jc_debit = self._apply_cave_in_consequence(
+                    discord_id=discord_id,
+                    guild_id=guild_id,
+                    tunnel=tunnel,
+                    depth_before=depth_before,
+                    band=band,
+                    block_loss=block_loss,
+                    catastrophic=catastrophic,
+                    balance=balance,
+                    injury_bonus=injury_bonus,
+                    tunnel_updates=cave_in_tunnel_updates,
+                )
+                cave_in_balance_delta -= jc_debit
+                # Catastrophic depth roll-back overrides new_depth.
+                if catastrophic:
+                    new_depth = cave_in_tunnel_updates["depth"]
 
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
@@ -3423,16 +3485,13 @@ class DigService:
             advance += dynamite_bonus
         depth_charge_bonus = 0
         if has_depth_charge:
-            depth_charge_bonus = 8
+            depth_charge_bonus = 10
             advance += depth_charge_bonus
         advance = int(advance * (1.0 + perk_advance_bonus) * injury_advance_mod)
         # Half-up rounding so mixed_bonus's 0.5 contribution doesn't get
         # silently truncated to 0 when picked alone.
         advance += int(perk_advance_flat + 0.5)
         advance = max(1, advance)
-        # Depth charge triggers mini cave-in penalty after advance
-        if has_depth_charge:
-            advance = max(1, advance - 3)
 
         # 12. Check boss boundary
         boss_progress = self._get_boss_progress(tunnel)
@@ -3589,30 +3648,65 @@ class DigService:
             event_chance = 1.0
             self._force_event_for.discard(force_key)
         event = None
+        sonar_skip_consumed = False
         if random.random() < event_chance:
-            event = self.roll_event(new_depth, luminosity=luminosity,
-                                     prestige_level=prestige_level,
-                                     discord_id=discord_id, guild_id=guild_id,
-                                     in_boss=boss_encounter, tunnel=tunnel)
-            # Relic: Hollow Eye — reveal all option outcomes upfront
-            if event is not None and self._has_relic(
+            event = self.roll_event(
+                new_depth, luminosity=luminosity,
+                prestige_level=prestige_level,
+                discord_id=discord_id, guild_id=guild_id,
+                in_boss=boss_encounter, tunnel=tunnel,
+                void_bait_active=void_bait_charge_used,
+            )
+            # Sonar Pulse skip: the player primed Sonar on a prior dig — let
+            # this event pass by harmlessly. We still rolled it (so the RNG
+            # cadence matches) but suppress the application.
+            if event is not None and sonar_skip_active_this_dig:
+                event_preview_skipped = {
+                    "name": event.get("name"),
+                    "description": event.get("description"),
+                    "rarity": event.get("rarity", "common"),
+                }
+                event = None
+                sonar_skip_consumed = True
+            elif event is not None and self._has_relic(
                 discord_id, guild_id, "hollow_eye"
             ):
+                # Relic: Hollow Eye — reveal all option outcomes upfront
                 event["hollow_eye_revealed"] = True
+        else:
+            event_preview_skipped = None
 
-        # Sonar Pulse: preview what the next event would be
+        # Lantern + Sonar Pulse: preview what the next event would be. The
+        # Lantern variant also surfaces a boss-imminent warning when the
+        # player is close to a tier threshold.
         event_preview = None
-        if has_sonar_pulse:
-            preview = self.roll_event(new_depth, luminosity=luminosity,
-                                      prestige_level=prestige_level,
-                                      discord_id=discord_id, guild_id=guild_id,
-                                      in_boss=boss_encounter, tunnel=tunnel)
+        boss_scout = None
+        if has_lantern or has_sonar_pulse:
+            preview = self.roll_event(
+                new_depth, luminosity=luminosity,
+                prestige_level=prestige_level,
+                discord_id=discord_id, guild_id=guild_id,
+                in_boss=boss_encounter, tunnel=tunnel,
+            )
             if preview:
                 event_preview = {
                     "name": preview.get("name"),
                     "description": preview.get("description"),
                     "rarity": preview.get("rarity", "common"),
                 }
+        if has_lantern:
+            # Boss scout: next tier boundary ahead within 10 blocks?
+            for boundary in BOSS_BOUNDARIES:
+                if boundary > new_depth and boundary - new_depth <= 10:
+                    boss_scout = {
+                        "blocks_until": boundary - new_depth,
+                        "depth": boundary,
+                    }
+                    break
+        if sonar_skip_consumed and event_preview is None:
+            # Surface what was skipped even if no preview rolled — gives the
+            # player feedback that their Sonar charge fired.
+            event_preview = event_preview_skipped
 
         # 18. Check achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
@@ -3645,6 +3739,11 @@ class DigService:
         }
         if void_bait_charge_used:
             final_tunnel_updates["void_bait_digs"] = void_bait_digs - 1
+        if sonar_skip_consumed:
+            # Clear only when we actually skipped an event this dig. The
+            # priming dig sets the flag without clearing, and a primed flag
+            # waits across event-less digs until something to skip shows up.
+            final_tunnel_updates["sonar_skip_pending"] = 0
 
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
@@ -3689,6 +3788,8 @@ class DigService:
             corruption=corruption,
             mutations=[m.get("name") for m in mutations] if mutations else None,
             event_preview=event_preview,
+            boss_scout=boss_scout,
+            sonar_skipped=sonar_skip_consumed,
             weather=weather_info,
         )
 
@@ -3831,12 +3932,26 @@ class DigService:
         has_sonar_pulse = _item_flags["has_sonar_pulse"]
         has_void_bait = _item_flags["has_void_bait"]
 
+        # Sonar Pulse flag persists across digs — snapshot pre-grant.
+        sonar_skip_active_this_dig = int(tunnel.get("sonar_skip_pending") or 0) > 0
+
         if has_hard_hat:
             existing_charges = tunnel.get("hard_hat_charges", 0) or 0
             self.dig_repo.update_tunnel(
                 discord_id, guild_id, hard_hat_charges=existing_charges + 3,
             )
             tunnel["hard_hat_charges"] = existing_charges + 3
+        if has_grappling_hook:
+            existing_gh = tunnel.get("grappling_hook_charges", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, grappling_hook_charges=existing_gh + 5,
+            )
+            tunnel["grappling_hook_charges"] = existing_gh + 5
+        if has_sonar_pulse:
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, sonar_skip_pending=1,
+            )
+            tunnel["sonar_skip_pending"] = 1
         if has_reinforcement:
             self.dig_repo.update_tunnel(
                 discord_id, guild_id, reinforced_until=now + 48 * 3600,
@@ -3936,6 +4051,7 @@ class DigService:
 
         # ── Cave-in chance ────────────────────────────────────────
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
+        grappling_hook_charges = int(tunnel.get("grappling_hook_charges") or 0)
         cave_in_chance = layer.get("cave_in_pct", 0.10)
         cave_in_chance += ascension.get("cave_in_bonus", 0)
         weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
@@ -4000,14 +4116,11 @@ class DigService:
         if has_dynamite:
             adv_fixed += 5
         if has_depth_charge:
-            adv_fixed += 8
+            adv_fixed += 10
 
         adv_mult = (1.0 + perk_advance_bonus) * injury_advance_mod
         advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult)) + int(perk_advance_flat + 0.5)
         advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult)) + int(perk_advance_flat + 0.5)
-        if has_depth_charge:
-            advance_min = max(1, advance_min - 3)
-            advance_max = max(1, advance_max - 3)
 
         # ── Effective JC range ────────────────────────────────────
         jc_min_base = layer.get("jc_min", 1)
@@ -4185,6 +4298,8 @@ class DigService:
             "stat_effects": stat_effects,
             "hard_hat_charges": hard_hat_charges,
             "hard_hat_prevents": hard_hat_prevents,
+            "grappling_hook_charges": grappling_hook_charges,
+            "sonar_skip_active_this_dig": sonar_skip_active_this_dig,
             "cave_in_chance": cave_in_chance,
             "thick_skin_saved": thick_skin_saved,
             "paid_dig_cost": paid_dig_cost,
@@ -4228,12 +4343,19 @@ class DigService:
         tunnel = p["tunnel"]
         depth_before = p["depth_before"]
 
-        # Cave-in check
+        # Cave-in check. Hard Hat absorb also drains luminosity (matches the
+        # main dig() flow).
+        luminosity_after_hh = p["luminosity"]
         if p["hard_hat_prevents"]:
             cave_in = False
+            luminosity_after_hh = max(0, luminosity_after_hh - 10)
             self.dig_repo.update_tunnel(
-                discord_id, guild_id, hard_hat_charges=p["hard_hat_charges"] - 1,
+                discord_id, guild_id,
+                hard_hat_charges=p["hard_hat_charges"] - 1,
+                luminosity=luminosity_after_hh,
             )
+            p["lum_info"]["luminosity_after"] = luminosity_after_hh
+            p["lum_info"]["drained"] = p["lum_info"].get("drained", 0) + 10
         else:
             cave_in = random.random() < p["cave_in_chance"]
         cave_in_detail = None
@@ -4253,9 +4375,20 @@ class DigService:
             # Relic: Patient Stone — -30% depth lost
             if self._has_relic(discord_id, guild_id, "patient_stone"):
                 block_loss = max(0, int(block_loss * 0.7))
+            # Reinforcement: cap cave-in block_loss while the 48h window is active
+            reinforced_until_for_cap = tunnel.get("reinforced_until") or 0
+            if now < int(reinforced_until_for_cap):
+                block_loss = min(block_loss, 8)
             block_loss_pre_save = block_loss
-            if p["has_grappling_hook"]:
+            grappling_hook_charges = int(p.get("grappling_hook_charges") or 0)
+            grappling_absorbed = False
+            if grappling_hook_charges > 0:
                 block_loss = 0
+                grappling_absorbed = True
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    grappling_hook_charges=grappling_hook_charges - 1,
+                )
             elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
@@ -4294,19 +4427,28 @@ class DigService:
 
             injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
             balance = self.player_repo.get_balance(discord_id, guild_id)
-            catastrophic = roll_catastrophic_cave_in(band)
-            cave_in_detail, jc_debit = self._apply_cave_in_consequence(
-                discord_id=discord_id,
-                guild_id=guild_id,
-                tunnel=tunnel,
-                depth_before=depth_before,
-                band=band,
-                block_loss=block_loss,
-                catastrophic=catastrophic,
-                balance=balance,
-                injury_bonus=injury_bonus,
-                tunnel_updates=tunnel_updates,
-            )
+            if grappling_absorbed:
+                catastrophic = False
+                cave_in_detail = {
+                    "type": "cushioned",
+                    "block_loss": 0,
+                    "message": "Cave-in! Your grappling line snapped taut and absorbed the impact.",
+                }
+                jc_debit = 0
+            else:
+                catastrophic = roll_catastrophic_cave_in(band)
+                cave_in_detail, jc_debit = self._apply_cave_in_consequence(
+                    discord_id=discord_id,
+                    guild_id=guild_id,
+                    tunnel=tunnel,
+                    depth_before=depth_before,
+                    band=band,
+                    block_loss=block_loss,
+                    catastrophic=catastrophic,
+                    balance=balance,
+                    injury_bonus=injury_bonus,
+                    tunnel_updates=tunnel_updates,
+                )
             # Single net add_balance: loot credit minus consequence debit. The
             # tunnel write below isn't atomic with this, but at least the
             # balance side flips together.
@@ -4376,15 +4518,13 @@ class DigService:
             advance += dynamite_bonus
         depth_charge_bonus = 0
         if p["has_depth_charge"]:
-            depth_charge_bonus = 8
+            depth_charge_bonus = 10
             advance += depth_charge_bonus
         advance = int(
             advance * (1.0 + p["perk_advance_bonus"]) * p["injury_advance_mod"]
         )
         advance += int(p.get("perk_advance_flat", 0) + 0.5)
         advance = max(1, advance)
-        if p["has_depth_charge"]:
-            advance = max(1, advance - 3)
 
         # Boss boundary
         boss_progress = self._get_boss_progress(tunnel)
@@ -4486,24 +4626,37 @@ class DigService:
 
         # Event
         void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
-        if void_bait_digs > 0:
+        void_bait_charge_used = void_bait_digs > 0
+        if void_bait_charge_used:
             self.dig_repo.update_tunnel(
                 discord_id, guild_id, void_bait_digs=void_bait_digs - 1,
             )
         event = None
+        sonar_skip_consumed = False
+        sonar_skip_active_this_dig = bool(p.get("sonar_skip_active_this_dig"))
+        event_preview_skipped = None
         if random.random() < p["event_chance"]:
             event = self.roll_event(
                 new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
                 discord_id=discord_id, guild_id=guild_id, in_boss=boss_encounter,
-                tunnel=tunnel,
+                tunnel=tunnel, void_bait_active=void_bait_charge_used,
             )
-            if event is not None and self._has_relic(
+            if event is not None and sonar_skip_active_this_dig:
+                event_preview_skipped = {
+                    "name": event.get("name"),
+                    "description": event.get("description"),
+                    "rarity": event.get("rarity", "common"),
+                }
+                event = None
+                sonar_skip_consumed = True
+            elif event is not None and self._has_relic(
                 discord_id, guild_id, "hollow_eye"
             ):
                 event["hollow_eye_revealed"] = True
 
         event_preview = None
-        if p["has_sonar_pulse"]:
+        boss_scout = None
+        if p["has_lantern"] or p["has_sonar_pulse"]:
             preview = self.roll_event(
                 new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
                 discord_id=discord_id, guild_id=guild_id, in_boss=boss_encounter,
@@ -4515,6 +4668,20 @@ class DigService:
                     "description": preview.get("description"),
                     "rarity": preview.get("rarity", "common"),
                 }
+        if p["has_lantern"]:
+            for boundary in BOSS_BOUNDARIES:
+                if boundary > new_depth and boundary - new_depth <= 10:
+                    boss_scout = {
+                        "blocks_until": boundary - new_depth,
+                        "depth": boundary,
+                    }
+                    break
+        if sonar_skip_consumed and event_preview is None:
+            event_preview = event_preview_skipped
+        if sonar_skip_consumed:
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, sonar_skip_pending=0,
+            )
 
         # Achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
@@ -4572,6 +4739,8 @@ class DigService:
             corruption=p["corruption"],
             mutations=[m.get("name") for m in p["mutations"]] if p["mutations"] else None,
             event_preview=event_preview,
+            boss_scout=boss_scout,
+            sonar_skipped=sonar_skip_consumed,
             weather=p["weather_info"],
         )
 
@@ -4596,34 +4765,58 @@ class DigService:
 
         cave_in = outcome.get("cave_in", False)
 
-        # Hard hat prevents cave-in regardless of DM decision
+        # Hard hat prevents cave-in regardless of DM decision. Also drains
+        # 10 luminosity per absorb to match the main dig() flow.
         if p["hard_hat_prevents"]:
             cave_in = False
+            luminosity_after_hh = max(0, int(p["luminosity"]) - 10)
             self.dig_repo.update_tunnel(
-                discord_id, guild_id, hard_hat_charges=p["hard_hat_charges"] - 1,
+                discord_id, guild_id,
+                hard_hat_charges=p["hard_hat_charges"] - 1,
+                luminosity=luminosity_after_hh,
             )
+            p["lum_info"]["luminosity_after"] = luminosity_after_hh
+            p["lum_info"]["drained"] = p["lum_info"].get("drained", 0) + 10
 
         if cave_in:
             block_loss = outcome.get("cave_in_block_loss", 5)
             # Enforce game-rule constraints
-            if p["has_grappling_hook"]:
+            grappling_hook_charges = int(p.get("grappling_hook_charges") or 0)
+            grappling_absorbed = False
+            if grappling_hook_charges > 0:
                 block_loss = 0
+                grappling_absorbed = True
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    grappling_hook_charges=grappling_hook_charges - 1,
+                )
             elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
             if weather_loss_cap is not None:
                 block_loss = min(block_loss, int(weather_loss_cap))
+            # Reinforcement: cap cave-in block_loss while the 48h window is active
+            reinforced_until_for_cap = tunnel.get("reinforced_until") or 0
+            if now < int(reinforced_until_for_cap):
+                block_loss = min(block_loss, 8)
 
             new_depth = max(0, depth_before - block_loss)
 
             if p["thick_skin_saved"]:
                 self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
 
-            # Cave-in type from DM
+            # Cave-in type from DM (overridden when grappling absorbs)
             cave_in_type = outcome.get("cave_in_type", "stun")
+            if grappling_absorbed:
+                cave_in_type = "cushioned"
             injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
 
-            if cave_in_type == "stun":
+            if cave_in_type == "cushioned":
+                cave_in_detail = {
+                    "type": "cushioned", "block_loss": 0,
+                    "message": "Cave-in! Your grappling line snapped taut and absorbed the impact.",
+                }
+            elif cave_in_type == "stun":
                 cave_in_detail = {
                     "type": "stun", "block_loss": block_loss,
                     "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
@@ -4770,8 +4963,11 @@ class DigService:
                     extra_rate_mod=p["weather_fx"].get("artifact_multiplier", 1.0),
                 )
 
-            # Event from DM
+            # Event from DM (Sonar Pulse skip can suppress it)
             event = None
+            sonar_skip_consumed = False
+            sonar_skip_active_this_dig = bool(p.get("sonar_skip_active_this_dig"))
+            event_preview_skipped = None
             event_id = outcome.get("event_id", "")
             if event_id:
                 pool_event = next((e for e in EVENT_POOL if e["id"] == event_id), None)
@@ -4788,6 +4984,14 @@ class DigService:
                         "buff_on_success": pool_event.get("buff_on_success"),
                         "rarity": pool_event.get("rarity", "common"),
                     }
+                    if sonar_skip_active_this_dig:
+                        event_preview_skipped = {
+                            "name": event["name"],
+                            "description": event["description"],
+                            "rarity": event["rarity"],
+                        }
+                        event = None
+                        sonar_skip_consumed = True
 
             # Void bait decrement
             void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
@@ -4796,9 +5000,10 @@ class DigService:
                     discord_id, guild_id, void_bait_digs=void_bait_digs - 1,
                 )
 
-            # Sonar pulse
+            # Lantern / Sonar preview + boss scout
             event_preview = None
-            if p["has_sonar_pulse"]:
+            boss_scout = None
+            if p["has_lantern"] or p["has_sonar_pulse"]:
                 preview = self.roll_event(
                     new_depth, luminosity=p["luminosity"], prestige_level=p["prestige_level"],
                     discord_id=discord_id, guild_id=guild_id, in_boss=boss_encounter,
@@ -4810,6 +5015,20 @@ class DigService:
                         "description": preview.get("description"),
                         "rarity": preview.get("rarity", "common"),
                     }
+            if p["has_lantern"]:
+                for boundary in BOSS_BOUNDARIES:
+                    if boundary > new_depth and boundary - new_depth <= 10:
+                        boss_scout = {
+                            "blocks_until": boundary - new_depth,
+                            "depth": boundary,
+                        }
+                        break
+            if sonar_skip_consumed and event_preview is None:
+                event_preview = event_preview_skipped
+            if sonar_skip_consumed:
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id, sonar_skip_pending=0,
+                )
 
             # Achievements
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
@@ -4866,6 +5085,8 @@ class DigService:
                 corruption=p["corruption"],
                 mutations=[m.get("name") for m in p["mutations"]] if p["mutations"] else None,
                 event_preview=event_preview,
+                boss_scout=boss_scout,
+                sonar_skipped=sonar_skip_consumed,
                 weather=p["weather_info"],
             )
 
@@ -5258,21 +5479,31 @@ class DigService:
 
         # PvP immunity buffs on the target absorb the entire sabotage attempt.
         # Counterspell / Sanctuary block outright; a single Aegis charge is
-        # consumed when present.
+        # consumed when present. In both cases the would-be victim gets a
+        # small JC tip — defending feels like a win, not a non-event.
+        victim_block_tip = max(25, cost // 2)
         if self.buff_service is not None:
             try:
                 if self.buff_service.has_pvp_immunity(target_id, guild_id):
+                    self.player_repo.add_balance(
+                        target_id, guild_id, victim_block_tip,
+                    )
                     return self._error(
                         "Your target is shielded by an active manashop ward — "
-                        "the sabotage was repelled before you could land it."
+                        "the sabotage was repelled before you could land it. "
+                        f"They pocketed {victim_block_tip} JC for the trouble."
                     )
                 if self.buff_service.consume_aegis_charge(target_id, guild_id):
                     # Charge absorbed — log the wasted attempt and refund cost.
+                    self.player_repo.add_balance(
+                        target_id, guild_id, victim_block_tip,
+                    )
                     self.dig_repo.log_action(
                         discord_id=actor_id, guild_id=guild_id,
                         action_type="sabotage",
                         details=json.dumps({
                             "target_id": target_id, "absorbed": True, "cost": 0,
+                            "victim_tip": victim_block_tip,
                         }),
                     )
                     return self._ok(
@@ -5286,6 +5517,7 @@ class DigService:
                         insurance_applied=False,
                         damage_reduced=True,
                         absorbed_by_aegis=True,
+                        victim_tip=victim_block_tip,
                     )
             except Exception:
                 logger.debug("PvP immunity / aegis check failed", exc_info=True)
@@ -5302,11 +5534,14 @@ class DigService:
             if sab_detail.get("target_id") == target_id:
                 return self._error("You already sabotaged this player in the last 12 hours.")
 
-        # Check for active trap
+        # Check for active trap. Trap victim already gets the attacker's
+        # cost as JC; on top of that, add a small block-defense tip so
+        # defending a sabotage attempt has a small positive payout.
         if target_tunnel.get("trap_active"):
             trap_steal = cost * 2
             actor_tunnel = self.dig_repo.get_tunnel(actor_id, guild_id)
             actor_loss = random.randint(3, 5)
+            trap_victim_tip = victim_block_tip
 
             self.dig_repo.atomic_sabotage(
                 actor_id=actor_id,
@@ -5314,12 +5549,13 @@ class DigService:
                 guild_id=guild_id,
                 target_depth_delta=0,
                 actor_jc_cost=trap_steal,
-                target_jc_credit=cost,
+                target_jc_credit=cost + trap_victim_tip,
                 actor_depth_delta=-actor_loss if actor_tunnel else 0,
                 clear_target_trap=True,
                 log_detail={
                     "target_id": target_id, "trap_triggered": True,
                     "jc_lost": trap_steal, "blocks_lost": actor_loss,
+                    "victim_tip": trap_victim_tip,
                 },
             )
 
@@ -5390,12 +5626,23 @@ class DigService:
             "saboteur_id": actor_id,
         }
 
+        # Attacker block-advance reward: scaled by victim's depth tier so
+        # raiding deeper diggers is more rewarding. Pure positive incentive
+        # to actually use sabotage — attacker still pays JC cost.
+        if target_depth < 100:
+            attacker_block_reward = 3
+        elif target_depth < 250:
+            attacker_block_reward = 5
+        else:
+            attacker_block_reward = 7
+
         self.dig_repo.atomic_sabotage(
             actor_id=actor_id,
             target_id=target_id,
             guild_id=guild_id,
             target_depth_delta=-damage,
             actor_jc_cost=cost,
+            actor_depth_delta=attacker_block_reward,
             revenge={
                 "target": actor_id,
                 "type": revenge["type"],
@@ -5404,6 +5651,7 @@ class DigService:
             log_detail={
                 "target_id": target_id, "damage": damage, "cost": cost,
                 "trap_triggered": False,
+                "attacker_block_reward": attacker_block_reward,
             },
         )
 
@@ -5463,6 +5711,7 @@ class DigService:
             insurance_applied=total_reduction > 0,
             damage_reduced=total_reduction > 0,
             mana_steal_jc=attacker_steal_jc,
+            attacker_block_reward=attacker_block_reward,
             vendetta_reflect=vendetta_reflect,
             vendetta_bonus=vendetta_bonus,
         )
@@ -5713,6 +5962,8 @@ class DigService:
         boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
             boss_progress, at_boss, fresh_boss_hp, now,
         )
+        # Snapshot for the post-loss soften UX ("knocked from X to Y").
+        starting_boss_hp = int(boss_hp)
         boss_hit_chance = float(scaled["boss_hit"])
         boss_dmg = int(scaled["boss_dmg"])
 
@@ -5776,6 +6027,10 @@ class DigService:
             except Exception:
                 pass
 
+        # Bold/Reckless crit: roll a chance to add bonus damage on a player hit.
+        crit_chance = float(stats.get("crit_chance", 0) or 0)
+        crit_bonus = int(stats.get("crit_bonus", 0) or 0)
+
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``
         # would show — per-round hit rate is not the same as duel win rate.
@@ -5786,6 +6041,8 @@ class DigService:
             player_dmg=player_dmg,
             boss_hit=boss_hit_chance,
             boss_dmg=boss_dmg,
+            crit_chance=crit_chance,
+            crit_bonus=crit_bonus,
         )
 
         round_log: list[dict] = []
@@ -5793,9 +6050,15 @@ class DigService:
         for round_num in range(1, BOSS_ROUND_CAP + 1):
             entry: dict = {"round": round_num}
             player_roll = random.random() < player_hit
+            crit_this_round = False
             if player_roll:
-                boss_hp -= player_dmg
+                dmg_this_round = player_dmg
+                if crit_chance > 0 and random.random() < crit_chance:
+                    dmg_this_round += crit_bonus
+                    crit_this_round = True
+                boss_hp -= dmg_this_round
             entry["player_hit"] = player_roll
+            entry["crit"] = crit_this_round
             entry["boss_hp"] = max(0, boss_hp)
             if boss_hp <= 0:
                 won = True
@@ -6093,6 +6356,14 @@ class DigService:
                 log_action_type="boss_fight",
             )
 
+            soften_line = None
+            chipped = starting_boss_hp - max(0, int(boss_hp))
+            if chipped > 0:
+                soften_line = (
+                    f"You knocked the boss from {starting_boss_hp}/{boss_hp_max} "
+                    f"to {max(0, int(boss_hp))}/{boss_hp_max} before retreating."
+                )
+
             return self._ok(
                 won=False,
                 boss_name=boss_name,
@@ -6104,6 +6375,7 @@ class DigService:
                 new_depth=new_depth,
                 boss_hp_remaining=max(0, boss_hp),
                 boss_hp_max=boss_hp_max,
+                soften_line=soften_line,
                 dialogue=self._pick_boss_outcome_line(
                     boundary=at_boss, boss_name=boss_name, won=False,
                 ),
@@ -6205,6 +6477,8 @@ class DigService:
         boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
             boss_progress, phase_key, fresh_boss_hp, now,
         )
+        # Snapshot starting HP for the post-loss soften UX.
+        starting_boss_hp = int(boss_hp)
         boss_hit_chance = float(scaled["boss_hit"])
         boss_dmg = int(scaled["boss_dmg"])
 
@@ -6267,6 +6541,10 @@ class DigService:
             pin_entry_now.pop("pending_phase_event_id", None)
             boss_progress[str(PINNACLE_DEPTH)] = pin_entry_now
 
+        # Bold/Reckless crit carries through to the pinnacle fight.
+        crit_chance = float(stats.get("crit_chance", 0) or 0)
+        crit_bonus = int(stats.get("crit_bonus", 0) or 0)
+
         win_chance = _approx_duel_win_prob(
             player_hp=player_hp,
             boss_hp=boss_hp,
@@ -6274,6 +6552,8 @@ class DigService:
             player_dmg=player_dmg,
             boss_hit=boss_hit_chance,
             boss_dmg=boss_dmg,
+            crit_chance=crit_chance,
+            crit_bonus=crit_bonus,
         )
 
         # Roll a mid-fight mechanic from this phase's pool. Pinnacle phase
@@ -6356,8 +6636,14 @@ class DigService:
                 )
 
             entry: dict = {"round": round_num}
+            crit_this_round = False
             if random.random() < player_hit:
-                boss_hp -= player_dmg
+                dmg_this_round = player_dmg
+                if crit_chance > 0 and random.random() < crit_chance:
+                    dmg_this_round += crit_bonus
+                    crit_this_round = True
+                boss_hp -= dmg_this_round
+            entry["crit"] = crit_this_round
             entry["boss_hp"] = max(0, boss_hp)
             if boss_hp <= 0:
                 won = True
@@ -6396,6 +6682,7 @@ class DigService:
             round_log=round_log,
             gear_broken_names=gear_broken_names,
             prestige_level=prestige_level, depth=depth, now=now,
+            starting_boss_hp=starting_boss_hp,
         )
 
     def _resume_pinnacle_duel(
@@ -6472,13 +6759,24 @@ class DigService:
         player_dmg = int(state_row["player_dmg"])
         boss_hit_chance = float(state_row["boss_hit"])
         boss_dmg = int(state_row["boss_dmg"])
+        # Crit carries through paused/resumed fights — pull from the
+        # risk-tier table since it's not persisted in the duel state.
+        _crit_stats = BOSS_DUEL_STATS.get(state_row["risk_tier"], {})
+        crit_chance = float(_crit_stats.get("crit_chance", 0) or 0)
+        crit_bonus = int(_crit_stats.get("crit_bonus", 0) or 0)
 
         # Continue remaining auto-rounds if option didn't decide it.
         if won is None:
             for r in range(round_num + 1, BOSS_ROUND_CAP + 1):
                 entry: dict = {"round": r}
+                crit_this_round = False
                 if random.random() < player_hit:
-                    boss_hp -= player_dmg
+                    dmg_this_round = player_dmg
+                    if crit_chance > 0 and random.random() < crit_chance:
+                        dmg_this_round += crit_bonus
+                        crit_this_round = True
+                    boss_hp -= dmg_this_round
+                entry["crit"] = crit_this_round
                 entry["boss_hp"] = max(0, boss_hp)
                 if boss_hp <= 0:
                     won = True
@@ -6545,6 +6843,9 @@ class DigService:
         depth = tunnel.get("depth", 0)
         now = int(time.time())
 
+        # Soften UX from a resumed pinnacle fight uses the at-pause HP
+        # snapshot as the best-effort starting HP for this engagement.
+        starting_boss_hp_for_resume = int(state_row.get("boss_hp", 0) or 0)
         return self._finalize_pinnacle_outcome(
             discord_id=discord_id, guild_id=guild_id, tunnel=tunnel,
             pinnacle_id=pinnacle_id, pinnacle=pinnacle, phase_def=phase_def,
@@ -6556,6 +6857,7 @@ class DigService:
             round_log=round_log,
             gear_broken_names=gear_broken_names,
             prestige_level=prestige_level, depth=depth, now=now,
+            starting_boss_hp=starting_boss_hp_for_resume,
         )
 
     def _finalize_pinnacle_outcome(
@@ -6582,6 +6884,7 @@ class DigService:
         prestige_level: int,
         depth: int,
         now: int,
+        starting_boss_hp: int | None = None,
     ) -> dict:
         """Shared end-of-pinnacle-fight resolution used by both
         ``_fight_pinnacle`` and ``_resume_pinnacle_duel``."""
@@ -6761,6 +7064,15 @@ class DigService:
                 "boss_hp_remaining": max(0, boss_hp),
             }),
         )
+        soften_line = None
+        if starting_boss_hp is not None:
+            chipped = int(starting_boss_hp) - max(0, int(boss_hp))
+            if chipped > 0:
+                soften_line = (
+                    f"You knocked the boss from {int(starting_boss_hp)}/{boss_hp_max} "
+                    f"to {max(0, int(boss_hp))}/{boss_hp_max} before retreating."
+                )
+
         return self._ok(
             won=False,
             phase=phase_idx,
@@ -6773,6 +7085,7 @@ class DigService:
             new_depth=new_depth,
             boss_hp_remaining=max(0, boss_hp),
             boss_hp_max=boss_hp_max,
+            soften_line=soften_line,
             dialogue=f"{boss_name} sends you reeling back {knockback} blocks!",
             achievements=[],
             round_log=round_log,
@@ -6926,6 +7239,8 @@ class DigService:
 
         player_hp = int(stats["player_hp"])
         player_dmg = int(stats["player_dmg"])
+        crit_chance = float(stats.get("crit_chance", 0) or 0)
+        crit_bonus = int(stats.get("crit_bonus", 0) or 0)
 
         win_chance = _approx_duel_win_prob(
             player_hp=player_hp,
@@ -6934,8 +7249,14 @@ class DigService:
             player_dmg=player_dmg,
             boss_hit=boss_hit_chance,
             boss_dmg=boss_dmg,
+            crit_chance=crit_chance,
+            crit_bonus=crit_bonus,
         )
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
+        # Snapshot pre-fight boss HP for the post-loss "you knocked it from X
+        # to Y" soften UX. Auto-resolve path skips paused state, so the
+        # snapshot lives in a local.
+        starting_boss_hp = int(boss_hp)
 
         # Run auto-rounds until trigger or resolution.
         round_log: list[dict] = []
@@ -7014,6 +7335,7 @@ class DigService:
                 player_hit=player_hit, player_dmg=player_dmg,
                 boss_hit=boss_hit_chance, boss_dmg=boss_dmg,
                 status_effects=status_effects,
+                crit_chance=crit_chance, crit_bonus=crit_bonus,
             )
             round_log.append(entry)
             if terminal is True:
@@ -7038,6 +7360,7 @@ class DigService:
             attempts=attempts, boss_progress=dict(boss_progress),
             depth=depth,
             ending_boss_hp=int(boss_hp), boss_hp_max=int(boss_hp_max),
+            starting_boss_hp=starting_boss_hp,
         )
 
     def resume_boss_duel(
@@ -7132,6 +7455,9 @@ class DigService:
         player_dmg = int(state_row["player_dmg"])
         boss_hit = float(state_row["boss_hit"])
         boss_dmg = int(state_row["boss_dmg"])
+        _crit_stats = BOSS_DUEL_STATS.get(state_row["risk_tier"], {})
+        crit_chance = float(_crit_stats.get("crit_chance", 0) or 0)
+        crit_bonus = int(_crit_stats.get("crit_bonus", 0) or 0)
 
         at_boss = int(state_row["tier"])
 
@@ -7144,6 +7470,7 @@ class DigService:
                     player_hit=player_hit, player_dmg=player_dmg,
                     boss_hit=boss_hit, boss_dmg=boss_dmg,
                     status_effects=status_effects,
+                    crit_chance=crit_chance, crit_bonus=crit_bonus,
                 )
                 round_log.append(entry)
                 if terminal is True:
@@ -7189,6 +7516,10 @@ class DigService:
         if approx_hp_max < int(boss_hp):
             approx_hp_max = max(int(boss_hp), 1)
         approx_hp_max += int(state_row["player_dmg"])
+        # Soften UX: best-effort starting HP for resumed fights is the
+        # at-pause value (the post-pause portion of the fight is what gets
+        # surfaced as soften progress).
+        starting_boss_hp_for_resume = int(state_row.get("boss_hp", 0) or 0)
         return self._resolve_duel_outcome(
             discord_id=discord_id, guild_id=guild_id,
             tunnel=tunnel, boss=boss, at_boss=at_boss,
@@ -7202,6 +7533,7 @@ class DigService:
             depth=depth,
             gear_snapshot_ids=snapshot_ids,
             ending_boss_hp=int(boss_hp), boss_hp_max=int(approx_hp_max),
+            starting_boss_hp=starting_boss_hp_for_resume,
         )
 
     # --- helpers --------------------------------------------------------
@@ -7228,6 +7560,7 @@ class DigService:
         player_hit: float, player_dmg: int,
         boss_hit: float, boss_dmg: int,
         status_effects: dict,
+        crit_chance: float = 0.0, crit_bonus: int = 0,
     ) -> tuple[dict, int, int, bool | None]:
         """Run one auto-round. Returns (entry, player_hp, boss_hp, terminal).
 
@@ -7266,9 +7599,15 @@ class DigService:
         if skip != "player":
             effective_player_hit = 0.0 if silenced else player_hit
             player_roll = random.random() < effective_player_hit
+            crit_this_round = False
             if player_roll:
-                boss_hp -= player_dmg
+                dmg_this_round = player_dmg
+                if crit_chance > 0 and random.random() < crit_chance:
+                    dmg_this_round += crit_bonus
+                    crit_this_round = True
+                boss_hp -= dmg_this_round
             entry["player_hit"] = player_roll
+            entry["crit"] = crit_this_round
             entry["boss_hp"] = max(0, boss_hp)
         else:
             entry["player_hit"] = False
@@ -7369,6 +7708,7 @@ class DigService:
         gear_snapshot_ids: list[int] | None = None,
         ending_boss_hp: int | None = None,
         boss_hp_max: int | None = None,
+        starting_boss_hp: int | None = None,
     ) -> dict:
         """Apply the win-branch or loss-branch post-processing and return the result dict.
 
@@ -7679,6 +8019,25 @@ class DigService:
                 "rounds": round_log,
             }),
         )
+        # Soften progress line: show how much HP the player chipped off
+        # before retreating, so the long-grind boss fights feel like progress
+        # rather than a flat repeat.
+        soften_line = None
+        if (
+            starting_boss_hp is not None
+            and ending_boss_hp is not None
+            and boss_hp_max is not None
+        ):
+            sbp = max(0, int(starting_boss_hp))
+            ebp = max(0, int(ending_boss_hp))
+            hmax = max(1, int(boss_hp_max))
+            chipped = sbp - ebp
+            if chipped > 0:
+                soften_line = (
+                    f"You knocked the boss from {sbp}/{hmax} to {ebp}/{hmax} "
+                    f"before retreating."
+                )
+
         return self._ok(
             won=False,
             boss_name=boss_name,
@@ -7696,6 +8055,7 @@ class DigService:
             ),
             achievements=[],
             round_log=round_log,
+            soften_line=soften_line,
             echo_applied=echo_applied,
             echo_killer_id=(
                 active_echo.get("killer_discord_id")
@@ -7870,6 +8230,8 @@ class DigService:
                 PLAYER_HIT_FLOOR,
                 min(PLAYER_HIT_CEILING, player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD),
             )
+            _scout_crit_chance = float(stats.get("crit_chance", 0) or 0)
+            _scout_crit_bonus = int(stats.get("crit_bonus", 0) or 0)
             win_pct = _approx_duel_win_prob(
                 player_hp=int(stats["player_hp"]),
                 boss_hp=boss_hp,
@@ -7877,6 +8239,8 @@ class DigService:
                 player_dmg=int(stats["player_dmg"]),
                 boss_hit=boss_hit_chance,
                 boss_dmg=boss_dmg_eff,
+                crit_chance=_scout_crit_chance,
+                crit_bonus=_scout_crit_bonus,
             )
             free_win_pct = _approx_duel_win_prob(
                 player_hp=int(stats["player_hp"]),
@@ -7885,6 +8249,8 @@ class DigService:
                 player_dmg=int(stats["player_dmg"]),
                 boss_hit=boss_hit_chance,
                 boss_dmg=boss_dmg_eff,
+                crit_chance=_scout_crit_chance,
+                crit_bonus=_scout_crit_bonus,
             )
             base_multiplier = payouts[i] if i < len(payouts) else 2.0
             odds[tier] = {
@@ -8392,7 +8758,8 @@ class DigService:
                    discord_id: int | None = None,
                    guild_id: int | None = None,
                    in_boss: bool = False,
-                   tunnel: dict | None = None) -> dict | None:
+                   tunnel: dict | None = None,
+                   void_bait_active: bool = False) -> dict | None:
         """
         Roll for a random event with layer-specific rates, rarity, and prestige gating.
 
@@ -8459,9 +8826,12 @@ class DigService:
         if not eligible:
             return None
 
-        # Rarity-weighted selection with ascension modifiers
+        # Rarity-weighted selection with ascension modifiers + Void Bait bias
         rare_mult = 1.0 + ascension.get("rare_event_multiplier", 0)
         legendary_mult = 1.0 + ascension.get("legendary_event_multiplier", 0)
+        if void_bait_active:
+            rare_mult *= 1.25
+            legendary_mult *= 1.5
         adjusted_weights = dict(RARITY_WEIGHTS)
         adjusted_weights["rare"] = int(RARITY_WEIGHTS["rare"] * rare_mult)
         adjusted_weights["legendary"] = int(RARITY_WEIGHTS["legendary"] * legendary_mult)

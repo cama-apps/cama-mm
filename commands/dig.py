@@ -798,6 +798,9 @@ async def _resolve_carried_phase_fight(
             f"You lost **{loss}** {JOPACOIN_EMOTE} and were knocked back "
             f"{knockback} blocks."
         )
+    soften_line = getattr(result, "soften_line", None)
+    if soften_line:
+        embed.add_field(name="​", value=soften_line, inline=False)
     embed.add_field(
         name="Details",
         value=(
@@ -977,6 +980,9 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             embed.add_field(
                 name="Loss Penalty", value="; ".join(parts), inline=False,
             )
+    soften_line = getattr(result, "soften_line", None)
+    if soften_line:
+        embed.add_field(name="​", value=soften_line, inline=False)
     embed.add_field(
         name="Details",
         value=(
@@ -4621,6 +4627,54 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         embed.add_field(
             name="\u200b",
             value=event_text,
+            inline=False,
+        )
+
+    # Sonar Pulse: surface the skipped-event flavor.
+    if getattr(result, "sonar_skipped", False):
+        skipped = getattr(result, "event_preview", None)
+        skipped_d = skipped if isinstance(skipped, dict) else (
+            skipped._d if hasattr(skipped, "_d") else None
+        )
+        if isinstance(skipped_d, dict) and skipped_d.get("name"):
+            embed.add_field(
+                name="​",
+                value=(
+                    f"The rumble of *{skipped_d['name']}* passed you by, "
+                    "harmless this time."
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="​",
+                value="The cavern stirred but settled without incident.",
+                inline=False,
+            )
+    else:
+        # Lantern / Sonar Pulse preview of what stirs ahead.
+        preview = getattr(result, "event_preview", None)
+        preview_d = preview if isinstance(preview, dict) else (
+            preview._d if hasattr(preview, "_d") else None
+        )
+        if isinstance(preview_d, dict) and preview_d.get("name"):
+            embed.add_field(
+                name="​",
+                value=f"Stirring ahead: *{preview_d['name']}*.",
+                inline=False,
+            )
+
+    # Lantern boss-approach scout
+    scout = getattr(result, "boss_scout", None)
+    scout_d = scout if isinstance(scout, dict) else (
+        scout._d if hasattr(scout, "_d") else None
+    )
+    if isinstance(scout_d, dict) and scout_d.get("blocks_until"):
+        embed.add_field(
+            name="​",
+            value=(
+                f"Something looms {scout_d['blocks_until']} blocks deeper."
+            ),
             inline=False,
         )
 

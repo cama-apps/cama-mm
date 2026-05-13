@@ -19,7 +19,7 @@ from services.dig_constants import (
     BOSS_ARCHETYPES,
     BOSS_BOUNDARIES,
     BOSS_DIALOGUE_V2,
-    BOSS_HP_REGEN_PER_2_HOURS,
+    BOSS_HP_REGEN_PER_3_HOURS,
     BOSS_PRESTIGE_BONUS,
     BOSS_TIER_BONUS,
     BOSSES_BY_ID,
@@ -150,6 +150,26 @@ class TestWinChanceCap:
         )
         assert win < 0.5
 
+    def test_crit_raises_win_chance(self):
+        # Crit should non-trivially raise win prob: same hit/dmg, but a 100%
+        # crit chance for +1 damage effectively turns the player into a 2-dmg
+        # hitter. Compare with the crit-less baseline.
+        baseline = _approx_duel_win_prob(
+            player_hp=5, boss_hp=10,
+            player_hit=0.5, player_dmg=1,
+            boss_hit=0.3, boss_dmg=1,
+            trials=400,
+        )
+        with_crit = _approx_duel_win_prob(
+            player_hp=5, boss_hp=10,
+            player_hit=0.5, player_dmg=1,
+            boss_hit=0.3, boss_dmg=1,
+            crit_chance=1.0, crit_bonus=1,
+            trials=400,
+        )
+        # Allow Monte Carlo wobble — but +1 dmg should be a clear win-rate lift.
+        assert with_crit > baseline + 0.10
+
 
 # --- Boss-stat scaling helper ----------------------------------------
 
@@ -270,7 +290,7 @@ class TestPersistedBossHP:
         assert hp_max == 12
 
     def test_regen_caps_at_hp_max(self):
-        # 100 hours elapsed at +1/2h would exceed hp_max; should cap.
+        # 100 hours elapsed at +1/3h would exceed hp_max; should cap.
         now = 100 * 3600
         bp = {"25": {"hp_remaining": 4, "hp_max": 12, "last_engaged_at": 0}}
         hp, hp_max = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
@@ -278,11 +298,19 @@ class TestPersistedBossHP:
         assert hp_max == 12
 
     def test_regen_partial(self):
-        # 6 hours → 3 two-hour blocks → +3 HP; persisted 4 → 7 (within cap).
+        # 9 hours → 3 three-hour blocks → +3 HP; persisted 4 → 7 (within cap).
+        now = 9 * 3600
+        bp = {"25": {"hp_remaining": 4, "hp_max": 12, "last_engaged_at": 0}}
+        hp, _ = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
+        assert hp == 4 + 3 * BOSS_HP_REGEN_PER_3_HOURS
+
+    def test_regen_six_hours_no_longer_two_blocks(self):
+        """6 hours under the new 1/3h cadence is two three-hour blocks, not
+        three two-hour blocks. Guards against silent revert to 1/2h."""
         now = 6 * 3600
         bp = {"25": {"hp_remaining": 4, "hp_max": 12, "last_engaged_at": 0}}
         hp, _ = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
-        assert hp == 4 + 3 * BOSS_HP_REGEN_PER_2_HOURS
+        assert hp == 4 + 2 * BOSS_HP_REGEN_PER_3_HOURS
 
     def test_persist_after_loss_writes_entry(self):
         bp = {}
