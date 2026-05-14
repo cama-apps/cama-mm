@@ -342,6 +342,7 @@ EXTENSIONS = [
     "commands.dig",
     "commands.russianroulette",
     "commands.reminders",
+    "commands.ping_rewards",
 ]
 
 
