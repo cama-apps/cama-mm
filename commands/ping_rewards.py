@@ -24,10 +24,10 @@ class PingRewardsCog(commands.Cog):
         guild_id = message.guild.id
         pinger_id = message.author.id
 
-        if config.LUKE_DISCORD_ID in mentioned_ids:
+        if config.LUKE_DISCORD_ID and config.LUKE_DISCORD_ID in mentioned_ids:
             await self._maybe_reward_luke_ping(pinger_id, guild_id, message.channel)
 
-        if config.ASH_DISCORD_ID in mentioned_ids:
+        if config.ASH_DISCORD_ID and config.ASH_DISCORD_ID in mentioned_ids:
             await self._maybe_reward_ash_ping(pinger_id, guild_id, message.channel)
 
     async def _maybe_reward_luke_ping(

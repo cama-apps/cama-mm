@@ -89,8 +89,23 @@ class ReminderService:
         )
         self._tasks[(discord_id, guild_id, "dig")] = task
 
+    async def notify_rebellion_subscribers(
+        self, bot: "commands.Bot", guild_id: int, inciter_name: str,
+        exclude_discord_id: int | None = None,
+    ) -> None:
+        subscribers = await asyncio.to_thread(
+            self._notification_repo.get_enabled_users_for_type, guild_id, "rebellion"
+        )
+        if not subscribers:
+            return
+        message = f"⚔️ A rebellion has been incited by **{inciter_name}**! Vote to ATTACK or DEFEND now."
+        for discord_id in subscribers:
+            if discord_id != exclude_discord_id:
+                asyncio.create_task(self._dm_user(bot, discord_id, message))
+
     async def notify_betting_subscribers(
-        self, bot: "commands.Bot", guild_id: int, bet_lock_until: int
+        self, bot: "commands.Bot", guild_id: int, bet_lock_until: int,
+        exclude_discord_id: int | None = None,
     ) -> None:
         subscribers = await asyncio.to_thread(
             self._notification_repo.get_enabled_users_for_type, guild_id, "betting"
@@ -104,7 +119,8 @@ class ReminderService:
             "Use `/bet` now!"
         )
         for discord_id in subscribers:
-            asyncio.create_task(self._dm_user(bot, discord_id, message))
+            if discord_id != exclude_discord_id:
+                asyncio.create_task(self._dm_user(bot, discord_id, message))
 
     # ------------------------------------------------------------------
     # Restart recovery

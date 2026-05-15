@@ -2,8 +2,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import config
 from commands.ping_rewards import PingRewardsCog, PING_REWARD_JC
+
+LUKE_ID = 894313284705079336
+ASH_ID = 111293627199746048
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +34,13 @@ def bot():
     return b
 
 
+@pytest.fixture(autouse=True)
+def patch_config_ids():
+    with patch("commands.ping_rewards.config.LUKE_DISCORD_ID", LUKE_ID), \
+         patch("commands.ping_rewards.config.ASH_DISCORD_ID", ASH_ID):
+        yield
+
+
 @pytest.fixture
 def cog(bot):
     return PingRewardsCog(bot)
@@ -44,14 +53,14 @@ def cog(bot):
 
 @pytest.mark.asyncio
 async def test_ignores_bot_messages(cog, bot):
-    message = _make_message(mentioned_ids=[config.LUKE_DISCORD_ID], author_is_bot=True)
+    message = _make_message(mentioned_ids=[LUKE_ID], author_is_bot=True)
     await cog.on_message(message)
     bot.player_service.adjust_balance.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_ignores_dm_messages(cog, bot):
-    message = _make_message(mentioned_ids=[config.LUKE_DISCORD_ID])
+    message = _make_message(mentioned_ids=[LUKE_ID])
     message.guild = None
     await cog.on_message(message)
     bot.player_service.adjust_balance.assert_not_called()
@@ -64,7 +73,7 @@ async def test_ignores_dm_messages(cog, bot):
 
 @pytest.mark.asyncio
 async def test_luke_ping_awards_jc_on_win(cog, bot):
-    message = _make_message(mentioned_ids=[config.LUKE_DISCORD_ID])
+    message = _make_message(mentioned_ids=[LUKE_ID])
     with patch("commands.ping_rewards.random.random", return_value=0.0):
         await cog.on_message(message)
     bot.player_service.adjust_balance.assert_called_once_with(
@@ -75,7 +84,7 @@ async def test_luke_ping_awards_jc_on_win(cog, bot):
 
 @pytest.mark.asyncio
 async def test_luke_ping_no_reward_on_loss(cog, bot):
-    message = _make_message(mentioned_ids=[config.LUKE_DISCORD_ID])
+    message = _make_message(mentioned_ids=[LUKE_ID])
     with patch("commands.ping_rewards.random.random", return_value=0.99):
         await cog.on_message(message)
     bot.player_service.adjust_balance.assert_not_called()
@@ -89,7 +98,7 @@ async def test_luke_ping_no_reward_on_loss(cog, bot):
 
 @pytest.mark.asyncio
 async def test_ash_ping_awards_jc_on_win(cog, bot):
-    message = _make_message(mentioned_ids=[config.ASH_DISCORD_ID])
+    message = _make_message(mentioned_ids=[ASH_ID])
     # Both rolls win (< 0.01)
     with patch("commands.ping_rewards.random.random", return_value=0.0):
         await cog.on_message(message)
@@ -101,7 +110,7 @@ async def test_ash_ping_awards_jc_on_win(cog, bot):
 
 @pytest.mark.asyncio
 async def test_ash_ping_no_jc_on_loss(cog, bot):
-    message = _make_message(mentioned_ids=[config.ASH_DISCORD_ID])
+    message = _make_message(mentioned_ids=[ASH_ID])
     # Both rolls lose
     with patch("commands.ping_rewards.random.random", return_value=0.5):
         await cog.on_message(message)
@@ -115,13 +124,13 @@ async def test_ash_ping_no_jc_on_loss(cog, bot):
 
 @pytest.mark.asyncio
 async def test_ash_ping_dms_luke_on_win(cog, bot):
-    message = _make_message(mentioned_ids=[config.ASH_DISCORD_ID])
+    message = _make_message(mentioned_ids=[ASH_ID])
     luke_user = MagicMock()
     luke_user.send = AsyncMock()
     pinger_user = MagicMock(display_name="Tester", mention="<@999>")
 
     async def fetch_user(uid):
-        return luke_user if uid == config.LUKE_DISCORD_ID else pinger_user
+        return luke_user if uid == LUKE_ID else pinger_user
 
     bot.fetch_user = fetch_user
 
@@ -136,7 +145,7 @@ async def test_ash_ping_dms_luke_on_win(cog, bot):
 
 @pytest.mark.asyncio
 async def test_ash_ping_no_dm_on_loss(cog, bot):
-    message = _make_message(mentioned_ids=[config.ASH_DISCORD_ID])
+    message = _make_message(mentioned_ids=[ASH_ID])
     luke_user = MagicMock()
     luke_user.send = AsyncMock()
     bot.fetch_user = AsyncMock(return_value=luke_user)
@@ -155,13 +164,13 @@ async def test_ash_ping_no_dm_on_loss(cog, bot):
 @pytest.mark.asyncio
 async def test_ash_ping_only_dm_fires(cog, bot):
     """JC roll loses, DM roll wins — only DM should fire."""
-    message = _make_message(mentioned_ids=[config.ASH_DISCORD_ID])
+    message = _make_message(mentioned_ids=[ASH_ID])
     luke_user = MagicMock()
     luke_user.send = AsyncMock()
     pinger_user = MagicMock(display_name="Tester", mention="<@999>")
 
     async def fetch_user(uid):
-        return luke_user if uid == config.LUKE_DISCORD_ID else pinger_user
+        return luke_user if uid == LUKE_ID else pinger_user
 
     bot.fetch_user = fetch_user
 

@@ -53,8 +53,8 @@ DB_PATH = os.getenv("DB_PATH", "cama_shuffle.db")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ADMIN_USER_IDS: list[int] = []
 
-LUKE_DISCORD_ID: int = int(os.getenv("LUKE_DISCORD_ID", "894313284705079336"))
-ASH_DISCORD_ID: int = int(os.getenv("ASH_DISCORD_ID", "111293627199746048"))
+LUKE_DISCORD_ID: int | None = _parse_int("LUKE_DISCORD_ID", 0) or None
+ASH_DISCORD_ID: int | None = _parse_int("ASH_DISCORD_ID", 0) or None
 
 _admin_env = os.getenv("ADMIN_USER_IDS", "")
 if _admin_env:
