@@ -45,7 +45,7 @@ def mock_bot():
 class TestNotificationRepository:
     def test_defaults_when_no_row(self, notification_repo):
         prefs = notification_repo.get_preferences(9001, TEST_GUILD_ID)
-        assert prefs == {"wheel_enabled": False, "trivia_enabled": False, "betting_enabled": False, "dig_enabled": False}
+        assert prefs == {"wheel_enabled": False, "trivia_enabled": False, "betting_enabled": False, "dig_enabled": False, "rebellion_enabled": False}
 
     def test_set_wheel_preference(self, notification_repo):
         notification_repo.set_preference(1, TEST_GUILD_ID, "wheel", True)
@@ -223,6 +223,25 @@ class TestReminderServiceBetting:
 
         assert set(sent_to) == {1, 2}
 
+    @pytest.mark.asyncio
+    async def test_notify_betting_excludes_shuffler(self, reminder_service, mock_bot):
+        reminder_service.toggle_preference(1, TEST_GUILD_ID, "betting")
+        reminder_service.toggle_preference(2, TEST_GUILD_ID, "betting")
+
+        sent_to = []
+
+        async def fake_dm(bot, discord_id, message):
+            sent_to.append(discord_id)
+
+        with patch.object(reminder_service, "_dm_user", new=fake_dm):
+            await reminder_service.notify_betting_subscribers(
+                mock_bot, TEST_GUILD_ID, int(time.time()) + 900, exclude_discord_id=1
+            )
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert sent_to == [2]  # user 1 is the shuffler, should not receive DM
+
 
 # ---------------------------------------------------------------------------
 # Dig reminder
@@ -296,3 +315,86 @@ class TestDigReminder:
         dig_repo_mock.get_tunnel.return_value = {"last_dig_at": int(time.time()) - 200000}
         await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
         assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
+
+
+# ---------------------------------------------------------------------------
+# Rebellion reminder
+# ---------------------------------------------------------------------------
+
+
+class TestRebellionReminder:
+    def test_rebellion_preference_default_false(self, notification_repo):
+        prefs = notification_repo.get_preferences(1, TEST_GUILD_ID)
+        assert prefs.get("rebellion_enabled") is False
+
+    def test_rebellion_preference_toggle(self, notification_repo):
+        notification_repo.set_preference(1, TEST_GUILD_ID, "rebellion", True)
+        assert notification_repo.get_preferences(1, TEST_GUILD_ID)["rebellion_enabled"] is True
+
+    def test_rebellion_get_enabled_users(self, notification_repo):
+        notification_repo.set_preference(1, TEST_GUILD_ID, "rebellion", True)
+        notification_repo.set_preference(2, TEST_GUILD_ID, "rebellion", False)
+        notification_repo.set_preference(3, TEST_GUILD_ID, "rebellion", True)
+        users = notification_repo.get_enabled_users_for_type(TEST_GUILD_ID, "rebellion")
+        assert set(users) == {1, 3}
+
+    @pytest.mark.asyncio
+    async def test_notify_rebellion_no_subscribers(self, reminder_service, mock_bot):
+        # No-op when nobody subscribed — just verify it doesn't error
+        await reminder_service.notify_rebellion_subscribers(mock_bot, TEST_GUILD_ID, "Jopa")
+
+    @pytest.mark.asyncio
+    async def test_notify_rebellion_dms_subscribers(self, reminder_service, mock_bot):
+        reminder_service.toggle_preference(1, TEST_GUILD_ID, "rebellion")
+        reminder_service.toggle_preference(2, TEST_GUILD_ID, "rebellion")
+
+        sent_to = []
+        sent_messages = []
+
+        async def fake_dm(bot, discord_id, message):
+            sent_to.append(discord_id)
+            sent_messages.append(message)
+
+        with patch.object(reminder_service, "_dm_user", new=fake_dm):
+            await reminder_service.notify_rebellion_subscribers(mock_bot, TEST_GUILD_ID, "Jopa")
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert set(sent_to) == {1, 2}
+        assert all("Jopa" in m for m in sent_messages)
+
+    @pytest.mark.asyncio
+    async def test_notify_rebellion_excludes_inciter(self, reminder_service, mock_bot):
+        reminder_service.toggle_preference(1, TEST_GUILD_ID, "rebellion")
+        reminder_service.toggle_preference(2, TEST_GUILD_ID, "rebellion")
+
+        sent_to = []
+
+        async def fake_dm(bot, discord_id, message):
+            sent_to.append(discord_id)
+
+        with patch.object(reminder_service, "_dm_user", new=fake_dm):
+            await reminder_service.notify_rebellion_subscribers(
+                mock_bot, TEST_GUILD_ID, "Jopa", exclude_discord_id=1
+            )
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert sent_to == [2]  # user 1 is the inciter, should not receive DM
+
+    @pytest.mark.asyncio
+    async def test_notify_rebellion_excludes_other_guild(self, reminder_service, mock_bot):
+        reminder_service.toggle_preference(1, TEST_GUILD_ID, "rebellion")
+        reminder_service.toggle_preference(2, TEST_GUILD_ID_2, "rebellion")
+
+        sent_to = []
+
+        async def fake_dm(bot, discord_id, message):
+            sent_to.append(discord_id)
+
+        with patch.object(reminder_service, "_dm_user", new=fake_dm):
+            await reminder_service.notify_rebellion_subscribers(mock_bot, TEST_GUILD_ID, "Jopa")
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        assert sent_to == [1]  # user 2 is in a different guild
