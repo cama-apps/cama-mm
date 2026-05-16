@@ -1528,11 +1528,6 @@ class IRebellionRepository(ABC):
         ...
 
     @abstractmethod
-    def add_defend_vote(self, war_id: int, discord_id: int) -> dict:
-        """Add a defend vote (deducts stake from player balance). Returns updated counts."""
-        ...
-
-    @abstractmethod
     def defend_vote_with_stake_atomic(
         self, war_id: int, discord_id: int, guild_id: int, stake: int
     ) -> dict:

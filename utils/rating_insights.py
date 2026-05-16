@@ -4,10 +4,14 @@ Helpers for computing rating system insights.
 
 from __future__ import annotations
 
+import asyncio
 import statistics
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any
 
 from domain.models.player import Player
+from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 
 RATING_BUCKETS = [
@@ -396,3 +400,158 @@ def _compute_rating_stability(rating_history_entries: list[dict]) -> dict:
         "uncalibrated_count": len(uncalibrated_deltas),
         "stability_ratio": stability_ratio,
     }
+
+
+@dataclass
+class PlayerCalibration:
+    """Shared per-player calibration computations.
+
+    Produced by :func:`compute_player_calibration` and consumed by both the
+    ``/calibration`` individual view and the ``/profile`` Rating tab. Holds
+    only the values whose *computation* is identical between the two; each
+    call site formats these into its own (intentionally divergent) embed.
+    """
+
+    percentile: float | None
+    drift: float | None
+    matches_with_predictions: list[dict]
+    actual_wins: int
+    expected_wins: float
+    overperformance: float | None
+    favored_matches: list[dict]
+    underdog_matches: list[dict]
+    favored_wins: int
+    underdog_wins: int
+    last_5_delta: float | None
+    streak: int
+    streak_type: str | None
+    upsets: list[tuple[dict, float]]
+    chokes: list[tuple[dict, float]]
+
+
+def compute_player_calibration(
+    player: Player,
+    history: list[dict],
+    rated_players: list[Player],
+    rating_system: CamaRatingSystem,
+) -> PlayerCalibration:
+    """Compute the calibration values shared by the calibration and profile views.
+
+    ``history`` must be the player's detailed rating history newest-first.
+    ``rated_players`` is the guild's players with a non-None ``glicko_rating``
+    (used for the percentile). Pure: no I/O, no formatting.
+    """
+    # Percentile vs the rated population
+    percentile: float | None = None
+    if player.glicko_rating and rated_players:
+        lower_count = sum(
+            1 for p in rated_players if (p.glicko_rating or 0) < player.glicko_rating
+        )
+        percentile = (lower_count / len(rated_players)) * 100
+
+    # Drift from the initial MMR seed
+    drift: float | None = None
+    if player.initial_mmr and player.glicko_rating:
+        seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
+        drift = player.glicko_rating - seed_rating
+
+    # Performance vs expectations
+    matches_with_predictions = [
+        h for h in history if h.get("expected_team_win_prob") is not None
+    ]
+    actual_wins = sum(1 for h in matches_with_predictions if h.get("won"))
+    expected_wins = sum(
+        h.get("expected_team_win_prob", 0) for h in matches_with_predictions
+    )
+    overperformance = actual_wins - expected_wins if matches_with_predictions else None
+
+    # Win rate when favored vs underdog
+    favored_matches = [
+        h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) >= 0.55
+    ]
+    underdog_matches = [
+        h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) <= 0.45
+    ]
+    favored_wins = sum(1 for h in favored_matches if h.get("won"))
+    underdog_wins = sum(1 for h in underdog_matches if h.get("won"))
+
+    # Rating trend over the last 5 games
+    last_5_delta: float | None = None
+    if len(history) >= 2:
+        if len(history) > 5:
+            last_5_delta = (history[0].get("rating") or 0) - (history[4].get("rating") or 0)
+        else:
+            last_5_delta = (history[0].get("rating") or 0) - (history[-1].get("rating") or 0)
+
+    # Current streak
+    streak = 0
+    streak_type: str | None = None
+    for h in matches_with_predictions:
+        won = h.get("won")
+        if streak_type is None:
+            streak_type = "W" if won else "L"
+            streak = 1
+        elif (won and streak_type == "W") or (not won and streak_type == "L"):
+            streak += 1
+        else:
+            break
+
+    # Biggest upset (win as underdog) and choke (loss as favorite)
+    upsets = [
+        (h, h.get("expected_team_win_prob", 0.5))
+        for h in matches_with_predictions
+        if h.get("won") and (h.get("expected_team_win_prob") or 0.5) < 0.45
+    ]
+    chokes = [
+        (h, h.get("expected_team_win_prob", 0.5))
+        for h in matches_with_predictions
+        if not h.get("won") and (h.get("expected_team_win_prob") or 0.5) > 0.55
+    ]
+    upsets.sort(key=lambda x: x[1])  # lowest prob first
+    chokes.sort(key=lambda x: x[1], reverse=True)  # highest prob first
+
+    return PlayerCalibration(
+        percentile=percentile,
+        drift=drift,
+        matches_with_predictions=matches_with_predictions,
+        actual_wins=actual_wins,
+        expected_wins=expected_wins,
+        overperformance=overperformance,
+        favored_matches=favored_matches,
+        underdog_matches=underdog_matches,
+        favored_wins=favored_wins,
+        underdog_wins=underdog_wins,
+        last_5_delta=last_5_delta,
+        streak=streak,
+        streak_type=streak_type,
+        upsets=upsets,
+        chokes=chokes,
+    )
+
+
+async def get_os_win_probability(
+    match_source: Any,
+    os_system: CamaOpenSkillSystem,
+    match_id: int | None,
+    team_number: int | None,
+) -> float | None:
+    """Fetch the OpenSkill expected win probability for a player's match side.
+
+    ``match_source`` is anything exposing ``get_os_ratings_for_match`` (the
+    match service or repository). Returns ``None`` when the match has no
+    OpenSkill ratings or the team number is unknown.
+    """
+    if not match_id or match_source is None:
+        return None
+    os_ratings = await asyncio.to_thread(match_source.get_os_ratings_for_match, match_id)
+    if not (os_ratings["team1"] and os_ratings["team2"]):
+        return None
+    if team_number == 1:
+        return os_system.os_predict_win_probability(
+            os_ratings["team1"], os_ratings["team2"]
+        )
+    if team_number == 2:
+        return os_system.os_predict_win_probability(
+            os_ratings["team2"], os_ratings["team1"]
+        )
+    return None

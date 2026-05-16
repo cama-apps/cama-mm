@@ -192,37 +192,6 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                 "stake_deducted": stake,
             }
 
-    def add_defend_vote(self, war_id: int, discord_id: int) -> dict:
-        """Add a defend vote. Returns updated defend count. Stake deducted separately by service."""
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT defend_voter_ids, effective_defend_count FROM wheel_wars WHERE war_id = ?",
-                (war_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError(f"War {war_id} not found")
-            voters = safe_json_loads(
-                row["defend_voter_ids"],
-                default=[],
-                context=f"wheel_wars.defend_voter_ids war_id={war_id}",
-            )
-            # Prevent duplicate votes
-            if discord_id in voters:
-                return {"effective_defend_count": row["effective_defend_count"], "duplicate": True}
-            voters.append(discord_id)
-            new_count = row["effective_defend_count"] + 1.0
-            cursor.execute(
-                """
-                UPDATE wheel_wars
-                SET defend_voter_ids = ?, effective_defend_count = ?
-                WHERE war_id = ?
-                """,
-                (json.dumps(voters), new_count, war_id),
-            )
-            return {"effective_defend_count": new_count, "duplicate": False}
-
     def update_war_status(self, war_id: int, status: str) -> None:
         """Update war status."""
         with self.connection() as conn:
