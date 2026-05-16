@@ -68,12 +68,17 @@ class DigLeaderboardService:
         return _ok(entries=entries)
 
     def get_collection(self, discord_id: int, guild_id) -> dict:
-        """Return all artifacts grouped by layer and rarity."""
+        """Return a player's discovered artifacts grouped by rarity.
+
+        ``dig_artifacts`` rows store no rarity, so it is resolved from
+        ``ARTIFACT_POOL`` by ``artifact_id``.
+        """
         artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
+        rarity_by_id = {a["id"]: a["rarity"] for a in ARTIFACT_POOL}
         collection = {}
         for a in artifacts:
             a = dict(a)
-            rarity = a.get("rarity", "common")
+            rarity = rarity_by_id.get(a.get("artifact_id"), "common")
             if rarity not in collection:
                 collection[rarity] = []
             collection[rarity].append(a)
@@ -83,20 +88,12 @@ class DigLeaderboardService:
         """Return guild artifact registry with first finders and counts."""
         entries = self.dig_repo.get_registry(guild_id)
         entries = [dict(e) for e in entries]
+        layer_by_id = {a["id"]: a["layer"] for a in ARTIFACT_POOL}
 
-        # Group by layer
+        # Group by the artifact's layer (resolved from the pool by id).
         by_layer = {}
         for e in entries:
-            # Look up artifact info from pool
-            art_info = next(
-                (a for a in ARTIFACT_POOL if a["id"] == e.get("artifact_id")),
-                None,
-            )
-            layer = "unknown"
-            if art_info:
-                layers = art_info.get("layers", [])
-                layer = layers[0] if layers else "unknown"
-
+            layer = layer_by_id.get(e.get("artifact_id")) or "unknown"
             if layer not in by_layer:
                 by_layer[layer] = []
             by_layer[layer].append(e)
