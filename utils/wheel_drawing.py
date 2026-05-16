@@ -1266,7 +1266,7 @@ def _draw_terminal_shell(draw: ImageDraw.Draw, size: int, frame_idx: int, displa
             bbox = draw.textbbox((0, 0), ch, font=bar_font)
             x_pos += bbox[2] - bbox[0]
     else:
-        # Steady state (frames 44+) - solid cursor
+        # Steady state (frames 31+) - solid cursor
         prompt = new_text + "\u2588"
         draw.text((4, y), prompt, fill=(55, 190, 55, 180), font=bar_font)
 
@@ -1392,8 +1392,6 @@ def create_wheel_gif(
     Returns:
         BytesIO buffer containing the GIF data
     """
-    import random
-
     frames = []
     durations = []
 

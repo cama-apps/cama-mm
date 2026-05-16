@@ -9,6 +9,7 @@ from PIL import Image
 from utils.drawing import (
     draw_advantage_graph,
     draw_attribute_distribution,
+    draw_gamba_chart,
     draw_lane_distribution,
     draw_matches_table,
     draw_rating_history_chart,
@@ -476,6 +477,26 @@ class TestDrawAdvantageGraph:
         """Test chart works with only XP advantage data."""
         data = {"radiant_xp_adv": [0, 300, 600, 1200, 900]}
         result = draw_advantage_graph(data)
+        assert isinstance(result, BytesIO)
+        img = Image.open(result)
+        assert img.format == "PNG"
+
+
+class TestDrawGambaChart:
+    """Tests for draw_gamba_chart function."""
+
+    def test_wheel_source_info_missing_keys_does_not_raise(self):
+        """A wheel-source info dict lacking effective_bet/outcome/leverage must not crash.
+
+        Marker rendering subscripts these keys; a wheel info dict that omits them
+        (e.g. from an older/external source) should be tolerated, not KeyError.
+        """
+        pnl_series = [
+            (1, 100, {"source": "wheel"}),
+            (2, -50, {"source": "wheel"}),
+        ]
+        stats = {"total_bets": 2, "win_rate": 0.5, "net_pnl": -50, "roi": -0.1}
+        result = draw_gamba_chart("TestUser", 50, "Degen", "🎰", pnl_series, stats)
         assert isinstance(result, BytesIO)
         img = Image.open(result)
         assert img.format == "PNG"
