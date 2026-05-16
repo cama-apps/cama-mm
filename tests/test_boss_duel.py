@@ -16,6 +16,7 @@ from services.dig_constants import (
     BOSS_PAYOUTS,
     BOSS_PRESTIGE_BONUS,
     BOSS_TIER_BONUS,
+    BOSS_VICTORY_BASE_JC,
     FREE_DIG_COOLDOWN_SECONDS,
     PHASE_TRANSITION_EVENTS,
 )
@@ -220,9 +221,11 @@ class TestDuelPayout:
         assert result["won"] is True
         expected_multiplier = BOSS_PAYOUTS[25][0]
         expected_profit = int(10 * (expected_multiplier - 1))
-        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + expected_profit
+        # Every victory pays the flat base reward on top of the wager profit.
+        expected_payout = BOSS_VICTORY_BASE_JC[25] + expected_profit
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + expected_payout
         # Reported payout is the real net credited, not the gross return.
-        assert result["payout"] == expected_profit
+        assert result["payout"] == expected_payout
 
     def test_loss_applies_knockback(self, dig_service, dig_repo, player_repository, monkeypatch):
         """Boss loss knocks the player back and clears cheers."""
@@ -410,10 +413,12 @@ class TestBossEchoWeakening:
         assert result.get("echo_applied") is True
         assert result.get("echo_killer_id") == 10001
 
-        # Payout is 0.7x the normal cautious multiplier
+        # Wager profit is 0.7x the normal cautious multiplier; the flat base
+        # reward is still paid on top.
         base_multiplier = BOSS_PAYOUTS[25][0]
         expected_profit = int(10 * (base_multiplier * 0.7 - 1))
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == balance_before + expected_profit
+        expected_payout = BOSS_VICTORY_BASE_JC[25] + expected_profit
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == balance_before + expected_payout
 
     def test_killer_reruns_get_no_discount(self, dig_service, dig_repo, player_repository, monkeypatch):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
@@ -685,7 +690,7 @@ class TestWagerTaper:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
 
         assert result["won"] is True
-        expected = int(100 * (BOSS_PAYOUTS[25][0] - 1))
+        expected = BOSS_VICTORY_BASE_JC[25] + int(100 * (BOSS_PAYOUTS[25][0] - 1))
         assert (player_repository.get_balance(10001, TEST_GUILD_ID)
                 == balance_before + expected)
 
@@ -694,7 +699,8 @@ class TestWagerTaper:
     ):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         # A near-certain (softened) bet at 95%: the multiplier tapers to fair
-        # odds, so a 100 JC wager returns ~+5 instead of the untapered +50.
+        # odds, so a 100 JC wager profits only ~+5 (plus the flat base
+        # reward) instead of the untapered +50.
         monkeypatch.setattr(
             "services.dig_service._approx_duel_win_prob", lambda **kw: 0.95,
         )
@@ -704,8 +710,9 @@ class TestWagerTaper:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
 
         assert result["won"] is True
-        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + 5
-        assert result["payout"] == 5
+        assert (player_repository.get_balance(10001, TEST_GUILD_ID)
+                == balance_before + BOSS_VICTORY_BASE_JC[25] + 5)
+        assert result["payout"] == BOSS_VICTORY_BASE_JC[25] + 5
 
     def test_won_wager_at_high_win_chance_never_loses_money(
         self, dig_service, dig_repo, player_repository, monkeypatch,

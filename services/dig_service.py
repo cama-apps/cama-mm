@@ -34,6 +34,7 @@ from services.dig_constants import (
     BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
+    BOSS_VICTORY_BASE_JC,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CAVE_IN_CATASTROPHIC_GEAR_TICKS,
     CAVE_IN_CATASTROPHIC_MEDICAL_BILL,
@@ -6310,15 +6311,20 @@ class DigService:
                 tunnel["stat_points"] = tunnel_updates["stat_points"]
                 tunnel["stat_boss_awards"] = tunnel_updates["stat_boss_awards"]
 
+            # Every boss victory pays a flat depth-scaled base reward so a
+            # win is never empty; a wagered win adds its taper-floored profit
+            # on top.
+            base_reward = BOSS_VICTORY_BASE_JC.get(at_boss, 15)
             if wager > 0:
                 # A won wager never returns less than the stake — the taper
                 # plus loot penalties (echo) can otherwise drive it negative.
-                payout_delta = max(
+                wager_profit = max(
                     0,
                     int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1)),
                 )
             else:
-                payout_delta = jc_delta
+                wager_profit = 0
+            payout_delta = base_reward + wager_profit
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
@@ -8035,17 +8041,22 @@ class DigService:
                 killer_discord_id=discord_id,
                 window_seconds=24 * 3600,
             )
+            # Every boss victory pays a flat depth-scaled base reward so a
+            # win is never empty; a wagered win adds its taper-floored profit
+            # on top.
+            base_reward = BOSS_VICTORY_BASE_JC.get(at_boss, 15)
             if wager > 0:
                 # A won wager never returns less than the stake — the taper
                 # plus loot penalties (echo, drain curse) can otherwise drive
                 # it negative.
-                net_payout = max(
+                wager_profit = max(
                     0,
                     int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1))
                     - (int(round(wager * multiplier * 0.25)) if drain_applied else 0),
                 )
             else:
-                net_payout = jc_delta
+                wager_profit = 0
+            net_payout = base_reward + wager_profit
             self.player_repo.add_balance(discord_id, guild_id, net_payout)
 
             achievements = self.check_achievements(
