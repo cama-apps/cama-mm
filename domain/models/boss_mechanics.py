@@ -2177,27 +2177,3 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
 
 def get_mechanic(mechanic_id: str) -> BossMechanic | None:
     return MECHANIC_REGISTRY.get(mechanic_id)
-
-
-def pick_random_mechanic_id(pool: tuple[str, ...], rng) -> str:
-    """Pick a mechanic id from a boss's pool using the provided Random."""
-    return rng.choice(pool)
-
-
-def validate_mechanic(mechanic: BossMechanic) -> None:
-    """Sanity-check invariants. Call from tests or at module import for safety."""
-    if len(mechanic.options) != 3:
-        raise ValueError(f"{mechanic.id}: expected 3 options, got {len(mechanic.options)}")
-    if not 0 <= mechanic.safe_option_idx < 3:
-        raise ValueError(f"{mechanic.id}: safe_option_idx out of range")
-    for idx, option in enumerate(mechanic.options):
-        total = sum(r.probability for r in option.outcome_rolls)
-        if abs(total - 1.0) > 1e-6:
-            raise ValueError(
-                f"{mechanic.id}.options[{idx}]: probabilities sum to {total}, not 1.0"
-            )
-        for roll in option.outcome_rolls:
-            if roll.status_effect and roll.status_effect not in EFFECT_APPLIERS:
-                raise ValueError(
-                    f"{mechanic.id}.options[{idx}]: unknown status_effect {roll.status_effect!r}"
-                )

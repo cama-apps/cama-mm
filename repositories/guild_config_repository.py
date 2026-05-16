@@ -18,7 +18,8 @@ class GuildConfigRepository(BaseRepository, IGuildConfigRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT guild_id, league_id, auto_enrich_matches, created_at, updated_at
+                SELECT guild_id, league_id, auto_enrich_matches, ai_features_enabled,
+                       created_at, updated_at
                 FROM guild_config
                 WHERE guild_id = ?
                 """,

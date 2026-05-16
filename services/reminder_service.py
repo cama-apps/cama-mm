@@ -51,7 +51,7 @@ class ReminderService:
                 message="Your wheel cooldown has expired! You can `/gamba` again now.",
             )
         )
-        self._tasks[(discord_id, guild_id, "wheel")] = task
+        self._register_task((discord_id, guild_id, "wheel"), task)
 
     def schedule_trivia_reminder(
         self, bot: "commands.Bot", discord_id: int, guild_id: int, next_trivia_time: int
@@ -69,7 +69,7 @@ class ReminderService:
                 message="Your trivia cooldown has expired! You can `/trivia` again now.",
             )
         )
-        self._tasks[(discord_id, guild_id, "trivia")] = task
+        self._register_task((discord_id, guild_id, "trivia"), task)
 
     def schedule_dig_reminder(
         self, bot: "commands.Bot", discord_id: int, guild_id: int, next_dig_time: int
@@ -87,7 +87,7 @@ class ReminderService:
                 message="Your free dig cooldown has expired! You can `/dig` again now.",
             )
         )
-        self._tasks[(discord_id, guild_id, "dig")] = task
+        self._register_task((discord_id, guild_id, "dig"), task)
 
     async def notify_betting_subscribers(
         self, bot: "commands.Bot", guild_id: int, bet_lock_until: int
@@ -164,6 +164,15 @@ class ReminderService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _register_task(self, key: tuple, task: asyncio.Task) -> None:
+        """Track a task and ensure it's removed from ``_tasks`` once it finishes.
+
+        Without the done-callback, naturally-completed tasks would linger in
+        ``_tasks`` forever (only ``_cancel_task`` pops).
+        """
+        self._tasks[key] = task
+        task.add_done_callback(lambda t, k=key: self._tasks.pop(k, None) if self._tasks.get(k) is t else None)
 
     def _cancel_task(self, discord_id: int, guild_id: int, reminder_type: str) -> None:
         task = self._tasks.pop((discord_id, guild_id, reminder_type), None)

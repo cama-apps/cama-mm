@@ -37,3 +37,15 @@ def test_auto_enrich_toggle_preserves_league_id(repo_db_path):
 
     repo.set_auto_enrich(55, True)
     assert repo.get_auto_enrich(55) is True
+
+
+def test_get_config_includes_ai_features_enabled(repo_db_path):
+    """get_config must surface the ai_features_enabled column."""
+    repo = GuildConfigRepository(repo_db_path)
+
+    repo.set_ai_enabled(88, True)
+    config = repo.get_config(88)
+
+    assert config is not None
+    assert "ai_features_enabled" in config
+    assert config["ai_features_enabled"] == 1
