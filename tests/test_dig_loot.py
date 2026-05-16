@@ -1,5 +1,6 @@
 """Loot and event drops: items, artifacts, event pool composition, JC earnings."""
 
+import json
 import random
 import time
 
@@ -95,6 +96,39 @@ class TestItems:
         assert result["success"]
         # Dynamite should add bonus blocks
         assert result.get("dynamite_bonus") or result["advance"] >= CONSUMABLES["dynamite"].params["bonus_blocks"]
+
+    def test_dynamite_bonus_is_flat_when_injured(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Dynamite's +5 is a flat bonus - an injury must not scale it down."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
+        dig_service.dig(10001, guild_id)
+
+        # Buy and queue dynamite while the inventory is still empty.
+        dig_service.buy_item(10001, guild_id, "dynamite")
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+
+        # Injure the player (halves advance) and place them mid-tunnel.
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=10,
+            injury_state=json.dumps({"type": "reduced_advance", "digs_remaining": 3}),
+        )
+
+        # Fixed base roll so the result is deterministic regardless of layer config.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "randint", lambda a, b: 4)
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        # Base roll 4, injury halves it (-> 2), but dynamite's flat +5 must land
+        # in full (-> 7). The pre-fix bug added +5 before the 0.5x injury
+        # multiplier, yielding only int((4+5)*0.5)=4 blocks.
+        bonus = CONSUMABLES["dynamite"].params["bonus_blocks"]
+        assert result["advance"] >= bonus, (
+            f"injured dig with dynamite advanced only {result['advance']} blocks; "
+            f"the flat +{bonus} bonus was scaled down by the injury"
+        )
 
     def test_hard_hat_prevents_cave_in(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Hard hat blocks cave-in (for 3 digs) when charges are already set."""

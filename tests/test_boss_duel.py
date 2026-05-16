@@ -17,6 +17,7 @@ from services.dig_constants import (
     BOSS_PRESTIGE_BONUS,
     BOSS_TIER_BONUS,
     FREE_DIG_COOLDOWN_SECONDS,
+    PHASE_TRANSITION_EVENTS,
 )
 from services.dig_service import DigService, _approx_duel_win_prob
 from tests.conftest import TEST_GUILD_ID
@@ -500,3 +501,123 @@ class TestAbandonedDuelCleanup:
         row = dig_repo.get_gear_by_id(gid)
         # At most one tick (no double-tick from a phantom cleanup pass).
         assert row["durability"] >= 19
+
+
+def _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, discord_id,
+               *, pending_event=None):
+    """Place a player mid-fight at the depth-25 grothak boss, in phase 2 (P2+).
+
+    Pins grothak and seeds ``phase1_defeated`` so the next fight is the secret
+    second phase. ``random.random`` is left at 0.99 (round-cap loss) so the
+    fight resolves deterministically without consuming the boss.
+    """
+    _register(player_repository, discord_id=discord_id, balance=200)
+    monkeypatch.setattr(time, "time", lambda: 1_000_000)
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+    dig_service.dig(discord_id, TEST_GUILD_ID)
+    entry = {"boss_id": "grothak", "status": "phase1_defeated"}
+    if pending_event is not None:
+        entry["pending_phase_event_id"] = pending_event
+    dig_repo.update_tunnel(
+        discord_id, TEST_GUILD_ID,
+        depth=24, prestige_level=2,
+        boss_progress=json.dumps({"25": entry}),
+    )
+    monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+
+
+class TestPhaseTransitionEvents:
+    """A boss's secret second phase must vary: the rolled transition event
+    has to reach the next fight, not just decorate the embed."""
+
+    def test_fight_boss_stores_pending_phase_event_on_transition(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Winning phase 1 at P2 records a pending transition event for phase 2."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=24, prestige=2)
+        rolls = iter([0.0, 0.99] * 100)
+        monkeypatch.setattr(random, "random", lambda: next(rolls))
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["success"]
+        assert result.get("phase2_incoming") is True
+
+        entry = json.loads(dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"])["25"]
+        assert entry.get("status") == "phase1_defeated"
+        valid_ids = {e.id for e in PHASE_TRANSITION_EVENTS}
+        assert entry.get("pending_phase_event_id") in valid_ids
+
+    def test_fight_boss_phase2_applies_and_consumes_event(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A pending transition event changes the phase-2 fight, then is consumed."""
+        # Baseline phase-2 fight with no pending event.
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10001)
+        base = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert base["success"]
+
+        # Identical fight, but 'void_pull' (player -2 HP, boss -2 HP) is pending.
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10002,
+                   pending_event="void_pull")
+        evt = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=10)
+        assert evt["success"]
+
+        # Applied: both fighters start the phase-2 fight 2 HP lighter. Rolls are
+        # pinned to 0.99 (no hits land), so round 1 HP is the starting HP.
+        assert evt["round_log"][0]["boss_hp"] == base["round_log"][0]["boss_hp"] - 2
+        assert evt["round_log"][0]["player_hp"] == base["round_log"][0]["player_hp"] - 2
+        # Consumed: the one-shot event is cleared from boss_progress.
+        entry = json.loads(dig_repo.get_tunnel(10002, TEST_GUILD_ID)["boss_progress"])["25"]
+        assert "pending_phase_event_id" not in entry
+
+    def test_start_boss_duel_stores_pending_phase_event_on_transition(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """start_boss_duel records a pending transition event on a phase-1 win."""
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=24, prestige=2)
+        rolls = iter([0.0, 0.99] * 100)
+        monkeypatch.setattr(random, "random", lambda: next(rolls))
+        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["success"]
+        assert result.get("phase2_incoming") is True
+
+        entry = json.loads(dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"])["25"]
+        valid_ids = {e.id for e in PHASE_TRANSITION_EVENTS}
+        assert entry.get("pending_phase_event_id") in valid_ids
+
+    def test_start_boss_duel_phase2_applies_transition_event(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """start_boss_duel's phase-2 fight applies a pending transition event."""
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10001)
+        base = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert base["success"]
+
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10002,
+                   pending_event="void_pull")
+        evt = dig_service.start_boss_duel(10002, TEST_GUILD_ID, "cautious", wager=10)
+        assert evt["success"]
+
+        # Applied: void_pull starts both fighters 2 HP lighter (rolls pinned, no hits).
+        assert evt["round_log"][0]["boss_hp"] == base["round_log"][0]["boss_hp"] - 2
+        assert evt["round_log"][0]["player_hp"] == base["round_log"][0]["player_hp"] - 2
+
+    def test_start_boss_duel_consumes_event_even_when_fight_pauses(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A phase-2 fight that pauses for a mechanic must still persist the
+        consumed event: resume_boss_duel re-reads boss_progress fresh, so a
+        stale id would re-fire the one-shot on a retry after a paused loss."""
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10001,
+                   pending_event="void_pull")
+        # No get_mechanic patch: grothak's mechanic fires and the duel pauses
+        # mid-fight (rolls pinned to 0.99, so nobody dies before the trigger).
+        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is not None, (
+            "expected the duel to pause for a mechanic"
+        )
+        # The one-shot event must already be consumed in the persisted tunnel.
+        entry = json.loads(dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"])["25"]
+        assert "pending_phase_event_id" not in entry

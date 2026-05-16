@@ -3479,18 +3479,15 @@ class DigService:
         # Corruption advance penalty (one-dig)
         if corruption:
             advance -= int(corruption["effects"].get("advance_penalty", 0))
-        dynamite_bonus = 0
-        if has_dynamite:
-            dynamite_bonus = 5
-            advance += dynamite_bonus
-        depth_charge_bonus = 0
-        if has_depth_charge:
-            depth_charge_bonus = 10
-            advance += depth_charge_bonus
+        dynamite_bonus = 5 if has_dynamite else 0
+        depth_charge_bonus = 10 if has_depth_charge else 0
         advance = int(advance * (1.0 + perk_advance_bonus) * injury_advance_mod)
         # Half-up rounding so mixed_bonus's 0.5 contribution doesn't get
         # silently truncated to 0 when picked alone.
         advance += int(perk_advance_flat + 0.5)
+        # Consumable bonuses are flat - applied after the multiplier so an
+        # injury or negative perk can't shrink the advertised +5 / +10.
+        advance += dynamite_bonus + depth_charge_bonus
         advance = max(1, advance)
 
         # 12. Check boss boundary
@@ -4512,18 +4509,15 @@ class DigService:
         advance -= int(p["ascension"].get("advance_penalty", 0))
         if p["corruption"]:
             advance -= int(p["corruption"]["effects"].get("advance_penalty", 0))
-        dynamite_bonus = 0
-        if p["has_dynamite"]:
-            dynamite_bonus = 5
-            advance += dynamite_bonus
-        depth_charge_bonus = 0
-        if p["has_depth_charge"]:
-            depth_charge_bonus = 10
-            advance += depth_charge_bonus
+        dynamite_bonus = 5 if p["has_dynamite"] else 0
+        depth_charge_bonus = 10 if p["has_depth_charge"] else 0
         advance = int(
             advance * (1.0 + p["perk_advance_bonus"]) * p["injury_advance_mod"]
         )
         advance += int(p.get("perk_advance_flat", 0) + 0.5)
+        # Consumable bonuses are flat - applied after the multiplier so an
+        # injury or negative perk can't shrink the advertised +5 / +10.
+        advance += dynamite_bonus + depth_charge_bonus
         advance = max(1, advance)
 
         # Boss boundary
@@ -5926,6 +5920,15 @@ class DigService:
         elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
             phase2_penalty = abs(BOSS_PHASE3[at_boss].win_odds_penalty)
 
+        # Pending phase-transition event (rolled when this boss entered its
+        # next phase): a one-shot environmental effect applied to this fight.
+        phase_event_obj = None
+        if isinstance(_phase_entry, dict) and _phase_entry.get("pending_phase_event_id"):
+            phase_event_obj = next(
+                (e for e in PHASE_TRANSITION_EVENTS
+                 if e.id == _phase_entry["pending_phase_event_id"]), None,
+            )
+
         # Lock the boss to know its archetype for stat scaling.
         boss_def = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
         active_boss_id = boss_def.boss_id
@@ -5948,6 +5951,8 @@ class DigService:
             echo_applied=echo_applied,
         )
         fresh_boss_hp = int(scaled["boss_hp"])
+        if phase_event_obj is not None:
+            fresh_boss_hp = max(1, fresh_boss_hp + int(phase_event_obj.boss_hp_delta))
         # Mana: Black inflates fresh boss HP (+30%) for the matching loot
         # bonus applied at payout. White's damage bump is applied to player
         # _dmg below — not here — to keep the symmetry visible in the duel.
@@ -6030,6 +6035,22 @@ class DigService:
         # Bold/Reckless crit: roll a chance to add bonus damage on a player hit.
         crit_chance = float(stats.get("crit_chance", 0) or 0)
         crit_bonus = int(stats.get("crit_bonus", 0) or 0)
+
+        # Apply the pending phase-transition event's combat effects (one-shot).
+        # boss_hp_delta was already folded into fresh_boss_hp above; the rest
+        # adjust the stats feeding win_chance and the round loop. Consumed here
+        # so a retry of this phase doesn't re-trigger it.
+        if phase_event_obj is not None:
+            boss_hit_chance = max(
+                0.05, min(0.95, boss_hit_chance + float(phase_event_obj.boss_hit_offset)),
+            )
+            boss_dmg = max(1, boss_dmg + int(phase_event_obj.boss_dmg_delta))
+            player_hit += float(phase_event_obj.player_hit_offset)
+            player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+            player_hp = max(1, player_hp + int(phase_event_obj.player_hp_delta))
+            player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
+            _phase_entry.pop("pending_phase_event_id", None)
+            boss_progress[str(at_boss)] = _phase_entry
 
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``
@@ -6132,9 +6153,10 @@ class DigService:
                 next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
                 phase_def = BOSS_PHASE2[at_boss] if needs_phase2 else BOSS_PHASE3[at_boss]
                 next_phase_num = 2 if needs_phase2 else 3
-                # Roll an environmental transition event for flavor (mechanical
-                # effects on the next round are TODO — for now only the flavor
-                # surfaces in the embed).
+                # Roll an environmental transition event. Its flavor surfaces
+                # in the embed; the event id rides on the boss entry so its
+                # mechanical effects are applied at the start of the next
+                # phase's fight (and consumed there).
                 phase_event = random.choice(PHASE_TRANSITION_EVENTS)
                 _prev_entry = boss_progress.get(str(at_boss))
                 if isinstance(_prev_entry, dict):
@@ -6142,9 +6164,13 @@ class DigService:
                     _next_entry["status"] = next_status
                     _next_entry.pop("hp_remaining", None)
                     _next_entry.pop("hp_max", None)
+                    _next_entry["pending_phase_event_id"] = phase_event.id
                     boss_progress[str(at_boss)] = _next_entry
                 else:
-                    boss_progress[str(at_boss)] = {"status": next_status}
+                    boss_progress[str(at_boss)] = {
+                        "status": next_status,
+                        "pending_phase_event_id": phase_event.id,
+                    }
                 # Lock the original wager + risk_tier so the next phase rides
                 # the same stake (no new wager modal on the next /dig go).
                 if wager > 0:
@@ -7197,6 +7223,15 @@ class DigService:
         elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
             phase2_penalty = abs(BOSS_PHASE3[at_boss].win_odds_penalty)
 
+        # Pending phase-transition event (rolled when this boss entered its
+        # next phase): a one-shot environmental effect applied to this fight.
+        phase_event_obj = None
+        if isinstance(_phase_entry, dict) and _phase_entry.get("pending_phase_event_id"):
+            phase_event_obj = next(
+                (e for e in PHASE_TRANSITION_EVENTS
+                 if e.id == _phase_entry["pending_phase_event_id"]), None,
+            )
+
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, boss.boss_id)
         echo_applied = bool(
             active_echo
@@ -7211,6 +7246,8 @@ class DigService:
             echo_applied=echo_applied,
         )
         fresh_boss_hp = int(scaled["boss_hp"])
+        if phase_event_obj is not None:
+            fresh_boss_hp = max(1, fresh_boss_hp + int(phase_event_obj.boss_hp_delta))
         # Carry persisted HP from prior unfinished engagements (with regen).
         boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
             boss_progress, at_boss, fresh_boss_hp, int(time.time()),
@@ -7241,6 +7278,28 @@ class DigService:
         player_dmg = int(stats["player_dmg"])
         crit_chance = float(stats.get("crit_chance", 0) or 0)
         crit_bonus = int(stats.get("crit_bonus", 0) or 0)
+
+        # Apply the pending phase-transition event's combat effects (one-shot).
+        # boss_hp_delta was already folded into fresh_boss_hp above; the rest
+        # adjust the stats feeding win_chance and the round loop. Consumed here
+        # so a retry of this phase doesn't re-trigger it.
+        if phase_event_obj is not None:
+            boss_hit_chance = max(
+                0.05, min(0.95, boss_hit_chance + float(phase_event_obj.boss_hit_offset)),
+            )
+            boss_dmg = max(1, boss_dmg + int(phase_event_obj.boss_dmg_delta))
+            player_hit += float(phase_event_obj.player_hit_offset)
+            player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+            player_hp = max(1, player_hp + int(phase_event_obj.player_hp_delta))
+            player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
+            _phase_entry.pop("pending_phase_event_id", None)
+            boss_progress[str(at_boss)] = _phase_entry
+            # start_boss_duel can pause mid-fight before its post-fight
+            # boss_progress write; persist the consumption now so a resumed
+            # fight (which re-reads boss_progress) can't re-fire the one-shot.
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, boss_progress=json.dumps(boss_progress),
+            )
 
         win_chance = _approx_duel_win_prob(
             player_hp=player_hp,
@@ -7797,11 +7856,13 @@ class DigService:
                     next_entry["status"] = next_status
                     next_entry.pop("hp_remaining", None)
                     next_entry.pop("hp_max", None)
+                    next_entry["pending_phase_event_id"] = phase_event.id
                     boss_progress[str(at_boss)] = next_entry
                 else:
                     boss_progress[str(at_boss)] = {
                         "boss_id": boss.boss_id if boss else "",
                         "status": next_status,
+                        "pending_phase_event_id": phase_event.id,
                     }
                 # Lock the original wager + risk_tier onto the entry so the
                 # next phase rides the same stake (no new wager modal).

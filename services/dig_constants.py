@@ -6954,10 +6954,10 @@ ASCENSION_MODIFIERS: dict[int, AscensionModifier] = {
     ),
     4: AscensionModifier(
         level=4, name="Boss Rage",
-        penalty="Bosses gain a secret second phase",
+        penalty="Bosses fight harder the longer you delve",
         reward="Boss payouts +50%",
-        effects={"boss_phase2": True, "boss_payout_multiplier": 0.50},
-        gameplay=True,
+        effects={"boss_payout_multiplier": 0.50},
+        gameplay=False,
     ),
     5: AscensionModifier(
         level=5, name="Erosion",
@@ -7101,12 +7101,12 @@ OMINOUS_TUNNEL_NAMES: list[str] = [
 
 
 # ---------------------------------------------------------------------------
-# Boss Phase 2 Definitions (P4+, Sekiro / Mythic Lura style)
+# Boss Phase 2 Definitions (P2+, Sekiro / Mythic Lura style)
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class BossPhase2Def:
-    """Secret second phase for bosses at prestige 4+."""
+    """Secret second phase for bosses at prestige 2+."""
     depth: int
     name: str
     title: str
