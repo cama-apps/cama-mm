@@ -550,7 +550,7 @@ class BossWagerModal(discord.ui.Modal):
             boss_name = getattr(self.result, "boss_name", "the boss")
             win_chance = getattr(self.result, "win_chance", 0)
             if getattr(self.result, "won", False):
-                payout = getattr(self.result, "payout", 0) or getattr(self.result, "jc_delta", 0)
+                payout = getattr(self.result, "payout", 0)
                 embed.description = (
                     f"Victory! You defeated **{boss_name}** and earned "
                     f"**{payout}** {JOPACOIN_EMOTE}!"
@@ -785,7 +785,7 @@ async def _resolve_carried_phase_fight(
     boss_name = getattr(result, "boss_name", "the boss")
     win_chance = getattr(result, "win_chance", 0)
     if getattr(result, "won", False):
-        payout = getattr(result, "payout", 0) or getattr(result, "jc_delta", 0)
+        payout = getattr(result, "payout", 0)
         embed.description = (
             f"Victory! You defeated **{boss_name}** and earned "
             f"**{payout}** {JOPACOIN_EMOTE}!"
@@ -910,7 +910,7 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
         color=0x00FF00 if won else 0xFF0000,
     )
     if won:
-        payout = getattr(result, "payout", 0) or getattr(result, "jc_delta", 0)
+        payout = getattr(result, "payout", 0)
         embed.description = (
             f"Victory! You defeated **{boss_name}** and earned "
             f"**{payout}** {JOPACOIN_EMOTE}!"

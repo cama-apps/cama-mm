@@ -227,7 +227,10 @@ class TestScaleBossStats:
             base, boss_id="grothak", at_boss=25, prestige_level=5,
         )
         pb = BOSS_PRESTIGE_BONUS[5]
-        assert scaled["boss_hp"] == 4 + int(pb["hp"])
+        # P5 is in the P4+ band: boss HP gets a small extra multiplier on top
+        # of the flat prestige table — 1.0 + 0.03 * (prestige - 3).
+        p4_mult = 1.0 + 0.03 * (5 - 3)
+        assert scaled["boss_hp"] == int(round((4 + int(pb["hp"])) * p4_mult))
         assert scaled["boss_hit"] == pytest.approx(0.30 + pb["hit"])
         assert scaled["boss_dmg"] == 1 + int(pb["dmg"])
 

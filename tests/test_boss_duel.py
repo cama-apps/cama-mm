@@ -172,6 +172,36 @@ class TestDuelScaling:
         first_round_boss_hp_after_hit = result["round_log"][0]["boss_hp"]
         assert first_round_boss_hp_after_hit == expected - int(BOSS_DUEL_STATS["cautious"]["player_dmg"])
 
+    def test_boss_hp_scales_extra_hard_at_p4(self, dig_service, dig_repo, player_repository, monkeypatch):
+        """P4+ delvers face a small extra boss-HP multiplier on top of the
+        flat prestige table."""
+        base_boss_hp = int(BOSS_DUEL_STATS["cautious"]["boss_hp"])
+        prestige = 4
+        archetype = BOSS_ARCHETYPES[BOSS_ARCHETYPE_BY_ID["grothak"]]
+        table_hp = (
+            int(round(base_boss_hp * archetype["hp_mult"]))
+            + int(BOSS_PRESTIGE_BONUS[prestige]["hp"])
+        )
+        # P4 adds a 3% bump; the boss must end up tougher than the table alone.
+        expected = int(round(table_hp * 1.03))
+        assert expected > table_hp
+
+        _register(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=24, prestige_level=prestige,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        first_round_boss_hp_after_hit = result["round_log"][0]["boss_hp"]
+        assert first_round_boss_hp_after_hit == expected - int(BOSS_DUEL_STATS["cautious"]["player_dmg"])
+
 
 class TestDuelPayout:
     """Win pays wager * BOSS_PAYOUTS[depth][tier]; loss forfeits wager + cave-in."""
@@ -180,12 +210,19 @@ class TestDuelPayout:
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
         monkeypatch.setattr(random, "random", lambda: 0.0)
+        # Pin win chance below the taper knee so this exercises the authored
+        # payout-table multiplier untapered.
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
 
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is True
         expected_multiplier = BOSS_PAYOUTS[25][0]
         expected_profit = int(10 * (expected_multiplier - 1))
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + expected_profit
+        # Reported payout is the real net credited, not the gross return.
+        assert result["payout"] == expected_profit
 
     def test_loss_applies_knockback(self, dig_service, dig_repo, player_repository, monkeypatch):
         """Boss loss knocks the player back and clears cheers."""
@@ -362,6 +399,11 @@ class TestBossEchoWeakening:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
         balance_before = player_repository.get_balance(10002, TEST_GUILD_ID)
         monkeypatch.setattr(random, "random", lambda: 0.0)
+        # Pin win chance below the taper knee so this isolates the 0.7x echo
+        # penalty from the high-win-chance payout taper.
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
 
         result = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is True
@@ -621,3 +663,82 @@ class TestPhaseTransitionEvents:
         # The one-shot event must already be consumed in the persisted tunnel.
         entry = json.loads(dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"])["25"]
         assert "pending_phase_event_id" not in entry
+
+
+class TestWagerTaper:
+    """Payout multiplier tapers toward break-even at high win chance, so
+    softening a boss to a near-sure win then betting big stops printing money.
+    """
+
+    def test_wager_payout_untouched_below_knee(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        # A genuine ~50/50 bet sits below the taper knee: the authored
+        # BOSS_PAYOUTS multiplier is used unchanged.
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.0)  # deterministic win
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
+
+        assert result["won"] is True
+        expected = int(100 * (BOSS_PAYOUTS[25][0] - 1))
+        assert (player_repository.get_balance(10001, TEST_GUILD_ID)
+                == balance_before + expected)
+
+    def test_wager_payout_tapers_at_high_win_chance(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        # A near-certain (softened) bet at 95%: the multiplier tapers to fair
+        # odds, so a 100 JC wager returns ~+5 instead of the untapered +50.
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.95,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.0)  # deterministic win
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
+
+        assert result["won"] is True
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + 5
+        assert result["payout"] == 5
+
+    def test_won_wager_at_high_win_chance_never_loses_money(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        # First digger kills the boss, leaving a weakened echo (0.7x payout).
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+
+        # Second digger fights the echo at a near-certain win chance. The
+        # taper plus the 0.7x echo penalty would drive a winning wager
+        # negative — but a win must never cost the player money.
+        _register(player_repository, discord_id=10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 10)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10002, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10002, TEST_GUILD_ID, depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.95,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.0)  # deterministic win
+        balance_before = player_repository.get_balance(10002, TEST_GUILD_ID)
+
+        result = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=100)
+        balance_after = player_repository.get_balance(10002, TEST_GUILD_ID)
+
+        assert result["won"] is True
+        assert result.get("echo_applied") is True
+        # A win never costs money, and the reported payout is the real balance
+        # change — not an inflated gross figure.
+        assert balance_after >= balance_before
+        assert result["payout"] == balance_after - balance_before
