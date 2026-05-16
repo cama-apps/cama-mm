@@ -26,7 +26,7 @@ class DigRepository(BaseRepository, IDigRepository):
         "stat_smarts", "stat_stamina", "stat_points",
         # boss revamp
         "last_lum_update_at", "pinnacle_phase", "pinnacle_hp_remaining",
-        "pinnacle_last_engaged_at", "retreat_cooldown_until",
+        "pinnacle_last_engaged_at",
     })
 
     @staticmethod
@@ -116,8 +116,6 @@ class DigRepository(BaseRepository, IDigRepository):
         "pinnacle_phase",
         "pinnacle_hp_remaining",
         "pinnacle_last_engaged_at",
-        # boss revamp: retreat cooldown
-        "retreat_cooldown_until",
         # dig_buff_fun_charges migration
         "grappling_hook_charges", "sonar_skip_pending",
     })

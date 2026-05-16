@@ -2501,11 +2501,13 @@ class DigCommands(commands.Cog):
             items = await asyncio.to_thread(
                 self.dig_service.get_inventory, interaction.user.id, guild_id
             )
-            choices = [
-                app_commands.Choice(name=item.get("name", str(item)), value=item.get("type", item.get("name", str(item))))
-                for item in (items or [])
-                if current.lower() in item.get("name", "").lower()
-            ]
+            choices: list[app_commands.Choice[str]] = []
+            for item in items or []:
+                name = item.get("name") or ""
+                if name and current.lower() in name.lower():
+                    choices.append(app_commands.Choice(
+                        name=name, value=item.get("type") or name,
+                    ))
             return choices[:25]
         except Exception:
             return []
@@ -4196,7 +4198,7 @@ class DigCommands(commands.Cog):
             embed.set_footer(text=f"{len(items)}/{MAX_INVENTORY_SLOTS} slots used")
         else:
             embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
-            embed.set_footer(text="0/{MAX_INVENTORY_SLOTS} slots used")
+            embed.set_footer(text=f"0/{MAX_INVENTORY_SLOTS} slots used")
 
         await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
 

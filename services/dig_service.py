@@ -109,7 +109,6 @@ from services.dig_constants import (
     RELIC_SLOTS_BASE,
     RETREAT_BLOCK_LOSS_MAX,
     RETREAT_BLOCK_LOSS_MIN,
-    RETREAT_COOLDOWN_SECONDS,
     STREAKS,
     WEATHER_BY_ID,
     WIN_CHANCE_CAP,
@@ -580,7 +579,12 @@ class DigService:
         mutation_fx = self._apply_mutation_effects(mutations)
         cooldown += int(mutation_fx.get("cooldown_bonus_seconds", 0))
         # Check for stun from injury (overrides base + mutation bonus).
-        injury = json.loads(tunnel["injury_state"]) if tunnel.get("injury_state") else None
+        injury = None
+        if tunnel.get("injury_state"):
+            try:
+                injury = json.loads(tunnel["injury_state"])
+            except (json.JSONDecodeError, TypeError):
+                injury = None
         if injury and injury.get("type") == "slower_cooldown":
             cooldown = INJURY_SLOW_COOLDOWN
         cooldown = self._apply_stamina_to_cooldown(cooldown, tunnel)
@@ -8192,13 +8196,11 @@ class DigService:
         )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
-        """Retreat from boss. Lose 2-3 blocks and trigger a 30-min cooldown.
+        """Retreat from boss. Lose 2-3 blocks.
 
         Persisted boss HP from any prior engagement is preserved (the
-        retreat exchanges no blows). The cooldown stops the player from
-        scout-and-back-off-loop scout the same boss for free intel until it
-        expires; ``fight_boss`` / ``start_boss_duel`` / ``scout_boss`` all
-        check ``retreat_cooldown_until`` before engaging.
+        retreat exchanges no blows). Retreating from a phase-2/3 encounter
+        forfeits half of the carried wager.
         """
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
@@ -8214,8 +8216,6 @@ class DigService:
 
         loss = random.randint(RETREAT_BLOCK_LOSS_MIN, RETREAT_BLOCK_LOSS_MAX)
         new_depth = max(0, depth - loss)
-        now = int(time.time())
-        cooldown_until = now + RETREAT_COOLDOWN_SECONDS
 
         # Multi-phase carry: retreating from a phase-2/3 encounter forfeits
         # half of the carried wager. Pure phase-1 retreat (no carry) keeps
@@ -8249,11 +8249,9 @@ class DigService:
             tunnel_updates={
                 "depth": new_depth,
                 "boss_progress": json.dumps(boss_progress),
-                "retreat_cooldown_until": cooldown_until,
             },
             log_detail={
                 "boundary": at_boss, "loss": loss,
-                "cooldown_until": cooldown_until,
                 "carried_wager_forfeit": carried_forfeit,
             },
             log_action_type="boss_retreat",
@@ -8263,7 +8261,6 @@ class DigService:
             boundary=at_boss,
             loss=loss,
             new_depth=new_depth,
-            retreat_cooldown_until=cooldown_until,
             carried_wager_forfeit=carried_forfeit,
         )
 
