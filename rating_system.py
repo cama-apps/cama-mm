@@ -223,7 +223,9 @@ class CamaRatingSystem:
             else:
                 break
 
-        # Calculate multiplier: 1.0 + STREAK_MULTIPLIER_PER_GAME * max(0, streak_length - 2)
+        # Calculate multiplier: 1.0 + STREAK_MULTIPLIER_PER_GAME * (streak_length - 2).
+        # The guard above guarantees streak_length >= STREAK_THRESHOLD (3), so
+        # (streak_length - 2) is always >= 1 and no max(0, ...) clamp is needed.
         if streak_length < STREAK_THRESHOLD:
             return streak_length, 1.0
 

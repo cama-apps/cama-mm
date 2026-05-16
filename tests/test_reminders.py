@@ -144,6 +144,22 @@ class TestReminderServiceScheduling:
         reminder_service._cancel_task(1, TEST_GUILD_ID, "trivia")
 
     @pytest.mark.asyncio
+    async def test_finished_task_removed_from_tasks(self, reminder_service, mock_bot):
+        """A naturally-completed reminder task must not linger in ``_tasks``.
+
+        Only ``_cancel_task`` used to pop; tasks that ran to completion leaked.
+        """
+        reminder_service.toggle_preference(1, TEST_GUILD_ID, "wheel")
+        # next_spin_time in the past -> delay clamps to 0, task finishes immediately
+        reminder_service.schedule_wheel_reminder(mock_bot, 1, TEST_GUILD_ID, int(time.time()) - 10)
+        task = reminder_service._tasks.get((1, TEST_GUILD_ID, "wheel"))
+        assert task is not None
+        await task
+        # done-callback runs as a scheduled callback; yield so it fires
+        await asyncio.sleep(0)
+        assert (1, TEST_GUILD_ID, "wheel") not in reminder_service._tasks
+
+    @pytest.mark.asyncio
     async def test_disabling_cancels_task(self, reminder_service, mock_bot):
         reminder_service.toggle_preference(1, TEST_GUILD_ID, "wheel")
         future_time = int(time.time()) + 3600

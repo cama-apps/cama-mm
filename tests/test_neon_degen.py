@@ -372,6 +372,24 @@ class TestNeonDegenPersistence:
         svc2 = NeonDegenService(player_repo=player_repo, neon_event_repo=neon_event_repo2)
         assert await svc2.on_degen_milestone(123, 456, 95) is None
 
+    def test_persist_one_time_event_raises_on_write_failure(self, repo_db_path):
+        """A failed one-time write must raise, not be silently swallowed.
+
+        Swallowing the failure would let the one-time event re-trigger.
+        """
+        import sqlite3
+
+        from repositories.neon_event_repository import NeonEventRepository
+
+        repo = NeonEventRepository(repo_db_path)
+
+        def boom(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        repo.connection = boom
+        with pytest.raises(sqlite3.OperationalError):
+            repo.persist_one_time_event(123, 456, "registration", 1)
+
     @pytest.mark.asyncio
     async def test_one_time_db_fallback_without_repo(self):
         svc = NeonDegenService()

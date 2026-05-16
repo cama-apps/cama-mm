@@ -746,34 +746,36 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             incited_rows = cursor.fetchall()
             incited = {row["outcome"]: row["cnt"] for row in incited_rows}
 
-            # Wars participated (attack votes) - search JSON
+            # Wars participated - parse the JSON voter arrays in Python so a
+            # substring LIKE can't cross-count IDs (e.g. 123 vs 1234).
             cursor.execute(
                 """
-                SELECT outcome, COUNT(*) as cnt
+                SELECT outcome, inciter_id, attack_voter_ids, defend_voter_ids
                 FROM wheel_wars
                 WHERE guild_id = ?
-                  AND attack_voter_ids LIKE ?
-                  AND inciter_id != ?
-                GROUP BY outcome
                 """,
-                (normalized, f"%\"discord_id\": {discord_id}%", discord_id),
+                (normalized,),
             )
-            attack_rows = cursor.fetchall()
-            attacked = {row["outcome"]: row["cnt"] for row in attack_rows}
-
-            # Wars defended
-            cursor.execute(
-                """
-                SELECT outcome, COUNT(*) as cnt
-                FROM wheel_wars
-                WHERE guild_id = ?
-                  AND defend_voter_ids LIKE ?
-                GROUP BY outcome
-                """,
-                (normalized, f"%{discord_id}%"),
-            )
-            defend_rows = cursor.fetchall()
-            defended = {row["outcome"]: row["cnt"] for row in defend_rows}
+            attacked: dict = {}
+            defended: dict = {}
+            for row in cursor.fetchall():
+                outcome = row["outcome"]
+                attack_voters = safe_json_loads(
+                    row["attack_voter_ids"],
+                    default=[],
+                    context=f"wheel_wars.attack_voter_ids guild_id={normalized}",
+                )
+                if row["inciter_id"] != discord_id and any(
+                    v.get("discord_id") == discord_id for v in attack_voters
+                ):
+                    attacked[outcome] = attacked.get(outcome, 0) + 1
+                defend_voters = safe_json_loads(
+                    row["defend_voter_ids"],
+                    default=[],
+                    context=f"wheel_wars.defend_voter_ids guild_id={normalized}",
+                )
+                if discord_id in defend_voters:
+                    defended[outcome] = defended.get(outcome, 0) + 1
 
             return {
                 "incited": incited,
