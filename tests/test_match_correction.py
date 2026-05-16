@@ -235,6 +235,57 @@ class TestMatchCorrection:
         assert spectator_balance_after_correction > spectator_balance_after_wrong, \
             "Spectator who bet on Dire should gain balance after correction to Dire win"
 
+    def test_correction_clears_stale_payout_on_former_winner(self, correction_services):
+        """A bet that won, then becomes a loser after correction, must have its
+        payout column nulled — otherwise gambling stats stay permanently wrong."""
+        match_service = correction_services["match_service"]
+        betting_service = correction_services["betting_service"]
+        player_repo = correction_services["player_repo"]
+        bet_repo = correction_services["bet_repo"]
+
+        player_ids = _create_players(player_repo, start_id=4000)
+
+        spectator_id = 4999
+        player_repo.add(
+            discord_id=spectator_id,
+            discord_username="Spectator",
+            guild_id=TEST_GUILD_ID,
+            dotabuff_url="https://dotabuff.com/players/4999",
+            initial_mmr=1500,
+        )
+        player_repo.add_balance(spectator_id, TEST_GUILD_ID, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = pending.radiant_team_ids
+        pending.bet_lock_until = int(time.time()) + 600
+
+        # Radiant bettor wins initially; spectator bets Dire and loses.
+        betting_service.place_bet(TEST_GUILD_ID, radiant_ids[0], "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
+
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        # The Radiant bettor's winning bet now holds a non-null payout.
+        bets = bet_repo.get_settled_bets_for_match(match_id)
+        radiant_bet = next(b for b in bets if b["discord_id"] == radiant_ids[0])
+        assert radiant_bet["payout"] is not None
+
+        # Correct to Dire winning: the Radiant bettor is now a loser.
+        match_service.correct_match_result(
+            match_id=match_id,
+            new_winning_team="dire",
+            guild_id=TEST_GUILD_ID,
+            corrected_by=99999,
+        )
+
+        bets_after = bet_repo.get_settled_bets_for_match(match_id)
+        radiant_bet_after = next(b for b in bets_after if b["discord_id"] == radiant_ids[0])
+        assert radiant_bet_after["payout"] is None, \
+            "Former winner that lost the correction must have a NULL payout"
+
     def test_correction_updates_pairings(self, correction_services):
         """Test that pairings statistics are properly reversed and updated."""
         match_service = correction_services["match_service"]

@@ -74,7 +74,7 @@ async def tip_action(
     # Check if tipping themselves
     if player.id == interaction.user.id:
         await interaction.followup.send(
-            "You cannot tip yourcog.",
+            "You cannot tip yourself.",
             ephemeral=True,
         )
         return
@@ -176,24 +176,35 @@ async def tip_action(
         )
         return
 
-    # Mana post-effects on tip
+    # Mana post-effects on tip. These run as separate, non-atomic balance
+    # adjustments after the transfer commits; guard each so a failure logs
+    # loudly instead of silently leaving partially-applied money drift.
     mana_notes = []
     if effects and mana_effects_service:
         # Green steady bonus: recipient gets +1 JC
         if effects.green_steady_bonus > 0:
-            await asyncio.to_thread(cog.player_service.adjust_balance, player.id, guild_id, effects.green_steady_bonus)
-            mana_notes.append(f"🌲 +{effects.green_steady_bonus} bonus to recipient")
+            try:
+                await asyncio.to_thread(cog.player_service.adjust_balance, player.id, guild_id, effects.green_steady_bonus)
+                mana_notes.append(f"🌲 +{effects.green_steady_bonus} bonus to recipient")
+            except Exception:
+                logger.error("Tip green_steady_bonus adjustment failed", exc_info=True)
 
         # Swamp self-tax
         if effects.swamp_self_tax > 0:
-            await asyncio.to_thread(cog.player_service.adjust_balance, interaction.user.id, guild_id, -effects.swamp_self_tax)
-            mana_notes.append(f"🌿 Swamp tax: -{effects.swamp_self_tax}")
+            try:
+                await asyncio.to_thread(cog.player_service.adjust_balance, interaction.user.id, guild_id, -effects.swamp_self_tax)
+                mana_notes.append(f"🌿 Swamp tax: -{effects.swamp_self_tax}")
+            except Exception:
+                logger.error("Tip swamp_self_tax adjustment failed", exc_info=True)
 
         # Swamp siphon
         if effects.swamp_siphon:
-            siphon = await asyncio.to_thread(mana_effects_service.execute_siphon, interaction.user.id, guild_id)
-            if siphon:
-                mana_notes.append(f"🌿 Siphon: +{siphon['amount']}")
+            try:
+                siphon = await asyncio.to_thread(mana_effects_service.execute_siphon, interaction.user.id, guild_id)
+                if siphon:
+                    mana_notes.append(f"🌿 Siphon: +{siphon['amount']}")
+            except Exception:
+                logger.error("Tip swamp_siphon adjustment failed", exc_info=True)
 
         if tithe:
             mana_notes.append(f"🌾 Tithe: -{tithe}")
@@ -704,15 +715,23 @@ async def loan_action(
         except Exception:
             pass
         if _loan_effects:
-            # Swamp self-tax
+            # Swamp self-tax. Runs as a separate, non-atomic adjustment after
+            # the loan commits; guard it so a failure logs loudly instead of
+            # silently leaving partially-applied money drift.
             if _loan_effects.swamp_self_tax > 0:
-                await asyncio.to_thread(cog.player_service.adjust_balance, user_id, guild_id, -_loan_effects.swamp_self_tax)
-                mana_notes_loan.append(f"🌿 Swamp tax: -{_loan_effects.swamp_self_tax}")
+                try:
+                    await asyncio.to_thread(cog.player_service.adjust_balance, user_id, guild_id, -_loan_effects.swamp_self_tax)
+                    mana_notes_loan.append(f"🌿 Swamp tax: -{_loan_effects.swamp_self_tax}")
+                except Exception:
+                    logger.error("Loan swamp_self_tax adjustment failed", exc_info=True)
             # Swamp siphon
             if _loan_effects.swamp_siphon:
-                siphon = await asyncio.to_thread(_mana_fx_loan.execute_siphon, user_id, guild_id)
-                if siphon:
-                    mana_notes_loan.append(f"🌿 Siphon: +{siphon['amount']}")
+                try:
+                    siphon = await asyncio.to_thread(_mana_fx_loan.execute_siphon, user_id, guild_id)
+                    if siphon:
+                        mana_notes_loan.append(f"🌿 Siphon: +{siphon['amount']}")
+                except Exception:
+                    logger.error("Loan swamp_siphon adjustment failed", exc_info=True)
     _loan_mana_suffix = ""
     if mana_notes_loan:
         _loan_mana_suffix = "\n" + " | ".join(mana_notes_loan)
