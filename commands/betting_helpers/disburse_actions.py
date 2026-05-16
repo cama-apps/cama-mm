@@ -237,11 +237,11 @@ async def disburse_execute(
             if channel:
                 msg = await channel.fetch_message(proposal.message_id)
                 disabled_view = discord.ui.View(timeout=None)
-                for method in ["even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"]:
+                for method in cog.disburse_service.METHODS:
                     label = cog.disburse_service.METHOD_LABELS[method]
                     emoji = {"even": "📊", "proportional": "📈", "neediest": "🎯",
                              "stimulus": "💸", "lottery": "🎲",
-                             "social_security": "👴", "cancel": "❌"}.get(method)
+                             "social_security": "👴", "richest": "💎", "cancel": "❌"}.get(method)
                     style = discord.ButtonStyle.danger if method == "cancel" else discord.ButtonStyle.secondary
                     btn = discord.ui.Button(
                         label=label, emoji=emoji, style=style,

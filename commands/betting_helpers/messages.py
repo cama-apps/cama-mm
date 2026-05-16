@@ -55,13 +55,6 @@ LOAN_DENIED_COOLDOWN_MESSAGES = [
     "The Jopacoin Bank says: 'Come back later, we're still counting your last loan's fees.'",
 ]
 
-LOAN_DENIED_DEBT_MESSAGES = [
-    "You're already too deep in debt. Even we have standards.",
-    "Loan denied. Your credit is worse than your gambling decisions.",
-    "The bank has reviewed your finances and respectfully declined to make things worse.",
-    "ERROR: Maximum debt capacity reached. Try bankruptcy first.",
-]
-
 # Special messages for peak degen behavior: taking a loan while already in debt
 NEGATIVE_LOAN_MESSAGES = [
     "You... you took out a loan while already in debt. The money went straight to your creditors. "
@@ -75,6 +68,3 @@ NEGATIVE_LOAN_MESSAGES = [
     "This is advanced degeneracy. You can't even gamble with this money because you're still negative. "
     "But you did it anyway. We're impressed and horrified.",
 ]
-
-
-GAMBA_GIF_URL = "https://tenor.com/view/uncut-gems-sports-betting-sports-acting-adam-sandler-gif-11474547316651780959"

@@ -15,7 +15,32 @@ from commands.shop import (
     SHOP_RECALIBRATE_COST,
     SHOP_WITCHS_CURSE_COST,
     ShopCommands,
+    _today_4am_pst_unix,
 )
+
+
+def test_today_4am_pst_unix_is_4am_utc_minus_8(monkeypatch):
+    """The reset boundary must be exactly 4 AM at the fixed UTC-8 offset of
+    the current game date — no DST distortion."""
+    import datetime as dt
+
+    from utils.game_date import _PST
+
+    monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-05-16")
+    boundary = _today_4am_pst_unix()
+    expected = dt.datetime(2026, 5, 16, 4, 0, 0, tzinfo=_PST).timestamp()
+    assert boundary == int(expected)
+
+
+def test_today_4am_pst_unix_dst_transition_is_exactly_24h(monkeypatch):
+    """Two consecutive game dates straddling the March DST transition must be
+    exactly 86400s apart. A wall-clock day subtraction in a DST-aware zone
+    would instead yield a 23-hour gap."""
+    monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-03-08")
+    before = _today_4am_pst_unix()
+    monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-03-09")
+    after = _today_4am_pst_unix()
+    assert after - before == 86400
 
 
 def _make_interaction(user_id: int = 1001, guild_id: int | None = None):

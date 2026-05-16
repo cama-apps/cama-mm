@@ -185,9 +185,19 @@ class BuffService:
         active = self.buff_repo.active_targeted_at(target_id, guild_id, BUFF_BLOOD_PACT)
         return active[0] if active else None
 
-    def record_blood_pact_skim(self, buff_id: int, new_total: int) -> None:
-        """Update the running skim total on a Blood Pact buff."""
-        self.buff_repo.update_data(buff_id, {"skimmed_total": new_total, "cap": 50, "skim_rate": 0.10})
+    def record_blood_pact_skim(
+        self, buff_id: int, current_data: dict, new_total: int
+    ) -> None:
+        """Update the running skim total on a Blood Pact buff.
+
+        ``current_data`` is the buff's existing ``data`` blob (as returned by
+        ``get_blood_pact_skimmer``). Only ``skimmed_total`` is updated so the
+        stored ``cap`` / ``skim_rate`` are preserved rather than overwritten
+        with hardcoded defaults.
+        """
+        data = dict(current_data)
+        data["skimmed_total"] = new_total
+        self.buff_repo.update_data(buff_id, data)
 
     def has_dark_bargain_debt(
         self, discord_id: int, guild_id: int | None

@@ -74,7 +74,7 @@ class RebellionVoteView(discord.ui.View):
         )
         await self._refresh_embed()
 
-    @discord.ui.button(label="🛡️ DEFEND (10 JC)", style=discord.ButtonStyle.primary, custom_id="rebellion:defend")
+    @discord.ui.button(label=f"🛡️ DEFEND ({REBELLION_DEFENDER_STAKE} JC)", style=discord.ButtonStyle.primary, custom_id="rebellion:defend")
     async def defend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         result = await asyncio.to_thread(
             self.rebellion_service.process_defend_vote,
@@ -179,7 +179,7 @@ class WarBetView(discord.ui.View):
         self.rebellion_service = rebellion_service
         self.player_service = player_service
 
-    @discord.ui.button(label="⚔️ Bet REBELS (1–50 JC)", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label=f"⚔️ Bet REBELS (1–{REBELLION_META_BET_MAX} JC)", style=discord.ButtonStyle.danger)
     async def bet_rebels(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = WarBetAmountModal(
             war_id=self.war_id,
@@ -190,7 +190,7 @@ class WarBetView(discord.ui.View):
         )
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="⚙️ Bet WHEEL (1–50 JC)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label=f"⚙️ Bet WHEEL (1–{REBELLION_META_BET_MAX} JC)", style=discord.ButtonStyle.primary)
     async def bet_wheel(self, interaction: discord.Interaction, button: discord.ui.Button):
         modal = WarBetAmountModal(
             war_id=self.war_id,
