@@ -72,7 +72,7 @@ class HeroGridCommands(commands.Cog):
 
         # Priority 4: Most recent recorded match
         try:
-            last_match_ids = self.match_service.get_last_match_participant_ids()
+            last_match_ids = self.match_service.get_last_match_participant_ids(guild_id)
             if last_match_ids:
                 return list(last_match_ids), "Last Match"
         except Exception:

@@ -314,6 +314,33 @@ class TestMatchRepositoryEnrichment:
         unenriched = repo.get_matches_without_enrichment(guild_id=TEST_GUILD_ID)
         assert len(unenriched) == 0
 
+    def test_get_matches_without_fantasy_data_scoped_to_guild(self, temp_db_path):
+        """get_matches_without_fantasy_data must only return the caller's guild.
+
+        Regression: the query had no guild filter, so an admin refilling fantasy
+        data in one guild would re-enrich other guilds' matches.
+        """
+        from infrastructure.schema_manager import SchemaManager
+        from repositories.match_repository import MatchRepository
+
+        SchemaManager(temp_db_path).initialize()
+        repo = MatchRepository(temp_db_path)
+
+        other_guild = TEST_GUILD_ID + 1
+
+        # A match in the OTHER guild that is enriched but lacks fantasy data.
+        other_match_id = repo.record_match(
+            [1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, guild_id=other_guild
+        )
+        repo.set_valve_match_id(other_match_id, 8181518332)
+
+        # Querying TEST_GUILD_ID must not see the other guild's match.
+        assert repo.get_matches_without_fantasy_data(guild_id=TEST_GUILD_ID) == []
+
+        # The other guild still sees its own match.
+        own = repo.get_matches_without_fantasy_data(guild_id=other_guild)
+        assert [m["match_id"] for m in own] == [other_match_id]
+
 
 class TestGetEnrichmentData:
     """Tests for MatchRepository.get_enrichment_data."""
