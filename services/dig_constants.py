@@ -7638,11 +7638,9 @@ def format_relic_label(artifact_id: str, *, with_stats: bool = False) -> str:
 # ---------------------------------------------------------------------------
 # Retreat Cost (boss revamp)
 # ---------------------------------------------------------------------------
-# Retreat now costs depth blocks + a cooldown so it can't be spammed for
-# free intel after we add persisted boss HP.
+# Retreat costs depth blocks.
 RETREAT_BLOCK_LOSS_MIN: int = 2
 RETREAT_BLOCK_LOSS_MAX: int = 3
-RETREAT_COOLDOWN_SECONDS: int = 30 * 60   # 30 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -7694,9 +7692,6 @@ INSURANCE_DURATION_SECONDS: int = 86_400   # 24 hours
 INSURANCE_REDUCTION: float = 0.50
 REINFORCEMENT_SABOTAGE_REDUCTION: float = 0.25
 MAX_COMBINED_SABOTAGE_REDUCTION: float = 0.70
-
-TRAP_BASE_COST: int = 8
-TRAP_COST_DEPTH_DIVISOR: int = 4           # cost = max(TRAP_BASE_COST, depth // TRAP_COST_DEPTH_DIVISOR)
 
 REVENGE_DISCOUNT_WINDOW_SECONDS: int = 3600   # 1 hour
 REVENGE_FREE_WINDOW_SECONDS: int = 1800       # 30 minutes
