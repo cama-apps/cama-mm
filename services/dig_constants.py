@@ -2548,7 +2548,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.40,
         ),
         complexity="complex", layer="Magma",
-        buff_on_success=TempBuff("forged", "Forge-Tempered", 3, {"advance_bonus": 2}),
+        buff_on_success=TempBuff("forged", "Forge-Tempered", 3, {"advance_bonus": 4}),
     ),
     RandomEvent(
         id="volcanic_vent_gambit",
@@ -2664,7 +2664,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.45,
         ),
         complexity="complex", layer="Crystal", rarity="uncommon",
-        buff_on_success=TempBuff("tinker_drill", "Rearm Protocol", 3, {"advance_bonus": 2}),
+        buff_on_success=TempBuff("tinker_drill", "Rearm Protocol", 3, {"advance_bonus": 4}),
     ),
     RandomEvent(
         id="the_burrow",
@@ -2687,7 +2687,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.35,
         ),
         complexity="complex", rarity="uncommon",
-        buff_on_success=TempBuff("nyx_insight", "Vendetta's Whisper", 2, {"cave_in_reduction": 0.10}),
+        buff_on_success=TempBuff("nyx_insight", "Vendetta's Whisper", 3, {"cave_in_reduction": 0.2}),
     ),
     RandomEvent(
         id="arcanist_library",
@@ -2852,7 +2852,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.45,
         ),
         layer="Fungal Depths",
-        buff_on_success=TempBuff("spore_enhanced", "Spore-Enhanced", 2, {"advance_bonus": 1}),
+        buff_on_success=TempBuff("spore_enhanced", "Spore-Enhanced", 3, {"advance_bonus": 3}),
     ),
     RandomEvent(
         id="mycelium_network",
@@ -2897,7 +2897,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.50,
         ),
         complexity="simple", layer="Fungal Depths",
-        buff_on_success=TempBuff("spore_shield", "Fungal Fortitude", 3, {"cave_in_reduction": 0.05}),
+        buff_on_success=TempBuff("spore_shield", "Fungal Fortitude", 3, {"cave_in_reduction": 0.1}),
     ),
     RandomEvent(
         id="bioluminescent_cathedral",
@@ -2991,7 +2991,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.50,
         ),
         complexity="simple", layer="Frozen Core", rarity="rare",
-        buff_on_success=TempBuff("still_point", "Temporal Anchor", 5, {"cave_in_reduction": 0.08}),
+        buff_on_success=TempBuff("still_point", "Temporal Anchor", 5, {"cave_in_reduction": 0.16}),
     ),
     RandomEvent(
         id="paradox_loop",
@@ -3309,9 +3309,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="uncommon",
         boon_options=(
-            TempBuff("efficiency", "Efficiency", 3, {"advance_bonus": 2}),
-            TempBuff("fortune", "Fortune", 3, {"jc_bonus": 3}),
-            TempBuff("unbreaking", "Unbreaking", 3, {"cave_in_reduction": 0.15}),
+            TempBuff("efficiency", "Efficiency", 3, {"advance_bonus": 4}),
+            TempBuff("fortune", "Fortune", 3, {"jc_bonus": 7}),
+            TempBuff("unbreaking", "Unbreaking", 3, {"cave_in_reduction": 0.3}),
         ),
     ),
     RandomEvent(
@@ -3390,7 +3390,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.20,
         ),
         rarity="uncommon",
-        buff_on_success=TempBuff("mob_farm", "Mob Farm", 2, {"jc_bonus": 2}),
+        buff_on_success=TempBuff("mob_farm", "Mob Farm", 3, {"jc_bonus": 5}),
     ),
     RandomEvent(
         id="witch_cauldron",
@@ -3413,9 +3413,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon",
         boon_options=(
-            TempBuff("red_potion", "Red Potion", 1, {"advance_bonus": 3}),
-            TempBuff("blue_potion", "Blue Potion", 2, {"cave_in_reduction": 0.20}),
-            TempBuff("green_potion", "Green Potion", 1, {"jc_bonus": 5}),
+            TempBuff("red_potion", "Red Potion", 2, {"advance_bonus": 5}),
+            TempBuff("blue_potion", "Blue Potion", 3, {"cave_in_reduction": 0.4}),
+            TempBuff("green_potion", "Green Potion", 2, {"jc_bonus": 11}),
         ),
     ),
 
@@ -3591,9 +3591,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="uncommon",
         boon_options=(
-            TempBuff("volatile_flare", "Volatile Flare", 1, {"advance_bonus": 4}),
-            TempBuff("azurite_tonic", "Azurite Tonic", 1, {"luminosity_restore": 30}),
-            TempBuff("smugglers_map", "Smuggler's Map", 2, {"advance_bonus": 2}),
+            TempBuff("volatile_flare", "Volatile Flare", 2, {"advance_bonus": 6}),
+            TempBuff("azurite_tonic", "Azurite Tonic", 2, {"luminosity_restore": 51}),
+            TempBuff("smugglers_map", "Smuggler's Map", 3, {"advance_bonus": 4}),
         ),
     ),
 
@@ -3620,9 +3620,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="uncommon",
         boon_options=(
-            TempBuff("combat_buddy", "Combat Buddy", 3, {"advance_bonus": 2}),
-            TempBuff("treasure_finder", "Treasure Finder", 3, {"jc_bonus": 2}),
-            TempBuff("veteran_guidance", "Veteran Guidance", 3, {"cave_in_reduction": 0.10}),
+            TempBuff("combat_buddy", "Combat Buddy", 3, {"advance_bonus": 4}),
+            TempBuff("treasure_finder", "Treasure Finder", 3, {"jc_bonus": 5}),
+            TempBuff("veteran_guidance", "Veteran Guidance", 3, {"cave_in_reduction": 0.2}),
         ),
     ),
     RandomEvent(
@@ -3666,7 +3666,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("You slip. A cut on the hand. It'll heal.", 0, 0, False),
             success_chance=0.65,
         ),
-        buff_on_success=TempBuff("honed_edge", "Honed Edge", 2, {"advance_bonus": 2}),
+        buff_on_success=TempBuff("honed_edge", "Honed Edge", 3, {"advance_bonus": 4}),
     ),
     RandomEvent(
         id="zekvir_shadow",
@@ -3745,9 +3745,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="rare",
         boon_options=(
-            TempBuff("power_rune", "Power", 3, {"advance_bonus": 3}),
-            TempBuff("protection_rune", "Protection", 5, {"cave_in_reduction": 0.20}),
-            TempBuff("fortune_rune", "Fortune", 3, {"jc_bonus": 3}),
+            TempBuff("power_rune", "Power", 3, {"advance_bonus": 5}),
+            TempBuff("protection_rune", "Protection", 5, {"cave_in_reduction": 0.4}),
+            TempBuff("fortune_rune", "Fortune", 3, {"jc_bonus": 7}),
         ),
     ),
     RandomEvent(
@@ -3795,9 +3795,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="uncommon",
         boon_options=(
-            TempBuff("zeus_fury", "Zeus's Fury", 2, {"advance_bonus": 4}),
-            TempBuff("athena_shield", "Athena's Shield", 1, {"cave_in_reduction": 1.0}),
-            TempBuff("hermes_speed", "Hermes's Speed", 1, {"cooldown_reduction": 0.50}),
+            TempBuff("zeus_fury", "Zeus's Fury", 3, {"advance_bonus": 6}),
+            TempBuff("athena_shield", "Athena's Shield", 2, {"cave_in_reduction": 1.0}),
+            TempBuff("hermes_speed", "Hermes's Speed", 2, {"cooldown_reduction": 0.50}),
         ),
     ),
     RandomEvent(
@@ -3956,7 +3956,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.10,
         ),
         rarity="rare",
-        buff_on_success=TempBuff("aghanim_blessing", "Arcane Blessing", 2, {"advance_bonus": 3, "jc_bonus": 2}),
+        buff_on_success=TempBuff("aghanim_blessing", "Arcane Blessing", 3, {"advance_bonus": 5, "jc_bonus": 5}),
     ),
     RandomEvent(
         id="tormentor_encounter",
@@ -4007,9 +4007,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="uncommon",
         boon_options=(
-            TempBuff("trusty_shovel", "Trusty Shovel", 3, {"advance_bonus": 2}),
-            TempBuff("philosophers_stone", "Philosopher's Stone", 3, {"jc_bonus": 2}),
-            TempBuff("spark_of_courage", "Spark of Courage", 2, {"cave_in_reduction": 0.10, "advance_bonus": 1}),
+            TempBuff("trusty_shovel", "Trusty Shovel", 3, {"advance_bonus": 4}),
+            TempBuff("philosophers_stone", "Philosopher's Stone", 3, {"jc_bonus": 5}),
+            TempBuff("spark_of_courage", "Spark of Courage", 3, {"cave_in_reduction": 0.2, "advance_bonus": 3}),
         ),
     ),
 
@@ -4136,9 +4136,9 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="boon", rarity="legendary",
         boon_options=(
-            TempBuff("blessing_depth", "Blessing of Depth", 5, {"advance_bonus": 3}),
-            TempBuff("blessing_fortune", "Blessing of Fortune", 5, {"jc_bonus": 5}),
-            TempBuff("blessing_iron", "Blessing of Iron", 5, {"cave_in_reduction": 0.25}),
+            TempBuff("blessing_depth", "Blessing of Depth", 5, {"advance_bonus": 5}),
+            TempBuff("blessing_fortune", "Blessing of Fortune", 5, {"jc_bonus": 11}),
+            TempBuff("blessing_iron", "Blessing of Iron", 5, {"cave_in_reduction": 0.4}),
         ),
     ),
     # ---- Negative-EV "trap" events (rare). Safe option is always weakly
@@ -4803,7 +4803,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("Your coin sinks into the dirt. Nothing happens.", 0, -8, False),
             success_chance=0.50,
         ),
-        buff_on_success=TempBuff("aegis_aura", "Aegis Aura", 3, {"cave_in_reduction": 0.15}),
+        buff_on_success=TempBuff("aegis_aura", "Aegis Aura", 3, {"cave_in_reduction": 0.3}),
         rarity="uncommon",
     ),
     RandomEvent(
@@ -4929,7 +4929,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You complete the drill. The ghost salutes and dissolves; your form has never been better.", 0, -10, False),
             failure=None, success_chance=1.0,
         ),
-        buff_on_success=TempBuff("drilled", "Drilled", 4, {"advance_bonus": 2}),
+        buff_on_success=TempBuff("drilled", "Drilled", 4, {"advance_bonus": 4}),
         rarity="rare",
     ),
     RandomEvent(
@@ -5134,7 +5134,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The shard cracks against your palm and the hum cuts out.", 0, -8, False),
             success_chance=0.55,
         ),
-        buff_on_success=TempBuff("affix_hum", "Affix Hum", 2, {"advance_bonus": 1}),
+        buff_on_success=TempBuff("affix_hum", "Affix Hum", 3, {"advance_bonus": 3}),
         rarity="uncommon",
     ),
 
@@ -5241,7 +5241,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("Your voice carries somewhere it shouldn't. The cave folds in on you.", -2, -90, True),
             success_chance=0.25,
         ),
-        buff_on_success=TempBuff("whispered_insight", "Whispered Insight", 3, {"cave_in_reduction": 0.20}),
+        buff_on_success=TempBuff("whispered_insight", "Whispered Insight", 3, {"cave_in_reduction": 0.4}),
         rarity="legendary", social=True, requires_dark=True,
         splash=SplashConfig(
             strategy="richest_n", victim_count=1, penalty_jc=28,
@@ -5384,7 +5384,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="common",
         buff_on_success=TempBuff(
             id="glyph_pulse_buff", name="Quickened Step",
-            duration_digs=2, effect={"advance_bonus": 2},
+            duration_digs=3, effect={"advance_bonus": 4},
         ),
     ),
 
@@ -5411,7 +5411,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="common",
         buff_on_success=TempBuff(
             id="mossfire_echo_buff", name="Sheltered",
-            duration_digs=3, effect={"cave_in_reduction": 0.10},
+            duration_digs=3, effect={"cave_in_reduction": 0.2},
         ),
     ),
 
@@ -5438,7 +5438,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="common",
         buff_on_success=TempBuff(
             id="fountain_buff", name="Spring-touched",
-            duration_digs=2, effect={"cave_in_reduction": 0.10},
+            duration_digs=3, effect={"cave_in_reduction": 0.2},
         ),
     ),
 
@@ -5531,7 +5531,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Bind it to yourself (offer 50)",
-            success=EventOutcome("The ward chooses a target and pulls. Coin spills your way.", 0, -50, False),
+            success=EventOutcome("The ward chooses a target and pulls. The coin it tears loose is someone else's.", 0, -50, False),
             failure=EventOutcome("The ward chooses you. The shards take their tribute.", 0, -50, False),
             success_chance=0.50,
         ),
@@ -5562,7 +5562,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="uncommon",
         buff_on_success=TempBuff(
             id="sanguine_pact_buff", name="Sanguine",
-            duration_digs=3, effect={"advance_bonus": 3},
+            duration_digs=3, effect={"advance_bonus": 5},
         ),
     ),
 
@@ -5636,7 +5636,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="uncommon",
         buff_on_success=TempBuff(
             id="archive_buff", name="Read In",
-            duration_digs=4, effect={"advance_bonus": 2, "cave_in_reduction": 0.05},
+            duration_digs=4, effect={"advance_bonus": 4, "cave_in_reduction": 0.1},
         ),
     ),
 
@@ -5686,7 +5686,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="uncommon",
         buff_on_success=TempBuff(
             id="silken_cocoon_buff", name="Snapped Free",
-            duration_digs=1, effect={"advance_bonus": 5},
+            duration_digs=2, effect={"advance_bonus": 7},
         ),
     ),
 

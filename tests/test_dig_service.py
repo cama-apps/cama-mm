@@ -1077,8 +1077,13 @@ class TestBoss:
             boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
         )
 
-        # Force win
+        # Force win. Pin the win chance below the wager-taper knee so a
+        # normal-odds wager pays its full multiplier (a tiny wager on a
+        # near-certain fight would otherwise taper to ~0 net profit).
         monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert result.get("won")
@@ -1329,10 +1334,15 @@ class TestBossOdds:
         # At depth 25, penalty = (25/100)*0.05 = 0.0125, so ~0.74
         assert cautious_pct > 0.70, f"Cautious odds {cautious_pct} should reflect 0.75 base, not 0.50 default"
 
-        # Multiplier should come from BOSS_PAYOUTS[25], not default 2.0
+        # Multiplier comes from BOSS_PAYOUTS[25] (1.5), tapered toward
+        # break-even by the high cautious win chance — not the 2.0 default.
         cautious_mult = result["odds"]["cautious"]["multiplier"]
-        expected_mult = BOSS_PAYOUTS[25][0]
-        assert cautious_mult == expected_mult, f"Expected multiplier {expected_mult}, got {cautious_mult}"
+        expected_mult = dig_service._effective_wager_multiplier(
+            BOSS_PAYOUTS[25][0], cautious_pct,
+        )
+        assert abs(cautious_mult - expected_mult) < 0.05, (
+            f"Expected ~{expected_mult:.2f}, got {cautious_mult}"
+        )
 
     def test_fight_boss_reckless_high_roll_loses(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Reckless fight with high roll (0.99 > 0.20 base odds) should lose."""

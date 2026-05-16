@@ -1193,6 +1193,12 @@ class DigService:
     _WAGER_SKIN_BONUS_DENOMINATOR: int = 500
     _WAGER_SKIN_BONUS_MAX: float = 0.03
 
+    # Wager payouts taper toward break-even once a fight is a near-sure thing:
+    # at or below this win chance the authored BOSS_PAYOUTS multiplier is
+    # untouched; above it the multiplier blends down to fair odds, so softening
+    # a boss to ~95% then betting big no longer prints money.
+    _WAGER_TAPER_KNEE: float = 0.65
+
     def _wager_skin_bonus(self, wager: int) -> float:
         """Silent +0..+3% hit bonus that scales with wager size.
 
@@ -1204,6 +1210,26 @@ class DigService:
             return 0.0
         ratio = min(1.0, wager / float(self._WAGER_SKIN_BONUS_DENOMINATOR))
         return ratio * self._WAGER_SKIN_BONUS_MAX
+
+    def _effective_wager_multiplier(
+        self, base_multiplier: float, win_chance: float,
+    ) -> float:
+        """Taper the wager payout multiplier toward break-even at high win chance.
+
+        At or below ``_WAGER_TAPER_KNEE`` the authored ``base_multiplier`` is
+        returned unchanged, so normal and genuinely-risky betting is unaffected.
+        Above the knee it blends linearly toward fair odds (``1 / win_chance``)
+        at ``WIN_CHANCE_CAP``, where a wager is EV-neutral. The taper only ever
+        reduces a payout, never raises one.
+        """
+        knee = self._WAGER_TAPER_KNEE
+        if win_chance <= knee:
+            return base_multiplier
+        fair = 1.0 / win_chance
+        span = max(1e-6, WIN_CHANCE_CAP - knee)
+        t = min(1.0, (win_chance - knee) / span)
+        eff = base_multiplier * (1.0 - t) + fair * t
+        return min(base_multiplier, eff)
 
     def _get_carried_wager(self, boss_progress: dict, at_boss) -> tuple[int, str] | None:
         """Return (wager, risk_tier) carried from a prior phase win, or None.
@@ -1322,6 +1348,10 @@ class DigService:
         # Boss HP: archetype mult, then tier+prestige adds from tables, then echo.
         boss_hp = float(stats["boss_hp"]) * archetype["hp_mult"]
         boss_hp += tier["hp"] + prestige["hp"]
+        # P4+ delvers face slightly tougher bosses — a small extra HP curve on
+        # top of the flat prestige table ("Boss Rage" made real).
+        if prestige_level >= 4:
+            boss_hp *= 1.0 + 0.03 * (prestige_level - 3)
         boss_hp = max(1, int(round(boss_hp)))
         if echo_applied:
             boss_hp = max(1, int(round(boss_hp * 0.75)))
@@ -6065,6 +6095,9 @@ class DigService:
             crit_chance=crit_chance,
             crit_bonus=crit_bonus,
         )
+        # Wager payout tapers toward break-even once the fight is near-certain,
+        # so softening a boss then betting big no longer prints money.
+        multiplier = self._effective_wager_multiplier(multiplier, win_chance)
 
         round_log: list[dict] = []
         won: bool | None = None
@@ -6274,7 +6307,12 @@ class DigService:
                 tunnel["stat_boss_awards"] = tunnel_updates["stat_boss_awards"]
 
             if wager > 0:
-                payout_delta = int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1))
+                # A won wager never returns less than the stake — the taper
+                # plus loot penalties (echo) can otherwise drive it negative.
+                payout_delta = max(
+                    0,
+                    int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1)),
+                )
             else:
                 payout_delta = jc_delta
 
@@ -6331,8 +6369,8 @@ class DigService:
                 boundary=at_boss,
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
-                jc_delta=jc_delta,
-                payout=jc_delta,
+                jc_delta=payout_delta,
+                payout=payout_delta,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 achievements=achievements,
@@ -6934,6 +6972,12 @@ class DigService:
                 pin_entry["pending_phase_event_id"] = phase_event.id
                 boss_progress[str(PINNACLE_DEPTH)] = pin_entry
 
+                # Lock the wager so phases 2/3 ride the same stake.
+                if wager > 0:
+                    self._set_carried_wager(
+                        boss_progress, PINNACLE_DEPTH, wager, risk_tier,
+                    )
+
                 # Apply pre-fight effects of the event:
                 # - luminosity_delta: clamp to [0, MAX] on tunnel
                 # - boss_hp_delta: pre-seed the next phase's HP entry so the
@@ -7001,6 +7045,15 @@ class DigService:
             # Phase 3 win — pinnacle defeated.
             new_depth = PINNACLE_DEPTH
             jc_reward = PINNACLE_BASE_JC_REWARD + PINNACLE_JC_PER_PRESTIGE * prestige_level
+            # A carried wager rode all 3 phases; pay it out at win-chance-tapered
+            # odds on top of the base reward. Any phase loss already forfeited it.
+            wager_payout = 0
+            if wager > 0:
+                tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
+                base_mult = BOSS_PAYOUTS.get(PINNACLE_DEPTH, (2.0, 3.0, 6.0))[tier_index]
+                eff_mult = self._effective_wager_multiplier(base_mult, win_chance)
+                wager_payout = int(wager * (eff_mult - 1))
+            total_reward = jc_reward + wager_payout
             relic_drop = self._drop_pinnacle_relic(discord_id, guild_id, tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
             boss_progress[str(PINNACLE_DEPTH)] = {
@@ -7023,14 +7076,15 @@ class DigService:
                 last_dig_at=now,
                 pinnacle_phase=0,
             )
-            self.player_repo.add_balance(discord_id, guild_id, jc_reward)
+            self.player_repo.add_balance(discord_id, guild_id, total_reward)
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id,
                 action_type="pinnacle_fight",
                 details=json.dumps({
                     "pinnacle_id": pinnacle_id,
                     "phase": 3, "won": True,
-                    "jc_delta": jc_reward,
+                    "jc_delta": total_reward,
+                    "wager_payout": wager_payout,
                     "relic_id": relic_drop["artifact_id"],
                 }),
             )
@@ -7041,8 +7095,10 @@ class DigService:
                 boundary=PINNACLE_DEPTH,
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
-                jc_delta=jc_reward,
-                payout=jc_reward,
+                jc_delta=total_reward,
+                payout=total_reward,
+                base_reward=jc_reward,
+                wager_payout=wager_payout,
                 new_depth=new_depth,
                 dialogue=f"You stand over the broken form of {pinnacle.name}.",
                 pinnacle_relic=relic_drop,
@@ -7069,6 +7125,8 @@ class DigService:
         pin_entry["first_meet_seen"] = True
         pin_entry["boss_id"] = pinnacle_id
         boss_progress[str(PINNACLE_DEPTH)] = pin_entry
+        # Forfeited on a loss — drop the carry markers so a retry starts fresh.
+        self._clear_carried_wager(boss_progress, PINNACLE_DEPTH)
 
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
@@ -7311,6 +7369,8 @@ class DigService:
             crit_chance=crit_chance,
             crit_bonus=crit_bonus,
         )
+        # Wager payout tapers toward break-even once the fight is near-certain.
+        multiplier = self._effective_wager_multiplier(multiplier, win_chance)
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
         # Snapshot pre-fight boss HP for the post-loss "you knocked it from X
         # to Y" soften UX. Auto-resolve path skips paused state, so the
@@ -7972,13 +8032,17 @@ class DigService:
                 window_seconds=24 * 3600,
             )
             if wager > 0:
-                self.player_repo.add_balance(
-                    discord_id, guild_id,
+                # A won wager never returns less than the stake — the taper
+                # plus loot penalties (echo, drain curse) can otherwise drive
+                # it negative.
+                net_payout = max(
+                    0,
                     int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1))
                     - (int(round(wager * multiplier * 0.25)) if drain_applied else 0),
                 )
             else:
-                self.player_repo.add_balance(discord_id, guild_id, jc_delta)
+                net_payout = jc_delta
+            self.player_repo.add_balance(discord_id, guild_id, net_payout)
 
             achievements = self.check_achievements(
                 discord_id, guild_id,
@@ -8017,7 +8081,7 @@ class DigService:
                 boundary=at_boss,
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
-                jc_delta=jc_delta, payout=jc_delta,
+                jc_delta=net_payout, payout=net_payout,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 achievements=achievements,
@@ -8321,7 +8385,10 @@ class DigService:
                 "boss_hp": boss_hp,
                 "player_hit": round(player_hit, 2),
                 "boss_hit": round(boss_hit_chance, 2),
-                "multiplier": round(base_multiplier * payout_mult, 2),
+                "multiplier": round(
+                    self._effective_wager_multiplier(base_multiplier, win_pct)
+                    * payout_mult, 2,
+                ),
             }
 
         # Resolve the locked boss for richer scout output (and Great Lantern tier).
