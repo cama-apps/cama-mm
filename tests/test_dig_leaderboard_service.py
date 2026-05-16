@@ -151,17 +151,21 @@ class TestGetCollection:
         assert result == {"artifacts": {}, "total": 0}
 
     def test_collection_grouped_by_rarity(self, lb_service, dig_repo, guild_id):
-        """Artifacts are bucketed under their stored rarity value."""
+        """Artifacts bucket under the rarity declared in ARTIFACT_POOL. The
+        dig_artifacts row has no rarity column, so the service must resolve
+        rarity by artifact_id — a flat 'common' default would be wrong."""
+        rarity_by_id = {a["id"]: a["rarity"] for a in ARTIFACT_POOL}
         dig_repo.add_artifact(1, guild_id, "mole_claws", is_relic=True)
         dig_repo.add_artifact(1, guild_id, "crystal_compass", is_relic=True)
 
         result = lb_service.get_collection(1, guild_id)
 
         assert result["total"] == 2
-        # dig_artifacts rows carry no 'rarity' column, so the service's
-        # a.get("rarity", "common") default puts both under "common".
-        assert set(result["artifacts"]) == {"common"}
-        assert len(result["artifacts"]["common"]) == 2
+        # Both relics are "Rare" in the pool — resolved as such, not "common".
+        assert set(result["artifacts"]) == {"Rare"}
+        for rarity, arts in result["artifacts"].items():
+            for art in arts:
+                assert rarity_by_id[art["artifact_id"]] == rarity
 
     def test_collection_is_player_scoped(self, lb_service, dig_repo, guild_id):
         """One player's artifacts never leak into another's collection."""
@@ -216,19 +220,18 @@ class TestGetMuseum:
         assert entry["first_finder_id"] == 1
         assert entry["total_found"] == 2
 
-    def test_museum_groups_pool_entries_under_unknown_layer(
+    def test_museum_groups_entries_by_pool_layer(
         self, lb_service, dig_repo, guild_id
     ):
-        """ARTIFACT_POOL entries expose a 'layer' string but get_museum reads
-        'layers' (a list), so every entry falls through to the 'unknown'
-        bucket. This test pins that current behavior."""
+        """Registry entries bucket under the artifact's ARTIFACT_POOL layer."""
         now = int(time.time())
+        # mole_claws is a "Dirt"-layer artifact in the pool.
         dig_repo.register_artifact_find("mole_claws", guild_id, finder_id=1, found_at=now)
 
         by_layer = lb_service.get_museum(guild_id)["by_layer"]
 
-        assert list(by_layer) == ["unknown"]
-        assert len(by_layer["unknown"]) == 1
+        assert list(by_layer) == ["Dirt"]
+        assert len(by_layer["Dirt"]) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────
