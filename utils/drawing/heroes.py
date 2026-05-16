@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from io import BytesIO
 
@@ -18,6 +19,8 @@ from utils.drawing._common import (
     _get_font,
     _get_text_size,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def draw_hero_performance_chart(
@@ -514,11 +517,13 @@ def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.I
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         img = Image.open(BytesIO(response.content)).convert("RGBA")
-        # Cache the original
+        # Cache the original. Intentionally retained (not closed) for the
+        # lifetime of the process so repeat lookups reuse the decoded image.
         _hero_image_cache[cache_key] = img
         # Return resized
         return img.resize(size, Image.Resampling.LANCZOS)
     except Exception:
+        logger.debug("Failed to fetch hero image for hero_id=%s", hero_id, exc_info=True)
         return None
 
 
