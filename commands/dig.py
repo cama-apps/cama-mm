@@ -87,7 +87,7 @@ PROGRESSIVE_TIPS = [
     "Tip: Relics from /dig museum are rare — gift duplicates to friends.",
     "Tip: Higher pickaxe tiers dig more blocks per action.",
     "Tip: Streaks grant bonus JC — keep digging daily!",
-    "Tip: /dig flex shows off your achievements and titles.",
+    "Tip: /dig flex shows off your mining stats and titles.",
 ]
 
 # "Dig Dug" flavor — classic arcade game references sprinkled in
@@ -3261,18 +3261,6 @@ class DigCommands(commands.Cog):
             if event_lines:
                 embed.add_field(name="Recent Events", value="\n".join(event_lines), inline=False)
 
-        # Stats
-        stats = getattr(info, "stats", None)
-        if stats:
-            stats_text = (
-                f"Total digs: {stats.get('total_digs', 0)}\n"
-                f"Max depth: {stats.get('max_depth', 0)}\n"
-                f"Total JC earned: {stats.get('total_jc_earned', 0)}\n"
-                f"Cave-ins survived: {stats.get('cave_ins_survived', 0)}\n"
-                f"Bosses defeated: {stats.get('bosses_defeated', 0)}"
-            )
-            embed.add_field(name="Stats", value=stats_text, inline=False)
-
         # Active ascension modifiers (prestige > 0)
         if prestige > 0:
             asc_lines = []
@@ -3766,7 +3754,7 @@ class DigCommands(commands.Cog):
     # 10. /dig_flex — Show stats and titles
     # ------------------------------------------------------------------
 
-    @dig.command(name="flex", description="Show off your mining achievements")
+    @dig.command(name="flex", description="Show off your mining stats")
     @require_guild
     async def dig_flex(self, interaction: discord.Interaction):
         if not await require_dig_channel(interaction):
@@ -3804,7 +3792,6 @@ class DigCommands(commands.Cog):
         tunnel_name = getattr(flex, "tunnel_name", "Unknown")
         layer = getattr(flex, "layer", "Dirt")
         titles = getattr(flex, "titles", [])
-        achievement_count = getattr(flex, "achievement_count", 0)
         prestige_emoji = getattr(flex, "prestige_emoji", "")
 
         has_anything = depth > 0 or total_digs > 1
@@ -3842,8 +3829,7 @@ class DigCommands(commands.Cog):
             f"Depth: **{depth}** ({layer})\n"
             f"Total digs: **{total_digs}**\n"
             f"Total JC earned: **{total_jc}**\n"
-            f"Streak: **{streak}** days\n"
-            f"Achievements: **{achievement_count}**"
+            f"Streak: **{streak}** days"
         )
         if prestige:
             stats_text += f"\nPrestige: **{prestige}**"

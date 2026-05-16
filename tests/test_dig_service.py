@@ -1180,35 +1180,6 @@ class TestBoss:
         assert result["success"]
 
 
-class TestAchievements:
-    """Tests for achievement unlocking."""
-
-    def test_achievement_unlocked_on_milestone(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Achievement triggers at threshold."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        # Directly add achievement
-        added = dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_000)
-        assert added is True
-
-        achievements = dig_repo.get_achievements(10001, guild_id)
-        assert len(achievements) == 1
-        assert achievements[0]["achievement_id"] == "dig_count_bronze"
-
-    def test_achievement_not_duplicated(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Same achievement not added twice."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_000)
-        added_again = dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_001)
-        assert added_again is False
-
-        achievements = dig_repo.get_achievements(10001, guild_id)
-        assert len(achievements) == 1
-
-
 class TestStreaks:
     """Tests for consecutive day dig streaks."""
 
