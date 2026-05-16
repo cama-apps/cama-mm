@@ -10,7 +10,7 @@ from repositories.interfaces import IDigRepository
 
 
 class DigRepository(BaseRepository, IDigRepository):
-    """Data access for dig tunnels, actions, inventory, artifacts, and achievements."""
+    """Data access for dig tunnels, actions, inventory, and artifacts."""
 
     # Integer columns in the tunnels table — ensure these are always int
     # even if SQLite returns them as strings (e.g., after ALTER TABLE migrations).
@@ -850,55 +850,6 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             row = cursor.fetchone()
             return dict(row) if row else None
-
-    # ── Achievements ─────────────────────────────────────────────────────
-
-    def add_achievement(
-        self, discord_id: int, guild_id: int, achievement_id: str, unlocked_at: int,
-    ) -> bool:
-        """Add achievement if not exists. Returns True if newly added."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO dig_achievements
-                    (discord_id, guild_id, achievement_id, unlocked_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (discord_id, gid, achievement_id, unlocked_at),
-            )
-            return cursor.rowcount > 0
-
-    def get_achievements(self, discord_id: int, guild_id: int) -> list[dict]:
-        """Get all achievements for a player."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM dig_achievements
-                WHERE discord_id = ? AND guild_id = ?
-                ORDER BY unlocked_at ASC
-                """,
-                (discord_id, gid),
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
-    def has_achievement(self, discord_id: int, guild_id: int, achievement_id: str) -> bool:
-        """Check if player has a specific achievement."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT 1 FROM dig_achievements
-                WHERE discord_id = ? AND guild_id = ? AND achievement_id = ?
-                LIMIT 1
-                """,
-                (discord_id, gid, achievement_id),
-            )
-            return cursor.fetchone() is not None
 
     # ── Atomic Operations ────────────────────────────────────────────────
 

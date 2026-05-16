@@ -2,7 +2,7 @@
 Service for the tunnel digging minigame.
 
 Handles all game logic: digging, cave-ins, bosses, prestige,
-items, artifacts, sabotage, traps, and achievements.
+items, artifacts, sabotage, and traps.
 """
 
 import datetime
@@ -260,7 +260,6 @@ class DigService:
         slow_drip_repo=None,
         balance_history_service=None,
         leaderboard_service=None,
-        achievement_service=None,
         tunnel_naming_service=None,
         inventory_service=None,
         quest_service=None,
@@ -276,16 +275,12 @@ class DigService:
         # Sub-services for focused concerns. Defaults wire local instances so
         # existing callers (and tests that construct DigService directly) keep
         # working without having to pass anything new.
-        from services.dig_achievement_service import DigAchievementService
         from services.dig_inventory_service import DigInventoryService
         from services.dig_leaderboard_service import DigLeaderboardService
         from services.dig_tunnel_naming_service import DigTunnelNamingService
 
         self.leaderboard_service = leaderboard_service or DigLeaderboardService(
             dig_repo
-        )
-        self.achievement_service = achievement_service or DigAchievementService(
-            dig_repo, player_repo
         )
         self.tunnel_naming_service = (
             tunnel_naming_service or DigTunnelNamingService()
@@ -2603,7 +2598,6 @@ class DigService:
             has_lantern=has_lantern_early,
             event=None,
             artifact=None,
-            achievements=[],
             is_first_dig=False,
             items_used=[],
             items_used_ids=[],
@@ -2657,7 +2651,6 @@ class DigService:
             has_lantern=False,
             event=None,
             artifact=None,
-            achievements=[],
             is_first_dig=True,
             items_used=[],
             items_used_ids=[],
@@ -2932,7 +2925,7 @@ class DigService:
 
         Returns dict with: success, error, tunnel, depth_before, depth_after,
         advance, jc_earned, milestone_bonus, streak_bonus, cave_in, cave_in_detail,
-        boss_encounter, boss_info, event, artifact, achievements, is_first_dig,
+        boss_encounter, boss_info, event, artifact, is_first_dig,
         items_used, tip.
         """
         # 0. Check player is registered
@@ -3455,12 +3448,6 @@ class DigService:
                 log_action_type="dig",
             )
 
-            achievements = self.check_achievements(
-                discord_id, guild_id,
-                {**tunnel, "depth": new_depth},
-                {"action": "cave_in"},
-            )
-
             return self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before,
@@ -3476,7 +3463,6 @@ class DigService:
                 has_lantern=has_lantern,
                 event=None,
                 artifact=None,
-                achievements=achievements,
                 is_first_dig=False,
                 items_used=items_used,
                 items_used_ids=items_used_ids,
@@ -3740,13 +3726,7 @@ class DigService:
             # player feedback that their Sonar charge fired.
             event_preview = event_preview_skipped
 
-        # 18. Check achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
-        tunnel_updated = {**tunnel, "depth": new_depth, "total_digs": total_digs, "streak_days": streak}
-        achievements = self.check_achievements(
-            discord_id, guild_id, tunnel_updated,
-            {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
-        )
 
         # 19. Final commit: tunnel state flip (incl. void-bait decrement if
         # applicable, depth, max_depth, counters, streak, run counters) +
@@ -3807,7 +3787,6 @@ class DigService:
             has_lantern=has_lantern,
             event=event,
             artifact=artifact,
-            achievements=achievements,
             is_first_dig=False,
             items_used=items_used,
             items_used_ids=items_used_ids,
@@ -4499,11 +4478,6 @@ class DigService:
                     "depth_before": depth_before, "depth_after": new_depth,
                 }),
             )
-            achievements = self.check_achievements(
-                discord_id, guild_id,
-                {**tunnel, "depth": new_depth},
-                {"action": "cave_in"},
-            )
             return self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
@@ -4512,7 +4486,7 @@ class DigService:
                 boss_encounter=False, boss_info=None,
                 has_lantern=p["has_lantern"],
                 event=None, artifact=None,
-                achievements=achievements, is_first_dig=False,
+                is_first_dig=False,
                 items_used=p["items_used"], items_used_ids=p["items_used_ids"],
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
@@ -4712,15 +4686,7 @@ class DigService:
                 discord_id, guild_id, sonar_skip_pending=0,
             )
 
-        # Achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
-        tunnel_updated = {
-            **tunnel, "depth": new_depth, "total_digs": total_digs, "streak_days": streak,
-        }
-        achievements = self.check_achievements(
-            discord_id, guild_id, tunnel_updated,
-            {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
-        )
 
         # DB writes
         run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
@@ -4757,7 +4723,7 @@ class DigService:
             boss_encounter=boss_encounter, boss_info=boss_info,
             has_lantern=p["has_lantern"],
             event=event, artifact=artifact,
-            achievements=achievements, is_first_dig=False,
+            is_first_dig=False,
             items_used=p["items_used"], items_used_ids=p["items_used_ids"],
             pickaxe_tier=p["pickaxe_tier"],
             tip=self._pick_tip(new_depth),
@@ -4780,9 +4746,8 @@ class DigService:
         advance, jc_earned, cave_in, cave_in_block_loss, cave_in_type,
         cave_in_jc_lost, event_id, narrative, tone.
 
-        Handles boss-boundary capping, milestone/streak bonuses, achievement
-        checking, and all DB writes.  Returns the standard result dict for
-        the embed builder.
+        Handles boss-boundary capping, milestone/streak bonuses, and all
+        DB writes.  Returns the standard result dict for the embed builder.
         """
         p = preconditions
         discord_id = p["discord_id"]
@@ -4919,11 +4884,6 @@ class DigService:
                     "dm_mode": True,
                 }),
             )
-            achievements = self.check_achievements(
-                discord_id, guild_id,
-                {**tunnel, "depth": new_depth},
-                {"action": "cave_in"},
-            )
             result = self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
@@ -4932,7 +4892,7 @@ class DigService:
                 boss_encounter=False, boss_info=None,
                 has_lantern=p["has_lantern"],
                 event=None, artifact=None,
-                achievements=achievements, is_first_dig=False,
+                is_first_dig=False,
                 items_used=p["items_used"], items_used_ids=p["items_used_ids"],
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
@@ -5059,15 +5019,7 @@ class DigService:
                     discord_id, guild_id, sonar_skip_pending=0,
                 )
 
-            # Achievements
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
-            tunnel_updated = {
-                **tunnel, "depth": new_depth, "total_digs": total_digs, "streak_days": streak,
-            }
-            achievements = self.check_achievements(
-                discord_id, guild_id, tunnel_updated,
-                {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
-            )
 
             # DB writes
             run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
@@ -5104,7 +5056,7 @@ class DigService:
                 boss_encounter=boss_encounter, boss_info=boss_info,
                 has_lantern=p["has_lantern"],
                 event=event, artifact=artifact,
-                achievements=achievements, is_first_dig=False,
+                is_first_dig=False,
                 items_used=p["items_used"], items_used_ids=p["items_used_ids"],
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
@@ -5789,7 +5741,6 @@ class DigService:
         # Gather data
         inventory = self.get_inventory(discord_id, guild_id)
         relics = self._get_equipped_relics_for_player(discord_id, guild_id)
-        achievements = self.dig_repo.get_achievements(discord_id, guild_id)
         recent_helpers = self.dig_repo.get_recent_actions(
             discord_id, guild_id, action_type="help", hours=24
         )
@@ -5824,7 +5775,6 @@ class DigService:
             "layer": layer,
             "inventory": inventory,
             "relics": relics,
-            "achievements": achievements,
             "recent_helpers": recent_helpers[:5],
             "recent_events": recent_events[:5],
             "next_milestone": next_milestone,
@@ -6246,7 +6196,6 @@ class DigService:
                     payout=0,
                     new_depth=depth,
                     dialogue=p_dialogue,
-                    achievements=[],
                     round_log=round_log,
                     echo_applied=echo_applied,
                     echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
@@ -6306,10 +6255,6 @@ class DigService:
                 )
                 tunnel_updates["stat_points"] = current_points + DIG_BOSS_STAT_POINT_BONUS
                 tunnel_updates["stat_boss_awards"] = json.dumps(new_awarded)
-                # Keep the in-memory tunnel dict consistent for downstream
-                # achievement checks that pass ``{**tunnel, ...}``.
-                tunnel["stat_points"] = tunnel_updates["stat_points"]
-                tunnel["stat_boss_awards"] = tunnel_updates["stat_boss_awards"]
 
             # Every boss victory pays a flat depth-scaled base reward so a
             # win is never empty; a wagered win adds its taper-floored profit
@@ -6346,16 +6291,6 @@ class DigService:
                 },
             )
 
-            # Achievement check runs in its own txns (reads + conditional
-            # inserts + own JC rewards). A failure here leaves the boss
-            # cleared but the achievement row not inserted; it can be
-            # awarded on the next relevant check.
-            achievements = self.check_achievements(
-                discord_id, guild_id,
-                {**tunnel, "depth": new_depth},
-                {"action": "boss_win", "boundary": at_boss, "boss_progress": boss_progress},
-            )
-
             defeat_msg = self._pick_boss_outcome_line(
                 boundary=at_boss, boss_name=boss_name, won=True,
             )
@@ -6383,7 +6318,6 @@ class DigService:
                 payout=payout_delta,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
-                achievements=achievements,
                 stat_point_awarded=stat_point_awarded,
                 round_log=round_log,
                 echo_applied=echo_applied,
@@ -6453,7 +6387,6 @@ class DigService:
                 dialogue=self._pick_boss_outcome_line(
                     boundary=at_boss, boss_name=boss_name, won=False,
                 ),
-                achievements=[],
                 round_log=round_log,
                 echo_applied=echo_applied,
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
@@ -7044,7 +6977,6 @@ class DigService:
                     next_phase_title=next_title,
                     phase_event_flavor=phase_event.flavor,
                     phase_event_description=phase_event.description,
-                    achievements=[],
                     round_log=round_log,
                     is_pinnacle=True,
                     gear_broken=gear_broken_names,
@@ -7112,7 +7044,6 @@ class DigService:
                 new_depth=new_depth,
                 dialogue=f"You stand over the broken form of {pinnacle.name}.",
                 pinnacle_relic=relic_drop,
-                achievements=[],
                 round_log=round_log,
                 is_pinnacle=True,
                 pinnacle_defeated=True,
@@ -7181,7 +7112,6 @@ class DigService:
             boss_hp_max=boss_hp_max,
             soften_line=soften_line,
             dialogue=f"{boss_name} sends you reeling back {knockback} blocks!",
-            achievements=[],
             round_log=round_log,
             is_pinnacle=True,
             gear_broken=gear_broken_names,
@@ -7967,7 +7897,6 @@ class DigService:
                     jc_delta=0, payout=0,
                     new_depth=depth,
                     dialogue=p_dialogue,
-                    achievements=[],
                     round_log=round_log,
                     echo_applied=echo_applied,
                     echo_killer_id=(
@@ -8059,11 +7988,6 @@ class DigService:
             net_payout = base_reward + wager_profit
             self.player_repo.add_balance(discord_id, guild_id, net_payout)
 
-            achievements = self.check_achievements(
-                discord_id, guild_id,
-                {**tunnel, "depth": new_depth},
-                {"action": "boss_win", "boundary": at_boss, "boss_progress": boss_progress},
-            )
             defeat_msg = self._pick_boss_outcome_line(
                 boss=boss, boss_name=boss_name, boundary=at_boss, won=True,
             )
@@ -8099,7 +8023,6 @@ class DigService:
                 jc_delta=net_payout, payout=net_payout,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
-                achievements=achievements,
                 stat_point_awarded=stat_point_awarded,
                 round_log=round_log,
                 echo_applied=echo_applied,
@@ -8193,7 +8116,6 @@ class DigService:
             dialogue=self._pick_boss_outcome_line(
                 boss=boss, boss_name=boss_name, boundary=at_boss, won=False,
             ),
-            achievements=[],
             round_log=round_log,
             soften_line=soften_line,
             echo_applied=echo_applied,
@@ -9307,20 +9229,6 @@ class DigService:
         )
 
     # ------------------------------------------------------------------
-    # Achievements
-    # ------------------------------------------------------------------
-
-    def check_achievements(self, discord_id: int, guild_id, tunnel: dict, context: dict) -> list[dict]:
-        """
-        Check all achievement conditions. Return newly unlocked achievements.
-
-        context: dict with what just happened (action, advance, boss_win, etc.)
-        """
-        return self.achievement_service.check_achievements(
-            discord_id, guild_id, tunnel, context
-        )
-
-    # ------------------------------------------------------------------
     # Abandon Tunnel
     # ------------------------------------------------------------------
 
@@ -9374,13 +9282,12 @@ class DigService:
     # ------------------------------------------------------------------
 
     def get_flex_data(self, discord_id: int, guild_id) -> dict:
-        """Return tunnel info, achievements, titles, prestige emoji, stats."""
+        """Return tunnel info, titles, prestige emoji, stats."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return self._error("No tunnel found.")
 
         tunnel = dict(tunnel)
-        achievements = self.dig_repo.get_achievements(discord_id, guild_id)
 
         boss_progress = self._get_boss_progress(tunnel)
         all_bosses_beaten = all(
@@ -9404,7 +9311,6 @@ class DigService:
             prestige_level=prestige_level,
             prestige_emoji=p_emoji,
             titles=titles,
-            achievement_count=len(achievements),
             streak=tunnel.get("streak_days", 0) or 0,
             layer=self._get_layer(tunnel.get("depth", 0)).get("name", "dirt"),
         )

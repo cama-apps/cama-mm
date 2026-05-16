@@ -1826,16 +1826,6 @@ class IDigRepository(ABC):
     @abstractmethod
     def get_registry_entry(self, artifact_id: str, guild_id: int) -> dict | None: ...
 
-    # Achievements
-    @abstractmethod
-    def add_achievement(self, discord_id: int, guild_id: int, achievement_id: str, unlocked_at: int) -> bool: ...
-
-    @abstractmethod
-    def get_achievements(self, discord_id: int, guild_id: int) -> list[dict]: ...
-
-    @abstractmethod
-    def has_achievement(self, discord_id: int, guild_id: int, achievement_id: str) -> bool: ...
-
     # Atomic Operations
     @abstractmethod
     def atomic_tunnel_balance_update(
