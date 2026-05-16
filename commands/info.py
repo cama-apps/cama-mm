@@ -25,7 +25,12 @@ from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
 from utils.hero_lookup import classify_hero_role, get_hero_short_name
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.rating_insights import compute_calibration_stats, rd_to_certainty
+from utils.rating_insights import (
+    compute_calibration_stats,
+    compute_player_calibration,
+    get_os_win_probability,
+    rd_to_certainty,
+)
 
 logger = logging.getLogger("cama_bot.commands.info")
 
@@ -1678,12 +1683,23 @@ class InfoCommands(commands.Cog):
         all_players = await asyncio.to_thread(self.player_service.get_all, guild_id) if self.player_service else []
         rated_players = [p for p in all_players if p.glicko_rating is not None]
 
-        # Calculate percentile
-        if player.glicko_rating and rated_players:
-            lower_count = sum(1 for p in rated_players if (p.glicko_rating or 0) < player.glicko_rating)
-            percentile = (lower_count / len(rated_players)) * 100
-        else:
-            percentile = None
+        # Shared calibration computation (percentile, drift, performance, streak, ...)
+        calibration = compute_player_calibration(player, history, rated_players, rating_system)
+        percentile = calibration.percentile
+        drift = calibration.drift
+        matches_with_predictions = calibration.matches_with_predictions
+        actual_wins = calibration.actual_wins
+        expected_wins = calibration.expected_wins
+        overperformance = calibration.overperformance
+        favored_matches = calibration.favored_matches
+        underdog_matches = calibration.underdog_matches
+        favored_wins = calibration.favored_wins
+        underdog_wins = calibration.underdog_wins
+        last_5_delta = calibration.last_5_delta
+        streak = calibration.streak
+        streak_type = calibration.streak_type
+        upsets = calibration.upsets
+        chokes = calibration.chokes
 
         # Calculate calibration tier
         rd = player.glicko_rd or 350
@@ -1695,36 +1711,6 @@ class InfoCommands(commands.Cog):
             calibration_tier = "Developing"
         else:
             calibration_tier = "Fresh"
-
-        # Calculate drift
-        drift = None
-        if player.initial_mmr and player.glicko_rating:
-            seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
-            drift = player.glicko_rating - seed_rating
-
-        # Analyze match history
-        matches_with_predictions = [h for h in history if h.get("expected_team_win_prob") is not None]
-
-        actual_wins = sum(1 for h in matches_with_predictions if h.get("won"))
-        expected_wins = sum(h.get("expected_team_win_prob", 0) for h in matches_with_predictions)
-        overperformance = actual_wins - expected_wins if matches_with_predictions else None
-
-        # Win rate when favored vs underdog
-        favored_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) >= 0.55]
-        underdog_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) <= 0.45]
-        favored_wins = sum(1 for h in favored_matches if h.get("won"))
-        underdog_wins = sum(1 for h in underdog_matches if h.get("won"))
-
-        # Rating trend (last 5 games)
-        if len(history) >= 2:
-            recent_delta = (history[0].get("rating") or 0) - (history[-1].get("rating") or 0)
-            if len(history) > 5:
-                last_5_delta = (history[0].get("rating") or 0) - (history[4].get("rating") or 0)
-            else:
-                last_5_delta = recent_delta
-        else:
-            recent_delta = None
-            last_5_delta = None
 
         # Recent matches with predictions comparison (last 5)
         # Shows Glicko-2 vs OpenSkill expected outcomes vs actual result
@@ -1750,19 +1736,9 @@ class InfoCommands(commands.Cog):
             result_emoji = "✅" if won else "❌"
 
             # Get OpenSkill expected outcome for this match
-            os_expected = None
-            if match_id and self.match_service:
-                os_ratings = await asyncio.to_thread(self.match_service.get_os_ratings_for_match, match_id)
-                if os_ratings["team1"] and os_ratings["team2"]:
-                    team_num = h.get("team_number")
-                    if team_num == 1:
-                        os_expected = os_system.os_predict_win_probability(
-                            os_ratings["team1"], os_ratings["team2"]
-                        )
-                    elif team_num == 2:
-                        os_expected = os_system.os_predict_win_probability(
-                            os_ratings["team2"], os_ratings["team1"]
-                        )
+            os_expected = await get_os_win_probability(
+                self.match_service, os_system, match_id, h.get("team_number")
+            )
 
             # Build compact prediction string: G=Glicko, O=OpenSkill
             pred_parts = []
@@ -1775,27 +1751,6 @@ class InfoCommands(commands.Cog):
             recent_game_details.append(
                 f"{lobby_emoji}#{match_id}: {result_emoji}{result} ({pred_str}) → **{delta_str}**"
             )
-
-        # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
-        upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
-                  if h.get("won") and (h.get("expected_team_win_prob") or 0.5) < 0.45]
-        chokes = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
-                  if not h.get("won") and (h.get("expected_team_win_prob") or 0.5) > 0.55]
-        upsets.sort(key=lambda x: x[1])  # lowest prob first
-        chokes.sort(key=lambda x: x[1], reverse=True)  # highest prob first
-
-        # Current streak
-        streak = 0
-        streak_type = None
-        for h in matches_with_predictions:
-            won = h.get("won")
-            if streak_type is None:
-                streak_type = "W" if won else "L"
-                streak = 1
-            elif (won and streak_type == "W") or (not won and streak_type == "L"):
-                streak += 1
-            else:
-                break
 
         # Build embed
         embed = discord.Embed(

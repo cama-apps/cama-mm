@@ -31,7 +31,12 @@ from utils.drawing import (
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.rating_insights import get_rd_tier_name, rd_to_certainty
+from utils.rating_insights import (
+    compute_player_calibration,
+    get_os_win_probability,
+    get_rd_tier_name,
+    rd_to_certainty,
+)
 
 logger = logging.getLogger("cama_bot.commands.profile")
 
@@ -441,13 +446,14 @@ class ProfileCommands(commands.Cog):
             )
         history = full_history[:50]
 
-        # Calculate percentile
+        # Calculate percentile (needs the guild's rated population)
         all_players = await asyncio.to_thread(player_repo.get_all, guild_id)
         rated_players = [p for p in all_players if p.glicko_rating is not None]
-        percentile = None
-        if player.glicko_rating and rated_players:
-            lower_count = sum(1 for p in rated_players if (p.glicko_rating or 0) < player.glicko_rating)
-            percentile = (lower_count / len(rated_players)) * 100
+
+        # Shared calibration computation (percentile, drift, performance, streak, ...)
+        calibration = compute_player_calibration(player, history, rated_players, rating_system)
+        percentile = calibration.percentile
+        last_5_delta = calibration.last_5_delta
 
         # Calculate calibration tier and trend color
         rd = player.glicko_rd or 350
@@ -455,16 +461,10 @@ class ProfileCommands(commands.Cog):
 
         # Determine color based on recent trend
         color = COLOR_BLUE
-        last_5_delta = None
-        if len(history) >= 2:
-            if len(history) > 5:
-                last_5_delta = (history[0].get("rating") or 0) - (history[4].get("rating") or 0)
-            else:
-                last_5_delta = (history[0].get("rating") or 0) - (history[-1].get("rating") or 0)
-            if last_5_delta and last_5_delta > 10:
-                color = COLOR_GREEN
-            elif last_5_delta and last_5_delta < -10:
-                color = COLOR_RED
+        if last_5_delta and last_5_delta > 10:
+            color = COLOR_GREEN
+        elif last_5_delta and last_5_delta < -10:
+            color = COLOR_RED
 
         embed = discord.Embed(
             title=f"Profile: {target_user.display_name} > Rating",
@@ -485,9 +485,8 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="Rating Profile", value="\n".join(profile_lines), inline=False)
 
         # Drift from initial seed
-        if player.initial_mmr and player.glicko_rating:
-            seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
-            drift = player.glicko_rating - seed_rating
+        if calibration.drift is not None:
+            drift = calibration.drift
             drift_emoji = "+" if drift > 0 else "" if drift < 0 else ""
             arrow = "📈" if drift > 0 else "📉" if drift < 0 else "➡️"
             embed.add_field(
@@ -497,10 +496,10 @@ class ProfileCommands(commands.Cog):
             )
 
         # Performance vs expectations
-        matches_with_predictions = [h for h in history if h.get("expected_team_win_prob") is not None]
+        matches_with_predictions = calibration.matches_with_predictions
         if matches_with_predictions:
-            actual_wins = sum(1 for h in matches_with_predictions if h.get("won"))
-            expected_wins = sum(h.get("expected_team_win_prob", 0) for h in matches_with_predictions)
+            actual_wins = calibration.actual_wins
+            expected_wins = calibration.expected_wins
             overperformance = actual_wins - expected_wins
 
             over_emoji = "🔥" if overperformance > 0 else "💀" if overperformance < 0 else "➡️"
@@ -514,10 +513,10 @@ class ProfileCommands(commands.Cog):
             )
 
             # Win rates when favored vs underdog
-            favored_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) >= 0.55]
-            underdog_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) <= 0.45]
-            favored_wins = sum(1 for h in favored_matches if h.get("won"))
-            underdog_wins = sum(1 for h in underdog_matches if h.get("won"))
+            favored_matches = calibration.favored_matches
+            underdog_matches = calibration.underdog_matches
+            favored_wins = calibration.favored_wins
+            underdog_wins = calibration.underdog_wins
 
             winrate_lines = []
             if favored_matches:
@@ -532,18 +531,8 @@ class ProfileCommands(commands.Cog):
             trend_emoji = "📈" if last_5_delta > 0 else "📉" if last_5_delta < 0 else "➡️"
             trend_text = f"{trend_emoji} **{last_5_delta:+.0f}** over last {min(5, len(history))} games"
 
-            # Calculate current streak
-            streak = 0
-            streak_type = None
-            for h in matches_with_predictions:
-                won = h.get("won")
-                if streak_type is None:
-                    streak_type = "W" if won else "L"
-                    streak = 1
-                elif (won and streak_type == "W") or (not won and streak_type == "L"):
-                    streak += 1
-                else:
-                    break
+            streak = calibration.streak
+            streak_type = calibration.streak_type
 
             if streak and streak_type:
                 streak_emoji = "🔥" if streak_type == "W" else "💀"
@@ -562,19 +551,9 @@ class ProfileCommands(commands.Cog):
                 expected_win = glicko_prob >= 0.5
 
                 # Get OpenSkill expected outcome
-                os_prob = None
-                if match_id and match_repo:
-                    os_ratings = await asyncio.to_thread(match_repo.get_os_ratings_for_match, match_id)
-                    if os_ratings["team1"] and os_ratings["team2"]:
-                        team_num = h.get("team_number")
-                        if team_num == 1:
-                            os_prob = os_system.os_predict_win_probability(
-                                os_ratings["team1"], os_ratings["team2"]
-                            )
-                        elif team_num == 2:
-                            os_prob = os_system.os_predict_win_probability(
-                                os_ratings["team2"], os_ratings["team1"]
-                            )
+                os_prob = await get_os_win_probability(
+                    match_repo, os_system, match_id, h.get("team_number")
+                )
 
                 if won:
                     emoji = "✅" if expected_win else "🔥"  # expected win or upset
@@ -594,12 +573,8 @@ class ProfileCommands(commands.Cog):
             )
 
         # Highlights (biggest upset and choke)
-        upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
-                  if h.get("won") and (h.get("expected_team_win_prob") or 0.5) < 0.45]
-        chokes = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
-                  if not h.get("won") and (h.get("expected_team_win_prob") or 0.5) > 0.55]
-        upsets.sort(key=lambda x: x[1])
-        chokes.sort(key=lambda x: x[1], reverse=True)
+        upsets = calibration.upsets
+        chokes = calibration.chokes
 
         highlights = []
         if upsets:
