@@ -10,6 +10,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
+    BOSS_VICTORY_BASE_JC,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CHEER_COOLDOWN_SECONDS,
@@ -1090,6 +1091,38 @@ class TestBoss:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] > 24
         assert result.get("payout", 0) > 0
+
+    def test_boss_fight_win_pays_base_reward_despite_taper(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A wagered win at a high win-chance still pays the depth-scaled
+        base reward. Regression: the wager-payout taper used to floor a
+        near-certain, low-risk win at max(0, ...) = 0 JC — the player beat
+        the boss and earned nothing."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        balance_before = player_repository.get_balance(10001, guild_id)
+        # Force a win, with the win chance pinned ABOVE the wager-taper knee
+        # so the wager profit tapers to ~0 — the base reward must still pay.
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.99,
+        )
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
+        assert result["success"]
+        assert result.get("won")
+        # Boundary 25's base reward is paid even when wager profit tapers to 0.
+        assert result["payout"] >= BOSS_VICTORY_BASE_JC[25]
+        gained = player_repository.get_balance(10001, guild_id) - balance_before
+        assert gained == result["payout"]
 
     def test_boss_fight_lose(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Lose forfeits the wager and applies a depth knockback."""

@@ -1329,6 +1329,20 @@ BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
     350: (2.5, 3.8, 7.5),
 }
 
+# Flat JC every boss victory pays, on top of any wager profit, so a win is
+# never empty — the wager-payout taper can otherwise floor a low-risk,
+# high-win-chance win at 0. Keyed by boundary depth; the pinnacle (275) uses
+# its own PINNACLE_BASE_JC_REWARD instead.
+BOSS_VICTORY_BASE_JC: dict[int, int] = {
+    25: 15,
+    50: 20,
+    75: 25,
+    100: 30,
+    150: 40,
+    200: 50,
+    350: 75,
+}
+
 
 # ---------------------------------------------------------------------------
 # Artifacts
