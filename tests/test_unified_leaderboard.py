@@ -359,6 +359,35 @@ class TestEmbedBuilding:
         assert "No gambling data yet" in embed.description
 
     @pytest.mark.asyncio
+    async def test_gambling_bankruptcy_lookup_scoped_to_guild(self, mock_cog, mock_interaction):
+        """The gambling tab must fetch bankruptcy states for the view's guild.
+
+        Regression: get_bulk_states was called without guild_id, normalizing to
+        guild 0, so the bankruptcy tombstone never rendered in a real guild.
+        """
+        # One gambler who is a guild member so the entry survives filtering.
+        entry = MagicMock()
+        entry.discord_id = 123
+        mock_cog.gambling_stats_service.get_leaderboard.return_value.top_earners = [entry]
+
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.GAMBLING,
+        )
+
+        await view._load_tab_data(LeaderboardTab.GAMBLING)
+
+        mock_cog.bankruptcy_service.get_bulk_states.assert_called_once()
+        call = mock_cog.bankruptcy_service.get_bulk_states.call_args
+        # guild_id must be passed (positionally or by keyword) and equal the view's guild.
+        passed_guild = call.kwargs.get("guild_id")
+        if passed_guild is None and len(call.args) > 1:
+            passed_guild = call.args[1]
+        assert passed_guild == 12345
+
+    @pytest.mark.asyncio
     async def test_build_predictions_embed_empty(self, mock_cog, mock_interaction):
         """Test Predictions embed with no data."""
         view = UnifiedLeaderboardView(

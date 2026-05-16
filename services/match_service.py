@@ -1829,19 +1829,24 @@ class MatchService:
         """
         return self.match_repo.get_rating_history_for_match(match_id)
 
-    def get_matches_without_fantasy_data(self, limit: int = 100) -> list[dict]:
+    def get_matches_without_fantasy_data(
+        self, guild_id: int | None, limit: int = 100
+    ) -> list[dict]:
         """
         Get matches that have enrichment but no fantasy data.
 
         Used for fantasy data backfill operations.
 
         Args:
+            guild_id: Guild ID for multi-server isolation
             limit: Maximum number of matches to return
 
         Returns:
             List of match dicts needing fantasy data
         """
-        return self.match_repo.get_matches_without_fantasy_data(limit=limit)
+        return self.match_repo.get_matches_without_fantasy_data(
+            normalize_guild_id(guild_id), limit=limit
+        )
 
     def get_enriched_count(self, guild_id: int | None = None) -> int:
         """
@@ -2106,14 +2111,17 @@ class MatchService:
         """
         return self.match_repo.get_players_with_enriched_data(guild_id)
 
-    def get_last_match_participant_ids(self) -> list[int]:
+    def get_last_match_participant_ids(self, guild_id: int | None) -> list[int]:
         """
         Get participant IDs from the most recent recorded match.
+
+        Args:
+            guild_id: Guild ID for multi-server isolation
 
         Returns:
             List of Discord IDs from the last match, or empty list
         """
-        return self.match_repo.get_last_match_participant_ids()
+        return list(self.match_repo.get_last_match_participant_ids(guild_id))
 
     def get_multi_player_hero_stats(self, player_ids: list[int], guild_id: int | None) -> list[dict]:
         """

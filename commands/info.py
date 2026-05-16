@@ -238,7 +238,7 @@ class UnifiedLeaderboardView(discord.ui.View):
         # Batch fetch bankruptcy states
         bankruptcy_states = {}
         if self.cog.bankruptcy_service and all_discord_ids:
-            bankruptcy_states = await asyncio.to_thread(self.cog.bankruptcy_service.get_bulk_states, list(all_discord_ids))
+            bankruptcy_states = await asyncio.to_thread(self.cog.bankruptcy_service.get_bulk_states, list(all_discord_ids), self.guild_id)
 
         state.data = leaderboard
         state.extra = {"bankruptcy_states": bankruptcy_states}
@@ -1808,12 +1808,13 @@ class InfoCommands(commands.Cog):
         certainty = 100 - rating_system.get_rating_uncertainty_percentage(rd)
         percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
 
-        profile_text = (
-            f"**Rating:** {rating_display} ({certainty:.0f}% certain)\n"
-            f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}\n"
-            f"**Volatility:** {player.glicko_volatility:.3f}" if player.glicko_volatility else f"**Rating:** {rating_display} ({certainty:.0f}% certain)\n**Tier:** {calibration_tier} | **Percentile:** {percentile_text}"
-        )
-        embed.add_field(name="📊 Rating Profile", value=profile_text, inline=False)
+        profile_lines = [
+            f"**Rating:** {rating_display} ({certainty:.0f}% certain)",
+            f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}",
+        ]
+        if player.glicko_volatility:
+            profile_lines.append(f"**Volatility:** {player.glicko_volatility:.3f}")
+        embed.add_field(name="📊 Rating Profile", value="\n".join(profile_lines), inline=False)
 
         # Drift
         if drift is not None:

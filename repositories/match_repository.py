@@ -2273,9 +2273,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "recent_games": recent,
             }
 
-    def get_matches_without_fantasy_data(self, limit: int = 100) -> list[dict]:
+    def get_matches_without_fantasy_data(self, guild_id: int, limit: int = 100) -> list[dict]:
         """
-        Get matches that have enrichment but no fantasy data.
+        Get matches that have enrichment but no fantasy data in a guild.
 
         Returns matches where valve_match_id is set but fantasy_points is NULL.
         """
@@ -2286,12 +2286,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT DISTINCT m.match_id, m.valve_match_id, m.match_date
                 FROM matches m
                 JOIN match_participants mp ON m.match_id = mp.match_id
-                WHERE m.valve_match_id IS NOT NULL
+                WHERE m.guild_id = ?
+                  AND m.valve_match_id IS NOT NULL
                   AND mp.fantasy_points IS NULL
                 ORDER BY m.match_date DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
