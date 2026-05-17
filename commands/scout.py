@@ -29,6 +29,9 @@ HEROES_PER_PAGE = 10
 # Embed color for /scout links (matches commands/profile.py COLOR_BLUE)
 COLOR_BLUE = 0x3498DB
 
+# Discord's hard limit on an embed field's value length.
+EMBED_FIELD_LIMIT = 1024
+
 
 class TeamContext(NamedTuple):
     """Players resolved from active match/draft/lobby context.
@@ -303,6 +306,31 @@ class ScoutCommands(commands.Cog):
             lines.append(f"**{name}** — {links}")
         return lines
 
+    def _add_player_field(
+        self, embed: discord.Embed, name: str, lines: list[str]
+    ) -> None:
+        """
+        Add player lines to ``embed`` under ``name``.
+
+        Splits into multiple fields ("name", "name (2)", ...) when the joined
+        text would exceed Discord's per-field character limit, so a large flat
+        list (e.g. a full lobby of smurf-heavy players) never overflows.
+        """
+        if not lines:
+            embed.add_field(name=name, value="—", inline=False)
+            return
+        chunks: list[list[str]] = [[]]
+        for line in lines:
+            current = chunks[-1]
+            joined_len = sum(len(item) + 1 for item in current) + len(line)
+            if current and joined_len > EMBED_FIELD_LIMIT:
+                chunks.append([line])
+            else:
+                current.append(line)
+        for index, chunk in enumerate(chunks):
+            field_name = name if index == 0 else f"{name} ({index + 1})"
+            embed.add_field(name=field_name, value="\n".join(chunk), inline=False)
+
     @scout.command(
         name="report",
         description="Generate hero scouting report for players",
@@ -477,21 +505,15 @@ class ScoutCommands(commands.Cog):
             color=COLOR_BLUE,
         )
         if two_teams:
-            embed.add_field(
-                name="Radiant",
-                value="\n".join(self._build_link_lines(radiant_ids, name_map, steam_map)) or "—",
-                inline=False,
+            self._add_player_field(
+                embed, "Radiant", self._build_link_lines(radiant_ids, name_map, steam_map)
             )
-            embed.add_field(
-                name="Dire",
-                value="\n".join(self._build_link_lines(dire_ids, name_map, steam_map)) or "—",
-                inline=False,
+            self._add_player_field(
+                embed, "Dire", self._build_link_lines(dire_ids, name_map, steam_map)
             )
         else:
-            embed.add_field(
-                name="Players",
-                value="\n".join(self._build_link_lines(flat_ids, name_map, steam_map)) or "—",
-                inline=False,
+            self._add_player_field(
+                embed, "Players", self._build_link_lines(flat_ids, name_map, steam_map)
             )
 
         await safe_followup(interaction, embed=embed)
