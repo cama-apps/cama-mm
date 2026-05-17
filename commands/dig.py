@@ -87,7 +87,7 @@ PROGRESSIVE_TIPS = [
     "Tip: Relics from /dig museum are rare — gift duplicates to friends.",
     "Tip: Higher pickaxe tiers dig more blocks per action.",
     "Tip: Streaks grant bonus JC — keep digging daily!",
-    "Tip: /dig flex shows off your achievements and titles.",
+    "Tip: /dig flex shows off your mining stats and titles.",
 ]
 
 # "Dig Dug" flavor — classic arcade game references sprinkled in
@@ -550,7 +550,7 @@ class BossWagerModal(discord.ui.Modal):
             boss_name = getattr(self.result, "boss_name", "the boss")
             win_chance = getattr(self.result, "win_chance", 0)
             if getattr(self.result, "won", False):
-                payout = getattr(self.result, "payout", 0) or getattr(self.result, "jc_delta", 0)
+                payout = getattr(self.result, "payout", 0)
                 embed.description = (
                     f"Victory! You defeated **{boss_name}** and earned "
                     f"**{payout}** {JOPACOIN_EMOTE}!"
@@ -785,7 +785,7 @@ async def _resolve_carried_phase_fight(
     boss_name = getattr(result, "boss_name", "the boss")
     win_chance = getattr(result, "win_chance", 0)
     if getattr(result, "won", False):
-        payout = getattr(result, "payout", 0) or getattr(result, "jc_delta", 0)
+        payout = getattr(result, "payout", 0)
         embed.description = (
             f"Victory! You defeated **{boss_name}** and earned "
             f"**{payout}** {JOPACOIN_EMOTE}!"
@@ -798,6 +798,9 @@ async def _resolve_carried_phase_fight(
             f"You lost **{loss}** {JOPACOIN_EMOTE} and were knocked back "
             f"{knockback} blocks."
         )
+    soften_line = getattr(result, "soften_line", None)
+    if soften_line:
+        embed.add_field(name="​", value=soften_line, inline=False)
     embed.add_field(
         name="Details",
         value=(
@@ -907,7 +910,7 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
         color=0x00FF00 if won else 0xFF0000,
     )
     if won:
-        payout = getattr(result, "payout", 0) or getattr(result, "jc_delta", 0)
+        payout = getattr(result, "payout", 0)
         embed.description = (
             f"Victory! You defeated **{boss_name}** and earned "
             f"**{payout}** {JOPACOIN_EMOTE}!"
@@ -977,6 +980,9 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             embed.add_field(
                 name="Loss Penalty", value="; ".join(parts), inline=False,
             )
+    soften_line = getattr(result, "soften_line", None)
+    if soften_line:
+        embed.add_field(name="​", value=soften_line, inline=False)
     embed.add_field(
         name="Details",
         value=(
@@ -2495,11 +2501,13 @@ class DigCommands(commands.Cog):
             items = await asyncio.to_thread(
                 self.dig_service.get_inventory, interaction.user.id, guild_id
             )
-            choices = [
-                app_commands.Choice(name=item.get("name", str(item)), value=item.get("type", item.get("name", str(item))))
-                for item in (items or [])
-                if current.lower() in item.get("name", "").lower()
-            ]
+            choices: list[app_commands.Choice[str]] = []
+            for item in items or []:
+                name = item.get("name") or ""
+                if name and current.lower() in name.lower():
+                    choices.append(app_commands.Choice(
+                        name=name, value=item.get("type") or name,
+                    ))
             return choices[:25]
         except Exception:
             return []
@@ -3253,18 +3261,6 @@ class DigCommands(commands.Cog):
             if event_lines:
                 embed.add_field(name="Recent Events", value="\n".join(event_lines), inline=False)
 
-        # Stats
-        stats = getattr(info, "stats", None)
-        if stats:
-            stats_text = (
-                f"Total digs: {stats.get('total_digs', 0)}\n"
-                f"Max depth: {stats.get('max_depth', 0)}\n"
-                f"Total JC earned: {stats.get('total_jc_earned', 0)}\n"
-                f"Cave-ins survived: {stats.get('cave_ins_survived', 0)}\n"
-                f"Bosses defeated: {stats.get('bosses_defeated', 0)}"
-            )
-            embed.add_field(name="Stats", value=stats_text, inline=False)
-
         # Active ascension modifiers (prestige > 0)
         if prestige > 0:
             asc_lines = []
@@ -3758,7 +3754,7 @@ class DigCommands(commands.Cog):
     # 10. /dig_flex — Show stats and titles
     # ------------------------------------------------------------------
 
-    @dig.command(name="flex", description="Show off your mining achievements")
+    @dig.command(name="flex", description="Show off your mining stats")
     @require_guild
     async def dig_flex(self, interaction: discord.Interaction):
         if not await require_dig_channel(interaction):
@@ -3796,7 +3792,6 @@ class DigCommands(commands.Cog):
         tunnel_name = getattr(flex, "tunnel_name", "Unknown")
         layer = getattr(flex, "layer", "Dirt")
         titles = getattr(flex, "titles", [])
-        achievement_count = getattr(flex, "achievement_count", 0)
         prestige_emoji = getattr(flex, "prestige_emoji", "")
 
         has_anything = depth > 0 or total_digs > 1
@@ -3834,8 +3829,7 @@ class DigCommands(commands.Cog):
             f"Depth: **{depth}** ({layer})\n"
             f"Total digs: **{total_digs}**\n"
             f"Total JC earned: **{total_jc}**\n"
-            f"Streak: **{streak}** days\n"
-            f"Achievements: **{achievement_count}**"
+            f"Streak: **{streak}** days"
         )
         if prestige:
             stats_text += f"\nPrestige: **{prestige}**"
@@ -4190,7 +4184,7 @@ class DigCommands(commands.Cog):
             embed.set_footer(text=f"{len(items)}/{MAX_INVENTORY_SLOTS} slots used")
         else:
             embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
-            embed.set_footer(text="0/{MAX_INVENTORY_SLOTS} slots used")
+            embed.set_footer(text=f"0/{MAX_INVENTORY_SLOTS} slots used")
 
         await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
 
@@ -4621,6 +4615,54 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         embed.add_field(
             name="\u200b",
             value=event_text,
+            inline=False,
+        )
+
+    # Sonar Pulse: surface the skipped-event flavor.
+    if getattr(result, "sonar_skipped", False):
+        skipped = getattr(result, "event_preview", None)
+        skipped_d = skipped if isinstance(skipped, dict) else (
+            skipped._d if hasattr(skipped, "_d") else None
+        )
+        if isinstance(skipped_d, dict) and skipped_d.get("name"):
+            embed.add_field(
+                name="​",
+                value=(
+                    f"The rumble of *{skipped_d['name']}* passed you by, "
+                    "harmless this time."
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="​",
+                value="The cavern stirred but settled without incident.",
+                inline=False,
+            )
+    else:
+        # Lantern / Sonar Pulse preview of what stirs ahead.
+        preview = getattr(result, "event_preview", None)
+        preview_d = preview if isinstance(preview, dict) else (
+            preview._d if hasattr(preview, "_d") else None
+        )
+        if isinstance(preview_d, dict) and preview_d.get("name"):
+            embed.add_field(
+                name="​",
+                value=f"Stirring ahead: *{preview_d['name']}*.",
+                inline=False,
+            )
+
+    # Lantern boss-approach scout
+    scout = getattr(result, "boss_scout", None)
+    scout_d = scout if isinstance(scout, dict) else (
+        scout._d if hasattr(scout, "_d") else None
+    )
+    if isinstance(scout_d, dict) and scout_d.get("blocks_until"):
+        embed.add_field(
+            name="​",
+            value=(
+                f"Something looms {scout_d['blocks_until']} blocks deeper."
+            ),
             inline=False,
         )
 

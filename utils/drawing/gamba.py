@@ -156,11 +156,19 @@ def draw_gamba_chart(
 
     # Draw bet/wheel markers
     # Calculate max bet size for scaling (only consider bets, not wheel spins)
-    bet_sizes = [b["effective_bet"] for b in bet_infos if b.get("source", "bet") == "bet" and b["effective_bet"] > 0]
+    bet_sizes = [
+        b.get("effective_bet", 0)
+        for b in bet_infos
+        if b.get("source", "bet") == "bet" and b.get("effective_bet", 0) > 0
+    ]
     max_bet_size = max(bet_sizes) if bet_sizes else 1
 
     # Calculate max double or nothing size for scaling
-    don_sizes = [b["effective_bet"] for b in bet_infos if b.get("source") == "double_or_nothing" and b["effective_bet"] > 0]
+    don_sizes = [
+        b.get("effective_bet", 0)
+        for b in bet_infos
+        if b.get("source") == "double_or_nothing" and b.get("effective_bet", 0) > 0
+    ]
     max_don_size = max(don_sizes) if don_sizes else 1
 
     for bet_num, pnl, info in pnl_series:
@@ -168,9 +176,9 @@ def draw_gamba_chart(
         source = info.get("source", "bet")
 
         # Color based on outcome
-        if info["outcome"] == "won":
+        if info.get("outcome") == "won":
             color = DISCORD_GREEN
-        elif info["outcome"] == "neutral":
+        elif info.get("outcome") == "neutral":
             color = DISCORD_GREY  # Neutral (wheel lose-a-turn)
         else:
             color = DISCORD_RED
@@ -196,7 +204,7 @@ def draw_gamba_chart(
         elif source == "double_or_nothing":
             # Star/burst marker for Double or Nothing
             # Size scaled by amount risked (5-10 pixels)
-            size = 5 + int((info["effective_bet"] / max_don_size) * 5)
+            size = 5 + int((info.get("effective_bet", 0) / max_don_size) * 5)
             # Draw 8-pointed star
             points = []
             for i in range(16):
@@ -210,10 +218,10 @@ def draw_gamba_chart(
         else:
             # Regular bet marker
             # Size based on bet amount (3-8 pixels)
-            size = 3 + int((info["effective_bet"] / max_bet_size) * 5)
+            size = 3 + int((info.get("effective_bet", 0) / max_bet_size) * 5)
 
             # Diamond shape for leveraged bets, circle for normal
-            if info["leverage"] > 1:
+            if info.get("leverage", 1) > 1:
                 # Diamond
                 points = [
                     (px, py - size),

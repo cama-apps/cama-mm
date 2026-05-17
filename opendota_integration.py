@@ -80,16 +80,6 @@ class RateLimiter:
             # Wait a bit before trying again
             time.sleep(0.1)
 
-    def wait_for_token(self):
-        """Wait until a token is available (no timeout)."""
-        while True:
-            with self.lock:
-                self._refill()
-                if self.tokens >= 1:
-                    self.tokens -= 1
-                    return
-            time.sleep(0.1)
-
 
 class OpenDotaAPI:
     """Wrapper for OpenDota API calls with rate limiting."""

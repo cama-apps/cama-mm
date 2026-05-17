@@ -10,6 +10,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     ABANDON_REFUND_PCT,
+    ASCENSION_MODIFIERS,
     BOSS_BOUNDARIES,
     FREE_DIG_COOLDOWN_SECONDS,
     MAX_PRESTIGE,
@@ -408,6 +409,18 @@ class TestAscensionSystem:
         entry = bp["25"]
         status = entry.get("status") if isinstance(entry, dict) else entry
         assert status == "defeated"
+
+    def test_boss_rage_ascension_has_no_dead_phase2_flag(self):
+        """Boss Rage (lvl 4): the dead boss_phase2 flag is retired.
+
+        Phase 2 gates on prestige level, never on this flag, so leaving it in
+        the effects dict misleadingly implies the ascension grants phase 2.
+        The +50% boss payout multiplier is the ascension's real effect.
+        """
+        boss_rage = ASCENSION_MODIFIERS[4]
+        assert boss_rage.name == "Boss Rage"
+        assert "boss_phase2" not in boss_rage.effects
+        assert boss_rage.effects.get("boss_payout_multiplier") == 0.50
 
 
 class TestCorruptionSystem:

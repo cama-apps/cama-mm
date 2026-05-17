@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 
 from PIL import Image, ImageDraw
 
@@ -21,6 +22,8 @@ from utils.wrapped_drawing._common import (
     _draw_wrapped_header,
     _get_font,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def draw_story_slide(
@@ -130,9 +133,10 @@ def draw_pairwise_slide(
                 mask_draw = ImageDraw.Draw(mask)
                 mask_draw.ellipse((0, 0, 47, 47), fill=255)
                 img.paste(avatar_img, (avatar_x, y), mask)
+                avatar_img.close()
                 drew_avatar = True
             except Exception:
-                pass
+                logger.debug("Failed to render avatar for %s", discord_id, exc_info=True)
 
         if not drew_avatar:
             initial = entry.get("username", "?")[0].upper()
@@ -392,13 +396,17 @@ def wrap_chart_in_slide(
             ratio = min(max_w / chart_w, max_h / chart_h)
             new_w = int(chart_w * ratio)
             new_h = int(chart_h * ratio)
-            chart_img = chart_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            resized = chart_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            chart_img.close()
+            chart_img = resized
             chart_w, chart_h = new_w, new_h
 
         x_offset = (width - chart_w) // 2
         y_offset = 45
         img.paste(chart_img, (x_offset, y_offset), chart_img)
+        chart_img.close()
     except Exception:
+        logger.debug("Failed to render wrapped chart slide", exc_info=True)
         _center_text(draw, "Chart unavailable", title_font, 250, width, TEXT_GREY)
 
     if flavor_text:

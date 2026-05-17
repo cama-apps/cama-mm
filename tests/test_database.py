@@ -9,6 +9,7 @@ import pytest
 import remove_fake_users
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from database import Database
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
 def _expected_after_exclusions(exclusions: int) -> int:
@@ -111,6 +112,50 @@ class TestDatabase:
         assert match is not None
         assert match[3] == 1  # winning_team column
         conn.close()
+
+    def test_record_match_win_loss_scoped_to_guild(self, test_db):
+        """record_match must only bump win/loss for the recording guild.
+
+        Regression: the win/loss UPDATEs filtered only on discord_id, so a
+        multi-guild player's record was mutated in every guild at once.
+        """
+        # Same Discord IDs registered in two separate guilds.
+        team1_ids = [4001, 4002]
+        team2_ids = [4003, 4004]
+        for pid in team1_ids + team2_ids:
+            test_db.add_player(
+                discord_id=pid,
+                discord_username=f"P{pid}",
+                initial_mmr=1500,
+                guild_id=TEST_GUILD_ID,
+            )
+            test_db.add_player(
+                discord_id=pid,
+                discord_username=f"P{pid}",
+                initial_mmr=1500,
+                guild_id=TEST_GUILD_ID_SECONDARY,
+            )
+
+        # Team 1 wins, recorded only for the primary guild.
+        test_db.record_match(
+            team1_ids=team1_ids,
+            team2_ids=team2_ids,
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+        )
+
+        # Primary guild: winners have 1 win, losers have 1 loss.
+        for pid in team1_ids:
+            p = test_db.get_player(pid, guild_id=TEST_GUILD_ID)
+            assert (p.wins, p.losses) == (1, 0)
+        for pid in team2_ids:
+            p = test_db.get_player(pid, guild_id=TEST_GUILD_ID)
+            assert (p.wins, p.losses) == (0, 1)
+
+        # Secondary guild: untouched.
+        for pid in team1_ids + team2_ids:
+            p = test_db.get_player(pid, guild_id=TEST_GUILD_ID_SECONDARY)
+            assert (p.wins, p.losses) == (0, 0)
 
     def test_delete_player(self, test_db):
         """Test deleting a player."""

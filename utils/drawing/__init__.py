@@ -40,6 +40,7 @@ from utils.drawing.heroes import (
     draw_hero_grid,
     draw_hero_performance_chart,
 )
+from utils.drawing.predictions import draw_market_fair_history
 from utils.drawing.ratings import (
     draw_calibration_curve,
     draw_rating_comparison_chart,
@@ -95,4 +96,6 @@ __all__ = [
     "draw_prediction_over_time",
     "draw_advantage_graph",
     "draw_scout_report",
+    # Prediction markets
+    "draw_market_fair_history",
 ]
