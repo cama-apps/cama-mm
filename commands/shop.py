@@ -725,8 +725,30 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Check if there's an active shuffle
-        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+        def _state_value(state, name, default=None):
+            if isinstance(state, dict):
+                return state.get(name, default)
+            return getattr(state, name, default)
+
+        def _state_team_ids(state, name):
+            value = _state_value(state, name, [])
+            return value if isinstance(value, list) else []
+
+        def _looks_like_pending_state(state) -> bool:
+            return isinstance(_state_value(state, "radiant_team_ids"), list) and isinstance(
+                _state_value(state, "dire_team_ids"), list
+            )
+
+        # Check if there's an active shuffle containing this purchaser. This
+        # matters when a guild has multiple concurrent pending games.
+        pending_state = None
+        get_for_player = getattr(self.match_service, "get_pending_match_for_player", None)
+        if callable(get_for_player):
+            candidate = await asyncio.to_thread(get_for_player, guild_id, user_id)
+            if candidate is not None and _looks_like_pending_state(candidate):
+                pending_state = candidate
+        if pending_state is None:
+            pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
         if not pending_state:
             await interaction.response.send_message(
                 "There's no active shuffle. You can only protect a hero during an active game.",
@@ -735,8 +757,8 @@ class ShopCommands(commands.Cog):
             return
 
         # Check if player is in the shuffle
-        radiant_ids = pending_state.radiant_team_ids
-        dire_ids = pending_state.dire_team_ids
+        radiant_ids = _state_team_ids(pending_state, "radiant_team_ids")
+        dire_ids = _state_team_ids(pending_state, "dire_team_ids")
         all_player_ids = radiant_ids + dire_ids
 
         if user_id not in all_player_ids:
@@ -746,22 +768,6 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Check balance
-        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-        if balance < cost:
-            await interaction.response.send_message(
-                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
-                ephemeral=True,
-            )
-            return
-
-        # Defer - posting to multiple places
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
-        # Deduct cost
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-
         # Get hero info
         hero_id = int(hero)
         hero_name = get_hero_name(hero_id)
@@ -769,7 +775,69 @@ class ShopCommands(commands.Cog):
         hero_color = get_hero_color(hero_id) or 0xFFD700  # Gold fallback
 
         # Determine which team the player is on
-        team_name = "Radiant" if user_id in radiant_ids else "Dire"
+        team_side = "radiant" if user_id in radiant_ids else "dire"
+        team_name = team_side.capitalize()
+        pending_match_id = _state_value(pending_state, "pending_match_id")
+        if pending_match_id is None:
+            await interaction.response.send_message(
+                "This active game is missing its match tracking ID. Try again after reshuffling.",
+                ephemeral=True,
+            )
+            return
+
+        purchase_protected_hero = getattr(self.match_service, "purchase_protected_hero", None)
+        if not callable(purchase_protected_hero):
+            await interaction.response.send_message(
+                "This feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer before the atomic write in case SQLite is briefly waiting on a
+        # writer lock. Purchase failures are sent as followups below.
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        purchase = await asyncio.to_thread(
+            purchase_protected_hero,
+            guild_id=guild_id,
+            pending_match_id=pending_match_id,
+            discord_id=user_id,
+            hero_id=hero_id,
+            team_side=team_side,
+            cost=cost,
+        )
+        if not purchase.get("success"):
+            reason = purchase.get("reason")
+            if reason == "insufficient_balance":
+                balance = purchase.get("balance", 0)
+                await safe_followup(
+                    interaction,
+                    content=f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                    ephemeral=True,
+                )
+                return
+            if reason == "already_protected":
+                existing_hero_name = get_hero_name(purchase.get("hero_id") or hero_id)
+                await safe_followup(
+                    interaction,
+                    content=f"You already protected **{existing_hero_name}** for this game.",
+                    ephemeral=True,
+                )
+                return
+            if reason == "no_pending_match":
+                await safe_followup(
+                    interaction,
+                    content="This game is no longer active.",
+                    ephemeral=True,
+                )
+                return
+            await safe_followup(
+                interaction,
+                content="Could not protect that hero right now.",
+                ephemeral=True,
+            )
+            return
 
         # Build mentions for all other players in the shuffle
         other_player_ids = [pid for pid in all_player_ids if pid != user_id]
@@ -780,8 +848,8 @@ class ShopCommands(commands.Cog):
             title=f"First Pick Reserved: {hero_name}",
             description=(
                 f"{interaction.user.mention} has protected **{hero_name}** for **{team_name}**!\n\n"
-                f"**{team_name}** must pick **{hero_name}** as their **first pick** of the "
-                f"draft — it must be the very first hero {team_name} selects, not a later pick."
+                f"**{team_name}** should pick **{hero_name}** as their **first pick** of the "
+                f"draft. This reservation is now tracked for profile stats."
             ),
             color=hero_color,
         )
@@ -793,7 +861,7 @@ class ShopCommands(commands.Cog):
         content = f"{mentions}"
 
         # Post to the shuffle thread if it exists
-        thread_id = pending_state.thread_shuffle_thread_id
+        thread_id = _state_value(pending_state, "thread_shuffle_thread_id")
         if thread_id:
             try:
                 thread = self.bot.get_channel(thread_id)
@@ -806,7 +874,7 @@ class ShopCommands(commands.Cog):
 
         # Post to the shuffle channel if it's different from both the thread
         # and the channel where the command was invoked (to avoid double-posting)
-        channel_id = pending_state.shuffle_channel_id
+        channel_id = _state_value(pending_state, "shuffle_channel_id")
         interaction_channel_id = interaction.channel.id if interaction.channel else None
         if channel_id and channel_id != thread_id and channel_id != interaction_channel_id:
             try:

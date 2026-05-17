@@ -87,6 +87,11 @@ class IMatchService(ABC):
         ...
 
     @abstractmethod
+    def get_pending_match_for_player(self, guild_id: int | None, discord_id: int) -> dict | None:
+        """Get the pending match state containing a player."""
+        ...
+
+    @abstractmethod
     def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
         """Set the last shuffle state for a guild."""
         ...
@@ -94,6 +99,20 @@ class IMatchService(ABC):
     @abstractmethod
     def clear_last_shuffle(self, guild_id: int | None) -> None:
         """Clear the last shuffle state for a guild."""
+        ...
+
+    @abstractmethod
+    def purchase_protected_hero(
+        self,
+        *,
+        guild_id: int | None,
+        pending_match_id: int,
+        discord_id: int,
+        hero_id: int,
+        team_side: str,
+        cost: int,
+    ) -> dict:
+        """Atomically buy a protect-hero reservation for a pending match."""
         ...
 
     @abstractmethod

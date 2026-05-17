@@ -393,6 +393,12 @@ class SchemaManager:
             ("create_dig_quests_table", self._migration_create_dig_quests_table),
             # Multi-charge Grappling Hook + pending Sonar Pulse skip flag.
             ("dig_buff_fun_charges", self._migration_dig_buff_fun_charges),
+            # Track shop protect-hero purchases against pending games so
+            # profile stats can report the protected-hero win rate.
+            (
+                "create_protected_hero_purchases_table",
+                self._migration_create_protected_hero_purchases_table,
+            ),
         ]
 
     # --- Migrations ---
@@ -3197,4 +3203,44 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "tunnels", "sonar_skip_pending", "INTEGER NOT NULL DEFAULT 0",
+        )
+
+    def _migration_create_protected_hero_purchases_table(self, cursor) -> None:
+        """Store shop protect-hero purchases for pending matches."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS protected_hero_purchases (
+                purchase_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                pending_match_id INTEGER NOT NULL,
+                match_id INTEGER,
+                discord_id INTEGER NOT NULL,
+                team_side TEXT NOT NULL CHECK(team_side IN ('radiant', 'dire')),
+                hero_id INTEGER NOT NULL,
+                cost INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending', 'recorded', 'aborted')),
+                purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TIMESTAMP,
+                UNIQUE(guild_id, pending_match_id, discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_protected_hero_purchases_player
+            ON protected_hero_purchases(guild_id, discord_id, status)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_protected_hero_purchases_pending
+            ON protected_hero_purchases(guild_id, pending_match_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_protected_hero_purchases_match
+            ON protected_hero_purchases(match_id)
+            """
         )

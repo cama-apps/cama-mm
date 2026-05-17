@@ -128,6 +128,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         first_calibration_unix: int,
         effective_avoid_ids: list[int],
         effective_deal_ids: list[int],
+        pending_match_id: int | None = None,
     ) -> int:
         """Record a match and all dependent rating/pairings/consumable writes
         atomically.
@@ -420,6 +421,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     (now_unix, normalized_guild, *effective_deal_ids),
                 )
 
+            # 12. Link protect-hero shop purchases to the recorded game. The
+            # profile stat later joins this row to match_participants so match
+            # corrections and enrichment remain authoritative.
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE protected_hero_purchases
+                    SET match_id = ?, status = 'recorded', resolved_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                      AND pending_match_id = ?
+                      AND status = 'pending'
+                    """,
+                    (match_id, normalized_guild, pending_match_id),
+                )
+
             return match_id
 
     def add_rating_history(
@@ -672,6 +688,126 @@ class MatchRepository(BaseRepository, IMatchRepository):
             player_ids.update(match.get("dire_team_ids") or [])
         return player_ids
 
+    def purchase_protected_hero_atomic(
+        self,
+        *,
+        guild_id: int | None,
+        pending_match_id: int,
+        discord_id: int,
+        hero_id: int,
+        team_side: str,
+        cost: int,
+    ) -> dict:
+        """Atomically debit a player and store a protect-hero purchase."""
+        normalized = self.normalize_guild_id(guild_id)
+        team_side = team_side.lower()
+        if team_side not in {"radiant", "dire"}:
+            raise ValueError("team_side must be 'radiant' or 'dire'")
+        if cost < 0:
+            raise ValueError("cost must be non-negative")
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT 1
+                FROM pending_matches
+                WHERE guild_id = ? AND pending_match_id = ?
+                """,
+                (normalized, pending_match_id),
+            )
+            if not cursor.fetchone():
+                return {"success": False, "reason": "no_pending_match"}
+
+            cursor.execute(
+                """
+                SELECT purchase_id, hero_id, status
+                FROM protected_hero_purchases
+                WHERE guild_id = ? AND pending_match_id = ? AND discord_id = ?
+                """,
+                (normalized, pending_match_id, discord_id),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                return {
+                    "success": False,
+                    "reason": "already_protected",
+                    "purchase_id": existing["purchase_id"],
+                    "hero_id": existing["hero_id"],
+                    "status": existing["status"],
+                }
+
+            cursor.execute(
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, normalized),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return {"success": False, "reason": "not_registered"}
+
+            balance = int(row["balance"])
+            if balance < cost:
+                return {
+                    "success": False,
+                    "reason": "insufficient_balance",
+                    "balance": balance,
+                }
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND COALESCE(jopacoin_balance, 0) >= ?
+                """,
+                (cost, discord_id, normalized, cost),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    """
+                    SELECT COALESCE(jopacoin_balance, 0) AS balance
+                    FROM players
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (discord_id, normalized),
+                )
+                current = cursor.fetchone()
+                return {
+                    "success": False,
+                    "reason": "insufficient_balance",
+                    "balance": int(current["balance"]) if current else 0,
+                }
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (discord_id, normalized),
+            )
+            cursor.execute(
+                """
+                INSERT INTO protected_hero_purchases (
+                    guild_id, pending_match_id, discord_id, team_side, hero_id, cost
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (normalized, pending_match_id, discord_id, team_side, hero_id, cost),
+            )
+            return {
+                "success": True,
+                "purchase_id": cursor.lastrowid,
+                "balance_after": balance - cost,
+            }
+
     def clear_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
         """
         Clear pending match(es).
@@ -686,10 +822,26 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             if pending_match_id is not None:
                 cursor.execute(
+                    """
+                    UPDATE protected_hero_purchases
+                    SET status = 'aborted', resolved_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND pending_match_id = ? AND status = 'pending'
+                    """,
+                    (normalized, pending_match_id),
+                )
+                cursor.execute(
                     "DELETE FROM pending_matches WHERE pending_match_id = ? AND guild_id = ?",
                     (pending_match_id, normalized),
                 )
             else:
+                cursor.execute(
+                    """
+                    UPDATE protected_hero_purchases
+                    SET status = 'aborted', resolved_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND status = 'pending'
+                    """,
+                    (normalized,),
+                )
                 cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
 
     def consume_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> dict | None:
@@ -730,6 +882,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             row = rows[0]
             match_id = row["pending_match_id"]
+            cursor.execute(
+                """
+                UPDATE protected_hero_purchases
+                SET status = 'aborted', resolved_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ? AND pending_match_id = ? AND status = 'pending'
+                """,
+                (normalized, match_id),
+            )
             cursor.execute("DELETE FROM pending_matches WHERE pending_match_id = ?", (match_id,))
             payload = json.loads(row["payload"])
             payload["pending_match_id"] = match_id
@@ -1721,6 +1881,120 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return {
                 "last_hero_id": last_hero_id,
                 "hero_counts": hero_counts,
+            }
+
+    def get_player_protected_hero_stats(self, discord_id: int, guild_id: int) -> dict:
+        """
+        Get protected-hero purchase outcomes for a player.
+
+        A protected hero is only counted as a confirmed game when the recorded
+        match participant row shows that same hero. This reflects the real game
+        outcome without pretending the bot can force the draft pick.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS attempts,
+                    COALESCE(SUM(
+                        CASE WHEN mp.hero_id = php.hero_id THEN 1 ELSE 0 END
+                    ), 0) AS confirmed_games,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN mp.hero_id = php.hero_id AND mp.won = 1 THEN 1
+                            ELSE 0
+                        END
+                    ), 0) AS wins,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN mp.discord_id IS NULL
+                              OR mp.hero_id IS NULL
+                              OR mp.hero_id <= 0
+                            THEN 1
+                            ELSE 0
+                        END
+                    ), 0) AS unenriched_games,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN mp.hero_id IS NOT NULL
+                              AND mp.hero_id > 0
+                              AND mp.hero_id != php.hero_id
+                            THEN 1
+                            ELSE 0
+                        END
+                    ), 0) AS not_played_games
+                FROM protected_hero_purchases php
+                LEFT JOIN match_participants mp
+                  ON mp.match_id = php.match_id
+                 AND mp.guild_id = php.guild_id
+                 AND mp.discord_id = php.discord_id
+                WHERE php.discord_id = ?
+                  AND php.guild_id = ?
+                  AND php.status = 'recorded'
+                """,
+                (discord_id, normalized_guild),
+            )
+            row = cursor.fetchone()
+            attempts = int(row["attempts"] or 0) if row else 0
+            confirmed_games = int(row["confirmed_games"] or 0) if row else 0
+            wins = int(row["wins"] or 0) if row else 0
+            unenriched_games = int(row["unenriched_games"] or 0) if row else 0
+            not_played_games = int(row["not_played_games"] or 0) if row else 0
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS pending
+                FROM protected_hero_purchases
+                WHERE discord_id = ?
+                  AND guild_id = ?
+                  AND status = 'pending'
+                """,
+                (discord_id, normalized_guild),
+            )
+            pending_row = cursor.fetchone()
+            pending_purchases = int(pending_row["pending"] or 0) if pending_row else 0
+
+            cursor.execute(
+                """
+                SELECT
+                    php.hero_id,
+                    COUNT(*) AS games,
+                    COALESCE(SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END), 0) AS wins
+                FROM protected_hero_purchases php
+                JOIN match_participants mp
+                  ON mp.match_id = php.match_id
+                 AND mp.guild_id = php.guild_id
+                 AND mp.discord_id = php.discord_id
+                 AND mp.hero_id = php.hero_id
+                WHERE php.discord_id = ?
+                  AND php.guild_id = ?
+                  AND php.status = 'recorded'
+                GROUP BY php.hero_id
+                ORDER BY games DESC, wins DESC, php.hero_id ASC
+                LIMIT 5
+                """,
+                (discord_id, normalized_guild),
+            )
+            top_heroes = [
+                {
+                    "hero_id": int(hero_row["hero_id"]),
+                    "games": int(hero_row["games"]),
+                    "wins": int(hero_row["wins"] or 0),
+                }
+                for hero_row in cursor.fetchall()
+            ]
+
+            return {
+                "attempts": attempts,
+                "confirmed_games": confirmed_games,
+                "wins": wins,
+                "losses": confirmed_games - wins,
+                "not_played_games": not_played_games,
+                "unenriched_games": unenriched_games,
+                "pending_purchases": pending_purchases,
+                "top_heroes": top_heroes,
             }
 
     def wipe_match_enrichment(self, match_id: int) -> bool:
