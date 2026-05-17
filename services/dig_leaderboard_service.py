@@ -43,7 +43,7 @@ class DigLeaderboardService:
             depth = t.get("depth", 0)
             bar_len = max(1, int(40 * depth / max_depth))
             bar = "█" * bar_len
-            name = t.get("tunnel_name", "???")[:15]
+            name = (t.get("tunnel_name") or "???")[:15]
             lines.append(f"{i:>2}. {name:<15} {bar} {depth}m")
 
         ascii_art = "\n".join(lines)

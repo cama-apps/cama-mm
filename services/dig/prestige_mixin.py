@@ -188,7 +188,6 @@ class PrestigeMixin:
         from services.dig_constants import RELICS
 
         prestige_jc_grant = 1000
-        self.player_repo.add_balance(discord_id, guild_id, prestige_jc_grant)
         eligible_relic_ids = [
             r.id for r in RELICS if r.rarity in ("Rare", "Legendary")
         ]
@@ -205,27 +204,32 @@ class PrestigeMixin:
         prestige_grant = {"jc": prestige_jc_grant, "relic": granted_relic}
 
         # Reset tunnel — including pinnacle state so the next cycle re-rolls
-        # a fresh pinnacle from the rotating pool on first encounter.
+        # a fresh pinnacle from the rotating pool on first encounter. The
+        # tunnel reset and the flat JC grant commit together so a crash
+        # can't reset the run without paying the grant (or vice versa).
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
-        self.dig_repo.update_tunnel(
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=0,
-            boss_progress=json.dumps(boss_progress),
-            boss_attempts=0,
-            prestige_level=prestige_level,
-            prestige_perks=json.dumps(current_perks),
-            cheer_data=None,
-            injury_state=None,
-            best_run_score=best_score,
-            current_run_jc=0,
-            current_run_artifacts=0,
-            current_run_events=0,
-            total_prestige_score=total_score,
-            mutations=mutations_json,
-            pinnacle_boss_id=None,
-            pinnacle_phase=0,
-            pinnacle_hp_remaining=None,
-            pinnacle_last_engaged_at=None,
+            balance_delta=prestige_jc_grant,
+            tunnel_updates={
+                "depth": 0,
+                "boss_progress": json.dumps(boss_progress),
+                "boss_attempts": 0,
+                "prestige_level": prestige_level,
+                "prestige_perks": json.dumps(current_perks),
+                "cheer_data": None,
+                "injury_state": None,
+                "best_run_score": best_score,
+                "current_run_jc": 0,
+                "current_run_artifacts": 0,
+                "current_run_events": 0,
+                "total_prestige_score": total_score,
+                "mutations": mutations_json,
+                "pinnacle_boss_id": None,
+                "pinnacle_phase": 0,
+                "pinnacle_hp_remaining": None,
+                "pinnacle_last_engaged_at": None,
+            },
         )
 
         self.dig_repo.log_action(
