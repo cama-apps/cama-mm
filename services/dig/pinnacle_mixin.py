@@ -863,17 +863,19 @@ class PinnacleMixin:
                 "last_engaged_at": int(now),
             }
             prev_max_depth = tunnel.get("max_depth", 0) or 0
-            self.dig_repo.update_tunnel(
+            self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
-                depth=new_depth,
-                max_depth=max(prev_max_depth, new_depth),
-                boss_progress=json.dumps(boss_progress),
-                boss_attempts=0,
-                cheer_data=None,
-                last_dig_at=now,
-                pinnacle_phase=0,
+                balance_delta=total_reward,
+                tunnel_updates={
+                    "depth": new_depth,
+                    "max_depth": max(prev_max_depth, new_depth),
+                    "boss_progress": json.dumps(boss_progress),
+                    "boss_attempts": 0,
+                    "cheer_data": None,
+                    "last_dig_at": now,
+                    "pinnacle_phase": 0,
+                },
             )
-            self.player_repo.add_balance(discord_id, guild_id, total_reward)
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id,
                 action_type="pinnacle_fight",
@@ -924,16 +926,17 @@ class PinnacleMixin:
         # Forfeited on a loss — drop the carry markers so a retry starts fresh.
         self._clear_carried_wager(boss_progress, PINNACLE_DEPTH)
 
-        self.dig_repo.update_tunnel(
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=new_depth,
-            boss_progress=json.dumps(boss_progress),
-            boss_attempts=attempts,
-            cheer_data=None,
-            last_dig_at=now,
+            balance_delta=(-wager if wager > 0 else 0),
+            tunnel_updates={
+                "depth": new_depth,
+                "boss_progress": json.dumps(boss_progress),
+                "boss_attempts": attempts,
+                "cheer_data": None,
+                "last_dig_at": now,
+            },
         )
-        if wager > 0:
-            self.player_repo.add_balance(discord_id, guild_id, -wager)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="pinnacle_fight",
