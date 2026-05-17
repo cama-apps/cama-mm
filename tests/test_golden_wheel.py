@@ -108,6 +108,30 @@ class TestGoldenWheelWedges:
         )
         assert ev < 0, f"Golden wheel EV should be negative, got {ev:.2f}"
 
+    def test_live_golden_wheel_overextended_label_shows_value(self):
+        """
+        The live golden wheel must display the dynamically-computed OVEREXTENDED
+        penalty as the wedge label (e.g. "-372"), not the static "OVEREXTENDED"
+        placeholder. This matches how the static GOLDEN_WHEEL_WEDGES already
+        behaves, so spinners always see the actual value they are risking.
+        """
+        from utils.wheel_drawing import compute_live_golden_wedges
+
+        wedges = compute_live_golden_wedges(
+            spinner_balance=2500,
+            other_top_balances=[2000, 1800],
+            rank_next_balance=1200,
+            total_positive_balance=25000,
+            bottom_player_balances=[10] * 30,
+        )
+
+        overextended = [w for w in wedges if w[2] == "#4a3000"]
+        assert len(overextended) == 2, f"Expected 2 OVEREXTENDED wedges, got: {overextended}"
+        for label, value, color in overextended:
+            assert isinstance(value, int) and value < 0, f"value {value!r} should be a negative int"
+            assert label != "OVEREXTENDED", "live wheel still shows the static placeholder label"
+            assert label == str(value), f"label {label!r} should be the computed value {value}"
+
     def test_get_wheel_wedges_returns_golden_when_flag_set(self):
         from utils.wheel_drawing import (
             BANKRUPT_WHEEL_WEDGES,
