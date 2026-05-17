@@ -396,7 +396,9 @@ def wrap_chart_in_slide(
             ratio = min(max_w / chart_w, max_h / chart_h)
             new_w = int(chart_w * ratio)
             new_h = int(chart_h * ratio)
-            chart_img = chart_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            resized = chart_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            chart_img.close()
+            chart_img = resized
             chart_w, chart_h = new_w, new_h
 
         x_offset = (width - chart_w) // 2
