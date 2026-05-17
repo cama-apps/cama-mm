@@ -1104,7 +1104,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 SELECT rh.*, m.lobby_type
                 FROM rating_history rh
-                LEFT JOIN matches m ON rh.match_id = m.match_id
+                LEFT JOIN matches m ON rh.match_id = m.match_id AND m.guild_id = rh.guild_id
                 WHERE rh.discord_id = ? AND rh.guild_id = ?
                 ORDER BY rh.timestamp DESC
                 LIMIT ?
