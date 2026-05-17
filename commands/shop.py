@@ -780,8 +780,8 @@ class ShopCommands(commands.Cog):
             title=f"First Pick Reserved: {hero_name}",
             description=(
                 f"{interaction.user.mention} has protected **{hero_name}** for **{team_name}**!\n\n"
-                f"**{team_name}** should first-pick this hero as early as possible "
-                f"to avoid draft complications."
+                f"**{team_name}** must pick **{hero_name}** as their **first pick** of the "
+                f"draft — it must be the very first hero {team_name} selects, not a later pick."
             ),
             color=hero_color,
         )
