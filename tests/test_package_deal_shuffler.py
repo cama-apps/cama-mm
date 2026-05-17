@@ -157,14 +157,22 @@ class TestPackageDealWithPoolShuffle:
     """Tests for package deals with >10 player shuffles."""
 
     @pytest.fixture
-    def sample_14_players(self):
-        """Create 14 sample players."""
+    def sample_pool_players(self):
+        """Create 11 sample players — the smallest pool that still exercises
+        the >10 ``shuffle_from_pool`` path (one player is excluded).
+
+        Kept at 11 (not 14) deliberately: ``shuffle_from_pool`` cost grows
+        combinatorially with pool size (~0.13s at 11 vs ~11s at 14), and this
+        test only needs the pool branch + deal pass-through, not a specific
+        pool size. The 14-player path is covered by the branch-and-bound tests
+        below, which genuinely require exactly 14.
+        """
         return [
             Player(f"Player{i}", 4000, preferred_roles=["3"], discord_id=100 + i)
-            for i in range(14)
+            for i in range(11)
         ]
 
-    def test_pool_shuffle_with_deals(self, sample_14_players):
+    def test_pool_shuffle_with_deals(self, sample_pool_players):
         """Test that pool shuffle passes deals correctly."""
         shuffler = BalancedShuffler(
             use_glicko=True,
@@ -176,7 +184,7 @@ class TestPackageDealWithPoolShuffle:
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
 
         team1, team2, excluded = shuffler.shuffle_from_pool(
-            sample_14_players,
+            sample_pool_players,
             deals=deals,
         )
 
