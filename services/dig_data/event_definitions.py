@@ -1,8 +1,8 @@
 """Random event definitions for /dig.
 
-Extracted from ``services.dig_data.events``; see that module for the public
-re-export shim. The ``RandomEvent`` dataclass and its components live in
-``services.dig_data.event_types``.
+Extracted from the original ``dig_constants`` module; see
+``services.dig_constants`` for the public facade. The ``RandomEvent``
+dataclass and its components live in ``services.dig_data.event_types``.
 """
 
 from __future__ import annotations

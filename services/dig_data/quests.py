@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from services.dig_data.events import RANDOM_EVENTS
+from services.dig_data.event_definitions import RANDOM_EVENTS
 
 # ---------------------------------------------------------------------------
 # Quests

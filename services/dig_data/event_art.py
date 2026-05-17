@@ -1,7 +1,7 @@
 """Event ASCII art registry for /dig (roguelike dungeon crawler style).
 
-Extracted from ``services.dig_data.events``; see that module for the public
-re-export shim.
+Extracted from the original ``dig_constants`` module; see
+``services.dig_constants`` for the public facade.
 """
 
 from __future__ import annotations
