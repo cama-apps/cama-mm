@@ -360,14 +360,15 @@ class Database:
 
     def record_match(
         self,
-        radiant_team_ids: list[int] = None,
-        dire_team_ids: list[int] = None,
-        winning_team: str = None,  # "radiant" or "dire"
+        radiant_team_ids: list[int] | None = None,
+        dire_team_ids: list[int] | None = None,
+        winning_team: str | None = None,  # "radiant" or "dire"
         # Backward compatibility: support old team1/team2 format
-        team1_ids: list[int] = None,
-        team2_ids: list[int] = None,
+        team1_ids: list[int] | None = None,
+        team2_ids: list[int] | None = None,
         dotabuff_match_id: str | None = None,
         notes: str | None = None,
+        guild_id: int | None = None,
     ) -> int:
         """
         Record a match result.
@@ -389,10 +390,13 @@ class Database:
             team2_ids: Discord IDs of team 2 players (old API - backward compat)
             dotabuff_match_id: Optional Dotabuff match ID
             notes: Optional notes about the match
+            guild_id: Guild ID for multi-guild isolation
 
         Returns:
             Match ID
         """
+        normalized_gid = self._normalize_guild_id(guild_id)
+
         # Determine which API is being used and normalize to team1=Radiant, team2=Dire
         if isinstance(winning_team, int):
             # Old API: team1/team2 with winning_team as 1 or 2
@@ -424,8 +428,8 @@ class Database:
             # Insert match record (team1=Radiant, team2=Dire)
             cursor.execute(
                 """
-                INSERT INTO matches (team1_players, team2_players, winning_team, dotabuff_match_id, notes)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO matches (team1_players, team2_players, winning_team, dotabuff_match_id, notes, guild_id)
+                VALUES (?, ?, ?, ?, ?, ?)
             """,
                 (
                     json.dumps(team1_ids),
@@ -433,6 +437,7 @@ class Database:
                     winning_team_db,
                     dotabuff_match_id,
                     notes,
+                    normalized_gid,
                 ),
             )
 
@@ -468,17 +473,17 @@ class Database:
                     cursor.execute(
                         """
                         UPDATE players SET wins = wins + 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ?
+                        WHERE discord_id = ? AND guild_id = ?
                     """,
-                        (player_id,),
+                        (player_id, normalized_gid),
                     )
                 else:
                     cursor.execute(
                         """
                         UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ?
+                        WHERE discord_id = ? AND guild_id = ?
                     """,
-                        (player_id,),
+                        (player_id, normalized_gid),
                     )
 
             for player_id in team2_ids:
@@ -486,17 +491,17 @@ class Database:
                     cursor.execute(
                         """
                         UPDATE players SET wins = wins + 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ?
+                        WHERE discord_id = ? AND guild_id = ?
                     """,
-                        (player_id,),
+                        (player_id, normalized_gid),
                     )
                 else:
                     cursor.execute(
                         """
                         UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ?
+                        WHERE discord_id = ? AND guild_id = ?
                     """,
-                        (player_id,),
+                        (player_id, normalized_gid),
                     )
 
             return match_id

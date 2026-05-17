@@ -96,7 +96,7 @@ async def do_fizzle_consolation_spin(
         if interaction.channel:
             await interaction.channel.send(embed=embed)
     except Exception as e:
-        logger.error(f"Fizzle consolation spin error: {e}")
+        logger.error(f"Fizzle consolation spin error: {e}", exc_info=True)
 
 
 

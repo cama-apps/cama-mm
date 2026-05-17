@@ -14,14 +14,14 @@ from config import (
     RECALIBRATION_INITIAL_RD,
     RECALIBRATION_INITIAL_VOLATILITY,
 )
-
-# Minimum games required before recalibration is allowed
-RECALIBRATION_MIN_GAMES = 5
 from repositories.player_repository import PlayerRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from utils.guild import normalize_guild_id
 
 logger = logging.getLogger("cama_bot.services.recalibration")
+
+# Minimum games required before recalibration is allowed
+RECALIBRATION_MIN_GAMES = 5
 
 
 @dataclass

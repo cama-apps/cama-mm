@@ -76,13 +76,13 @@ def _get_text_size(font: ImageFont.FreeTypeFont, text: str) -> tuple[int, int]:
 
 # ─── Heatmap color utilities (used by the scout report) ──────────────────
 
-def _lerp_color(c1: tuple, c2: tuple, t: float) -> tuple:
+def _lerp_color(c1: tuple, c2: tuple, t: float) -> tuple[int, int, int]:
     """Linearly interpolate between two RGB tuples."""
     t = max(0.0, min(1.0, t))
     return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
 
 
-def _heatmap_contest_rate(rate: float) -> tuple:
+def _heatmap_contest_rate(rate: float) -> tuple[int, int, int]:
     """Heatmap for contest rate: grey (0%) -> amber (50%) -> red (100%)."""
     rate = max(0.0, min(1.0, rate))
     if rate < 0.5:
@@ -90,7 +90,7 @@ def _heatmap_contest_rate(rate: float) -> tuple:
     return _lerp_color((255, 180, 50), (255, 60, 60), (rate - 0.5) / 0.5)
 
 
-def _heatmap_winrate(rate: float) -> tuple:
+def _heatmap_winrate(rate: float) -> tuple[int, int, int]:
     """Heatmap for win rate: red (0%) -> yellow (50%) -> green (100%)."""
     rate = max(0.0, min(1.0, rate))
     if rate < 0.5:

@@ -131,9 +131,28 @@ def test_blood_pact_skim_state_persists(buff_service):
     assert pact is not None
     assert pact["discord_id"] == USER
     # Update the skim total — should round-trip via repo.
-    buff_service.record_blood_pact_skim(pact["id"], 25)
+    buff_service.record_blood_pact_skim(pact["id"], pact["data"], 25)
     refreshed = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
     assert refreshed["data"]["skimmed_total"] == 25
+
+
+def test_record_blood_pact_skim_preserves_stored_cap_and_rate(buff_repo, buff_service):
+    """Recording a skim must not clobber the pact's stored cap / skim_rate —
+    only skimmed_total should change."""
+    from services.buff_service import BUFF_BLOOD_PACT
+
+    buff_repo.grant(
+        USER, TEST_GUILD_ID, BUFF_BLOOD_PACT, int(time.time()) + 3600,
+        target_id=TARGET,
+        data={"skimmed_total": 5, "cap": 80, "skim_rate": 0.25},
+    )
+    pact = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
+    buff_service.record_blood_pact_skim(pact["id"], pact["data"], 30)
+
+    refreshed = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
+    assert refreshed["data"]["skimmed_total"] == 30
+    assert refreshed["data"]["cap"] == 80
+    assert refreshed["data"]["skim_rate"] == 0.25
 
 
 def test_dark_bargain_debt_fetches(buff_service):

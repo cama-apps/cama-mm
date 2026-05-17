@@ -57,6 +57,11 @@ def build_disburse_embed(proposal) -> discord.Embed:
         inline=True,
     )
     embed.add_field(
+        name="💎 Richest",
+        value=f"All to the richest player\n**{votes.get('richest', 0)}** votes",
+        inline=True,
+    )
+    embed.add_field(
         name="❌ Cancel",
         value=f"Keep funds in nonprofit\n**{votes.get('cancel', 0)}** votes",
         inline=True,
@@ -109,7 +114,7 @@ async def build_disburse_votes_embed(proposal, disburse_service) -> discord.Embe
 
     # Vote breakdown
     vote_lines = []
-    for method in ["even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"]:
+    for method in disburse_service.METHODS:
         count = votes.get(method, 0)
         pct = (count / total_votes * 100) if total_votes > 0 else 0
         label = disburse_service.METHOD_LABELS[method]

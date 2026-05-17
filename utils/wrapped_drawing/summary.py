@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
@@ -25,6 +26,8 @@ from utils.wrapped_drawing._common import (
     _draw_wrapped_header,
     _get_font,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from services.wrapped_service import PersonalRecord, PlayerWrapped, ServerWrapped
@@ -326,7 +329,7 @@ def draw_records_slide(
                     hero_y_offset = (row_height - 27) // 2
                     img.paste(hero_img, (hero_x, y + hero_y_offset), hero_img)
             except Exception:
-                pass
+                logger.debug("Failed to render hero image for record", exc_info=True)
 
         label_x = 90
         if is_na:

@@ -589,24 +589,27 @@ class OpenDotaPlayerService:
             from dotabase import Hero, dotabase_session
 
             session = dotabase_session()
-            heroes = session.query(Hero).all()
+            try:
+                heroes = session.query(Hero).all()
 
-            result = {}
-            for hero in heroes:
-                if not hero.roles or not hero.role_levels:
-                    continue
+                result = {}
+                for hero in heroes:
+                    if not hero.roles or not hero.role_levels:
+                        continue
 
-                roles = hero.roles.split("|")
-                levels = hero.role_levels.split("|")
+                    roles = hero.roles.split("|")
+                    levels = hero.role_levels.split("|")
 
-                role_weights = {}
-                for role, level in zip(roles, levels):
-                    try:
-                        role_weights[role] = int(level)
-                    except ValueError:
-                        role_weights[role] = 1
+                    role_weights = {}
+                    for role, level in zip(roles, levels):
+                        try:
+                            role_weights[role] = int(level)
+                        except ValueError:
+                            role_weights[role] = 1
 
-                result[hero.id] = role_weights
+                    result[hero.id] = role_weights
+            finally:
+                session.close()
 
             return result
         except ImportError:

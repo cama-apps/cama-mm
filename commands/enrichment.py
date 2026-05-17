@@ -745,7 +745,9 @@ class EnrichmentCommands(commands.Cog):
     ):
         """Re-enrich matches that have enrichment but no fantasy data."""
         matches = await asyncio.to_thread(
-            self.match_service.get_matches_without_fantasy_data, limit=100
+            functools.partial(
+                self.match_service.get_matches_without_fantasy_data, guild_id, limit=100
+            )
         )
 
         if not matches:

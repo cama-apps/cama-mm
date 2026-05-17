@@ -21,7 +21,8 @@ class DraftPhase(Enum):
 
 
 # Snake draft order: which captain picks at each step (0 = first captain, 1 = second captain)
-# Order: 1-2-2-2-1 means: first picks 1, second picks 2, first picks 2, second picks 1
+# 8 picks total, in consecutive runs of 1-2-2-2-1:
+# first picks 1, second picks 2, first picks 2, second picks 2, first picks 1.
 SNAKE_DRAFT_ORDER = [0, 1, 1, 0, 0, 1, 1, 0]
 
 

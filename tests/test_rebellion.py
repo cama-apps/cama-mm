@@ -769,3 +769,51 @@ class TestApplyWarEffects:
         wedges = self._get_normal_wedges()
         modified = apply_war_effects(wedges, war_state)
         assert modified == wedges
+
+
+# ---------------------------------------------------------------------------
+# War stats: exact-membership counting
+# ---------------------------------------------------------------------------
+
+
+class TestWarStats:
+    def _finalize_war(self, rebellion_repo, war_id, outcome, defend_voters):
+        """Set outcome and defend voter JSON directly for a war."""
+        with rebellion_repo.connection() as conn:
+            conn.execute(
+                "UPDATE wheel_wars SET outcome = ?, defend_voter_ids = ? WHERE war_id = ?",
+                (outcome, json.dumps(defend_voters), war_id),
+            )
+
+    def test_substring_ids_not_cross_counted(self, rebellion_repo):
+        """get_player_war_stats must count exact voter membership, not substrings.
+
+        discord_id 123 must not be credited with wars that only contain
+        1234 / 51234 in the voter JSON arrays.
+        """
+        guild_id = TEST_GUILD_ID
+        now = int(time.time())
+
+        # War A: attacked & defended only by 1234 (a superstring of 123).
+        war_a = rebellion_repo.create_war(guild_id, 999001, now + 900, now)
+        rebellion_repo.add_attack_vote(war_a, 1234, bankruptcy_count=0)
+        self._finalize_war(rebellion_repo, war_a, "attackers_win", [1234])
+
+        # War B: attacked & defended by 123 itself.
+        war_b = rebellion_repo.create_war(guild_id, 999002, now + 900, now)
+        rebellion_repo.add_attack_vote(war_b, 123, bankruptcy_count=0)
+        self._finalize_war(rebellion_repo, war_b, "defenders_win", [123])
+
+        stats_123 = rebellion_repo.get_player_war_stats(123, guild_id)
+        # 123 only attacked/defended war B, not war A.
+        assert sum(stats_123["attacked"].values()) == 1
+        assert sum(stats_123["defended"].values()) == 1
+        assert stats_123["attacked"].get("attackers_win", 0) == 0
+        assert stats_123["defended"].get("attackers_win", 0) == 0
+
+        stats_1234 = rebellion_repo.get_player_war_stats(1234, guild_id)
+        # 1234 only attacked/defended war A, not war B.
+        assert sum(stats_1234["attacked"].values()) == 1
+        assert sum(stats_1234["defended"].values()) == 1
+        assert stats_1234["attacked"].get("defenders_win", 0) == 0
+        assert stats_1234["defended"].get("defenders_win", 0) == 0

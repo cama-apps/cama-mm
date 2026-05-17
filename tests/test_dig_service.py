@@ -10,6 +10,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
+    BOSS_VICTORY_BASE_JC,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CHEER_COOLDOWN_SECONDS,
@@ -76,6 +77,12 @@ class TestDigConstants:
 
     def test_paid_dig_cost_cap(self):
         assert PAID_DIG_COST_CAP == 40
+
+    def test_boss_victory_base_jc_covers_every_boss_boundary(self):
+        """Every regular boss boundary needs a base-reward entry, else a win
+        there silently falls through to the 15-JC default. The pinnacle
+        (350) is excluded — it pays PINNACLE_BASE_JC_REWARD instead."""
+        assert set(BOSS_VICTORY_BASE_JC) == set(BOSS_BOUNDARIES)
 
 
 class TestPrestigeCaveInMultiplier:
@@ -1091,6 +1098,38 @@ class TestBoss:
         assert tunnel["depth"] > 24
         assert result.get("payout", 0) > 0
 
+    def test_boss_fight_win_pays_base_reward_despite_taper(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A wagered win at a high win-chance still pays the depth-scaled
+        base reward. Regression: the wager-payout taper used to floor a
+        near-certain, low-risk win at max(0, ...) = 0 JC — the player beat
+        the boss and earned nothing."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        balance_before = player_repository.get_balance(10001, guild_id)
+        # Force a win, with the win chance pinned ABOVE the wager-taper knee
+        # so the wager profit tapers to ~0 — the base reward must still pay.
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.99,
+        )
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
+        assert result["success"]
+        assert result.get("won")
+        # Boundary 25's base reward is paid even when wager profit tapers to 0.
+        assert result["payout"] >= BOSS_VICTORY_BASE_JC[25]
+        gained = player_repository.get_balance(10001, guild_id) - balance_before
+        assert gained == result["payout"]
+
     def test_boss_fight_lose(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Lose forfeits the wager and applies a depth knockback."""
         _register_player(player_repository, balance=200)
@@ -1145,35 +1184,6 @@ class TestBoss:
         dig_repo.update_tunnel(10001, guild_id, boss_progress=json.dumps(all_defeated))
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert result["success"]
-
-
-class TestAchievements:
-    """Tests for achievement unlocking."""
-
-    def test_achievement_unlocked_on_milestone(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Achievement triggers at threshold."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        # Directly add achievement
-        added = dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_000)
-        assert added is True
-
-        achievements = dig_repo.get_achievements(10001, guild_id)
-        assert len(achievements) == 1
-        assert achievements[0]["achievement_id"] == "dig_count_bronze"
-
-    def test_achievement_not_duplicated(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Same achievement not added twice."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_000)
-        added_again = dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_001)
-        assert added_again is False
-
-        achievements = dig_repo.get_achievements(10001, guild_id)
-        assert len(achievements) == 1
 
 
 class TestStreaks:

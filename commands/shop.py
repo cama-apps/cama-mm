@@ -56,19 +56,19 @@ logger = logging.getLogger("cama_bot.commands.shop")
 def _today_4am_pst_unix() -> int:
     """Return the unix timestamp of today's 4 AM PST reset boundary.
 
-    'Today' uses the same convention as `services.mana_service.get_today_pst`:
-    if the current LA time is before 4 AM, the boundary is yesterday's 4 AM.
+    Derived from ``utils.game_date``, which fixes the reset to UTC-8 (no DST)
+    so the boundary is stable across the spring/fall transitions: the current
+    game-date string is parsed back as a 4 AM UTC-8 datetime. If the current
+    Pacific time is before 4 AM, the game date is still the prior day, so the
+    boundary is yesterday's 4 AM.
     """
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
+    import datetime as _dt
 
-    from services.mana_service import RESET_HOUR, RESET_TZ
+    from utils.game_date import _PST, get_game_date
 
-    la_tz = ZoneInfo(RESET_TZ)
-    now_la = datetime.now(la_tz)
-    boundary = now_la.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0)
-    if now_la.hour < RESET_HOUR:
-        boundary = boundary - timedelta(days=1)
+    boundary = _dt.datetime.strptime(get_game_date(), "%Y-%m-%d").replace(
+        hour=4, tzinfo=_PST,
+    )
     return int(boundary.timestamp())
 
 # Bounty Hunter theme
@@ -780,8 +780,8 @@ class ShopCommands(commands.Cog):
             title=f"First Pick Reserved: {hero_name}",
             description=(
                 f"{interaction.user.mention} has protected **{hero_name}** for **{team_name}**!\n\n"
-                f"**{team_name}** should first-pick this hero as early as possible "
-                f"to avoid draft complications."
+                f"**{team_name}** must pick **{hero_name}** as their **first pick** of the "
+                f"draft — it must be the very first hero {team_name} selects, not a later pick."
             ),
             color=hero_color,
         )
@@ -1750,6 +1750,9 @@ class ShopCommands(commands.Cog):
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            if not eligible:
+                await _refund("No eligible targets to scorch; refunded.")
+                return
             targets = random.sample(eligible, min(3, len(eligible)))
             total_destroyed = 0
             victim_lines = []
@@ -1859,6 +1862,9 @@ class ShopCommands(commands.Cog):
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            if not eligible:
+                await _refund("No living souls to drain; refunded.")
+                return
             total_drained = 0
             for p in eligible:
                 await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -1)

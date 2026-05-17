@@ -262,14 +262,19 @@ def get_pickaxe_art(tier_index: int) -> discord.File | None:
 
 
 def _load_icon_image(directory: Path, base_name: str) -> Image.Image | None:
-    """Load an icon as a PIL Image for composition, with byte caching."""
+    """Load an icon as a PIL Image for composition, with byte caching.
+
+    The returned image is detached from the underlying BytesIO; the caller
+    owns it and must ``.close()`` it once composed.
+    """
     asset_path = _find_asset(directory, base_name)
     if not asset_path:
         return None
     data = _load_cached_bytes(asset_path)
     if not data:
         return None
-    return Image.open(io.BytesIO(data)).convert("RGBA")
+    with Image.open(io.BytesIO(data)) as im:
+        return im.convert("RGBA")
 
 
 def compose_items_used(item_ids: list[str]) -> discord.File | None:
@@ -283,22 +288,28 @@ def compose_items_used(item_ids: list[str]) -> discord.File | None:
     for item_id in item_ids:
         img = _load_icon_image(ASSETS_DIR / "items", item_id)
         if img:
-            icons.append(img.resize((icon_size, icon_size), Image.Resampling.LANCZOS))
+            resized = img.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+            img.close()
+            icons.append(resized)
 
     if not icons:
         return None
 
-    total_w = len(icons) * icon_size + (len(icons) - 1) * gap
-    strip = Image.new("RGBA", (total_w, icon_size), (0, 0, 0, 0))
-    x = 0
-    for ic in icons:
-        strip.paste(ic, (x, 0), ic)
-        x += ic.width + gap
+    try:
+        total_w = len(icons) * icon_size + (len(icons) - 1) * gap
+        strip = Image.new("RGBA", (total_w, icon_size), (0, 0, 0, 0))
+        x = 0
+        for ic in icons:
+            strip.paste(ic, (x, 0), ic)
+            x += ic.width + gap
 
-    buf = io.BytesIO()
-    strip.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return _file_from_buf(buf, "items_used.png")
+        buf = io.BytesIO()
+        strip.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+        return _file_from_buf(buf, "items_used.png")
+    finally:
+        for ic in icons:
+            ic.close()
 
 
 _SHOP_ITEM_IDS = [
@@ -321,11 +332,13 @@ def compose_shop_grid() -> discord.File | None:
         img = _load_icon_image(ASSETS_DIR / "items", item_id)
         if not img:
             continue
-        img = img.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+        resized = img.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+        img.close()
         row, col = divmod(placed, cols)
         x = col * (icon_size + gap)
         y = row * (icon_size + gap)
-        grid.paste(img, (x, y), img)
+        grid.paste(resized, (x, y), resized)
+        resized.close()
         placed += 1
 
     if not placed:
