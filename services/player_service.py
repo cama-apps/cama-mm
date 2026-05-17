@@ -624,6 +624,18 @@ class PlayerService:
         """
         return self.player_repo.get_steam_ids(discord_id)
 
+    def get_steam_ids_bulk(self, discord_ids: list[int]) -> dict[int, list[int]]:
+        """
+        Get all Steam IDs for multiple players in one query.
+
+        Args:
+            discord_ids: List of Discord IDs
+
+        Returns:
+            Dict mapping each Discord ID to its list of Steam IDs (primary first)
+        """
+        return self.player_repo.get_steam_ids_bulk(discord_ids)
+
     def add_steam_id(self, discord_id: int, steam_id: int, is_primary: bool = False) -> None:
         """
         Link a Steam ID to a player's account.

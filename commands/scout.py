@@ -11,6 +11,7 @@ Generates hero scouting reports for Dota 2 players showing:
 import asyncio
 import logging
 import re
+from typing import NamedTuple
 
 import discord
 from discord import app_commands
@@ -24,6 +25,26 @@ logger = logging.getLogger("cama_bot.commands.scout")
 
 # Heroes per page
 HEROES_PER_PAGE = 10
+
+# Embed color for /scout links (matches commands/profile.py COLOR_BLUE)
+COLOR_BLUE = 0x3498DB
+
+
+class TeamContext(NamedTuple):
+    """Players resolved from active match/draft/lobby context.
+
+    When the source has assigned teams (post-shuffle, or a draft with teams
+    picked) ``split`` is True and ``radiant``/``dire`` are populated. For an
+    open lobby or an unassigned draft pool there is no team split: ``split``
+    is False and only ``flat`` carries the players.
+    """
+
+    radiant: list[int]
+    dire: list[int]
+    flat: list[int]
+    source_label: str | None
+    split: bool
+    filtered_prefix: str
 
 
 class ScoutView(discord.ui.View):
@@ -134,6 +155,8 @@ class ScoutView(discord.ui.View):
 class ScoutCommands(commands.Cog):
     """Commands for player scouting."""
 
+    scout = app_commands.Group(name="scout", description="Player scouting tools")
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -146,35 +169,30 @@ class ScoutCommands(commands.Cog):
         self.player_service = player_service
         self.lobby_manager = lobby_manager
 
-    def _resolve_player_context(
-        self, guild_id: int | None, team_filter: str | None = None
-    ) -> tuple[list[int], str | None]:
+    def _resolve_team_context(self, guild_id: int | None) -> TeamContext:
         """
-        Resolve players from active match/lobby context.
+        Resolve players from active match/draft/lobby context, keeping teams split.
+
+        Priority: pending match (post-shuffle) -> active draft -> open lobby.
 
         Args:
             guild_id: Guild ID for context lookup
-            team_filter: Optional "radiant" or "dire" to filter to specific team
 
         Returns:
-            (player_ids, source_label)
+            A TeamContext. When no context is found every list is empty and
+            ``source_label`` is None.
         """
         # Priority 1: Pending match (post-shuffle)
         if self.match_service:
             try:
                 last_shuffle = self.match_service.get_last_shuffle(guild_id)
                 if last_shuffle:
-                    radiant_ids = last_shuffle.radiant_team_ids
-                    dire_ids = last_shuffle.dire_team_ids
-
-                    if radiant_ids or dire_ids:
-                        if team_filter == "radiant":
-                            return list(radiant_ids), "Radiant"
-                        elif team_filter == "dire":
-                            return list(dire_ids), "Dire"
-                        else:
-                            # Return both teams if no filter
-                            return list(radiant_ids) + list(dire_ids), "Active Match"
+                    radiant = list(last_shuffle.radiant_team_ids or [])
+                    dire = list(last_shuffle.dire_team_ids or [])
+                    if radiant or dire:
+                        return TeamContext(
+                            radiant, dire, radiant + dire, "Active Match", True, ""
+                        )
             except Exception:
                 logger.debug("Failed to check pending match state", exc_info=True)
 
@@ -186,18 +204,15 @@ class ScoutCommands(commands.Cog):
                 if draft_state:
                     radiant = list(draft_state.radiant_player_ids or [])
                     dire = list(draft_state.dire_player_ids or [])
-
                     if radiant or dire:
-                        if team_filter == "radiant":
-                            return radiant, "Draft Radiant"
-                        elif team_filter == "dire":
-                            return dire, "Draft Dire"
-                        else:
-                            return radiant + dire, "Draft"
+                        return TeamContext(
+                            radiant, dire, radiant + dire, "Draft", True, "Draft "
+                        )
 
                     # If draft not yet assigned teams, use player pool
                     if draft_state.player_pool_ids:
-                        return list(draft_state.player_pool_ids), "Draft Pool"
+                        pool = list(draft_state.player_pool_ids)
+                        return TeamContext([], [], pool, "Draft Pool", False, "")
             except Exception:
                 logger.debug("Failed to check draft state", exc_info=True)
 
@@ -207,9 +222,34 @@ class ScoutCommands(commands.Cog):
             player_ids = list(lobby.players)
             if lobby.conditional_players:
                 player_ids.extend(lobby.conditional_players)
-            return player_ids, "Lobby"
+            return TeamContext([], [], player_ids, "Lobby", False, "")
 
-        return [], None
+        return TeamContext([], [], [], None, False, "")
+
+    def _resolve_player_context(
+        self, guild_id: int | None, team_filter: str | None = None
+    ) -> tuple[list[int], str | None]:
+        """
+        Resolve players from active match/lobby context.
+
+        Thin wrapper over :meth:`_resolve_team_context` that flattens the result
+        to the ``(player_ids, source_label)`` contract used by ``/scout report``.
+
+        Args:
+            guild_id: Guild ID for context lookup
+            team_filter: Optional "radiant" or "dire" to filter to specific team
+
+        Returns:
+            (player_ids, source_label)
+        """
+        ctx = self._resolve_team_context(guild_id)
+        if not ctx.flat:
+            return [], None
+        if ctx.split and team_filter == "radiant":
+            return list(ctx.radiant), f"{ctx.filtered_prefix}Radiant"
+        if ctx.split and team_filter == "dire":
+            return list(ctx.dire), f"{ctx.filtered_prefix}Dire"
+        return list(ctx.flat), ctx.source_label
 
     def _parse_mentions(self, text: str) -> list[int]:
         """
@@ -226,8 +266,45 @@ class ScoutCommands(commands.Cog):
         matches = re.findall(pattern, text)
         return [int(m) for m in matches]
 
-    @app_commands.command(
-        name="scout",
+    def _build_link_lines(
+        self,
+        discord_ids: list[int],
+        name_map: dict[int, str],
+        steam_map: dict[int, list[int]],
+    ) -> list[str]:
+        """
+        Build one display line per player listing their Dotabuff profile link(s).
+
+        Players with no linked Steam account are still listed, with a note.
+
+        Args:
+            discord_ids: Players to render, in display order
+            name_map: discord_id -> display name
+            steam_map: discord_id -> Steam32 IDs (primary first)
+
+        Returns:
+            One Markdown line per player.
+        """
+        lines: list[str] = []
+        for did in discord_ids:
+            name = name_map.get(did) or f"<@{did}>"
+            steam_ids = steam_map.get(did) or []
+            if not steam_ids:
+                lines.append(f"**{name}** — no linked Steam account")
+                continue
+            if len(steam_ids) == 1:
+                labels = ["Dotabuff"]
+            else:
+                labels = [f"Dotabuff {i}" for i in range(1, len(steam_ids) + 1)]
+            links = " · ".join(
+                f"[{label}](https://www.dotabuff.com/players/{sid})"
+                for label, sid in zip(labels, steam_ids)
+            )
+            lines.append(f"**{name}** — {links}")
+        return lines
+
+    @scout.command(
+        name="report",
         description="Generate hero scouting report for players",
     )
     @app_commands.describe(
@@ -241,7 +318,7 @@ class ScoutCommands(commands.Cog):
         ]
     )
     @require_guild
-    async def scout(
+    async def report(
         self,
         interaction: discord.Interaction,
         players: str | None = None,
@@ -329,6 +406,95 @@ class ScoutCommands(commands.Cog):
                 interaction,
                 content="Failed to generate scout report. Please try again.",
             )
+
+    @scout.command(
+        name="links",
+        description="List Dotabuff profile links for players in the current game",
+    )
+    @app_commands.describe(
+        players="@mention players to look up (optional)",
+        team="Team to list from active match: radiant or dire",
+    )
+    @app_commands.choices(
+        team=[
+            app_commands.Choice(name="Radiant", value="radiant"),
+            app_commands.Choice(name="Dire", value="dire"),
+        ]
+    )
+    @require_guild
+    async def links(
+        self,
+        interaction: discord.Interaction,
+        players: str | None = None,
+        team: app_commands.Choice[str] | None = None,
+    ):
+        """List Dotabuff profile links for players in the current game."""
+        if not await safe_defer(interaction):
+            return
+
+        guild_id = interaction.guild.id
+        team_value = team.value if team else None
+
+        radiant_ids: list[int] = []
+        dire_ids: list[int] = []
+        flat_ids: list[int] = []
+        source_label: str | None = None
+        two_teams = False
+
+        if players:
+            # Explicit @mentions: render a flat list, no team split.
+            mentioned_ids = self._parse_mentions(players)
+            if mentioned_ids:
+                flat_ids = list(dict.fromkeys(mentioned_ids))
+                source_label = f"{len(flat_ids)} Player{'s' if len(flat_ids) > 1 else ''}"
+
+        if not flat_ids:
+            ctx = await asyncio.to_thread(self._resolve_team_context, guild_id)
+            if ctx.split and team_value == "radiant":
+                flat_ids, source_label = list(ctx.radiant), f"{ctx.filtered_prefix}Radiant"
+            elif ctx.split and team_value == "dire":
+                flat_ids, source_label = list(ctx.dire), f"{ctx.filtered_prefix}Dire"
+            elif ctx.split:
+                radiant_ids, dire_ids = list(ctx.radiant), list(ctx.dire)
+                source_label, two_teams = ctx.source_label, True
+            else:
+                flat_ids, source_label = list(ctx.flat), ctx.source_label
+
+        if not (flat_ids or radiant_ids or dire_ids):
+            await safe_followup(
+                interaction,
+                content="No players found. Use `@mentions` or specify a `team` (radiant/dire) during an active match.",
+            )
+            return
+
+        all_ids = list(dict.fromkeys(radiant_ids + dire_ids + flat_ids))
+        steam_map = await asyncio.to_thread(self.player_service.get_steam_ids_bulk, all_ids)
+        players_obj = await asyncio.to_thread(self.player_service.get_by_ids, all_ids, guild_id)
+        name_map = {p.discord_id: p.name for p in players_obj}
+
+        embed = discord.Embed(
+            title=f"Dotabuff Links — {source_label}" if source_label else "Dotabuff Links",
+            color=COLOR_BLUE,
+        )
+        if two_teams:
+            embed.add_field(
+                name="Radiant",
+                value="\n".join(self._build_link_lines(radiant_ids, name_map, steam_map)) or "—",
+                inline=False,
+            )
+            embed.add_field(
+                name="Dire",
+                value="\n".join(self._build_link_lines(dire_ids, name_map, steam_map)) or "—",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Players",
+                value="\n".join(self._build_link_lines(flat_ids, name_map, steam_map)) or "—",
+                inline=False,
+            )
+
+        await safe_followup(interaction, embed=embed)
 
 
 async def setup(bot: commands.Bot):
