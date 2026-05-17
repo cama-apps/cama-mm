@@ -552,8 +552,8 @@ class BossWagerModal(discord.ui.Modal):
             if getattr(self.result, "won", False):
                 payout = getattr(self.result, "payout", 0)
                 embed.description = (
-                    f"Victory! You defeated **{boss_name}** and earned "
-                    f"**{payout}** {JOPACOIN_EMOTE}!"
+                    f"Victory! You defeated **{boss_name}** and won "
+                    f"**{payout:+d}** {JOPACOIN_EMOTE} profit!"
                 )
                 if boss_narrative:
                     embed.add_field(name="\u200b", value=f"*{boss_narrative}*", inline=False)
@@ -787,8 +787,8 @@ async def _resolve_carried_phase_fight(
     if getattr(result, "won", False):
         payout = getattr(result, "payout", 0)
         embed.description = (
-            f"Victory! You defeated **{boss_name}** and earned "
-            f"**{payout}** {JOPACOIN_EMOTE}!"
+            f"Victory! You defeated **{boss_name}** and won "
+            f"**{payout:+d}** {JOPACOIN_EMOTE} profit!"
         )
     else:
         loss = abs(getattr(result, "jc_delta", 0))
@@ -912,8 +912,8 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
     if won:
         payout = getattr(result, "payout", 0)
         embed.description = (
-            f"Victory! You defeated **{boss_name}** and earned "
-            f"**{payout}** {JOPACOIN_EMOTE}!"
+            f"Victory! You defeated **{boss_name}** and won "
+            f"**{payout:+d}** {JOPACOIN_EMOTE} profit!"
         )
         if getattr(result, "stat_point_awarded", False):
             embed.add_field(
