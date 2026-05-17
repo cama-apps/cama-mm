@@ -1288,18 +1288,6 @@ class BossCombatMixin:
             # Full victory (or phase 2 already cleared)
             new_depth = at_boss
             echo_payout_mult = 0.7 if echo_applied else 1.0
-            base_jc = int(wager * multiplier) if wager > 0 else random.randint(8, 18)
-            # Mana: Black boss loot bump (matches the +30% HP swelling earlier).
-            mana_loot_mult = 1.0
-            if self.mana_effects_service is not None:
-                try:
-                    _ml_eff = self.mana_effects_service.get_effects(discord_id, guild_id)
-                    mana_loot_mult = _ml_eff.boss_loot_mult
-                except Exception:
-                    mana_loot_mult = 1.0
-            jc_delta = int(
-                base_jc * boss_payout_mult * echo_payout_mult * mana_loot_mult
-            )
 
             # Persist outcome for future dialogue picks. close_win signals when
             # the player just barely won — the boss responds differently.
@@ -1366,7 +1354,7 @@ class BossCombatMixin:
                 boss_echo_window_seconds=24 * 3600,
                 log_detail={
                     "boundary": at_boss, "won": True, "risk": risk_tier,
-                    "wager": wager, "jc_delta": jc_delta,
+                    "wager": wager, "jc_delta": payout_delta,
                     "stat_point_awarded": stat_point_awarded,
                     "echo_applied": echo_applied,
                     "rounds": round_log,
@@ -1992,8 +1980,8 @@ class BossCombatMixin:
                 pin_entry["first_meet_seen"] = True
                 pin_entry["boss_id"] = pinnacle_id
                 # Stash the event id so the next phase's fight can apply its
-                # round-by-round offsets (hit/dmg). Pre-fight effects (HP and
-                # luminosity deltas) are applied right now.
+                # round-by-round offsets (hit/dmg) and boss_hp_delta. The
+                # luminosity delta is the only pre-fight effect applied here.
                 pin_entry["pending_phase_event_id"] = phase_event.id
                 boss_progress[str(PINNACLE_DEPTH)] = pin_entry
 
@@ -2003,20 +1991,14 @@ class BossCombatMixin:
                         boss_progress, PINNACLE_DEPTH, wager, risk_tier,
                     )
 
-                # Apply pre-fight effects of the event:
-                # - luminosity_delta: clamp to [0, MAX] on tunnel
-                # - boss_hp_delta: pre-seed the next phase's HP entry so the
-                #   first boss_hp resolution starts wounded (or refreshed).
+                # Apply the pre-fight luminosity effect of the event now
+                # (clamped to [0, MAX] on the tunnel). The boss_hp_delta is
+                # applied when the next phase's fight consumes
+                # pending_phase_event_id (see _fight_pinnacle), mirroring the
+                # regular multi-phase boss flow.
                 lum_after = self._get_luminosity(tunnel)
                 if phase_event.luminosity_delta:
                     lum_after = max(0, min(LUMINOSITY_MAX, lum_after + phase_event.luminosity_delta))
-                next_phase_key = f"{PINNACLE_DEPTH}:{next_phase}"
-                if phase_event.boss_hp_delta:
-                    # Pre-seed wounded HP using a synthetic prior-engagement.
-                    boss_progress[next_phase_key] = {
-                        "boss_id": pinnacle_id,
-                        "hp_remaining_delta": int(phase_event.boss_hp_delta),
-                    }
 
                 self.dig_repo.update_tunnel(
                     discord_id, guild_id,
