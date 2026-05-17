@@ -1877,7 +1877,6 @@ class BossCombatMixin:
             # Full victory
             new_depth = at_boss
             echo_payout_mult = 0.7 if echo_applied else 1.0
-            base_jc = int(wager * multiplier) if wager > 0 else random.randint(8, 18)
             # Honor drain_next_reward curse: -25% on this reward.
             curse_raw = tunnel.get("stinger_curse")
             drain_applied = False
@@ -1886,7 +1885,6 @@ class BossCombatMixin:
             except (json.JSONDecodeError, TypeError):
                 curse = {}
             if curse.get("drain_next_reward"):
-                base_jc = int(round(base_jc * 0.75))
                 drain_applied = True
                 curse.pop("drain_next_reward", None)
                 # Persist cleared curse flag (keep other curses intact)
@@ -1894,16 +1892,6 @@ class BossCombatMixin:
                     discord_id, guild_id,
                     stinger_curse=(json.dumps(curse) if curse else None),
                 )
-            mana_loot_mult = 1.0
-            if self.mana_effects_service is not None:
-                try:
-                    _ml_eff = self.mana_effects_service.get_effects(discord_id, guild_id)
-                    mana_loot_mult = _ml_eff.boss_loot_mult
-                except Exception:
-                    mana_loot_mult = 1.0
-            jc_delta = int(
-                base_jc * boss_payout_mult * echo_payout_mult * mana_loot_mult
-            )
 
             # Mark defeated in the {boss_id, status} shape.
             existing_entry = boss_progress.get(str(at_boss))
@@ -1921,22 +1909,14 @@ class BossCombatMixin:
                 discord_id, guild_id, tunnel, at_boss,
             )
             prev_max_depth = tunnel.get("max_depth", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                depth=new_depth,
-                max_depth=max(prev_max_depth, new_depth),
-                boss_progress=json.dumps(boss_progress),
-                boss_attempts=0,
-                cheer_data=None,
-                last_dig_at=now,
-            )
-            self.dig_repo.record_boss_echo(
-                guild_id=guild_id,
-                boss_id=boss.boss_id if boss else "",
-                depth=at_boss,
-                killer_discord_id=discord_id,
-                window_seconds=24 * 3600,
-            )
+            tunnel_updates = {
+                "depth": new_depth,
+                "max_depth": max(prev_max_depth, new_depth),
+                "boss_progress": json.dumps(boss_progress),
+                "boss_attempts": 0,
+                "cheer_data": None,
+                "last_dig_at": now,
+            }
             # Every boss victory pays a flat depth-scaled base reward so a
             # win is never empty; a wagered win adds its taper-floored profit
             # on top.
@@ -1953,7 +1933,26 @@ class BossCombatMixin:
             else:
                 wager_profit = 0
             net_payout = base_reward + wager_profit
-            self.player_repo.add_balance(discord_id, guild_id, net_payout)
+
+            # Tunnel flip + JC payout + boss-echo refresh + audit log all
+            # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
+            # without clearing the boss (or vice versa).
+            self.dig_repo.atomic_boss_full_victory(
+                discord_id=discord_id,
+                guild_id=guild_id,
+                jc_delta=net_payout,
+                tunnel_updates=tunnel_updates,
+                boss_echo_boss_id=boss.boss_id if boss else "",
+                boss_echo_depth=at_boss,
+                boss_echo_window_seconds=24 * 3600,
+                log_detail={
+                    "boundary": at_boss, "won": True, "risk": risk_tier,
+                    "wager": wager, "jc_delta": net_payout,
+                    "stat_point_awarded": stat_point_awarded,
+                    "echo_applied": echo_applied,
+                    "rounds": round_log,
+                },
+            )
 
             defeat_msg = self._pick_boss_outcome_line(
                 boss=boss, boss_name=boss_name, boundary=at_boss, won=True,
@@ -1964,17 +1963,6 @@ class BossCombatMixin:
                 discord_id, guild_id, tunnel.get("prestige_level", 0) or 0,
             )
 
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="boss_fight",
-                details=json.dumps({
-                    "boundary": at_boss, "won": True, "risk": risk_tier,
-                    "wager": wager, "jc_delta": jc_delta,
-                    "stat_point_awarded": stat_point_awarded,
-                    "echo_applied": echo_applied,
-                    "rounds": round_log,
-                }),
-            )
             return self._ok(
                 won=True,
                 phase=(

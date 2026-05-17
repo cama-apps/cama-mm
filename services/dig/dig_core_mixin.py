@@ -257,7 +257,7 @@ class DigCoreMixin:
         """Pick & apply a cave-in consequence (or catastrophic upgrade).
 
         Mutates ``tunnel_updates`` with any tunnel-state changes (the caller
-        is responsible for the actual write — atomic or incremental). Side
+        is responsible for writing them atomically). Side
         effects that aren't tunnel-state (gear durability tick, inventory
         item removal) are applied to repos directly. Returns
         ``(cave_in_detail, jc_debit)`` where ``jc_debit`` is the JC amount
