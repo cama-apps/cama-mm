@@ -1279,6 +1279,7 @@ class BalancedShuffler:
             ITERATIONS: 35 - max search iterations
             BEAM_WIDTH: 8 - number of candidate pools to track
             EARLY_EXIT_THRESHOLD: 150 - exit early if score below this
+            STAGNATION_LIMIT: 5 - stop early once the best score plateaus
 
         Args:
             captain_a: First captain
@@ -1331,6 +1332,14 @@ class BalancedShuffler:
         best_excluded = initial_excluded
         best_score = initial_score
 
+        # Memoize pool scores across iterations: without this the same
+        # candidate pool is re-scored every time it reappears as a neighbour,
+        # which is the dominant cost (_score_full_pool is ~3ms). Also stop once
+        # the best score stops improving instead of always burning ITERATIONS.
+        score_cache: dict[frozenset[str], float] = {initial_pool_set: initial_score}
+        STAGNATION_LIMIT = 5
+        stagnant_iterations = 0
+
         for iteration in range(ITERATIONS):
             neighbors = []
             seen_pools = set()
@@ -1346,16 +1355,22 @@ class BalancedShuffler:
                         new_pool = pool[:i] + [in_player] + pool[i + 1:]
                         new_pool_set = frozenset(p.name for p in new_pool)
 
-                        # Skip if we've already seen this pool
+                        # Skip if we've already seen this pool this iteration
                         if new_pool_set in seen_pools:
                             continue
                         seen_pools.add(new_pool_set)
 
                         new_excluded = [c for c in candidates if c.name not in new_pool_set]
-                        score = self._score_full_pool(
-                            captain_a, captain_b, new_pool, new_excluded,
-                            exclusion_counts, recent_match_names
-                        )
+
+                        # Reuse the score if this pool was evaluated in an
+                        # earlier iteration; pay _score_full_pool only once.
+                        score = score_cache.get(new_pool_set)
+                        if score is None:
+                            score = self._score_full_pool(
+                                captain_a, captain_b, new_pool, new_excluded,
+                                exclusion_counts, recent_match_names
+                            )
+                            score_cache[new_pool_set] = score
 
                         neighbors.append((new_pool_set, new_pool, score))
 
@@ -1379,14 +1394,19 @@ class BalancedShuffler:
             neighbors.sort(key=lambda x: x[2])
             current_beams = neighbors[:BEAM_WIDTH]
 
-            # Update best if improved
+            # Update best if improved; otherwise count toward convergence.
             if current_beams[0][2] < best_score:
                 best_pool = current_beams[0][1]
                 best_score = current_beams[0][2]
                 best_excluded = [c for c in candidates if c.name not in current_beams[0][0]]
+                stagnant_iterations = 0
+            else:
+                stagnant_iterations += 1
+                if stagnant_iterations >= STAGNATION_LIMIT:
+                    break
 
         logger.info(
-            f"Beam search: completed {ITERATIONS} iterations, "
+            f"Beam search: finished after {iteration + 1} iterations, "
             f"best score={best_score:.1f}"
         )
 
