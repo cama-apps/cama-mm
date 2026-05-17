@@ -188,6 +188,136 @@ class BettingImpactStats:
     unique_haters: int
 
 
+def _get_degen_tier(score: int) -> tuple[str, str, str]:
+    """Get the degen tier title, tagline, and emoji for a score."""
+    emojis = ["🥱", "🎰", "🔥", "💀", "🎪", "👑"]
+
+    for i, (low, high, title, tagline) in enumerate(DEGEN_TIERS):
+        if low <= score <= high:
+            return title, tagline, emojis[i]
+
+    # Fallback for edge cases
+    return "Unknown", "???", "❓"
+
+
+def _compute_degen_score(
+    *,
+    leverage_dist: dict[int, int],
+    total_bets: int,
+    total_wagered: int,
+    lowest_balance: int | None,
+    bankruptcy_count: int,
+    total_matches: int,
+    matches_bet_on: int,
+    loss_chase_rate: float,
+    negative_loans: int,
+) -> DegenScoreBreakdown:
+    """Compute the 7-component degen score from pre-fetched primitives.
+
+    Pure: takes only primitives so both the per-player and batch-leaderboard
+    paths produce identical scores. ``total_bets``/``total_wagered`` drive the
+    bet-size component; ``leverage_dist`` drives the 5x component independently.
+    """
+    flavor_texts: list[str] = []
+    total_leverage_bets = sum(leverage_dist.values())
+
+    # 1. Max leverage addiction (0-25) - % of bets at 5x
+    if total_leverage_bets > 0:
+        pct_5x = leverage_dist.get(5, 0) / total_leverage_bets
+        max_leverage_score = min(int(pct_5x * MAX_LEVERAGE_WEIGHT), MAX_LEVERAGE_WEIGHT)
+
+        if pct_5x >= 0.5:
+            flavor_texts.append("5x addict")
+        elif pct_5x >= 0.2:
+            flavor_texts.append("5x enthusiast")
+    else:
+        max_leverage_score = 0
+
+    # 2. Bet size (0-25) - avg effective bet vs typical income
+    if total_bets > 0:
+        avg_bet = total_wagered / total_bets
+        # Ratio: 1:1 = 0pts, 10:1+ = 25pts (linear scale)
+        bet_ratio = avg_bet / TYPICAL_INCOME_PER_MATCH
+        bet_size_score = min(int((bet_ratio - 1) / 9 * BET_SIZE_WEIGHT), BET_SIZE_WEIGHT)
+        bet_size_score = max(0, bet_size_score)  # Floor at 0
+
+        if bet_ratio >= 10:
+            flavor_texts.append("high roller")
+        elif bet_ratio >= 5:
+            flavor_texts.append("big bets")
+    else:
+        bet_size_score = 0
+
+    # 3. Debt depth (0-20) - lowest balance ever reached
+    if lowest_balance is not None and lowest_balance < 0:
+        # Scale: 0 = 0pts, -500 = 20pts
+        from config import MAX_DEBT
+        debt_ratio = min(abs(lowest_balance) / MAX_DEBT, 1.0)
+        debt_depth_score = int(debt_ratio * DEBT_DEPTH_WEIGHT)
+
+        if lowest_balance <= -400:
+            flavor_texts.append("debt lord")
+        elif lowest_balance <= -200:
+            flavor_texts.append("deep in debt")
+    else:
+        debt_depth_score = 0
+
+    # 4. Bankruptcy count (0-15) - each = 5pts, max 15
+    bankruptcy_score = min(bankruptcy_count * 5, BANKRUPTCY_WEIGHT)
+    if bankruptcy_count >= 3:
+        flavor_texts.append(f"{bankruptcy_count} bankruptcies")
+    elif bankruptcy_count > 0:
+        flavor_texts.append(f"{bankruptcy_count} bankruptcy")
+
+    # 5. Bet frequency (0-10) - % of matches bet on
+    if total_matches > 0:
+        frequency_rate = matches_bet_on / total_matches
+        frequency_score = min(int(frequency_rate * FREQUENCY_WEIGHT), FREQUENCY_WEIGHT)
+        if frequency_rate >= 0.8:
+            flavor_texts.append("never misses")
+    else:
+        frequency_score = 0
+
+    # 6. Loss chasing (0-5)
+    loss_chase_score = min(int(loss_chase_rate * LOSS_CHASE_WEIGHT), LOSS_CHASE_WEIGHT)
+    if loss_chase_rate >= 0.5:
+        flavor_texts.append("loss chaser")
+
+    # 7. Negative loan bonus (+25 each, can exceed 100)
+    negative_loan_bonus = negative_loans * NEGATIVE_LOAN_BONUS
+    if negative_loans >= 1:
+        flavor_texts.insert(0, f"borrowed while broke x{negative_loans}")
+
+    # Total score (can exceed 100 with negative loan bonus)
+    total = (
+        max_leverage_score
+        + bet_size_score
+        + debt_depth_score
+        + bankruptcy_score
+        + frequency_score
+        + loss_chase_score
+        + negative_loan_bonus
+    )
+
+    # Get tier (capped at 100 for tier lookup)
+    title, tagline, emoji = _get_degen_tier(min(total, 100))
+
+    return DegenScoreBreakdown(
+        total=total,
+        title=title,
+        emoji=emoji,
+        tagline=tagline,
+        max_leverage_score=max_leverage_score,
+        bet_size_score=bet_size_score,
+        debt_depth_score=debt_depth_score,
+        bankruptcy_score=bankruptcy_score,
+        frequency_score=frequency_score,
+        loss_chase_score=loss_chase_score,
+        negative_loan_bonus=negative_loan_bonus,
+        flavor_texts=flavor_texts[:3],  # Limit to 3 flavor texts
+    )
+
+
 class GamblingStatsService:
     """Service for calculating gambling statistics and degen scores."""
 
@@ -274,114 +404,25 @@ class GamblingStatsService:
         leverage_dist = self.bet_repo.get_player_leverage_distribution(discord_id, guild_id)
         loss_chase_data = self.bet_repo.count_player_loss_chasing(discord_id, guild_id)
 
-        flavor_texts = []
-        total_bets = sum(leverage_dist.values())
-
-        # 1. Max leverage addiction (0-25) - % of bets at 5x
-        if total_bets > 0:
-            pct_5x = leverage_dist.get(5, 0) / total_bets
-            max_leverage_score = min(int(pct_5x * MAX_LEVERAGE_WEIGHT), MAX_LEVERAGE_WEIGHT)
-
-            if pct_5x >= 0.5:
-                flavor_texts.append("5x addict")
-            elif pct_5x >= 0.2:
-                flavor_texts.append("5x enthusiast")
-        else:
-            max_leverage_score = 0
-
-        # 2. Bet size (0-25) - avg effective bet vs typical income
-        if history:
-            total_wagered = sum(b["effective_bet"] for b in history)
-            avg_bet = total_wagered / len(history)
-            # Ratio: 1:1 = 0pts, 10:1+ = 25pts (linear scale)
-            bet_ratio = avg_bet / TYPICAL_INCOME_PER_MATCH
-            bet_size_score = min(int((bet_ratio - 1) / 9 * BET_SIZE_WEIGHT), BET_SIZE_WEIGHT)
-            bet_size_score = max(0, bet_size_score)  # Floor at 0
-
-            if bet_ratio >= 10:
-                flavor_texts.append("high roller")
-            elif bet_ratio >= 5:
-                flavor_texts.append("big bets")
-        else:
-            bet_size_score = 0
-
-        # 3. Debt depth (0-20) - lowest balance ever reached
-        lowest_balance = self.player_repo.get_lowest_balance(discord_id, guild_id)
-        if lowest_balance is not None and lowest_balance < 0:
-            # Scale: 0 = 0pts, -500 = 20pts
-            from config import MAX_DEBT
-            debt_ratio = min(abs(lowest_balance) / MAX_DEBT, 1.0)
-            debt_depth_score = int(debt_ratio * DEBT_DEPTH_WEIGHT)
-
-            if lowest_balance <= -400:
-                flavor_texts.append("debt lord")
-            elif lowest_balance <= -200:
-                flavor_texts.append("deep in debt")
-        else:
-            debt_depth_score = 0
-
-        # 4. Bankruptcy count (0-15) - each = 5pts, max 15
         bankruptcy_count = self.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
-        bankruptcy_score = min(bankruptcy_count * 5, BANKRUPTCY_WEIGHT)
-        if bankruptcy_count >= 3:
-            flavor_texts.append(f"{bankruptcy_count} bankruptcies")
-        elif bankruptcy_count > 0:
-            flavor_texts.append(f"{bankruptcy_count} bankruptcy")
-
-        # 5. Bet frequency (0-10) - % of matches bet on
-        matches_bet_on = len({b["match_id"] for b in history})
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
+        lowest_balance = self.player_repo.get_lowest_balance(discord_id, guild_id)
 
-        if total_matches > 0:
-            frequency_rate = matches_bet_on / total_matches
-            frequency_score = min(int(frequency_rate * FREQUENCY_WEIGHT), FREQUENCY_WEIGHT)
-            if frequency_rate >= 0.8:
-                flavor_texts.append("never misses")
-        else:
-            frequency_score = 0
-
-        # 6. Loss chasing (0-5)
-        loss_chase_rate = loss_chase_data["loss_chase_rate"]
-        loss_chase_score = min(int(loss_chase_rate * LOSS_CHASE_WEIGHT), LOSS_CHASE_WEIGHT)
-        if loss_chase_rate >= 0.5:
-            flavor_texts.append("loss chaser")
-
-        # 7. Negative loan bonus (+25 each, can exceed 100)
-        negative_loan_bonus = 0
+        negative_loans = 0
         if self.loan_service:
             loan_state = self.loan_service.get_state(discord_id, guild_id)
             negative_loans = loan_state.negative_loans_taken
-            negative_loan_bonus = negative_loans * NEGATIVE_LOAN_BONUS
-            if negative_loans >= 1:
-                flavor_texts.insert(0, f"borrowed while broke x{negative_loans}")
 
-        # Total score (can exceed 100 with negative loan bonus)
-        total = (
-            max_leverage_score
-            + bet_size_score
-            + debt_depth_score
-            + bankruptcy_score
-            + frequency_score
-            + loss_chase_score
-            + negative_loan_bonus
-        )
-
-        # Get tier (capped at 100 for tier lookup)
-        title, tagline, emoji = self._get_degen_tier(min(total, 100))
-
-        return DegenScoreBreakdown(
-            total=total,
-            title=title,
-            emoji=emoji,
-            tagline=tagline,
-            max_leverage_score=max_leverage_score,
-            bet_size_score=bet_size_score,
-            debt_depth_score=debt_depth_score,
-            bankruptcy_score=bankruptcy_score,
-            frequency_score=frequency_score,
-            loss_chase_score=loss_chase_score,
-            negative_loan_bonus=negative_loan_bonus,
-            flavor_texts=flavor_texts[:3],  # Limit to 3 flavor texts
+        return _compute_degen_score(
+            leverage_dist=leverage_dist,
+            total_bets=len(history),
+            total_wagered=sum(b["effective_bet"] for b in history),
+            lowest_balance=lowest_balance,
+            bankruptcy_count=bankruptcy_count,
+            total_matches=total_matches,
+            matches_bet_on=len({b["match_id"] for b in history}),
+            loss_chase_rate=loss_chase_data["loss_chase_rate"],
+            negative_loans=negative_loans,
         )
 
     def get_leaderboard(
@@ -533,104 +574,20 @@ class GamblingStatsService:
         total_bets: int,
     ) -> DegenScoreBreakdown:
         """Calculate degen score from pre-fetched batch data."""
-        flavor_texts = []
-        total_leverage_bets = sum(leverage_dist.values())
-
-        # 1. Max leverage addiction (0-25) - % of bets at 5x
-        if total_leverage_bets > 0:
-            pct_5x = leverage_dist.get(5, 0) / total_leverage_bets
-            max_leverage_score = min(int(pct_5x * MAX_LEVERAGE_WEIGHT), MAX_LEVERAGE_WEIGHT)
-
-            if pct_5x >= 0.5:
-                flavor_texts.append("5x addict")
-            elif pct_5x >= 0.2:
-                flavor_texts.append("5x enthusiast")
-        else:
-            max_leverage_score = 0
-
-        # 2. Bet size (0-25) - avg effective bet vs typical income
-        if total_bets > 0:
-            avg_bet = total_wagered / total_bets
-            bet_ratio = avg_bet / TYPICAL_INCOME_PER_MATCH
-            bet_size_score = min(int((bet_ratio - 1) / 9 * BET_SIZE_WEIGHT), BET_SIZE_WEIGHT)
-            bet_size_score = max(0, bet_size_score)
-
-            if bet_ratio >= 10:
-                flavor_texts.append("high roller")
-            elif bet_ratio >= 5:
-                flavor_texts.append("big bets")
-        else:
-            bet_size_score = 0
-
-        # 3. Debt depth (0-20) - lowest balance ever reached
-        if lowest_balance is not None and lowest_balance < 0:
-            from config import MAX_DEBT
-            debt_ratio = min(abs(lowest_balance) / MAX_DEBT, 1.0)
-            debt_depth_score = int(debt_ratio * DEBT_DEPTH_WEIGHT)
-
-            if lowest_balance <= -400:
-                flavor_texts.append("debt lord")
-            elif lowest_balance <= -200:
-                flavor_texts.append("deep in debt")
-        else:
-            debt_depth_score = 0
-
-        # 4. Bankruptcy count (0-15) - each = 5pts, max 15
-        bankruptcy_score = min(bankruptcy_count * 5, BANKRUPTCY_WEIGHT)
-        if bankruptcy_count >= 3:
-            flavor_texts.append(f"{bankruptcy_count} bankruptcies")
-        elif bankruptcy_count > 0:
-            flavor_texts.append(f"{bankruptcy_count} bankruptcy")
-
-        # 5. Bet frequency (0-10) - % of matches bet on
-        if total_matches > 0:
-            frequency_rate = matches_bet_on / total_matches
-            frequency_score = min(int(frequency_rate * FREQUENCY_WEIGHT), FREQUENCY_WEIGHT)
-            if frequency_rate >= 0.8:
-                flavor_texts.append("never misses")
-        else:
-            frequency_score = 0
-
-        # 6. Loss chasing (0-5)
         loss_sequences = loss_chase_data.get("sequences_analyzed", 0)
         times_increased = loss_chase_data.get("times_increased_after_loss", 0)
         loss_chase_rate = times_increased / loss_sequences if loss_sequences > 0 else 0.0
-        loss_chase_score = min(int(loss_chase_rate * LOSS_CHASE_WEIGHT), LOSS_CHASE_WEIGHT)
-        if loss_chase_rate >= 0.5:
-            flavor_texts.append("loss chaser")
 
-        # 7. Negative loan bonus (+25 each, can exceed 100)
-        negative_loan_bonus = negative_loans * NEGATIVE_LOAN_BONUS
-        if negative_loans >= 1:
-            flavor_texts.insert(0, f"borrowed while broke x{negative_loans}")
-
-        # Total score (can exceed 100 with negative loan bonus)
-        total = (
-            max_leverage_score
-            + bet_size_score
-            + debt_depth_score
-            + bankruptcy_score
-            + frequency_score
-            + loss_chase_score
-            + negative_loan_bonus
-        )
-
-        # Get tier (capped at 100 for tier lookup)
-        title, tagline, emoji = self._get_degen_tier(min(total, 100))
-
-        return DegenScoreBreakdown(
-            total=total,
-            title=title,
-            emoji=emoji,
-            tagline=tagline,
-            max_leverage_score=max_leverage_score,
-            bet_size_score=bet_size_score,
-            debt_depth_score=debt_depth_score,
-            bankruptcy_score=bankruptcy_score,
-            frequency_score=frequency_score,
-            loss_chase_score=loss_chase_score,
-            negative_loan_bonus=negative_loan_bonus,
-            flavor_texts=flavor_texts[:3],
+        return _compute_degen_score(
+            leverage_dist=leverage_dist,
+            total_bets=total_bets,
+            total_wagered=total_wagered,
+            lowest_balance=lowest_balance,
+            bankruptcy_count=bankruptcy_count,
+            total_matches=total_matches,
+            matches_bet_on=matches_bet_on,
+            loss_chase_rate=loss_chase_rate,
+            negative_loans=negative_loans,
         )
 
     def get_betting_impact_stats(self, discord_id: int, guild_id: int | None = None) -> BettingImpactStats | None:
@@ -934,17 +891,6 @@ class GamblingStatsService:
             trough = min(trough, cumulative)
 
         return peak, trough
-
-    def _get_degen_tier(self, score: int) -> tuple[str, str, str]:
-        """Get the degen tier title and tagline for a score."""
-        emojis = ["🥱", "🎰", "🔥", "💀", "🎪", "👑"]
-
-        for i, (low, high, title, tagline) in enumerate(DEGEN_TIERS):
-            if low <= score <= high:
-                return title, tagline, emojis[i]
-
-        # Fallback for edge cases
-        return "Unknown", "???", "❓"
 
     # --- Convenience methods to avoid repository access from commands ---
 

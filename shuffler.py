@@ -34,6 +34,18 @@ class DraftPoolResult:
     pool_score: float  # Best achievable balance score + penalties
 
 
+@dataclass
+class _PoolMatchup:
+    """A single evaluated team split within a pool shuffle."""
+
+    team1: Team
+    team2: Team
+    total_score: float
+    value_diff: float
+    total_off_roles: int
+    log_entry: tuple  # 12-tuple consumed by BalancedShuffler._log_top_matchups
+
+
 class BalancedShuffler:
     """
     Implements balanced team shuffling algorithm.
@@ -166,45 +178,26 @@ class BalancedShuffler:
         Returns:
             Sum of deltas across the five critical matchups
         """
-        # Get players and their effective values for each role
-        team1_carry_player, team1_carry_value = team1.get_player_by_role(
-            "1", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team1_offlane_player, team1_offlane_value = team1.get_player_by_role(
-            "3", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team1_mid_player, team1_mid_value = team1.get_player_by_role(
-            "2", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team1_pos4_player, team1_pos4_value = team1.get_player_by_role(
-            "4", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team1_pos5_player, team1_pos5_value = team1.get_player_by_role(
-            "5", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
+        # Effective value for each role, per team
+        def role_value(team: Team, role: str) -> float:
+            _player, value = team.get_player_by_role(
+                role,
+                self.use_glicko,
+                self.off_role_multiplier,
+                use_openskill=self.use_openskill,
+                use_jopacoin=self.use_jopacoin,
+            )
+            return value
 
-        team2_carry_player, team2_carry_value = team2.get_player_by_role(
-            "1", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team2_offlane_player, team2_offlane_value = team2.get_player_by_role(
-            "3", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team2_mid_player, team2_mid_value = team2.get_player_by_role(
-            "2", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team2_pos4_player, team2_pos4_value = team2.get_player_by_role(
-            "4", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team2_pos5_player, team2_pos5_value = team2.get_player_by_role(
-            "5", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
+        t1 = {role: role_value(team1, role) for role in ("1", "2", "3", "4", "5")}
+        t2 = {role: role_value(team2, role) for role in ("1", "2", "3", "4", "5")}
 
         # Calculate the five critical matchups
-        carry_vs_offlane_1 = abs(team1_carry_value - team2_offlane_value)
-        carry_vs_offlane_2 = abs(team2_carry_value - team1_offlane_value)
-        mid_vs_mid = abs(team1_mid_value - team2_mid_value)
-        support_cross_1 = abs(team1_pos4_value - team2_pos5_value)
-        support_cross_2 = abs(team2_pos4_value - team1_pos5_value)
+        carry_vs_offlane_1 = abs(t1["1"] - t2["3"])
+        carry_vs_offlane_2 = abs(t2["1"] - t1["3"])
+        mid_vs_mid = abs(t1["2"] - t2["2"])
+        support_cross_1 = abs(t1["4"] - t2["5"])
+        support_cross_2 = abs(t2["4"] - t1["5"])
 
         # Return the sum of all five deltas
         return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
@@ -585,6 +578,68 @@ class BalancedShuffler:
 
         return best_team1, best_team2, best_score
 
+    def _log_top_matchups(
+        self,
+        entries: list[tuple],
+        header: str,
+        show_exclusions: bool,
+    ) -> None:
+        """
+        Log the top-K candidate matchups (shared by ``shuffle`` and ``shuffle_from_pool``).
+
+        Args:
+            entries: List of matchup tuples, each
+                (score, value_diff, off_penalty, role_delta, excl_penalty,
+                 t1_val, t2_val, t1_off, t2_off, excluded, t1, t2),
+                sorted ascending by score.
+            header: Heading line printed above the matchups.
+            show_exclusions: Whether to include exclusion penalty / excluded players.
+        """
+        if not entries:
+            return
+
+        logger.info("=" * 60)
+        logger.info(header)
+        for i, (
+            score,
+            value_diff,
+            off_penalty,
+            role_delta,
+            excl_penalty,
+            t1_val,
+            t2_val,
+            t1_off,
+            t2_off,
+            excluded,
+            t1,
+            t2,
+        ) in enumerate(entries, 1):
+            t1_roles = t1.role_assignments if t1.role_assignments else t1._assign_roles_optimally()
+            t2_roles = t2.role_assignments if t2.role_assignments else t2._assign_roles_optimally()
+
+            if show_exclusions:
+                logger.info(
+                    f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, "
+                    f"Role Matchup Delta: {role_delta:.1f}, Exclusion Penalty: {excl_penalty:.1f})"
+                )
+            else:
+                logger.info(
+                    f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, Role Matchup Delta: {role_delta:.1f})"
+                )
+            logger.info(
+                f"  Team 1 Value: {t1_val:.1f} | Team 2 Value: {t2_val:.1f} | Diff: {abs(t1_val - t2_val):.1f}"
+            )
+            logger.info(f"  Off-Roles: Team1={t1_off}, Team2={t2_off} (Total: {t1_off + t2_off})")
+            if show_exclusions:
+                logger.info(f"  Excluded: {', '.join(excluded) if excluded else 'None'}")
+            logger.info(
+                f"  Team 1: {', '.join([f'{p.name}({role})' for p, role in zip(t1.players, t1_roles)])}"
+            )
+            logger.info(
+                f"  Team 2: {', '.join([f'{p.name}({role})' for p, role in zip(t2.players, t2_roles)])}"
+            )
+        logger.info("=" * 60)
+
     def shuffle(self, players: list[Player], avoids: list | None = None, deals: list | None = None) -> tuple[Team, Team]:
         """
         Shuffle players into two balanced teams.
@@ -644,17 +699,20 @@ class BalancedShuffler:
             role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
             total_off_roles = team1_off_roles + team2_off_roles
 
-            # Track this matchup
+            # Track this matchup (normalized 12-tuple shape shared with shuffle_from_pool;
+            # exclusion penalty / excluded players are unused for a fixed 10-player shuffle)
             top_matchups.append(
                 (
                     total_score,
                     value_diff,
                     off_role_penalty,
                     role_matchup_delta,
+                    0.0,
                     team1_value,
                     team2_value,
                     team1_off_roles,
                     team2_off_roles,
+                    [],
                     team1,
                     team2,
                 )
@@ -682,41 +740,154 @@ class BalancedShuffler:
 
         # Log top 5 matchups
         top_matchups.sort(key=lambda x: x[0])
-        logger.info("=" * 60)
-        logger.info("TOP 5 MATCHUPS (10 players):")
-        for i, (
-            score,
-            value_diff,
-            off_penalty,
-            role_delta,
-            t1_val,
-            t2_val,
-            t1_off,
-            t2_off,
-            t1,
-            t2,
-        ) in enumerate(top_matchups[:5], 1):
-            # Get role assignments
-            t1_roles = t1.role_assignments if t1.role_assignments else t1._assign_roles_optimally()
-            t2_roles = t2.role_assignments if t2.role_assignments else t2._assign_roles_optimally()
-
-            logger.info(
-                f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, Role Matchup Delta: {role_delta:.1f})"
-            )
-            logger.info(
-                f"  Team 1 Value: {t1_val:.1f} | Team 2 Value: {t2_val:.1f} | Diff: {abs(t1_val - t2_val):.1f}"
-            )
-            logger.info(f"  Off-Roles: Team1={t1_off}, Team2={t2_off} (Total: {t1_off + t2_off})")
-            logger.info(
-                f"  Team 1: {', '.join([f'{p.name}({role})' for p, role in zip(t1.players, t1_roles)])}"
-            )
-            logger.info(
-                f"  Team 2: {', '.join([f'{p.name}({role})' for p, role in zip(t2.players, t2_roles)])}"
-            )
-        logger.info("=" * 60)
+        self._log_top_matchups(
+            top_matchups[:5],
+            "TOP 5 MATCHUPS (10 players):",
+            show_exclusions=False,
+        )
         logger.info(f"SELECTED: Matchup #1 with score {top_matchups[0][0]:.1f}")
 
         return best_teams
+
+    @staticmethod
+    def _sample_player_combinations(
+        rng: random.Random, n: int, k: int, max_samples: int
+    ) -> Iterable[tuple[int, ...]]:
+        """
+        Yield up to max_samples unique k-combinations from range(n).
+
+        Uses the supplied RNG to sample; caps total attempts to avoid pathological
+        loops when nCk is not much larger than max_samples.
+        """
+        if max_samples <= 0:
+            return
+        seen = set()
+        attempts_left = max_samples * 25
+        while len(seen) < max_samples and attempts_left > 0:
+            attempts_left -= 1
+            combo = tuple(sorted(rng.sample(range(n), k)))
+            if combo in seen:
+                continue
+            seen.add(combo)
+            yield combo
+
+    def _evaluate_pool_matchup(
+        self,
+        team1_players: list[Player],
+        team2_players: list[Player],
+        combo_penalty: float,
+        exclusion_penalty: float,
+        excluded_names: list[str],
+        recent_match_names: set[str],
+        max_assignments_per_team: int,
+        avoids: list | None,
+        deals: list | None,
+    ) -> _PoolMatchup:
+        """
+        Optimize role assignments for one team split and score it.
+
+        ``combo_penalty`` is the sum of penalties that are constant for the
+        enclosing 10-player combination (exclusion + deal-split + rating-spread);
+        the recent-match penalty depends on the split and is added here.
+        """
+        team1, team2, base_score = self._optimize_role_assignments_for_matchup(
+            team1_players,
+            team2_players,
+            max_assignments_per_team=max_assignments_per_team,
+            avoids=avoids,
+            deals=deals,
+        )
+
+        # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
+        # We need to add exclusion_penalty, recent_match_penalty, deal_split_penalty, and rating_spread_penalty
+        selected_player_names = {p.name for p in team1_players + team2_players}
+        recent_in_match = len(selected_player_names & recent_match_names)
+        recent_penalty = recent_in_match * self.recent_match_penalty_weight
+
+        total_score = base_score + combo_penalty + recent_penalty
+
+        # Extract components for logging
+        team1_value = team1.get_team_value(
+            self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
+        )
+        team2_value = team2.get_team_value(
+            self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
+        )
+        value_diff = abs(team1_value - team2_value)
+        team1_off_roles = team1.get_off_role_count()
+        team2_off_roles = team2.get_off_role_count()
+        off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
+        role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
+        total_off_roles = team1_off_roles + team2_off_roles
+
+        log_entry = (
+            total_score,
+            value_diff,
+            off_role_penalty,
+            role_matchup_delta,
+            exclusion_penalty,
+            team1_value,
+            team2_value,
+            team1_off_roles,
+            team2_off_roles,
+            excluded_names,
+            team1,
+            team2,
+        )
+
+        return _PoolMatchup(
+            team1=team1,
+            team2=team2,
+            total_score=total_score,
+            value_diff=value_diff,
+            total_off_roles=total_off_roles,
+            log_entry=log_entry,
+        )
+
+    @staticmethod
+    def _pool_matchup_is_better(
+        candidate: tuple[float, float, int, tuple],
+        best: tuple[float, float, float, tuple | None],
+    ) -> bool:
+        """
+        Deterministic comparison for pool-shuffle candidate selection.
+
+        Minimizes (score, value_diff, total_off_roles), breaking remaining ties
+        lexicographically by the candidate's name signature so results are stable.
+
+        Args:
+            candidate: (score, value_diff, total_off_roles, signature)
+            best: (best_score, best_value_diff, best_total_off_roles, best_signature)
+        """
+        score, value_diff, total_off_roles, signature = candidate
+        best_score, best_value_diff, best_total_off_roles, best_signature = best
+        return (
+            score < best_score
+            or (score == best_score and value_diff < best_value_diff)
+            or (
+                score == best_score
+                and value_diff == best_value_diff
+                and total_off_roles < best_total_off_roles
+            )
+            or (
+                score == best_score
+                and value_diff == best_value_diff
+                and total_off_roles == best_total_off_roles
+                and (best_signature is None or signature < best_signature)
+            )
+        )
+
+    @staticmethod
+    def _pool_matchup_signature(
+        team1: Team, team2: Team, excluded_names: list[str]
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """Canonical (order-independent) name signature for a pool matchup."""
+        team1_sig = tuple(sorted(p.name for p in team1.players))
+        team2_sig = tuple(sorted(p.name for p in team2.players))
+        excluded_sig = tuple(sorted(excluded_names))
+        if team2_sig < team1_sig:
+            team1_sig, team2_sig = team2_sig, team1_sig
+        return (team1_sig, team2_sig, excluded_sig)
 
     def shuffle_from_pool(
         self,
@@ -780,23 +951,6 @@ class BalancedShuffler:
         # explore different candidate sets.
         pool_rng = rng if rng is not None else random.Random()
 
-        def _sample_player_combinations(
-            n: int, k: int, max_samples: int
-        ) -> Iterable[tuple[int, ...]]:
-            """Yield up to max_samples unique k-combinations from range(n) deterministically."""
-            if max_samples <= 0:
-                return []
-            seen = set()
-            # Cap attempts to avoid pathological loops when nCk isn't much bigger than max_samples.
-            attempts_left = max_samples * 25
-            while len(seen) < max_samples and attempts_left > 0:
-                attempts_left -= 1
-                combo = tuple(sorted(pool_rng.sample(range(n), k)))
-                if combo in seen:
-                    continue
-                seen.add(combo)
-                yield combo
-
         # Try combinations of 10 players from the pool (possibly sampled for very large pools).
         best_teams: tuple[Team, Team] | None = None
         best_excluded: list[Player] | None = None
@@ -807,15 +961,7 @@ class BalancedShuffler:
 
         # Track top-K matchups for logging (store only a small heap to avoid O(N) memory).
         # Keep a numeric tiebreaker so heapq never tries to compare Team objects.
-        top_matchups_heap: list[
-            tuple[
-                float,
-                int,
-                tuple[
-                    float, float, float, float, float, float, float, int, int, list[str], Team, Team
-                ],
-            ]
-        ] = []
+        top_matchups_heap: list[tuple[float, int, tuple]] = []
         heap_tiebreaker = 0
         seen_matchups = set()  # Track unique matchups per player combination
 
@@ -828,8 +974,8 @@ class BalancedShuffler:
         # Keep the threshold conservative to maintain quality for small/medium pools.
         max_player_combinations = 2500
         if total_player_combinations > max_player_combinations:
-            selected_indices_iter = _sample_player_combinations(
-                len(players), 10, max_player_combinations
+            selected_indices_iter = self._sample_player_combinations(
+                pool_rng, len(players), 10, max_player_combinations
             )
             logger.info(
                 f"Sampling {max_player_combinations} of {total_player_combinations} player combinations"
@@ -870,6 +1016,9 @@ class BalancedShuffler:
             ]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
 
+            # Penalties that are constant across every team split of this combination.
+            combo_penalty = exclusion_penalty + deal_split_penalty + rating_spread_penalty
+
             # For this combination of 10, try all ways to split into teams
             for team1_indices in itertools.combinations(range(10), 5):
                 team1_players = [selected_players[i] for i in team1_indices]
@@ -885,97 +1034,49 @@ class BalancedShuffler:
                     continue
                 seen_matchups.add(matchup_key)
 
-                # Optimize role assignments for this matchup
-                team1, team2, base_score = self._optimize_role_assignments_for_matchup(
+                matchup = self._evaluate_pool_matchup(
                     team1_players,
                     team2_players,
-                    max_assignments_per_team=pool_max_assignments_per_team,
-                    avoids=avoids,
-                    deals=deals,
+                    combo_penalty,
+                    exclusion_penalty,
+                    excluded_names,
+                    recent_match_names,
+                    pool_max_assignments_per_team,
+                    avoids,
+                    deals,
                 )
-
-                # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
-                # We need to add exclusion_penalty, recent_match_penalty, deal_split_penalty, and rating_spread_penalty
-
-                # Add recent match penalty for selected players
-                selected_player_names = {p.name for p in team1_players + team2_players}
-                recent_in_match = len(selected_player_names & recent_match_names)
-                recent_penalty = recent_in_match * self.recent_match_penalty_weight
-
-                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
-
-                # Extract components for logging
-                team1_value = team1.get_team_value(
-                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-                )
-                team2_value = team2.get_team_value(
-                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-                )
-                value_diff = abs(team1_value - team2_value)
-                team1_off_roles = team1.get_off_role_count()
-                team2_off_roles = team2.get_off_role_count()
-                off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
-                role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
-                total_off_roles = team1_off_roles + team2_off_roles
 
                 # Track top-K only (avoid storing all matchups).
                 if log_top_k > 0:
-                    entry = (
-                        total_score,
-                        value_diff,
-                        off_role_penalty,
-                        role_matchup_delta,
-                        exclusion_penalty,
-                        team1_value,
-                        team2_value,
-                        team1_off_roles,
-                        team2_off_roles,
-                        excluded_names,
-                        team1,
-                        team2,
-                    )
                     if len(top_matchups_heap) < log_top_k:
                         heap_tiebreaker += 1
-                        heapq.heappush(top_matchups_heap, (-total_score, heap_tiebreaker, entry))
+                        heapq.heappush(
+                            top_matchups_heap,
+                            (-matchup.total_score, heap_tiebreaker, matchup.log_entry),
+                        )
                     else:
                         worst_score = -top_matchups_heap[0][0]
-                        if total_score < worst_score:
+                        if matchup.total_score < worst_score:
                             heap_tiebreaker += 1
                             heapq.heapreplace(
-                                top_matchups_heap, (-total_score, heap_tiebreaker, entry)
+                                top_matchups_heap,
+                                (-matchup.total_score, heap_tiebreaker, matchup.log_entry),
                             )
 
-                # Deterministic best selection to avoid flaky tests:
-                # minimize (score, value_diff, total_off_roles), then break ties lexicographically by names.
-                team1_sig = tuple(sorted(p.name for p in team1.players))
-                team2_sig = tuple(sorted(p.name for p in team2.players))
-                excluded_sig = tuple(sorted(excluded_names))
-                # Canonicalize team order
-                if team2_sig < team1_sig:
-                    team1_sig, team2_sig = team2_sig, team1_sig
-                signature = (team1_sig, team2_sig, excluded_sig)
-
-                is_better = (
-                    total_score < best_score
-                    or (total_score == best_score and value_diff < best_value_diff)
-                    or (
-                        total_score == best_score
-                        and value_diff == best_value_diff
-                        and total_off_roles < best_total_off_roles
-                    )
-                    or (
-                        total_score == best_score
-                        and value_diff == best_value_diff
-                        and total_off_roles == best_total_off_roles
-                        and (best_signature is None or signature < best_signature)
-                    )
+                # Deterministic best selection to avoid flaky tests.
+                signature = self._pool_matchup_signature(
+                    matchup.team1, matchup.team2, excluded_names
+                )
+                is_better = self._pool_matchup_is_better(
+                    (matchup.total_score, matchup.value_diff, matchup.total_off_roles, signature),
+                    (best_score, best_value_diff, best_total_off_roles, best_signature),
                 )
                 if is_better:
-                    best_score = total_score
-                    best_value_diff = value_diff
-                    best_total_off_roles = total_off_roles
+                    best_score = matchup.total_score
+                    best_value_diff = matchup.value_diff
+                    best_total_off_roles = matchup.total_off_roles
                     best_signature = signature
-                    best_teams = (team1, team2)
+                    best_teams = (matchup.team1, matchup.team2)
                     best_excluded = excluded_players
 
                     if best_score <= early_termination_threshold:
@@ -990,48 +1091,11 @@ class BalancedShuffler:
         if logger.isEnabledFor(logging.INFO) and top_matchups_heap:
             top_entries = [entry for _neg, _tb, entry in top_matchups_heap]
             top_entries.sort(key=lambda x: x[0])
-            logger.info("=" * 60)
-            logger.info(
-                f"TOP {min(log_top_k, len(top_entries))} MATCHUPS (from pool of {len(players)} players):"
+            self._log_top_matchups(
+                top_entries[:log_top_k],
+                f"TOP {min(log_top_k, len(top_entries))} MATCHUPS (from pool of {len(players)} players):",
+                show_exclusions=True,
             )
-            for i, (
-                score,
-                value_diff,
-                off_penalty,
-                role_delta,
-                excl_penalty,
-                t1_val,
-                t2_val,
-                t1_off,
-                t2_off,
-                excluded,
-                t1,
-                t2,
-            ) in enumerate(top_entries[:log_top_k], 1):
-                t1_roles = (
-                    t1.role_assignments if t1.role_assignments else t1._assign_roles_optimally()
-                )
-                t2_roles = (
-                    t2.role_assignments if t2.role_assignments else t2._assign_roles_optimally()
-                )
-                logger.info(
-                    f"\n#{i} - Total Score: {score:.1f} (Value Diff: {value_diff:.1f}, Off-Role Penalty: {off_penalty:.1f}, "
-                    f"Role Matchup Delta: {role_delta:.1f}, Exclusion Penalty: {excl_penalty:.1f})"
-                )
-                logger.info(
-                    f"  Team 1 Value: {t1_val:.1f} | Team 2 Value: {t2_val:.1f} | Diff: {abs(t1_val - t2_val):.1f}"
-                )
-                logger.info(
-                    f"  Off-Roles: Team1={t1_off}, Team2={t2_off} (Total: {t1_off + t2_off})"
-                )
-                logger.info(f"  Excluded: {', '.join(excluded) if excluded else 'None'}")
-                logger.info(
-                    f"  Team 1: {', '.join([f'{p.name}({role})' for p, role in zip(t1.players, t1_roles)])}"
-                )
-                logger.info(
-                    f"  Team 2: {', '.join([f'{p.name}({role})' for p, role in zip(t2.players, t2_roles)])}"
-                )
-            logger.info("=" * 60)
 
         if best_teams is None or best_excluded is None:
             raise RuntimeError("Failed to compute teams from pool shuffle (no matchups evaluated)")

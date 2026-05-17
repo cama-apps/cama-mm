@@ -10,6 +10,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
+    BOSS_VICTORY_BASE_JC,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CHEER_COOLDOWN_SECONDS,
@@ -76,6 +77,12 @@ class TestDigConstants:
 
     def test_paid_dig_cost_cap(self):
         assert PAID_DIG_COST_CAP == 40
+
+    def test_boss_victory_base_jc_covers_every_boss_boundary(self):
+        """Every regular boss boundary needs a base-reward entry, else a win
+        there silently falls through to the 15-JC default. The pinnacle
+        (350) is excluded — it pays PINNACLE_BASE_JC_REWARD instead."""
+        assert set(BOSS_VICTORY_BASE_JC) == set(BOSS_BOUNDARIES)
 
 
 class TestPrestigeCaveInMultiplier:
@@ -470,6 +477,58 @@ class TestCaveIn:
         if result.get("stun_hours"):
             assert result["stun_hours"] >= 1
 
+    def test_reinforcement_caps_cave_in_block_loss_at_eight(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """When Reinforcement window is active, cave-in block_loss clamps to 8
+        even if the random roll would put it higher.
+
+        Uses a shallow-band depth where block_loss range tops out at 14 and
+        catastrophic_pct is 0 — so a single ``random=0.001`` forces a normal
+        cave-in (not a catastrophic one, which has its own depth-rollback path)
+        and `randint=b` rolls the upper bound, giving block_loss=14 pre-cap.
+        Reinforcement should clamp that to 8.
+        """
+        _register_player(player_repository, balance=300)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        dig_service.dig(10001, guild_id)
+        # Stay in the shallow band (< 50) and mark the depth-25 boss defeated
+        # so the test dig doesn't park there.
+        bp_defeated = json.dumps({"25": "defeated"})
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=40,
+            boss_progress=bp_defeated,
+            reinforced_until=1_000_000 + 48 * 3600,
+        )
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: 0.001)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        result = dig_service.dig(10001, guild_id)
+        assert result.get("cave_in"), "expected a forced cave-in"
+        detail = result.get("cave_in_detail") or {}
+        block_loss = int(detail.get("block_loss", -1))
+        assert 0 <= block_loss <= 8, f"block_loss {block_loss} exceeded cap"
+
+        # Sanity check: without Reinforcement on the same setup, block_loss
+        # should land in the uncapped shallow range (6..14). Guards against a
+        # cap that fires regardless of the window.
+        _register_player(player_repository, discord_id=10099, balance=300)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10099, guild_id)
+        dig_repo.update_tunnel(
+            10099, guild_id, depth=40, boss_progress=bp_defeated,
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: 0.001)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        result_no_reinf = dig_service.dig(10099, guild_id)
+        detail_no_reinf = result_no_reinf.get("cave_in_detail") or {}
+        assert int(detail_no_reinf.get("block_loss", 0)) > 8
+
     def test_cave_in_medical_bill(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Medical bill costs depth/10 JC."""
         _register_player(player_repository, balance=200)
@@ -803,6 +862,61 @@ class TestSabotage:
         result = dig_service.sabotage_tunnel(10001, 10001, guild_id)
         assert not result["success"]
 
+    def test_sabotage_attacker_block_reward_by_depth_tier(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Successful sabotage gives the attacker +3/+5/+7 advance scaled by
+        victim's depth bracket (<100 / 100-250 / 250+).
+
+        Uses a fresh victim per iteration to avoid the 12h per-target cooldown.
+        """
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        _register_player(player_repository, discord_id=29999, balance=2000)
+        dig_service.dig(29999, guild_id)
+
+        for i, (victim_depth, expected_reward) in enumerate(
+            [(50, 3), (150, 5), (300, 7)],
+        ):
+            victim_id = 20100 + i
+            _register_player(player_repository, discord_id=victim_id)
+            dig_service.dig(victim_id, guild_id)
+            dig_repo.update_tunnel(victim_id, guild_id, depth=victim_depth)
+            attacker_pre = dig_repo.get_tunnel(29999, guild_id)
+
+            result = dig_service.sabotage_tunnel(29999, victim_id, guild_id)
+            assert result["success"]
+            assert result.get("attacker_block_reward") == expected_reward
+            attacker_post = dig_repo.get_tunnel(29999, guild_id)
+            assert attacker_post["depth"] == attacker_pre["depth"] + expected_reward
+
+    def test_blocked_sabotage_credits_victim_jc_tip(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Trap-blocked sabotage credits the victim a small JC tip on top of
+        the existing trap_steal -> target_jc_credit flow."""
+        _register_player(player_repository, discord_id=10001, balance=100)
+        _register_player(player_repository, discord_id=10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=200)
+
+        # Victim sets a trap so the attacker's attempt is blocked.
+        dig_service.set_trap(10001, guild_id)
+
+        victim_balance_before = player_repository.get_balance(10001, guild_id)
+        result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
+        assert result.get("trapped")
+        victim_balance_after = player_repository.get_balance(10001, guild_id)
+        # Trap_steal (cost*2) + victim tip (max(25, cost//2)). Victim gain is
+        # strictly larger than the bare trap_steal, which is what the buff is for.
+        cost = max(5, 200 // 5)
+        bare_trap_credit = cost
+        assert victim_balance_after - victim_balance_before > bare_trap_credit
+
 
 class TestTrap:
     """Tests for trap mechanics."""
@@ -970,14 +1084,51 @@ class TestBoss:
             boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
         )
 
-        # Force win
+        # Force win. Pin the win chance below the wager-taper knee so a
+        # normal-odds wager pays its full multiplier (a tiny wager on a
+        # near-certain fight would otherwise taper to ~0 net profit).
         monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert result.get("won")
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] > 24
         assert result.get("payout", 0) > 0
+
+    def test_boss_fight_win_pays_base_reward_despite_taper(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A wagered win at a high win-chance still pays the depth-scaled
+        base reward. Regression: the wager-payout taper used to floor a
+        near-certain, low-risk win at max(0, ...) = 0 JC — the player beat
+        the boss and earned nothing."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        balance_before = player_repository.get_balance(10001, guild_id)
+        # Force a win, with the win chance pinned ABOVE the wager-taper knee
+        # so the wager profit tapers to ~0 — the base reward must still pay.
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.99,
+        )
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
+        assert result["success"]
+        assert result.get("won")
+        # Boundary 25's base reward is paid even when wager profit tapers to 0.
+        assert result["payout"] >= BOSS_VICTORY_BASE_JC[25]
+        gained = player_repository.get_balance(10001, guild_id) - balance_before
+        assert gained == result["payout"]
 
     def test_boss_fight_lose(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Lose forfeits the wager and applies a depth knockback."""
@@ -1033,35 +1184,6 @@ class TestBoss:
         dig_repo.update_tunnel(10001, guild_id, boss_progress=json.dumps(all_defeated))
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert result["success"]
-
-
-class TestAchievements:
-    """Tests for achievement unlocking."""
-
-    def test_achievement_unlocked_on_milestone(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Achievement triggers at threshold."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        # Directly add achievement
-        added = dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_000)
-        assert added is True
-
-        achievements = dig_repo.get_achievements(10001, guild_id)
-        assert len(achievements) == 1
-        assert achievements[0]["achievement_id"] == "dig_count_bronze"
-
-    def test_achievement_not_duplicated(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Same achievement not added twice."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_000)
-        added_again = dig_repo.add_achievement(10001, guild_id, "dig_count_bronze", 1_000_001)
-        assert added_again is False
-
-        achievements = dig_repo.get_achievements(10001, guild_id)
-        assert len(achievements) == 1
 
 
 class TestStreaks:
@@ -1222,10 +1344,15 @@ class TestBossOdds:
         # At depth 25, penalty = (25/100)*0.05 = 0.0125, so ~0.74
         assert cautious_pct > 0.70, f"Cautious odds {cautious_pct} should reflect 0.75 base, not 0.50 default"
 
-        # Multiplier should come from BOSS_PAYOUTS[25], not default 2.0
+        # Multiplier comes from BOSS_PAYOUTS[25] (1.5), tapered toward
+        # break-even by the high cautious win chance — not the 2.0 default.
         cautious_mult = result["odds"]["cautious"]["multiplier"]
-        expected_mult = BOSS_PAYOUTS[25][0]
-        assert cautious_mult == expected_mult, f"Expected multiplier {expected_mult}, got {cautious_mult}"
+        expected_mult = dig_service._effective_wager_multiplier(
+            BOSS_PAYOUTS[25][0], cautious_pct,
+        )
+        assert abs(cautious_mult - expected_mult) < 0.05, (
+            f"Expected ~{expected_mult:.2f}, got {cautious_mult}"
+        )
 
     def test_fight_boss_reckless_high_roll_loses(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Reckless fight with high roll (0.99 > 0.20 base odds) should lose."""

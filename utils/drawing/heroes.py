@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from io import BytesIO
 
 from PIL import Image, ImageDraw
@@ -18,6 +21,8 @@ from utils.drawing._common import (
     _get_font,
     _get_text_size,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def draw_hero_performance_chart(
@@ -136,6 +141,176 @@ def draw_hero_performance_chart(
     return fp
 
 
+# --- Hero grid layout constants ---
+_GRID_MAX_HEROES = 60
+_GRID_CELL_SIZE = 44
+_GRID_PLAYER_LABEL_WIDTH = 120
+_GRID_HERO_LABEL_HEIGHT = 90
+_GRID_PADDING = 15
+_GRID_LEGEND_HEIGHT = 80
+_GRID_TITLE_HEIGHT = 30
+_GRID_MIN_CIRCLE_RADIUS = 4
+_GRID_MAX_CIRCLE_RADIUS = 18
+_GRID_LABEL_REPEAT_INTERVAL = 10
+_GRID_MAX_WIDTH = 3900
+
+
+@dataclass(frozen=True)
+class _HeroGridLayout:
+    """Computed geometry for a hero grid render.
+
+    Holds the capped hero list, image dimensions, repeat-band/column counts,
+    and the four repeat-label coordinate helpers used throughout drawing.
+    """
+
+    hero_ids: list[int]
+    num_players: int
+    num_heroes: int
+    n_extra_bands: int
+    n_extra_cols: int
+    width: int
+    height: int
+    grid_top: int
+    count_bands_before: Callable[[int], int]
+    count_cols_before: Callable[[int], int]
+    player_row_y: Callable[[int], int]
+    hero_col_x: Callable[[int], int]
+
+
+def _compute_hero_grid_layout(
+    player_ids: list[int],
+    hero_ids: list[int],
+) -> _HeroGridLayout:
+    """Compute hero-grid geometry: hero capping, dimensions, coordinate helpers.
+
+    Args:
+        player_ids: Ordered player ids that will become grid rows.
+        hero_ids: Heroes sorted most-popular-first (pre-capping).
+
+    Returns:
+        A frozen :class:`_HeroGridLayout` with the capped hero list, image
+        dimensions, repeat band/column counts, and coordinate helper closures.
+    """
+    num_players = len(player_ids)
+    num_heroes_raw = len(hero_ids)
+
+    # Compute repeat band/column counts for dimension calculations
+    n_extra_bands = (
+        (num_players - 1) // _GRID_LABEL_REPEAT_INTERVAL
+        if num_players > _GRID_LABEL_REPEAT_INTERVAL
+        else 0
+    )
+    n_extra_cols = (
+        (num_heroes_raw - 1) // _GRID_LABEL_REPEAT_INTERVAL
+        if num_heroes_raw > _GRID_LABEL_REPEAT_INTERVAL
+        else 0
+    )
+
+    extra_col_width = n_extra_cols * _GRID_PLAYER_LABEL_WIDTH
+    max_heroes_by_width = (
+        _GRID_MAX_WIDTH - _GRID_PADDING * 2 - _GRID_PLAYER_LABEL_WIDTH - extra_col_width
+    ) // _GRID_CELL_SIZE
+    num_heroes = min(num_heroes_raw, _GRID_MAX_HEROES, max_heroes_by_width)
+    hero_ids = hero_ids[:num_heroes]
+
+    # Recompute extra columns after capping heroes
+    n_extra_cols = (
+        (num_heroes - 1) // _GRID_LABEL_REPEAT_INTERVAL
+        if num_heroes > _GRID_LABEL_REPEAT_INTERVAL
+        else 0
+    )
+
+    # --- Image dimensions ---
+    extra_band_height = n_extra_bands * _GRID_HERO_LABEL_HEIGHT
+    extra_col_width = n_extra_cols * _GRID_PLAYER_LABEL_WIDTH
+    width = (
+        _GRID_PADDING + _GRID_PLAYER_LABEL_WIDTH + num_heroes * _GRID_CELL_SIZE
+        + extra_col_width + _GRID_PADDING
+    )
+    height = (
+        _GRID_PADDING + _GRID_TITLE_HEIGHT + _GRID_HERO_LABEL_HEIGHT
+        + num_players * _GRID_CELL_SIZE + extra_band_height
+        + _GRID_LEGEND_HEIGHT + _GRID_PADDING
+    )
+
+    grid_top = _GRID_PADDING + _GRID_TITLE_HEIGHT + _GRID_HERO_LABEL_HEIGHT
+
+    # --- Repeat-label coordinate helpers ---
+    def _count_bands_before(player_idx: int) -> int:
+        """Number of hero-header repeat bands above this player row."""
+        if num_players <= _GRID_LABEL_REPEAT_INTERVAL:
+            return 0
+        return player_idx // _GRID_LABEL_REPEAT_INTERVAL
+
+    def _count_cols_before(hero_idx: int) -> int:
+        """Number of player-label repeat columns left of this hero column."""
+        if num_heroes <= _GRID_LABEL_REPEAT_INTERVAL:
+            return 0
+        return hero_idx // _GRID_LABEL_REPEAT_INTERVAL
+
+    def _player_row_y(player_idx: int) -> int:
+        return (
+            grid_top + player_idx * _GRID_CELL_SIZE
+            + _count_bands_before(player_idx) * _GRID_HERO_LABEL_HEIGHT
+        )
+
+    def _hero_col_x(hero_idx: int) -> int:
+        return (
+            _GRID_PADDING + _GRID_PLAYER_LABEL_WIDTH + hero_idx * _GRID_CELL_SIZE
+            + _count_cols_before(hero_idx) * _GRID_PLAYER_LABEL_WIDTH
+        )
+
+    return _HeroGridLayout(
+        hero_ids=hero_ids,
+        num_players=num_players,
+        num_heroes=num_heroes,
+        n_extra_bands=n_extra_bands,
+        n_extra_cols=n_extra_cols,
+        width=width,
+        height=height,
+        grid_top=grid_top,
+        count_bands_before=_count_bands_before,
+        count_cols_before=_count_cols_before,
+        player_row_y=_player_row_y,
+        hero_col_x=_hero_col_x,
+    )
+
+
+def _draw_grid_size_legend(draw: ImageDraw.ImageDraw, legend_y: int) -> None:
+    """Draw the "Size = games" circle-size legend row at ``legend_y``."""
+    legend_font = _get_font(11)
+    draw.text((_GRID_PADDING, legend_y), "Size = games:", fill=DISCORD_GREY, font=legend_font)
+    size_x = _GRID_PADDING + 90
+    for label, example_t in [("few", 0.05), ("some", 0.25), ("many", 1.0)]:
+        r = int(round(
+            _GRID_MIN_CIRCLE_RADIUS
+            + (_GRID_MAX_CIRCLE_RADIUS - _GRID_MIN_CIRCLE_RADIUS) * math.sqrt(example_t)
+        ))
+        cy = legend_y + 8
+        draw.ellipse(
+            [(size_x - r, cy - r), (size_x + r, cy + r)],
+            fill=DISCORD_GREY,
+        )
+        lw, _lh = _get_text_size(legend_font, label)
+        draw.text((size_x + r + 6, legend_y), label, fill=DISCORD_GREY, font=legend_font)
+        size_x += r + 6 + lw + 22
+
+
+def _draw_grid_color_legend(draw: ImageDraw.ImageDraw, legend_y2: int) -> None:
+    """Draw the "Color = WR" winrate-color legend row at ``legend_y2``."""
+    legend_font = _get_font(11)
+    draw.text((_GRID_PADDING, legend_y2), "Color = WR:", fill=DISCORD_GREY, font=legend_font)
+    color_x = _GRID_PADDING + 82
+    for label, clr in [("≥60%", DISCORD_GREEN), ("≥50%", "#7CB342"),
+                        ("≥40%", DISCORD_YELLOW), ("<40%", DISCORD_RED)]:
+        r = 6
+        cy = legend_y2 + 7
+        draw.ellipse([(color_x - r, cy - r), (color_x + r, cy + r)], fill=clr)
+        lw, _lh = _get_text_size(legend_font, label)
+        draw.text((color_x + r + 3, legend_y2), label, fill=DISCORD_GREY, font=legend_font)
+        color_x += r + 3 + lw + 14
+
+
 def draw_hero_grid(
     grid_data: list[dict],
     player_names: dict[int, str],
@@ -216,60 +391,26 @@ def draw_hero_grid(
     # Sort heroes by total games descending (most popular first)
     hero_ids.sort(key=lambda hid: hero_total_games.get(hid, 0), reverse=True)
 
-    # Cap heroes to keep image within Discord limits
-    MAX_HEROES = 60
-    CELL_SIZE = 44
-    PLAYER_LABEL_WIDTH = 120
-    HERO_LABEL_HEIGHT = 90
-    PADDING = 15
-    LEGEND_HEIGHT = 80
-    TITLE_HEIGHT = 30
-    MIN_CIRCLE_RADIUS = 4
-    MAX_CIRCLE_RADIUS = 18
-    LABEL_REPEAT_INTERVAL = 10
+    # --- Compute layout geometry (hero capping, dimensions, coordinate helpers) ---
+    layout = _compute_hero_grid_layout(player_ids, hero_ids)
+    hero_ids = layout.hero_ids
+    num_players = layout.num_players
+    num_heroes = layout.num_heroes
+    n_extra_bands = layout.n_extra_bands
+    n_extra_cols = layout.n_extra_cols
+    width = layout.width
+    height = layout.height
+    grid_top = layout.grid_top
+    _player_row_y = layout.player_row_y
+    _hero_col_x = layout.hero_col_x
 
-    num_players = len(player_ids)
-    num_heroes_raw = len(hero_ids)
-
-    # Compute repeat band/column counts for dimension calculations
-    n_extra_bands = (num_players - 1) // LABEL_REPEAT_INTERVAL if num_players > LABEL_REPEAT_INTERVAL else 0
-    n_extra_cols = (num_heroes_raw - 1) // LABEL_REPEAT_INTERVAL if num_heroes_raw > LABEL_REPEAT_INTERVAL else 0
-
-    max_width = 3900
-    extra_col_width = n_extra_cols * PLAYER_LABEL_WIDTH
-    max_heroes_by_width = (max_width - PADDING * 2 - PLAYER_LABEL_WIDTH - extra_col_width) // CELL_SIZE
-    num_heroes = min(num_heroes_raw, MAX_HEROES, max_heroes_by_width)
-    hero_ids = hero_ids[:num_heroes]
-
-    # Recompute extra columns after capping heroes
-    n_extra_cols = (num_heroes - 1) // LABEL_REPEAT_INTERVAL if num_heroes > LABEL_REPEAT_INTERVAL else 0
-
-    # --- Repeat-label coordinate helpers ---
-    def _count_bands_before(player_idx: int) -> int:
-        """Number of hero-header repeat bands above this player row."""
-        if num_players <= LABEL_REPEAT_INTERVAL:
-            return 0
-        return player_idx // LABEL_REPEAT_INTERVAL
-
-    def _count_cols_before(hero_idx: int) -> int:
-        """Number of player-label repeat columns left of this hero column."""
-        if num_heroes <= LABEL_REPEAT_INTERVAL:
-            return 0
-        return hero_idx // LABEL_REPEAT_INTERVAL
-
-    def _player_row_y(player_idx: int) -> int:
-        return grid_top + player_idx * CELL_SIZE + _count_bands_before(player_idx) * HERO_LABEL_HEIGHT
-
-    def _hero_col_x(hero_idx: int) -> int:
-        return PADDING + PLAYER_LABEL_WIDTH + hero_idx * CELL_SIZE + _count_cols_before(hero_idx) * PLAYER_LABEL_WIDTH
-
-    # --- Image dimensions ---
-    extra_band_height = n_extra_bands * HERO_LABEL_HEIGHT
-    extra_col_width = n_extra_cols * PLAYER_LABEL_WIDTH
-    width = PADDING + PLAYER_LABEL_WIDTH + num_heroes * CELL_SIZE + extra_col_width + PADDING
-    height = PADDING + TITLE_HEIGHT + HERO_LABEL_HEIGHT + num_players * CELL_SIZE + extra_band_height + LEGEND_HEIGHT + PADDING
-
-    grid_top = PADDING + TITLE_HEIGHT + HERO_LABEL_HEIGHT
+    # Drawing-stage aliases for the shared grid constants
+    CELL_SIZE = _GRID_CELL_SIZE
+    PLAYER_LABEL_WIDTH = _GRID_PLAYER_LABEL_WIDTH
+    PADDING = _GRID_PADDING
+    MIN_CIRCLE_RADIUS = _GRID_MIN_CIRCLE_RADIUS
+    MAX_CIRCLE_RADIUS = _GRID_MAX_CIRCLE_RADIUS
+    LABEL_REPEAT_INTERVAL = _GRID_LABEL_REPEAT_INTERVAL
 
     img = Image.new("RGBA", (width, height), DISCORD_BG)
     draw = ImageDraw.Draw(img)
@@ -435,36 +576,10 @@ def draw_hero_grid(
             fill=separator_color, width=2,
         )
 
-    # --- Draw legend ---
+    # --- Draw legends ---
     legend_y = grid_bottom + 25
-    legend_font = _get_font(11)
-
-    # Size legend
-    draw.text((PADDING, legend_y), "Size = games:", fill=DISCORD_GREY, font=legend_font)
-    size_x = PADDING + 90
-    for label, example_t in [("few", 0.05), ("some", 0.25), ("many", 1.0)]:
-        r = int(round(MIN_CIRCLE_RADIUS + (MAX_CIRCLE_RADIUS - MIN_CIRCLE_RADIUS) * math.sqrt(example_t)))
-        cy = legend_y + 8
-        draw.ellipse(
-            [(size_x - r, cy - r), (size_x + r, cy + r)],
-            fill=DISCORD_GREY,
-        )
-        lw, _lh = _get_text_size(legend_font, label)
-        draw.text((size_x + r + 6, legend_y), label, fill=DISCORD_GREY, font=legend_font)
-        size_x += r + 6 + lw + 22
-
-    # Color legend
-    legend_y2 = legend_y + 45
-    draw.text((PADDING, legend_y2), "Color = WR:", fill=DISCORD_GREY, font=legend_font)
-    color_x = PADDING + 82
-    for label, clr in [("\u226560%", DISCORD_GREEN), ("\u226550%", "#7CB342"),
-                        ("\u226540%", DISCORD_YELLOW), ("<40%", DISCORD_RED)]:
-        r = 6
-        cy = legend_y2 + 7
-        draw.ellipse([(color_x - r, cy - r), (color_x + r, cy + r)], fill=clr)
-        lw, _lh = _get_text_size(legend_font, label)
-        draw.text((color_x + r + 3, legend_y2), label, fill=DISCORD_GREY, font=legend_font)
-        color_x += r + 3 + lw + 14
+    _draw_grid_size_legend(draw, legend_y)
+    _draw_grid_color_legend(draw, legend_y + 45)
 
     # --- Save ---
     fp = BytesIO()
@@ -514,11 +629,13 @@ def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.I
         response = requests.get(url, timeout=5)
         response.raise_for_status()
         img = Image.open(BytesIO(response.content)).convert("RGBA")
-        # Cache the original
+        # Cache the original. Intentionally retained (not closed) for the
+        # lifetime of the process so repeat lookups reuse the decoded image.
         _hero_image_cache[cache_key] = img
         # Return resized
         return img.resize(size, Image.Resampling.LANCZOS)
     except Exception:
+        logger.debug("Failed to fetch hero image for hero_id=%s", hero_id, exc_info=True)
         return None
 
 

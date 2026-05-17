@@ -28,7 +28,7 @@ class NeonEventRepository(BaseRepository):
                 )
                 return [(row["discord_id"], row["guild_id"], row["event_type"]) for row in cursor.fetchall()]
         except Exception as e:
-            logger.debug(f"Failed to load one-time events: {e}")
+            logger.error(f"Failed to load one-time events: {e}", exc_info=True)
             return []
 
     def check_one_time_event(self, discord_id: int, guild_id: int, event_type: str) -> bool:
@@ -48,12 +48,16 @@ class NeonEventRepository(BaseRepository):
                 )
                 return cursor.fetchone() is not None
         except Exception as e:
-            logger.debug(f"Failed to check one-time event: {e}")
+            logger.error(f"Failed to check one-time event: {e}", exc_info=True)
             return False
 
     def persist_one_time_event(self, discord_id: int, guild_id: int, event_type: str, layer: int) -> None:
         """
         Persist a one-time event to the database.
+
+        A failed write is not swallowed: it is logged at ``error`` and the
+        exception re-raised, since silently dropping the row would let a
+        one-time event re-trigger.
         """
         try:
             with self.connection() as conn:
@@ -65,4 +69,5 @@ class NeonEventRepository(BaseRepository):
                     (discord_id, guild_id, event_type, layer, int(time.time())),
                 )
         except Exception as e:
-            logger.debug(f"Failed to persist one-time event: {e}")
+            logger.error(f"Failed to persist one-time event: {e}", exc_info=True)
+            raise

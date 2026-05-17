@@ -109,6 +109,7 @@ class ServiceContainer:
         from repositories.buff_repository import BuffRepository
         from repositories.curse_repository import CurseRepository
         from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
+        from repositories.dig_quest_repository import DigQuestRepository
         from repositories.dig_repository import DigRepository
         from repositories.disburse_repository import DisburseRepository
         from repositories.guild_config_repository import GuildConfigRepository
@@ -155,6 +156,7 @@ class ServiceContainer:
             "notification_repo": NotificationRepository(p),
             "curse_repo": CurseRepository(p),
             "dig_guild_modifier_repo": DigGuildModifierRepository(p),
+            "dig_quest_repo": DigQuestRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -386,7 +388,6 @@ class ServiceContainer:
 
     def _init_dig_service(self) -> None:
         """Tunnel digging minigame service."""
-        from services.dig_achievement_service import DigAchievementService
         from services.dig_inventory_service import DigInventoryService
         from services.dig_leaderboard_service import DigLeaderboardService
         from services.dig_service import DigService
@@ -394,13 +395,20 @@ class ServiceContainer:
 
         c = self._components
         c["dig_leaderboard_service"] = DigLeaderboardService(c["dig_repo"])
-        c["dig_achievement_service"] = DigAchievementService(
-            c["dig_repo"], c["player_repo"]
-        )
         c["dig_tunnel_naming_service"] = DigTunnelNamingService()
         c["dig_inventory_service"] = DigInventoryService(
             c["dig_repo"], c["player_repo"]
         )
+
+        from services.dig_quest_service import DigQuestService
+
+        c["dig_quest_service"] = DigQuestService(
+            quest_repo=c["dig_quest_repo"],
+            dig_repo=c["dig_repo"],
+            bet_repo=c["bet_repo"],
+            guild_modifier_repo=c["dig_guild_modifier_repo"],
+        )
+
         c["dig_service"] = DigService(
             dig_repo=c["dig_repo"],
             player_repo=c["player_repo"],
@@ -411,10 +419,16 @@ class ServiceContainer:
             slow_drip_repo=c.get("slow_drip_repo"),
             balance_history_service=c.get("balance_history_service"),
             leaderboard_service=c["dig_leaderboard_service"],
-            achievement_service=c["dig_achievement_service"],
             tunnel_naming_service=c["dig_tunnel_naming_service"],
             inventory_service=c["dig_inventory_service"],
+            quest_service=c["dig_quest_service"],
         )
+
+        # Cross-wire: quest finale JC needs the same Plains-tithe/Blue-tax
+        # treatment as normal dig JC. The tax function lives on DigService
+        # (Plains tithe transfers to the nonprofit fund as a side effect),
+        # so we back-fill it once both services exist.
+        c["dig_quest_service"].set_tax_fn(c["dig_service"]._apply_mana_yield_taxes)
 
         # Wire LLM flavor layer if AI is available
         ai_service = c.get("ai_service")
@@ -544,6 +558,8 @@ class ServiceContainer:
         bot.curse_repo = c["curse_repo"]
         bot.curse_service = c["curse_service"]
         bot.dig_guild_modifier_repo = c["dig_guild_modifier_repo"]
+        bot.dig_quest_service = c["dig_quest_service"]
+        bot.dig_quest_repo = c["dig_quest_repo"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]

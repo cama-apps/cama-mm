@@ -6,10 +6,16 @@ on full defeat. Loss or retreat between phases drops the carry markers.
 """
 
 import json
+import time
 
 import pytest
 
 from repositories.dig_repository import DigRepository
+from services.dig_constants import (
+    PINNACLE_BASE_JC_REWARD,
+    PINNACLE_BOSSES,
+    PINNACLE_DEPTH,
+)
 from services.dig_service import DigService
 
 
@@ -164,3 +170,155 @@ class TestRetreatForfeitsHalfOfCarry:
         assert result["success"]
         assert result["carried_wager_forfeit"] == 0
         assert player_repository.get_balance(10001, guild_id) == balance_before
+
+
+def _setup_pinnacle(dig_repo, player_repository, guild_id, *, discord_id=20001,
+                    balance=2000, prestige=0):
+    """Register a player and park a tunnel at the pinnacle depth (350)."""
+    player_repository.add(
+        discord_id=discord_id,
+        discord_username=f"Pinnacle{discord_id}",
+        guild_id=guild_id,
+        initial_mmr=3000,
+        glicko_rating=1500.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    player_repository.update_balance(discord_id, guild_id, balance)
+    dig_repo.create_tunnel(discord_id, guild_id, "PinnacleTunnel")
+    dig_repo.update_tunnel(
+        discord_id, guild_id,
+        depth=PINNACLE_DEPTH, max_depth=PINNACLE_DEPTH, prestige_level=prestige,
+    )
+    tunnel = dict(dig_repo.get_tunnel(discord_id, guild_id))
+    tunnel["discord_id"] = discord_id
+    return tunnel
+
+
+def _finalize_pinnacle(dig_service, guild_id, *, tunnel, discord_id=20001,
+                       pinnacle_id="forgotten_king", phase_idx=3, won=True,
+                       wager=0, risk_tier="bold", prestige_level=0,
+                       win_chance=0.55, boss_progress=None):
+    """Drive _finalize_pinnacle_outcome with sane defaults for a pinnacle fight.
+
+    win_chance defaults below the wager-taper knee so the authored multiplier
+    applies untapered unless a test overrides it.
+    """
+    pinnacle = PINNACLE_BOSSES[pinnacle_id]
+    return dig_service._finalize_pinnacle_outcome(
+        discord_id=discord_id, guild_id=guild_id, tunnel=tunnel,
+        pinnacle_id=pinnacle_id, pinnacle=pinnacle,
+        phase_def=pinnacle.phases[phase_idx - 1],
+        phase_idx=phase_idx, phase_key=f"{PINNACLE_DEPTH}:{phase_idx}",
+        boss_progress=boss_progress if boss_progress is not None else {},
+        won=won, boss_hp=0, boss_hp_max=500,
+        risk_tier=risk_tier, wager=wager,
+        win_chance=win_chance, attempts=1, round_log=[], gear_broken_names=[],
+        prestige_level=prestige_level, depth=PINNACLE_DEPTH, now=int(time.time()),
+    )
+
+
+class TestPinnacleWagerPayout:
+    """A pinnacle wager rides all 3 phases and pays out on a full clear at
+    win-chance-tapered odds; any phase loss forfeits it. Previously the wager
+    was ignored on a phase-3 win and could only ever be lost.
+    """
+
+    def test_full_clear_pays_the_wager_on_top_of_base_reward(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        before = player_repository.get_balance(20001, guild_id)
+
+        # bold tier, win chance below the taper knee -> full BOSS_PAYOUTS[350]
+        # bold multiplier (3.8); a 200 wager profits int(200 * (3.8 - 1)) = 560.
+        result = _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=3, won=True, wager=200, risk_tier="bold", win_chance=0.55,
+        )
+
+        assert result["payout"] == PINNACLE_BASE_JC_REWARD + 560
+        assert (player_repository.get_balance(20001, guild_id)
+                == before + PINNACLE_BASE_JC_REWARD + 560)
+
+    def test_full_clear_wager_payout_tapers_at_high_win_chance(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        before = player_repository.get_balance(20001, guild_id)
+
+        # Win chance at the cap -> fair odds ~1/0.95; a 200 wager returns only
+        # int(200 * (1/0.95 - 1)) = 10. Softening then betting big is dead.
+        result = _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=3, won=True, wager=200, risk_tier="bold", win_chance=0.95,
+        )
+
+        assert result["payout"] == PINNACLE_BASE_JC_REWARD + 10
+        assert (player_repository.get_balance(20001, guild_id)
+                == before + PINNACLE_BASE_JC_REWARD + 10)
+
+    def test_full_clear_without_a_wager_pays_only_the_base_reward(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        before = player_repository.get_balance(20001, guild_id)
+
+        result = _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel, phase_idx=3, won=True, wager=0,
+        )
+
+        assert result["payout"] == PINNACLE_BASE_JC_REWARD
+        assert (player_repository.get_balance(20001, guild_id)
+                == before + PINNACLE_BASE_JC_REWARD)
+
+    def test_phase_loss_forfeits_the_wager(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        before = player_repository.get_balance(20001, guild_id)
+
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=2, won=False, wager=200,
+        )
+
+        assert player_repository.get_balance(20001, guild_id) == before - 200
+
+    def test_phase1_win_carries_the_wager_forward(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=1, won=True, wager=150, risk_tier="reckless",
+        )
+
+        entry = json.loads(
+            dig_repo.get_tunnel(20001, guild_id)["boss_progress"]
+        )[str(PINNACLE_DEPTH)]
+        assert entry["carried_wager"] == 150
+        assert entry["carried_risk_tier"] == "reckless"
+
+    def test_phase_loss_clears_a_carried_wager(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        boss_progress = {
+            str(PINNACLE_DEPTH): {
+                "status": "phase1_defeated", "boss_id": "forgotten_king",
+                "carried_wager": 200, "carried_risk_tier": "bold",
+            }
+        }
+
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=2, won=False, wager=200, boss_progress=boss_progress,
+        )
+
+        entry = json.loads(
+            dig_repo.get_tunnel(20001, guild_id)["boss_progress"]
+        )[str(PINNACLE_DEPTH)]
+        assert "carried_wager" not in entry
+        assert "carried_risk_tier" not in entry

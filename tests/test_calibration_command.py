@@ -5,6 +5,7 @@ Tests for the /calibration command (public access).
 import ast
 import inspect
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -134,6 +135,70 @@ class TestCalibrationStatsIntegration:
         assert stats["rd_tiers"]["Settling"] == 1  # RD 100 falls in Settling range
         assert stats["avg_rating"] == 1200.0
         assert stats["avg_rd"] == 100.0
+
+
+class TestIndividualCalibrationProfile:
+    """Tests for the Rating Profile field of /calibration <user>."""
+
+    @pytest.mark.asyncio
+    async def test_unrated_player_rating_profile_not_duplicated(self):
+        """An unrated player (falsy volatility) must not see Rating/Tier twice.
+
+        Regression: a malformed ternary bound if/else to only the Volatility
+        literal, so a falsy glicko_volatility produced "Rating .. Tier .. Rating
+        .. Tier" - the Rating/Tier lines rendered twice.
+        """
+        from commands.info import InfoCommands
+        from domain.models.player import Player
+        from rating_system import CamaRatingSystem
+
+        # Player with no volatility -> falsy branch of the buggy ternary.
+        player = Player(
+            name="Unrated",
+            glicko_rating=1500.0,
+            glicko_rd=350.0,
+            glicko_volatility=None,
+            initial_mmr=3000,
+            discord_id=777,
+        )
+
+        player_service = MagicMock()
+        player_service.get_player.return_value = player
+        player_service.get_all.return_value = [player]
+        player_service.get_openskill_rating.return_value = None
+
+        cog = InfoCommands(
+            bot=MagicMock(),
+            player_service=player_service,
+            match_service=None,  # skips history-dependent branches
+            role_emojis={},
+            role_names={},
+        )
+
+        # The real safe_followup runs and awaits interaction.followup.send;
+        # reading the embed off an AsyncMock avoids a monkeypatch that a
+        # parallel cog-reload could defeat (test-isolation flake).
+        interaction = MagicMock()
+        interaction.guild = MagicMock()
+        interaction.guild.id = 12345
+        interaction.followup.send = AsyncMock()
+        user = MagicMock()
+        user.id = 777
+        user.display_name = "Unrated"
+        user.mention = "<@777>"
+
+        await cog._show_individual_calibration(interaction, user, CamaRatingSystem())
+
+        interaction.followup.send.assert_called_once()
+        embed = interaction.followup.send.call_args.kwargs["embed"]
+        assert embed is not None
+        profile_field = next(
+            (f for f in embed.fields if "Rating Profile" in f.name), None
+        )
+        assert profile_field is not None
+        # The Rating and Tier lines must each appear exactly once.
+        assert profile_field.value.count("**Rating:**") == 1
+        assert profile_field.value.count("**Tier:**") == 1
 
 
 if __name__ == "__main__":

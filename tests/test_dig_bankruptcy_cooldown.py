@@ -135,3 +135,26 @@ class TestBankruptcyCooldown:
         remaining = dig_service_with_bankruptcy._get_cooldown_remaining(tunnel)
         # Injury sets cooldown = INJURY_SLOW_COOLDOWN; bankruptcy halves it.
         assert remaining == INJURY_SLOW_COOLDOWN // 2
+
+
+class TestCooldownMalformedInjuryState:
+    """A corrupt injury_state JSON string must not crash the cooldown read.
+
+    _get_cooldown_remaining runs on essentially every /dig and status
+    check. A malformed/truncated injury_state (partial write, manual DB
+    edit, schema drift) must degrade to "no injury", not raise
+    JSONDecodeError — the two sibling injury readers already guard this.
+    Regression guard for the unguarded json.loads.
+    """
+
+    def test_malformed_injury_state_does_not_crash(
+        self, dig_service_no_bankruptcy, guild_id, monkeypatch,
+    ):
+        now = 1_000_000
+        monkeypatch.setattr(time, "time", lambda: now)
+        tunnel = _build_tunnel_dict(10001, guild_id, last_dig_at=now)
+        tunnel["injury_state"] = "{not valid json"
+
+        # Must not raise; malformed state is treated as "no injury".
+        remaining = dig_service_no_bankruptcy._get_cooldown_remaining(tunnel)
+        assert remaining == FREE_DIG_COOLDOWN

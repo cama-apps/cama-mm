@@ -1532,6 +1532,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 payout_updates.append((payout, bet["bet_id"]))
 
         # Update payout column for new winners and clear payout for new losers atomically
+        new_winner_bet_ids = {bet["bet_id"] for bet in new_winners}
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             if payout_updates:
@@ -1540,16 +1541,27 @@ class BetRepository(BaseRepository, IBetRepository):
                     payout_updates,
                 )
 
-            # Clear payout for new losers (old winners)
-            cursor.execute(
-                """
-                UPDATE bets
-                SET payout = NULL
-                WHERE match_id = ?
-                  AND bet_id NOT IN (SELECT bet_id FROM bets WHERE match_id = ? AND payout IS NOT NULL)
-                """,
-                (match_id, match_id),
-            )
+            # Clear payout for every bet of this match that is NOT a new
+            # winner. This explicitly nulls bets that won before the
+            # correction but are now losers — they still hold a stale,
+            # non-null payout at this point, so a "payout IS NOT NULL"
+            # subquery would wrongly keep them.
+            if new_winner_bet_ids:
+                placeholders = ",".join("?" for _ in new_winner_bet_ids)
+                cursor.execute(
+                    f"""
+                    UPDATE bets
+                    SET payout = NULL
+                    WHERE match_id = ?
+                      AND bet_id NOT IN ({placeholders})
+                    """,
+                    (match_id, *new_winner_bet_ids),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE bets SET payout = NULL WHERE match_id = ?",
+                    (match_id,),
+                )
 
         return balance_deltas
 
@@ -1612,3 +1624,20 @@ class BetRepository(BaseRepository, IBetRepository):
                     bet["profit"] = -effective_bet
                 results.append(bet)
             return results
+
+    def has_recent_bet(
+        self, discord_id: int, guild_id: int | None, since_ts: int,
+    ) -> bool:
+        """Return True if the player placed any bet at or after ``since_ts``."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM bets
+                 WHERE discord_id = ? AND guild_id = ? AND bet_time >= ?
+                 LIMIT 1
+                """,
+                (discord_id, gid, int(since_ts)),
+            )
+            return cursor.fetchone() is not None

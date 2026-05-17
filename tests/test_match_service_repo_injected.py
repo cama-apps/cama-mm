@@ -151,3 +151,30 @@ def test_openskill_used_when_all_players_have_os_mu(repo_db_path):
         player_ids, guild_id=TEST_GUILD_ID, rating_system="openskill"
     )
     assert result["balancing_rating_system"] == "openskill"
+
+
+def test_get_last_match_participant_ids_passes_guild_id(repo_db_path):
+    """get_last_match_participant_ids forwards guild_id to the repo without TypeError.
+
+    Regression: the service method called the repo with zero args while the repo
+    requires guild_id, raising TypeError on every real call (herogrid fallback).
+    """
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+
+    # No matches yet -> empty result, but the call itself must not raise.
+    assert service.get_last_match_participant_ids(TEST_GUILD_ID) == []
+
+    # Record a match and confirm the participants come back for that guild.
+    player_ids = _seed_players(player_repo, 10)
+    service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+    participants = service.get_last_match_participant_ids(TEST_GUILD_ID)
+    assert set(participants) == set(player_ids)
