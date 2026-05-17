@@ -322,3 +322,134 @@ class TestPinnacleWagerPayout:
         )[str(PINNACLE_DEPTH)]
         assert "carried_wager" not in entry
         assert "carried_risk_tier" not in entry
+
+
+def _read_carry(dig_repo, guild_id, discord_id=20001):
+    """Read the carried wager off the persisted tunnel, mimicking what the
+    command layer does between phases to size the next fight's stake."""
+    tunnel = dict(dig_repo.get_tunnel(discord_id, guild_id))
+    bp = json.loads(tunnel["boss_progress"]) if tunnel.get("boss_progress") else {}
+    entry = bp.get(str(PINNACLE_DEPTH), {})
+    return tunnel, bp, entry.get("carried_wager", 0), entry.get("carried_risk_tier")
+
+
+class TestWagerSettledExactlyOnceAcrossPhases:
+    """End-to-end: a wager placed in phase 1 rides phases 2 and 3 and is
+    settled exactly once over the full chain.
+
+    The isolated single-phase tests above each pin one branch; these chain all
+    three ``_finalize_pinnacle_outcome`` calls — re-reading the carried wager
+    from the persisted tunnel between phases, exactly as the command layer
+    does — and assert the player's balance moves by the wager (or its profit)
+    on precisely one phase, never on the intermediate wins and never twice.
+    """
+
+    def test_three_phase_full_clear_pays_wager_profit_once(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        start_balance = player_repository.get_balance(20001, guild_id)
+
+        # --- Phase 1 win: carry is set, balance MUST NOT move yet. ---
+        r1 = _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=1, won=True, wager=200, risk_tier="bold", win_chance=0.55,
+        )
+        assert r1["payout"] == 0
+        assert player_repository.get_balance(20001, guild_id) == start_balance, (
+            "Phase 1 win must not pay or charge the wager"
+        )
+
+        # --- Phase 2 win: carry rides, balance still unchanged. ---
+        tunnel, bp, carried, carried_tier = _read_carry(dig_repo, guild_id)
+        assert carried == 200 and carried_tier == "bold"
+        r2 = _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=2, won=True, wager=carried, risk_tier=carried_tier,
+            win_chance=0.55, boss_progress=bp,
+        )
+        assert r2["payout"] == 0
+        assert player_repository.get_balance(20001, guild_id) == start_balance, (
+            "Phase 2 win must not pay or charge the wager"
+        )
+
+        # --- Phase 3 win: the carried wager pays out exactly once. ---
+        tunnel, bp, carried, carried_tier = _read_carry(dig_repo, guild_id)
+        assert carried == 200 and carried_tier == "bold"
+        r3 = _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=3, won=True, wager=carried, risk_tier=carried_tier,
+            win_chance=0.55, boss_progress=bp,
+        )
+        # bold mult 3.8 untapered -> profit int(200 * 2.8) = 560.
+        assert r3["wager_payout"] == 560
+        assert r3["payout"] == PINNACLE_BASE_JC_REWARD + 560
+        assert player_repository.get_balance(20001, guild_id) == (
+            start_balance + PINNACLE_BASE_JC_REWARD + 560
+        ), "Full clear pays base + wager profit exactly once across 3 phases"
+
+        # Carry markers are gone after the final settlement.
+        _, _, carried_after, _ = _read_carry(dig_repo, guild_id)
+        assert carried_after == 0
+
+    def test_phase2_loss_debits_wager_once_after_phase1_carry(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        start_balance = player_repository.get_balance(20001, guild_id)
+
+        # Phase 1 win carries the wager — no balance change.
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=1, won=True, wager=200, risk_tier="bold", win_chance=0.55,
+        )
+        assert player_repository.get_balance(20001, guild_id) == start_balance
+
+        # Phase 2 loss: the carried stake is debited exactly once.
+        tunnel, bp, carried, carried_tier = _read_carry(dig_repo, guild_id)
+        assert carried == 200
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=2, won=False, wager=carried, risk_tier=carried_tier,
+            win_chance=0.55, boss_progress=bp,
+        )
+        assert player_repository.get_balance(20001, guild_id) == start_balance - 200, (
+            "Phase 2 loss debits the carried wager once — stake never double-charged"
+        )
+
+        # Carry is cleared so a later finalize cannot debit it again.
+        _, _, carried_after, _ = _read_carry(dig_repo, guild_id)
+        assert carried_after == 0
+
+    def test_phase3_loss_after_two_carries_debits_wager_once(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        tunnel = _setup_pinnacle(dig_repo, player_repository, guild_id)
+        start_balance = player_repository.get_balance(20001, guild_id)
+
+        # Phase 1 + 2 wins both carry forward with no balance movement.
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=1, won=True, wager=150, risk_tier="reckless", win_chance=0.55,
+        )
+        tunnel, bp, carried, carried_tier = _read_carry(dig_repo, guild_id)
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=2, won=True, wager=carried, risk_tier=carried_tier,
+            win_chance=0.55, boss_progress=bp,
+        )
+        assert player_repository.get_balance(20001, guild_id) == start_balance, (
+            "Two carried wins must not move the balance"
+        )
+
+        # Phase 3 loss forfeits the wager once — the full ride is settled here.
+        tunnel, bp, carried, carried_tier = _read_carry(dig_repo, guild_id)
+        assert carried == 150
+        _finalize_pinnacle(
+            dig_service, guild_id, tunnel=tunnel,
+            phase_idx=3, won=False, wager=carried, risk_tier=carried_tier,
+            win_chance=0.55, boss_progress=bp,
+        )
+        assert player_repository.get_balance(20001, guild_id) == start_balance - 150, (
+            "Phase 3 loss debits the carried wager exactly once"
+        )
