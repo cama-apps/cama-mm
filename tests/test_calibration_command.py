@@ -5,7 +5,7 @@ Tests for the /calibration command (public access).
 import ast
 import inspect
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -141,7 +141,7 @@ class TestIndividualCalibrationProfile:
     """Tests for the Rating Profile field of /calibration <user>."""
 
     @pytest.mark.asyncio
-    async def test_unrated_player_rating_profile_not_duplicated(self, monkeypatch):
+    async def test_unrated_player_rating_profile_not_duplicated(self):
         """An unrated player (falsy volatility) must not see Rating/Tier twice.
 
         Regression: a malformed ternary bound if/else to only the Volatility
@@ -175,17 +175,13 @@ class TestIndividualCalibrationProfile:
             role_names={},
         )
 
-        # Capture the embed instead of sending it to Discord.
-        captured = {}
-
-        async def fake_followup(interaction, *args, embed=None, **kwargs):
-            captured["embed"] = embed
-
-        monkeypatch.setattr("commands.info.safe_followup", fake_followup)
-
+        # The real safe_followup runs and awaits interaction.followup.send;
+        # reading the embed off an AsyncMock avoids a monkeypatch that a
+        # parallel cog-reload could defeat (test-isolation flake).
         interaction = MagicMock()
         interaction.guild = MagicMock()
         interaction.guild.id = 12345
+        interaction.followup.send = AsyncMock()
         user = MagicMock()
         user.id = 777
         user.display_name = "Unrated"
@@ -193,7 +189,8 @@ class TestIndividualCalibrationProfile:
 
         await cog._show_individual_calibration(interaction, user, CamaRatingSystem())
 
-        embed = captured["embed"]
+        interaction.followup.send.assert_called_once()
+        embed = interaction.followup.send.call_args.kwargs["embed"]
         assert embed is not None
         profile_field = next(
             (f for f in embed.fields if "Rating Profile" in f.name), None
