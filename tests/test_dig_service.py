@@ -78,6 +78,12 @@ class TestDigConstants:
     def test_paid_dig_cost_cap(self):
         assert PAID_DIG_COST_CAP == 40
 
+    def test_boss_victory_base_jc_covers_every_boss_boundary(self):
+        """Every regular boss boundary needs a base-reward entry, else a win
+        there silently falls through to the 15-JC default. The pinnacle
+        (350) is excluded — it pays PINNACLE_BASE_JC_REWARD instead."""
+        assert set(BOSS_VICTORY_BASE_JC) == set(BOSS_BOUNDARIES)
+
 
 class TestPrestigeCaveInMultiplier:
     """Pure math: prestige scales cave-in chance 0.9× → 1.2×."""
