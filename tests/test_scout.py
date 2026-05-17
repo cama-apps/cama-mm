@@ -6,6 +6,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
+
 from commands.scout import ScoutCommands
 from services.player_service import PlayerService
 from tests.conftest import TEST_GUILD_ID
@@ -613,17 +615,17 @@ class TestResolveTeamContext:
 
     def test_lobby_has_no_team_split(self):
         """An open lobby yields a flat list with split=False."""
-        lobby = SimpleNamespace(players=[5, 6, 7], conditional_players=[])
+        lobby = SimpleNamespace(players={5, 6, 7}, conditional_players=set())
         ctx = _make_scout_cog(lobby=lobby)._resolve_team_context(TEST_GUILD_ID)
         assert ctx.split is False
-        assert ctx.flat == [5, 6, 7]
+        assert set(ctx.flat) == {5, 6, 7}
         assert ctx.source_label == "Lobby"
 
     def test_lobby_includes_conditional_players(self):
         """Conditional (frogling) players are appended to the lobby list."""
-        lobby = SimpleNamespace(players=[5, 6], conditional_players=[9])
+        lobby = SimpleNamespace(players={5, 6}, conditional_players={9})
         ctx = _make_scout_cog(lobby=lobby)._resolve_team_context(TEST_GUILD_ID)
-        assert ctx.flat == [5, 6, 9]
+        assert set(ctx.flat) == {5, 6, 9}
 
     def test_pending_shuffle_splits_teams(self):
         """A post-shuffle pending match yields radiant/dire with split=True."""
@@ -639,7 +641,7 @@ class TestResolveTeamContext:
         """A pending match wins over an open lobby (priority order)."""
         cog = _make_scout_cog(
             match_service=_match_service([1, 2], [3, 4]),
-            lobby=SimpleNamespace(players=[90, 91], conditional_players=[]),
+            lobby=SimpleNamespace(players={90, 91}, conditional_players=set()),
         )
         ctx = cog._resolve_team_context(TEST_GUILD_ID)
         assert ctx.split is True
@@ -710,6 +712,32 @@ class TestBuildLinkLines:
         assert lines == ["**<@400>** — [Dotabuff](https://www.dotabuff.com/players/444)"]
 
 
+class TestAddPlayerField:
+    """Tests for ScoutCommands._add_player_field (Discord embed field limit)."""
+
+    def _cog(self):
+        return ScoutCommands(None, None, None, None)
+
+    def test_empty_lines_render_a_placeholder_field(self):
+        """An empty line list still produces one placeholder field."""
+        embed = discord.Embed()
+        self._cog()._add_player_field(embed, "Players", [])
+        assert len(embed.fields) == 1
+        assert embed.fields[0].value == "—"
+
+    def test_long_list_splits_across_multiple_fields(self):
+        """A list too long for one field is split, each field within the limit."""
+        embed = discord.Embed()
+        lines = ["x" * 100 for _ in range(30)]
+        self._cog()._add_player_field(embed, "Players", lines)
+        assert len(embed.fields) >= 3
+        assert embed.fields[0].name == "Players"
+        assert embed.fields[1].name == "Players (2)"
+        assert all(len(f.value) <= 1024 for f in embed.fields)
+        # Every line is preserved across the split.
+        assert sum(f.value.count("\n") + 1 for f in embed.fields) == 30
+
+
 class TestScoutLinksCommand:
     """Integration tests for the /scout links command handler."""
 
@@ -774,3 +802,53 @@ class TestScoutLinksCommand:
         embed = followup.await_args.kwargs["embed"]
         assert [f.name for f in embed.fields] == ["Players"]
         assert "https://www.dotabuff.com/players/77" in embed.fields[0].value
+
+    async def test_lobby_lists_players_flat(self, monkeypatch):
+        """An open lobby (no teams) lists everyone in a single Players field."""
+        followup = self._patch_interaction_safety(monkeypatch)
+        player_service = SimpleNamespace(
+            get_steam_ids_bulk=lambda ids: {5: [55], 6: [66]},
+            get_by_ids=lambda ids, guild_id: [
+                SimpleNamespace(discord_id=i, name=f"P{i}") for i in ids
+            ],
+        )
+        cog = _make_scout_cog(
+            lobby=SimpleNamespace(players={5, 6}, conditional_players=set()),
+            player_service=player_service,
+        )
+        interaction = SimpleNamespace(guild=SimpleNamespace(id=TEST_GUILD_ID))
+
+        await _links_cmd(cog).callback(cog, interaction)
+
+        followup.assert_awaited_once()
+        embed = followup.await_args.kwargs["embed"]
+        assert [f.name for f in embed.fields] == ["Players"]
+        value = embed.fields[0].value
+        assert "https://www.dotabuff.com/players/55" in value
+        assert "https://www.dotabuff.com/players/66" in value
+
+    async def test_team_filter_lists_only_that_team(self, monkeypatch):
+        """team=radiant lists only the Radiant side in a single field."""
+        followup = self._patch_interaction_safety(monkeypatch)
+        player_service = SimpleNamespace(
+            get_steam_ids_bulk=lambda ids: {1: [11], 2: [22], 3: [33], 4: [44]},
+            get_by_ids=lambda ids, guild_id: [
+                SimpleNamespace(discord_id=i, name=f"P{i}") for i in ids
+            ],
+        )
+        cog = _make_scout_cog(
+            match_service=_match_service([1, 2], [3, 4]),
+            player_service=player_service,
+        )
+        interaction = SimpleNamespace(guild=SimpleNamespace(id=TEST_GUILD_ID))
+
+        await _links_cmd(cog).callback(
+            cog, interaction, team=SimpleNamespace(value="radiant")
+        )
+
+        followup.assert_awaited_once()
+        embed = followup.await_args.kwargs["embed"]
+        assert [f.name for f in embed.fields] == ["Players"]
+        value = embed.fields[0].value
+        assert "players/11" in value and "players/22" in value
+        assert "players/33" not in value and "players/44" not in value
