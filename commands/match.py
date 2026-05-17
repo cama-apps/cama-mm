@@ -492,14 +492,11 @@ class MatchCommands(commands.Cog):
                 return
 
             try:
-                success = await draft_cog._execute_draft(
-                    interaction, guild_id, lobby
-                )
-                if not success:
-                    await interaction.followup.send(
-                        f"❌ Immortal Draft could not start with {regular_count} players. "
-                        f"Check that at least 2 players have used `/draft captain yes`."
-                    )
+                # _execute_draft sends its own specific error on every failure
+                # path, so inspecting the return value here would only let us
+                # add a misleading duplicate. The except below covers the
+                # unexpected-exception path.
+                await draft_cog._execute_draft(interaction, guild_id, lobby)
             except Exception as e:
                 logger.error(f"Draft auto-redirect failed: {e}", exc_info=True)
                 # Clean up any partially-created draft state so it doesn't block

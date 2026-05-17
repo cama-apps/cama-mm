@@ -3,6 +3,7 @@ Draft commands for Immortal Draft mode: /draft captain, /draft start, /draft res
 """
 
 import asyncio
+import contextlib
 import functools
 import logging
 import random
@@ -663,12 +664,19 @@ class DraftCommands(commands.Cog):
             specified_captain2_id: Optional specified captain 2 ID
 
         Returns:
-            True if draft started successfully, False otherwise.
+            True if the draft started, False otherwise. Every failure path
+            sends its own user-facing error first, so callers must not post a
+            generic failure message when this returns False.
         """
         # Handle regular and conditional players separately
         # Regular players are always included; conditional players fill remaining spots if needed
         regular_players = list(lobby.players)
         conditional_players = list(lobby.conditional_players)
+
+        logger.info(
+            "Immortal Draft starting: guild=%s, %d regular + %d conditional player(s)",
+            guild_id, len(regular_players), len(conditional_players),
+        )
 
         # Track which IDs are regular for pre-pruning priority (regular > conditional)
         regular_player_ids_set = set(regular_players)
@@ -745,6 +753,12 @@ class DraftCommands(commands.Cog):
         # Get exclusion counts for player pool selection
         exclusion_counts = await asyncio.to_thread(self.player_repo.get_exclusion_counts, lobby_player_ids, guild_id)
 
+        # Surface progress: pool selection is the one slow step. This message
+        # is converted in place into the draft embed once the pool is ready.
+        progress_message = await interaction.followup.send(
+            "⚙️ Building balanced Immortal Draft teams…"
+        )
+
         # Select player pool (10 players, captains always included)
         # Use balanced pool selection when possible, fall back to exclusion-count-only
         try:
@@ -782,10 +796,12 @@ class DraftCommands(commands.Cog):
                     except Exception as e:
                         logger.debug("Failed to fetch recent match participants: %s", e)
 
-                # Pre-prune candidates if too many
-                # Beam search algorithm handles up to 24 candidates efficiently
-                # Above that, we pre-prune to avoid excessive search space
-                MAX_CANDIDATES_FOR_BALANCED = 24
+                # Cap candidates so select_draft_pool stays in its fast
+                # exhaustive branch: C(12,8)=495 pools is ~1.5s (measured).
+                # Beam search (>12 candidates) is bimodal — milliseconds when
+                # it early-exits on an easy roster, but 20s+ when it grinds on
+                # a hard one — so we never feed it more than this.
+                MAX_CANDIDATES_FOR_BALANCED = 12
                 pre_excluded_players = []
 
                 if len(non_captain_candidates) > MAX_CANDIDATES_FOR_BALANCED:
@@ -809,6 +825,7 @@ class DraftCommands(commands.Cog):
                     candidates_for_pool = non_captain_candidates
 
                 shuffler = BalancedShuffler()
+                _pool_started = time.perf_counter()
                 draft_pool_result = await asyncio.to_thread(
                     shuffler.select_draft_pool,
                     captain_a=captain_a,
@@ -816,6 +833,10 @@ class DraftCommands(commands.Cog):
                     candidates=candidates_for_pool,
                     exclusion_counts=name_exclusion_counts,
                     recent_match_names=recent_match_names,
+                )
+                logger.info(
+                    "Draft pool selection: %d candidates scored in %.2fs",
+                    len(candidates_for_pool), time.perf_counter() - _pool_started,
                 )
 
                 # Add pre-excluded players to the excluded list
@@ -841,7 +862,16 @@ class DraftCommands(commands.Cog):
                 raise ValueError("Missing captain data or insufficient candidates")
 
         except Exception as e:
-            logger.info(f"Balanced pool selection unavailable ({e}), using fallback")
+            # A ValueError is the balanced path's own "can't run" signal
+            # (missing captains / too few candidates) — fall back quietly.
+            # Anything else is a real defect: log it loudly, don't bury it.
+            if isinstance(e, ValueError):
+                logger.info("Balanced pool selection unavailable (%s), using fallback", e)
+            else:
+                logger.warning(
+                    "Balanced pool selection raised an unexpected error, using fallback",
+                    exc_info=True,
+                )
             try:
                 pool_result = await asyncio.to_thread(
                     self.draft_service.select_player_pool,
@@ -851,6 +881,9 @@ class DraftCommands(commands.Cog):
                     pool_size=DRAFT_POOL_SIZE,
                 )
             except ValueError as e2:
+                logger.warning("Immortal Draft: pool selection failed — %s", e2)
+                with contextlib.suppress(Exception):
+                    await progress_message.delete()
                 await interaction.followup.send(f"❌ {e2}", ephemeral=True)
                 return False
 
@@ -872,6 +905,9 @@ class DraftCommands(commands.Cog):
         try:
             state = await asyncio.to_thread(self.draft_state_manager.create_draft, guild_id)
         except ValueError as e:
+            logger.warning("Immortal Draft: could not create draft state — %s", e)
+            with contextlib.suppress(Exception):
+                await progress_message.delete()
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return False
 
@@ -962,9 +998,11 @@ class DraftCommands(commands.Cog):
                     inline=False,
                 )
 
-            # Send with winner choice buttons
+            # Send with winner choice buttons — reuse the progress message so
+            # the draft appears in place instead of as a second message.
             view = WinnerChoiceView(self, guild_id, coinflip_winner_id)
-            message = await interaction.followup.send(embed=embed, view=view)
+            await progress_message.edit(content=None, embed=embed, view=view)
+            message = progress_message
 
             # Store message ID for later updates
             state.draft_message_id = message.id
@@ -992,6 +1030,8 @@ class DraftCommands(commands.Cog):
         except Exception:
             logger.error("Draft setup failed after state creation, cleaning up", exc_info=True)
             await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
+            with contextlib.suppress(Exception):
+                await progress_message.delete()
             raise
 
     # ========================================================================
@@ -1141,7 +1181,7 @@ class DraftCommands(commands.Cog):
         """Handle when coinflip winner chooses to pick side."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         # Delete captain ping message (first choice made)
@@ -1178,7 +1218,7 @@ class DraftCommands(commands.Cog):
         """Handle when coinflip winner chooses to pick hero order."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         # Delete captain ping message (first choice made)
@@ -1221,7 +1261,7 @@ class DraftCommands(commands.Cog):
         """Handle side choice (Radiant/Dire)."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         chooser_id = interaction.user.id
@@ -1293,7 +1333,7 @@ class DraftCommands(commands.Cog):
         """Handle hero pick order choice (First/Second)."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         chooser_id = interaction.user.id
@@ -1443,7 +1483,7 @@ class DraftCommands(commands.Cog):
         """Handle player draft order choice."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         lower_captain_id = state.lower_rated_captain_id
@@ -1741,7 +1781,7 @@ class DraftCommands(commands.Cog):
         """Handle when a captain picks a player."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         if state.phase != DraftPhase.DRAFTING:
@@ -1926,7 +1966,7 @@ class DraftCommands(commands.Cog):
         """Handle when a player sets their side preference."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
-            await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
+            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
         if state.phase != DraftPhase.DRAFTING:

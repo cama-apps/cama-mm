@@ -2,9 +2,16 @@
 Tests for Immortal Draft functionality.
 """
 
+import logging
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from commands.draft import DraftCommands
+from commands.match import MatchCommands
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
+from domain.models.lobby import Lobby
 from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
@@ -1265,3 +1272,306 @@ class TestCandidatePrePruning:
         # Exactly 1 player should be pruned
         assert len(candidates_for_pool) == 14
         assert len(pre_excluded) == 1
+
+
+# ============================================================================
+# Integration tests for _execute_draft (the immortal-draft execution path)
+# ============================================================================
+
+
+class _FakeMessage:
+    """A fake Discord message that records edits and deletes."""
+
+    _counter = 0
+
+    def __init__(self, content=None, embed=None, view=None, fail_edit=False):
+        _FakeMessage._counter += 1
+        self.id = 9_000_000 + _FakeMessage._counter
+        self.content = content
+        self.embed = embed
+        self.view = view
+        self.edited = False
+        self.deleted = False
+        self._fail_edit = fail_edit
+
+    async def edit(self, content=None, embed=None, view=None):
+        if self._fail_edit:
+            raise RuntimeError("simulated Discord edit failure")
+        self.edited = True
+        self.content = content
+        self.embed = embed
+        self.view = view
+        return self
+
+    async def delete(self):
+        self.deleted = True
+
+
+class _FakeFollowup:
+    """Records every followup.send and returns an editable fake message."""
+
+    def __init__(self, fail_edit=False):
+        self.messages = []
+        self._fail_edit = fail_edit
+
+    async def send(self, content=None, **kwargs):
+        msg = _FakeMessage(
+            content=content,
+            embed=kwargs.get("embed"),
+            view=kwargs.get("view"),
+            fail_edit=self._fail_edit,
+        )
+        self.messages.append(msg)
+        return msg
+
+
+class _FakeChannel:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, **kwargs):
+        msg = _FakeMessage(content=content)
+        self.sent.append(msg)
+        return msg
+
+
+class _FakeGuild:
+    def __init__(self, guild_id):
+        self.id = guild_id
+
+    def get_member(self, user_id):
+        # Force name resolution to fall back to the player repository.
+        return None
+
+
+class _FakeInteraction:
+    """Minimal stand-in for an already-deferred discord.Interaction."""
+
+    def __init__(self, guild_id, fail_edit=False):
+        self.guild = _FakeGuild(guild_id)
+        self.guild_id = guild_id
+        self.channel = _FakeChannel()
+        self.channel_id = 555_000
+        self.followup = _FakeFollowup(fail_edit=fail_edit)
+
+
+_ROLE_CYCLE = [["1"], ["2"], ["3"], ["4"], ["5"], ["1", "2"], ["3", "4"], ["2", "5"]]
+
+
+def _register_draft_players(player_repo, guild_id, count, *, start_id=50001):
+    """Register ``count`` players with varied ratings/roles; return their ids."""
+    ids = []
+    for i in range(count):
+        pid = start_id + i
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"DraftPlayer{i}",
+            guild_id=guild_id,
+            initial_mmr=2000 + i * 40,
+            preferred_roles=_ROLE_CYCLE[i % len(_ROLE_CYCLE)],
+            glicko_rating=1400.0 + i * 30,
+            glicko_rd=80.0,
+            glicko_volatility=0.06,
+        )
+        ids.append(pid)
+    return ids
+
+
+def _make_draft_cog(player_repo):
+    """Build a DraftCommands cog with real services and a stub bot."""
+    return DraftCommands(
+        bot=MagicMock(),
+        player_repo=player_repo,
+        lobby_manager=MagicMock(),
+        draft_state_manager=DraftStateManager(),
+        draft_service=DraftService(),
+        match_service=None,
+    )
+
+
+def _make_lobby(player_ids):
+    lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+    for pid in player_ids:
+        lobby.add_player(pid)
+    return lobby
+
+
+class TestExecuteDraft:
+    """Integration tests for DraftCommands._execute_draft.
+
+    These drive the real execution path — real PlayerRepository, DraftService
+    and DraftStateManager, with a fake Discord interaction — covering the
+    immortal-draft flow that broke in production and had no test coverage.
+    """
+
+    async def test_succeeds_with_sixteen_players(self, player_repository):
+        """A full 16-player lobby produces a 10-player draft awaiting choices."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 16)
+        for pid in player_ids:
+            player_repository.set_captain_eligible(pid, guild_id, True)
+
+        cog = _make_draft_cog(player_repository)
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        assert result is True
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+        assert state.phase == DraftPhase.WINNER_CHOICE
+        # 2 captains + 8 drafted players
+        assert len(state.player_pool_ids) == 10
+        assert state.captain1_id != state.captain2_id
+        assert {state.captain1_id, state.captain2_id} <= set(player_ids)
+        # 16 lobby players - 10 selected = 6 excluded, with no overlap
+        assert len(state.excluded_player_ids) == 6
+        assert not (set(state.player_pool_ids) & set(state.excluded_player_ids))
+        assert state.coinflip_winner_id in (state.captain1_id, state.captain2_id)
+        # excluded players get an exclusion bump so they are prioritised next draft
+        excl = player_repository.get_exclusion_counts(state.excluded_player_ids, guild_id)
+        assert all(excl.get(pid, 0) > 0 for pid in state.excluded_player_ids)
+        # the progress message is converted in place into the draft embed
+        assert len(interaction.followup.messages) == 1
+        draft_msg = interaction.followup.messages[0]
+        assert draft_msg.edited is True
+        assert draft_msg.embed is not None
+        assert draft_msg.view is not None
+        assert state.draft_message_id == draft_msg.id
+        # both captains were pinged
+        assert len(interaction.channel.sent) == 1
+        assert "Draft starting!" in interaction.channel.sent[0].content
+
+    async def test_fails_without_enough_captains(self, player_repository):
+        """With fewer than 2 captain opt-ins, the draft is rejected cleanly."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 16)
+        # only one player opts in as captain — two are required
+        player_repository.set_captain_eligible(player_ids[0], guild_id, True)
+
+        cog = _make_draft_cog(player_repository)
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        assert result is False
+        # no zombie draft state is left behind
+        assert cog.draft_state_manager.get_state(guild_id) is None
+        # the user is told why — _execute_draft owns its own error messaging,
+        # which commands/match.py relies on (it adds no message of its own).
+        assert len(interaction.followup.messages) == 1
+        # the message names the specific fix, pinning it to the eligibility
+        # guard rather than a generic "captain" error
+        assert "/draft captain yes" in interaction.followup.messages[0].content
+
+    async def test_fails_when_draft_already_active(self, player_repository):
+        """An existing active draft blocks a new one and is left untouched."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        for pid in player_ids:
+            player_repository.set_captain_eligible(pid, guild_id, True)
+
+        cog = _make_draft_cog(player_repository)
+        existing = cog.draft_state_manager.create_draft(guild_id)
+        existing.phase = DraftPhase.DRAFTING
+
+        interaction = _FakeInteraction(guild_id)
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        assert result is False
+        # the in-progress draft is preserved, not clobbered
+        assert cog.draft_state_manager.get_state(guild_id) is existing
+        assert existing.phase == DraftPhase.DRAFTING
+        # the progress message was cleaned up and an error was sent
+        assert interaction.followup.messages[0].deleted is True
+        assert interaction.followup.messages[-1].content.startswith("❌")
+
+    async def test_clears_state_when_draft_embed_fails(self, player_repository):
+        """A Discord failure mid-setup must not leave a zombie draft state.
+
+        The draft state is created before the embed is posted; if posting
+        fails, the post-creation handler must clear that state so the next
+        /shuffle or /draft start is not blocked.
+        """
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        for pid in player_ids:
+            player_repository.set_captain_eligible(pid, guild_id, True)
+
+        cog = _make_draft_cog(player_repository)
+        # the draft embed is posted by editing the progress message — make
+        # that edit fail to simulate a Discord API error mid-setup
+        interaction = _FakeInteraction(guild_id, fail_edit=True)
+
+        with pytest.raises(RuntimeError):
+            await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        # the failure handler cleared the state — no zombie draft left behind
+        assert cog.draft_state_manager.get_state(guild_id) is None
+        # and the progress message was cleaned up
+        assert interaction.followup.messages[0].deleted is True
+
+    async def test_unexpected_pool_error_falls_back_and_warns(
+        self, player_repository, monkeypatch, caplog
+    ):
+        """An unexpected error in balanced selection is logged loudly and the
+        draft still completes via the exclusion-count fallback pool."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 16)
+        for pid in player_ids:
+            player_repository.set_captain_eligible(pid, guild_id, True)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("balanced selection blew up")
+
+        monkeypatch.setattr("commands.draft.BalancedShuffler.select_draft_pool", _boom)
+
+        cog = _make_draft_cog(player_repository)
+        interaction = _FakeInteraction(guild_id)
+        with caplog.at_level(logging.WARNING, logger="cama_bot.commands.draft"):
+            result = await cog._execute_draft(
+                interaction, guild_id, _make_lobby(player_ids)
+            )
+
+        # the draft still completes via the fallback pool
+        assert result is True
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+        assert len(state.player_pool_ids) == 10
+        # the unexpected error surfaces as a warning, not buried as info
+        assert any(
+            rec.levelno == logging.WARNING and "unexpected" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+
+class TestShuffleDraftRedirect:
+    """/shuffle hands lobbies of >=15 players to Immortal Draft."""
+
+    async def test_redirects_without_adding_a_duplicate_message(self, monkeypatch):
+        """A >=15-player /shuffle runs _execute_draft and adds no message of
+        its own — even on failure, since _execute_draft owns its messaging."""
+        guild_id = TEST_GUILD_ID
+        draft_cog = MagicMock()
+        # the draft "fails" (returns False) but messaged the user itself
+        draft_cog._execute_draft = AsyncMock(return_value=False)
+        bot = MagicMock()
+        bot.get_cog = MagicMock(return_value=draft_cog)
+
+        match_cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
+
+        lobby = _make_lobby(list(range(60001, 60016)))  # 15 regular players
+        monkeypatch.setattr(
+            match_cog,
+            "_validate_shuffle_preconditions",
+            AsyncMock(return_value=lobby),
+        )
+
+        interaction = _FakeInteraction(guild_id)
+        await match_cog._execute_shuffle(interaction, interaction.guild, guild_id, None)
+
+        # the draft was started for the oversized lobby...
+        draft_cog._execute_draft.assert_awaited_once()
+        # ...and match.py posted nothing of its own (the old code added a
+        # misleading "check captain eligibility" message here)
+        assert interaction.followup.messages == []
