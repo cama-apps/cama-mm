@@ -252,6 +252,46 @@ class ProfileCommands(commands.Cog):
             return match_service.rating_system
         return CamaRatingSystem()
 
+    @staticmethod
+    def _format_protected_hero_stats(protected_stats: dict, hero_name_lookup) -> str | None:
+        """Format protected-hero purchase outcomes for profile embeds."""
+        confirmed_games = int(protected_stats.get("confirmed_games") or 0)
+        wins = int(protected_stats.get("wins") or 0)
+        losses = int(protected_stats.get("losses") or 0)
+        pending = int(protected_stats.get("pending_purchases") or 0)
+        not_played = int(protected_stats.get("not_played_games") or 0)
+        unenriched = int(protected_stats.get("unenriched_games") or 0)
+        attempts = int(protected_stats.get("attempts") or 0)
+
+        extras = []
+        if pending:
+            extras.append(f"{pending} pending")
+        if not_played:
+            extras.append(f"{not_played} not played")
+        if unenriched:
+            extras.append(f"{unenriched} unenriched")
+
+        if confirmed_games > 0:
+            winrate = wins / confirmed_games * 100
+            line = f"**Protected:** {wins}W-{losses}L ({winrate:.0f}%)"
+            top_heroes = protected_stats.get("top_heroes") or []
+            if top_heroes:
+                best = top_heroes[0]
+                hero_name = hero_name_lookup(best["hero_id"])
+                games = int(best.get("games") or 0)
+                hero_wins = int(best.get("wins") or 0)
+                hero_wr = hero_wins / games * 100 if games > 0 else 0
+                line += f"\n**Best Protected:** {hero_name} ({games}g, {hero_wr:.0f}%)"
+            if extras:
+                line += f"\n*{', '.join(extras)}*"
+            return line
+
+        if attempts or pending:
+            detail = ", ".join(extras) if extras else "waiting on enriched match data"
+            return f"**Protected:** No confirmed games yet\n*{detail}*"
+
+        return None
+
     async def build_tab_embed(
         self,
         tab_name: str,
@@ -393,6 +433,18 @@ class ProfileCommands(commands.Cog):
                             top_heroes.append(f"{hero_name} ({games}g, {winrate:.0f}%)")
                         if top_heroes:
                             hero_lines.append(f"**Top:** {', '.join(top_heroes)}")
+                    if hasattr(match_repo, "get_player_protected_hero_stats"):
+                        protected_stats = await asyncio.to_thread(
+                            match_repo.get_player_protected_hero_stats,
+                            target_discord_id,
+                            guild_id,
+                        )
+                        protected_line = self._format_protected_hero_stats(
+                            protected_stats,
+                            get_hero_name,
+                        )
+                        if protected_line:
+                            hero_lines.append(protected_line)
                     if hero_lines:
                         embed.add_field(name="Heroes", value="\n".join(hero_lines), inline=False)
             except Exception as e:
@@ -1543,6 +1595,23 @@ class ProfileCommands(commands.Cog):
             ),
             inline=True,
         )
+
+        if hasattr(match_repo, "get_player_protected_hero_stats"):
+            protected_stats = await asyncio.to_thread(
+                match_repo.get_player_protected_hero_stats,
+                target_discord_id,
+                guild_id,
+            )
+            protected_line = self._format_protected_hero_stats(
+                protected_stats,
+                get_hero_name,
+            )
+            if protected_line:
+                embed.add_field(
+                    name="Protected Hero",
+                    value=protected_line,
+                    inline=True,
+                )
 
         # Top heroes text (supplement to chart)
         if hero_stats:

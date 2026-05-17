@@ -100,6 +100,14 @@ class MatchService:
         """Get the pending shuffle state (delegates to state_service)."""
         return self.state_service.get_last_shuffle(guild_id, pending_match_id)
 
+    def get_pending_match_for_player(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+    ) -> PendingMatchState | None:
+        """Find the pending match containing a player."""
+        return self.state_service.get_pending_match_for_player(guild_id, discord_id)
+
     def set_last_shuffle(self, guild_id: int | None, state: PendingMatchState) -> None:
         """Set the pending shuffle state (delegates to state_service)."""
         self.state_service.set_last_shuffle(guild_id, state)
@@ -142,6 +150,26 @@ class MatchService:
     def clear_last_shuffle(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
         """Clear the pending shuffle state (delegates to state_service)."""
         self.state_service.clear_last_shuffle(guild_id, pending_match_id)
+
+    def purchase_protected_hero(
+        self,
+        *,
+        guild_id: int | None,
+        pending_match_id: int,
+        discord_id: int,
+        hero_id: int,
+        team_side: str,
+        cost: int,
+    ) -> dict:
+        """Atomically buy a protect-hero reservation for a pending match."""
+        return self.match_repo.purchase_protected_hero_atomic(
+            guild_id=guild_id,
+            pending_match_id=pending_match_id,
+            discord_id=discord_id,
+            hero_id=hero_id,
+            team_side=team_side,
+            cost=cost,
+        )
 
     def _ensure_pending_state(self, guild_id: int | None) -> PendingMatchState:
         """Get the pending state, raising error if none exists (delegates to state_service)."""
@@ -993,6 +1021,7 @@ class MatchService:
                 first_calibration_unix=now_unix,
                 effective_avoid_ids=effective_avoid_ids,
                 effective_deal_ids=effective_deal_ids,
+                pending_match_id=pending_match_id,
             )
             updated_count = len(glicko_updates)
 
