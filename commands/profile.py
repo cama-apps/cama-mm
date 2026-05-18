@@ -18,7 +18,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import BANKRUPTCY_PENALTY_RATE
+from config import BANKRUPTCY_PENALTY_RATE, PREDICTION_CONTRACT_VALUE
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from utils.drawing import (
@@ -953,7 +953,7 @@ class ProfileCommands(commands.Cog):
         target_discord_id: int,
         guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
-        """Build the Predictions tab embed with prediction market stats."""
+        """Build the Predictions tab embed from order-book market activity."""
         prediction_service = self._get_prediction_service()
 
         if not prediction_service:
@@ -961,124 +961,66 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Prediction service unavailable", color=COLOR_RED
             ), None
 
-        # Get prediction stats
         stats = await asyncio.to_thread(
-            prediction_service.get_user_prediction_stats, target_discord_id, guild_id
+            prediction_service.get_user_orderbook_stats, target_discord_id, guild_id
+        )
+        positions = await asyncio.to_thread(
+            prediction_service.get_user_open_positions, target_discord_id, guild_id
         )
 
-        if not stats:
+        if not positions and stats["resolved_markets"] == 0:
             return discord.Embed(
                 title=f"Profile: {target_user.display_name} > Predictions",
-                description="No prediction bets yet.\n\nUse `/predict list` to find active markets!",
+                description="No prediction market activity yet.\n\nUse `/predict list` to find active markets!",
                 color=COLOR_BLUE,
             ), None
 
-        # Color based on P&L
-        pnl = stats["net_pnl"] or 0
-        color = COLOR_GREEN if pnl >= 0 else COLOR_RED
-
+        realized = stats["realized_pnl"]
+        pnl_str = f"+{realized}" if realized >= 0 else str(realized)
         embed = discord.Embed(
             title=f"Profile: {target_user.display_name} > Predictions",
-            color=color,
+            color=COLOR_GREEN if realized >= 0 else COLOR_RED,
         )
-
-        # Performance
-        pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
-        wins = stats["wins"] or 0
-        losses = stats["losses"] or 0
-        win_rate = stats["win_rate"] or 0
 
         embed.add_field(
             name="Performance",
             value=(
-                f"**Net P&L:** {pnl_str} {JOPACOIN_EMOTE}\n"
-                f"**Record:** {wins}W-{losses}L ({win_rate:.0%})\n"
-                f"**Best Win:** +{stats['best_win'] or 0} {JOPACOIN_EMOTE}"
+                f"**Realized P&L:** {pnl_str} {JOPACOIN_EMOTE}\n"
+                f"**Record:** {stats['wins']}W-{stats['losses']}L "
+                f"({stats['resolved_markets']} resolved)"
             ),
-            inline=True,
+            inline=False,
         )
 
-        # Volume
-        total_wagered = stats["total_wagered"] or 0
-        total_bets = stats["total_bets"] or 0
-        avg_bet = total_wagered / total_bets if total_bets > 0 else 0
-
-        embed.add_field(
-            name="Volume",
-            value=(
-                f"**Total Bets:** {total_bets}\n"
-                f"**Wagered:** {total_wagered} {JOPACOIN_EMOTE}\n"
-                f"**Avg Bet:** {avg_bet:.1f} {JOPACOIN_EMOTE}"
-            ),
-            inline=True,
-        )
-
-        # Active positions
-        positions = await asyncio.to_thread(
-            prediction_service.get_user_active_positions, target_discord_id, guild_id
-        )
         if positions:
             position_lines = []
-            for pos in positions[:3]:
-                emoji = "✅" if pos["position"] == "yes" else "❌"
-                odds_info = await asyncio.to_thread(prediction_service.get_odds, pos["prediction_id"])
-                current_odds = odds_info["odds"].get(pos["position"], 0)
-                pool = odds_info["total_pool"]
-                yes_total = odds_info["yes_total"]
-                pct = round(100 * yes_total / pool) if pool > 0 else 50
-                my_pct = pct if pos["position"] == "yes" else 100 - pct
-
-                potential = int(pos["total_amount"] * current_odds) if current_odds > 0 else 0
-                question_short = pos["question"][:35] + "..." if len(pos["question"]) > 35 else pos["question"]
-
-                position_lines.append(
-                    f"{emoji} **#{pos['prediction_id']}:** {question_short}\n"
-                    f"   {pos['position'].upper()} @ {my_pct}% ({current_odds:.2f}x) | "
-                    f"{pos['total_amount']} → {potential} {JOPACOIN_EMOTE}"
-                )
-
-            if len(positions) > 3:
-                position_lines.append(f"*+{len(positions) - 3} more positions*")
-
+            for pos in positions[:5]:
+                question = pos["question"]
+                if len(question) > 40:
+                    question = question[:40] + "..."
+                for side in ("yes", "no"):
+                    qty = int(pos[f"{side}_contracts"])
+                    if qty == 0:
+                        continue
+                    basis = int(pos[f"{side}_cost_basis_total"])
+                    avg_pct = basis * 100 / (qty * PREDICTION_CONTRACT_VALUE)
+                    position_lines.append(
+                        f"**#{pos['prediction_id']}** {question}\n"
+                        f"   {side.upper()} {qty} @ {avg_pct:.0f}%"
+                    )
+            if len(positions) > 5:
+                position_lines.append(f"*+{len(positions) - 5} more*")
             embed.add_field(
-                name=f"🟢 Active Positions ({len(positions)})",
+                name=f"Open Positions ({len(positions)})",
                 value="\n".join(position_lines),
                 inline=False,
             )
         else:
             embed.add_field(
-                name="Active Positions",
-                value="No active positions",
-                inline=False,
+                name="Open Positions", value="No open positions", inline=False
             )
 
-        # Recent resolved
-        resolved = await asyncio.to_thread(
-            prediction_service.get_user_resolved_positions, target_discord_id, guild_id
-        )
-        if resolved:
-            recent_lines = []
-            for pos in resolved[:3]:
-                bet_emoji = "✅" if pos["position"] == "yes" else "❌"
-                won = pos["position"] == pos["outcome"]
-                result_emoji = "🏆" if won else "💀"
-                amount = pos["total_amount"]
-                payout = pos["payout"] or 0
-                profit = payout - amount if won else -amount
-                profit_str = f"+{profit}" if profit > 0 else str(profit)
-
-                question_short = pos["question"][:30] + "..." if len(pos["question"]) > 30 else pos["question"]
-                recent_lines.append(
-                    f"{result_emoji} {bet_emoji} {question_short}: {profit_str} {JOPACOIN_EMOTE}"
-                )
-
-            embed.add_field(
-                name="Recent Results",
-                value="\n".join(recent_lines),
-                inline=False,
-            )
-
-        embed.set_footer(text="Tip: Use /predict mine for all positions")
+        embed.set_footer(text="Tip: Use /predict mine for live position values")
 
         return embed, None
 
