@@ -67,9 +67,8 @@ class TestServiceInterfacesExist:
 
         assert issubclass(IPredictionService, ABC)
         assert hasattr(IPredictionService, "create_prediction")
-        assert hasattr(IPredictionService, "place_bet")
-        assert hasattr(IPredictionService, "resolve")
-        assert hasattr(IPredictionService, "cancel")
+        assert hasattr(IPredictionService, "add_resolution_vote")
+        assert hasattr(IPredictionService, "can_resolve")
 
     def test_lobby_service_interface(self):
         """ILobbyService interface exists with expected methods."""

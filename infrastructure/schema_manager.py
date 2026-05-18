@@ -399,6 +399,9 @@ class SchemaManager:
                 "create_protected_hero_purchases_table",
                 self._migration_create_protected_hero_purchases_table,
             ),
+            # Drop the obsolete pari-mutuel prediction table. The order-book
+            # rework replaced it and the last readers have been removed.
+            ("drop_prediction_bets_table", self._migration_drop_prediction_bets_table),
         ]
 
     # --- Migrations ---
@@ -811,35 +814,10 @@ class SchemaManager:
             """
         )
 
-        # Prediction bets table
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS prediction_bets (
-                bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                prediction_id INTEGER NOT NULL,
-                discord_id INTEGER NOT NULL,
-                position TEXT NOT NULL,
-                amount INTEGER NOT NULL,
-                bet_time INTEGER NOT NULL,
-                payout INTEGER,
-                FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id),
-                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
-            )
-            """
-        )
-
         # Indexes for efficient queries
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_predictions_guild_status "
             "ON predictions(guild_id, status)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_prediction_bets_prediction "
-            "ON prediction_bets(prediction_id)"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_prediction_bets_user "
-            "ON prediction_bets(discord_id)"
         )
 
     def _migration_add_prediction_channel_message_id(self, cursor) -> None:
@@ -2826,8 +2804,9 @@ class SchemaManager:
         - Creates ``prediction_positions`` (per-user YES/NO holdings + cost basis)
         - Creates ``prediction_trades`` (every fill, for tape display + stats)
 
-        The legacy ``prediction_bets`` table and ``resolution_votes`` column are left
-        in place but unused by the new code.
+        The legacy pari-mutuel ``prediction_bets`` table is dropped by a later
+        migration; the ``resolution_votes`` column is reused by the order-book
+        resolution-voting flow.
         """
         # New columns on predictions
         self._add_column_if_not_exists(cursor, "predictions", "current_price", "INTEGER")
@@ -3244,3 +3223,9 @@ class SchemaManager:
             ON protected_hero_purchases(match_id)
             """
         )
+
+    def _migration_drop_prediction_bets_table(self, cursor) -> None:
+        """Drop the obsolete pari-mutuel prediction_bets table. The order-book
+        prediction rework replaced it; all pool-mode read/write paths have
+        been removed."""
+        cursor.execute("DROP TABLE IF EXISTS prediction_bets")

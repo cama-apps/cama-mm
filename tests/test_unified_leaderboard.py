@@ -5,7 +5,6 @@ Tests cover:
 - Tab switching updates button styles
 - Per-tab page state is independent
 - Lazy loading only fetches once per tab
-- Predictions pagination works
 - Deep-linking via type parameter works
 """
 
@@ -46,19 +45,6 @@ def mock_cog():
     mock_leaderboard.biggest_gamblers = []
     mock_leaderboard.server_stats = {}
     cog.gambling_stats_service.get_leaderboard.return_value = mock_leaderboard
-
-    # Mock prediction_service
-    cog.prediction_service = MagicMock()
-    cog.prediction_service.get_prediction_leaderboard.return_value = {
-        "top_earners": [],
-        "down_bad": [],
-        "most_accurate": [],
-    }
-    cog.prediction_service.get_server_prediction_stats.return_value = {
-        "total_predictions": 0,
-        "total_bets": 0,
-        "total_wagered": 0,
-    }
 
     # Mock bankruptcy_service
     cog.bankruptcy_service = MagicMock()
@@ -105,14 +91,13 @@ class TestLeaderboardTab:
         """Test all tab enum values are correct."""
         assert LeaderboardTab.BALANCE.value == "balance"
         assert LeaderboardTab.GAMBLING.value == "gambling"
-        assert LeaderboardTab.PREDICTIONS.value == "predictions"
         assert LeaderboardTab.GLICKO.value == "glicko"
         assert LeaderboardTab.OPENSKILL.value == "openskill"
         assert LeaderboardTab.TIPS.value == "tips"
 
     def test_tab_count(self):
-        """Test we have exactly 7 tabs."""
-        assert len(LeaderboardTab) == 7
+        """Test we have exactly 6 tabs."""
+        assert len(LeaderboardTab) == 6
 
 
 class TestTabState:
@@ -175,7 +160,7 @@ class TestUnifiedLeaderboardViewInitialization:
             guild_id=12345,
             interaction=mock_interaction,
         )
-        assert len(view._tab_states) == 7
+        assert len(view._tab_states) == 6
         for tab in LeaderboardTab:
             assert tab in view._tab_states
             assert isinstance(view._tab_states[tab], TabState)
@@ -199,7 +184,6 @@ class TestButtonStyles:
         # Balance should be primary, others secondary
         assert view.balance_btn.style == discord.ButtonStyle.primary
         assert view.gambling_btn.style == discord.ButtonStyle.secondary
-        assert view.predictions_btn.style == discord.ButtonStyle.secondary
         assert view.glicko_btn.style == discord.ButtonStyle.secondary
         assert view.openskill_btn.style == discord.ButtonStyle.secondary
 
@@ -221,7 +205,7 @@ class TestButtonStyles:
 
         assert view.balance_btn.style == discord.ButtonStyle.secondary
         assert view.gambling_btn.style == discord.ButtonStyle.primary
-        assert view.predictions_btn.style == discord.ButtonStyle.secondary
+        assert view.glicko_btn.style == discord.ButtonStyle.secondary
 
 
 class TestPerTabPagination:
@@ -388,22 +372,6 @@ class TestEmbedBuilding:
         assert passed_guild == 12345
 
     @pytest.mark.asyncio
-    async def test_build_predictions_embed_empty(self, mock_cog, mock_interaction):
-        """Test Predictions embed with no data."""
-        view = UnifiedLeaderboardView(
-            cog=mock_cog,
-            guild_id=12345,
-            interaction=mock_interaction,
-            initial_tab=LeaderboardTab.PREDICTIONS,
-        )
-
-        await view._load_tab_data(LeaderboardTab.PREDICTIONS)
-        embed = view.build_embed()
-
-        assert "Predictions" in embed.title
-        assert "No prediction data yet" in embed.description
-
-    @pytest.mark.asyncio
     async def test_build_glicko_embed_empty(self, mock_cog, mock_interaction):
         """Test Glicko embed with no data."""
         view = UnifiedLeaderboardView(
@@ -472,17 +440,6 @@ class TestDeepLinking:
             initial_tab=LeaderboardTab.GAMBLING,
         )
         assert view.current_tab == LeaderboardTab.GAMBLING
-
-    @pytest.mark.asyncio
-    async def test_predictions_deep_link(self, mock_cog, mock_interaction):
-        """Test initializing with predictions tab."""
-        view = UnifiedLeaderboardView(
-            cog=mock_cog,
-            guild_id=12345,
-            interaction=mock_interaction,
-            initial_tab=LeaderboardTab.PREDICTIONS,
-        )
-        assert view.current_tab == LeaderboardTab.PREDICTIONS
 
     @pytest.mark.asyncio
     async def test_glicko_deep_link(self, mock_cog, mock_interaction):

@@ -33,7 +33,7 @@ def _build_service(**overrides):
     repos["match_repo"].get_player_bonus_events.return_value = []
     repos["player_repo"].get_wheel_spin_history.return_value = []
     repos["player_repo"].get_double_or_nothing_history.return_value = []
-    repos["prediction_repo"].get_player_prediction_history.return_value = []
+    repos["prediction_repo"].get_player_orderbook_pnl_history.return_value = []
     repos["disburse_repo"].get_recipient_history.return_value = []
     repos["tip_repo"].get_all_tips_for_user.return_value = []
     repos["dig_repo"].get_player_jc_events.return_value = []
@@ -112,16 +112,13 @@ def test_per_source_totals_exclude_zero_net_sources():
 
 def test_prediction_emits_net_event_per_settlement():
     svc, repos = _build_service()
-    repos["prediction_repo"].get_player_prediction_history.return_value = [
-        # Won prediction: staked 20, payout 40 → +20
-        {"settle_time": 1000, "total_amount": 20, "payout": 40, "position": "yes", "status": "resolved", "prediction_id": 1},
-        # Lost prediction: staked 30, payout 0 → -30
-        {"settle_time": 2000, "total_amount": 30, "payout": 0, "position": "no", "status": "resolved", "prediction_id": 2},
-        # Cancelled prediction fully refunded: staked 10, payout 10 → 0 (dropped)
-        {"settle_time": 3000, "total_amount": 10, "payout": 10, "position": "yes", "status": "cancelled", "prediction_id": 3},
+    repos["prediction_repo"].get_player_orderbook_pnl_history.return_value = [
+        {"prediction_id": 1, "settle_time": 1000, "delta": 20},   # won → +20
+        {"prediction_id": 2, "settle_time": 2000, "delta": -30},  # lost → -30
+        {"prediction_id": 3, "settle_time": 3000, "delta": 0},    # net-zero → dropped
     ]
     series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
-    assert len(series) == 2                    # cancelled refund dropped
+    assert len(series) == 2                    # net-zero event dropped
     assert [info["delta"] for _, _, info in series] == [20, -30]
     assert totals == {SOURCE_PREDICTIONS: -10}
 
@@ -404,7 +401,7 @@ def test_dig_missing_repo_produces_no_dig_events():
             get_wheel_spin_history=MagicMock(return_value=[]),
             get_double_or_nothing_history=MagicMock(return_value=[]),
         ),
-        prediction_repo=MagicMock(get_player_prediction_history=MagicMock(return_value=[])),
+        prediction_repo=MagicMock(get_player_orderbook_pnl_history=MagicMock(return_value=[])),
         disburse_repo=MagicMock(get_recipient_history=MagicMock(return_value=[])),
         tip_repo=MagicMock(get_all_tips_for_user=MagicMock(return_value=[])),
         dig_repo=None,

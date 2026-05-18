@@ -4,7 +4,6 @@ Tests for the /leaderboard command type parameter routing.
 Tests that the type parameter correctly routes to:
 - balance (default)
 - gambling
-- predictions
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -135,19 +134,6 @@ class TestLeaderboardTypeRouting:
             )
         )
 
-        # Mock prediction service
-        mock_prediction_service = MagicMock()
-        mock_prediction_service.get_prediction_leaderboard = MagicMock(
-            return_value={
-                "top_earners": [{"discord_id": 1, "net_pnl": 50, "win_rate": 0.7, "wins": 7, "losses": 3}],
-                "down_bad": [],
-                "most_accurate": [{"discord_id": 1, "win_rate": 0.7, "wins": 7, "losses": 3}],
-            }
-        )
-        mock_prediction_service.get_server_prediction_stats = MagicMock(
-            return_value={"total_predictions": 10, "total_bets": 30, "total_wagered": 300}
-        )
-
         return InfoCommands(
             bot=mock_bot,
             player_service=player_repo,
@@ -155,7 +141,6 @@ class TestLeaderboardTypeRouting:
             role_emojis={},
             role_names={},
             gambling_stats_service=mock_gambling_service,
-            prediction_service=mock_prediction_service,
             bankruptcy_service=None,
         )
 
@@ -220,26 +205,6 @@ class TestLeaderboardTypeRouting:
         assert "GAMBLING" in call_kwargs["embed"].title.upper()
 
     @pytest.mark.asyncio
-    async def test_leaderboard_type_predictions_routes_correctly(
-        self, info_cog, mock_rate_limiter, mock_discord_helpers
-    ):
-        """Test that type=predictions routes to predictions leaderboard."""
-        interaction = MockInteraction()
-
-        await info_cog.leaderboard.callback(
-            info_cog, interaction, type=MockChoice("predictions"), limit=20
-        )
-
-        # Verify prediction_service.get_prediction_leaderboard was called
-        info_cog.prediction_service.get_prediction_leaderboard.assert_called_once()
-
-        mock_followup = mock_discord_helpers["followup"]
-        assert mock_followup.called
-        call_kwargs = mock_followup.call_args.kwargs
-        assert "embed" in call_kwargs
-        assert "PREDICTION" in call_kwargs["embed"].title.upper()
-
-    @pytest.mark.asyncio
     async def test_gambling_leaderboard_unavailable_service(
         self, player_repo, mock_rate_limiter, mock_discord_helpers
     ):
@@ -269,38 +234,6 @@ class TestLeaderboardTypeRouting:
         # Unified view uses embed.description for "not available" message
         assert "embed" in call_kwargs
         assert "not available" in call_kwargs["embed"].description.lower()
-
-    @pytest.mark.asyncio
-    async def test_predictions_leaderboard_unavailable_service(
-        self, player_repo, mock_rate_limiter, mock_discord_helpers
-    ):
-        """Test graceful handling when prediction service unavailable."""
-        from commands.info import InfoCommands
-
-        info_cog = InfoCommands(
-            bot=MagicMock(),
-            player_service=player_repo,
-            match_service=MagicMock(),
-            role_emojis={},
-            role_names={},
-            gambling_stats_service=None,
-            prediction_service=None,
-        )
-
-        interaction = MockInteraction()
-        interaction.guild.members = []  # Will be populated with matching players
-
-        await info_cog.leaderboard.callback(
-            info_cog, interaction, type=MockChoice("predictions"), limit=20
-        )
-
-        mock_followup = mock_discord_helpers["followup"]
-        mock_followup.assert_called_once()
-        call_kwargs = mock_followup.call_args.kwargs
-        # Unified view uses embed.description for "not available" message
-        assert "embed" in call_kwargs
-        assert "not available" in call_kwargs["embed"].description.lower()
-
 
 class TestLeaderboardLimitParameter:
     """Tests for the limit parameter validation.
@@ -618,61 +551,3 @@ class TestGamblingLeaderboardIntegration:
             _ = entry.degen_score
             _ = entry.degen_title
             _ = entry.degen_emoji
-
-
-class TestLeaderboardPredictionsContent:
-    """Tests for predictions leaderboard content."""
-
-    @pytest.fixture
-    def info_cog_with_predictions(self, player_repo):
-        """Create InfoCommands with prediction service that returns specific data."""
-        from commands.info import InfoCommands
-
-        mock_prediction_service = MagicMock()
-        mock_prediction_service.get_prediction_leaderboard = MagicMock(
-            return_value={
-                "top_earners": [
-                    {"discord_id": 1001, "net_pnl": 200, "win_rate": 0.80, "wins": 8, "losses": 2},
-                ],
-                "down_bad": [
-                    {"discord_id": 1002, "net_pnl": -100, "win_rate": 0.40, "wins": 4, "losses": 6},
-                ],
-                "most_accurate": [
-                    {"discord_id": 1001, "win_rate": 0.80, "wins": 8, "losses": 2},
-                ],
-            }
-        )
-        mock_prediction_service.get_server_prediction_stats = MagicMock(
-            return_value={"total_predictions": 20, "total_bets": 50, "total_wagered": 500}
-        )
-
-        return InfoCommands(
-            bot=MagicMock(),
-            player_service=player_repo,
-            match_service=MagicMock(),
-            role_emojis={},
-            role_names={},
-            prediction_service=mock_prediction_service,
-        )
-
-    @pytest.mark.asyncio
-    async def test_predictions_leaderboard_has_all_sections(
-        self, info_cog_with_predictions, mock_rate_limiter, mock_discord_helpers
-    ):
-        """Test that predictions leaderboard contains all expected sections."""
-        interaction = MockInteraction()
-
-        await info_cog_with_predictions.leaderboard.callback(
-            info_cog_with_predictions, interaction, type=MockChoice("predictions"), limit=20
-        )
-
-        mock_followup = mock_discord_helpers["followup"]
-        call_kwargs = mock_followup.call_args.kwargs
-        embed = call_kwargs["embed"]
-
-        field_names = [f.name for f in embed.fields]
-
-        # Should have top earners
-        assert any("Top Earners" in name for name in field_names)
-        # Should have most accurate
-        assert any("Most Accurate" in name for name in field_names)

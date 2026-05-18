@@ -376,32 +376,6 @@ class IPredictionService(ABC):
         ...
 
     @abstractmethod
-    def place_bet(
-        self,
-        prediction_id: int,
-        discord_id: int,
-        position: str,
-        amount: int,
-    ) -> dict[str, Any]:
-        """Place a bet on a prediction."""
-        ...
-
-    @abstractmethod
-    def get_prediction(self, prediction_id: int) -> dict | None:
-        """Get a prediction by ID."""
-        ...
-
-    @abstractmethod
-    def get_active_predictions(self, guild_id: int) -> list[dict]:
-        """Get all active predictions for a guild."""
-        ...
-
-    @abstractmethod
-    def get_odds(self, prediction_id: int) -> dict[str, Any]:
-        """Get current odds for a prediction."""
-        ...
-
-    @abstractmethod
     def add_resolution_vote(
         self,
         prediction_id: int,
@@ -419,25 +393,6 @@ class IPredictionService(ABC):
         outcome: str | None = None,
     ) -> bool:
         """Check if prediction can be resolved."""
-        ...
-
-    @abstractmethod
-    def resolve(
-        self,
-        prediction_id: int,
-        outcome: str,
-        resolved_by: int,
-    ) -> dict[str, Any]:
-        """Resolve a prediction and pay out winners."""
-        ...
-
-    @abstractmethod
-    def cancel(
-        self,
-        prediction_id: int,
-        admin_id: int,
-    ) -> dict[str, Any]:
-        """Cancel a prediction and refund all bets."""
         ...
 
 

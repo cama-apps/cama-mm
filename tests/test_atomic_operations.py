@@ -32,7 +32,6 @@ from repositories.loan_repository import LoanRepository
 from repositories.mana_repository import ManaRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
-from repositories.prediction_repository import PredictionRepository
 from repositories.rebellion_repository import RebellionRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from tests.conftest import TEST_GUILD_ID
@@ -55,11 +54,6 @@ def loan_repo(repo_db_path):
 @pytest.fixture
 def bankruptcy_repo(repo_db_path):
     return BankruptcyRepository(repo_db_path)
-
-
-@pytest.fixture
-def prediction_repo(repo_db_path):
-    return PredictionRepository(repo_db_path)
 
 
 @pytest.fixture
@@ -318,64 +312,6 @@ class TestBankruptcyAtomic:
         state = bankruptcy_repo.get_state(1, TEST_GUILD_ID)
         # Counter reflects exactly one declaration (not 5).
         assert state["penalty_games_remaining"] == 5
-
-
-# ---------------------------------------------------------------------------
-# Prediction: resolve flips status and pays winners in one txn
-# ---------------------------------------------------------------------------
-
-
-class TestPredictionResolveAtomic:
-    def test_status_flip_and_pool_payout_commit_together(
-        self, player_repo, prediction_repo
-    ):
-        for did in (10, 11, 12):
-            register(player_repo, did, balance=100)
-
-        pid = prediction_repo.create_prediction(
-            guild_id=TEST_GUILD_ID,
-            creator_id=10,
-            question="Will it rain?",
-            closes_at=99_999_999_999,
-        )
-        prediction_repo.place_bet_atomic(
-            prediction_id=pid, discord_id=10, position="yes", amount=20
-        )
-        prediction_repo.place_bet_atomic(
-            prediction_id=pid, discord_id=11, position="no", amount=30
-        )
-        prediction_repo.place_bet_atomic(
-            prediction_id=pid, discord_id=12, position="yes", amount=10
-        )
-        # Lock betting so resolve is valid.
-        prediction_repo.update_prediction_status(pid, "locked")
-
-        balances_before = {
-            did: player_repo.get_balance(did, TEST_GUILD_ID) for did in (10, 11, 12)
-        }
-
-        result = prediction_repo.resolve_and_settle_atomic(
-            prediction_id=pid, outcome="yes", resolved_by=10
-        )
-
-        pred = prediction_repo.get_prediction(pid)
-        assert pred["status"] == "resolved"
-        assert pred["outcome"] == "yes"
-        assert result["total_pool"] == 60
-        assert result["winner_pool"] == 30
-
-        # Yes bettors got paid; no bettor unchanged (already debited at bet time).
-        assert player_repo.get_balance(10, TEST_GUILD_ID) > balances_before[10]
-        assert player_repo.get_balance(12, TEST_GUILD_ID) > balances_before[12]
-        assert player_repo.get_balance(11, TEST_GUILD_ID) == balances_before[11]
-
-        # Winning bets carry a payout column > 0; losers remain NULL.
-        bets = prediction_repo.get_prediction_bets(pid)
-        for bet in bets:
-            if bet["position"] == "yes":
-                assert bet["payout"] is not None and bet["payout"] > 0
-            else:
-                assert bet["payout"] is None
 
 
 # ---------------------------------------------------------------------------
