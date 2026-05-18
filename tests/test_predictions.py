@@ -1273,3 +1273,34 @@ def test_get_user_orderbook_stats_realized_pnl(
     assert stats["resolved_markets"] == 2
     assert stats["wins"] == 1
     assert stats["losses"] == 1
+
+
+def test_get_player_orderbook_pnl_history(
+    prediction_service, prediction_repo, player_repository
+):
+    """One row per resolved market (delta = payout - cost); open markets excluded."""
+    _add_player(player_repository, 1, balance=100_000)
+
+    win_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="History win?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=win_pid, discord_id=1, side="yes", contracts=3,
+    )
+    win_cost = prediction_repo.get_position(win_pid, 1)["yes_cost_basis_total"]
+
+    open_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="History open?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=open_pid, discord_id=1, side="yes", contracts=3,
+    )
+
+    prediction_service.resolve_orderbook(prediction_id=win_pid, outcome="yes")
+
+    history = prediction_repo.get_player_orderbook_pnl_history(1, TEST_GUILD_ID)
+
+    assert len(history) == 1  # open market excluded
+    assert history[0]["prediction_id"] == win_pid
+    assert history[0]["delta"] == 3 * PREDICTION_CONTRACT_VALUE - win_cost
+    assert history[0]["settle_time"] > 0

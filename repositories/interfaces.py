@@ -772,54 +772,6 @@ class IPredictionRepository(ABC):
         """Cancel a prediction (status -> cancelled)."""
         ...
 
-    @abstractmethod
-    def place_bet_atomic(
-        self, prediction_id: int, discord_id: int, position: str, amount: int
-    ) -> dict:
-        """Place a bet atomically (debit balance, insert bet). Returns bet info."""
-        ...
-
-    @abstractmethod
-    def get_prediction_bets(self, prediction_id: int) -> list[dict]:
-        """Get all bets for a prediction."""
-        ...
-
-    @abstractmethod
-    def get_user_bet_on_prediction(
-        self, prediction_id: int, discord_id: int
-    ) -> dict | None:
-        """Get user's bet on a specific prediction."""
-        ...
-
-    @abstractmethod
-    def get_user_active_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
-        """Get all active (unresolved) positions for a user."""
-        ...
-
-    @abstractmethod
-    def get_prediction_totals(self, prediction_id: int) -> dict:
-        """Get bet totals: {"yes_total": n, "no_total": m, "yes_count": x, "no_count": y}."""
-        ...
-
-    @abstractmethod
-    def settle_prediction_bets(
-        self, prediction_id: int, winning_position: str
-    ) -> dict:
-        """Settle all bets for a resolved prediction. Returns payout summary."""
-        ...
-
-    @abstractmethod
-    def resolve_and_settle_atomic(
-        self, prediction_id: int, outcome: str, resolved_by: int
-    ) -> dict:
-        """Atomically mark resolved and settle bets in one transaction."""
-        ...
-
-    @abstractmethod
-    def refund_prediction_bets(self, prediction_id: int) -> dict:
-        """Refund all bets for a cancelled prediction. Returns refund summary."""
-        ...
-
     # --- Order-book mechanic (new in feat/predict-orderbook) ---
 
     @abstractmethod
