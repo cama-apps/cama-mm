@@ -1477,6 +1477,53 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_user_orderbook_stats(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> dict:
+        """Realized P&L and W/L over a user's resolved order-book markets.
+
+        Per resolved market: payout = winning-side contracts * PREDICTION_CONTRACT_VALUE,
+        cost = total cost basis (both sides), pnl = payout - cost. Open and
+        cancelled markets are excluded — cancelled markets refund cost basis and
+        delete their position rows, so they net to zero either way.
+        """
+        from config import PREDICTION_CONTRACT_VALUE
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT p.outcome AS outcome,
+                       pp.yes_contracts AS yes_contracts,
+                       pp.no_contracts AS no_contracts,
+                       pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost
+                FROM prediction_positions pp
+                JOIN predictions p ON pp.prediction_id = p.prediction_id
+                WHERE pp.discord_id = ? AND p.guild_id = ? AND p.status = 'resolved'
+                """,
+                (discord_id, normalized_guild),
+            )
+            rows = cursor.fetchall()
+
+        realized_pnl = 0
+        wins = 0
+        losses = 0
+        for row in rows:
+            won = row["yes_contracts"] if row["outcome"] == "yes" else row["no_contracts"]
+            pnl = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"])
+            realized_pnl += pnl
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+        return {
+            "realized_pnl": realized_pnl,
+            "wins": wins,
+            "losses": losses,
+            "resolved_markets": len(rows),
+        }
+
     def get_recent_trades(self, prediction_id: int, limit: int = 5) -> list[dict]:
         with self.connection() as conn:
             cursor = conn.cursor()

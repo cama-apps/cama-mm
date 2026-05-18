@@ -693,6 +693,11 @@ class PredictionService:
     ) -> list[dict]:
         return self.prediction_repo.get_user_open_positions(discord_id, guild_id)
 
+    def get_user_orderbook_stats(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> dict:
+        return self.prediction_repo.get_user_orderbook_stats(discord_id, guild_id)
+
     def list_open_orderbook_markets(self, guild_id: int) -> list[dict]:
         return self.prediction_repo.get_open_orderbook_predictions(guild_id)
 
