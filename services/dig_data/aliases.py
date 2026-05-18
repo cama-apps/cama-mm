@@ -13,11 +13,9 @@ from __future__ import annotations
 from services.dig_data.artifacts import ALL_ARTIFACTS
 from services.dig_data.balance import MAX_INVENTORY_SLOTS, PROGRESSIVE_TIPS
 from services.dig_data.bosses import BOSSES, PINNACLE_DEPTH
-from services.dig_data.events import (
-    EVENT_ASCII_ART,
-    RANDOM_EVENTS,
-    _choice_to_dict,
-)
+from services.dig_data.event_art import EVENT_ASCII_ART
+from services.dig_data.event_definitions import RANDOM_EVENTS
+from services.dig_data.event_types import _choice_to_dict
 from services.dig_data.items import CONSUMABLES
 from services.dig_data.layers import (
     _LAYERS_DEF,

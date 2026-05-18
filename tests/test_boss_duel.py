@@ -227,6 +227,60 @@ class TestDuelPayout:
         # Reported payout is the real net credited, not the gross return.
         assert result["payout"] == expected_payout
 
+    def test_audit_log_jc_delta_matches_real_payout(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """The boss_fight audit log's detail.jc_delta must equal the JC the
+        player actually received — not a separate gross-loot estimate."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["won"] is True
+        real_payout = player_repository.get_balance(10001, TEST_GUILD_ID) - balance_before
+
+        actions = dig_repo.get_recent_actions(
+            10001, TEST_GUILD_ID, action_type="boss_fight",
+        )
+        assert actions, "expected a boss_fight audit row"
+        detail = json.loads(actions[0]["detail"])
+        assert detail["won"] is True
+        # The logged delta is the actual JC change, matching result["payout"].
+        assert detail["jc_delta"] == real_payout
+        assert detail["jc_delta"] == result["payout"]
+
+    def test_duel_audit_log_jc_delta_matches_real_payout(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """The duel path (start_boss_duel -> _resolve_duel_outcome) must log
+        the real JC payout, not a separate mana-scaled gross-loot estimate."""
+        # No mechanic so the duel auto-resolves in one call (no pause prompt).
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
+
+        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["success"]
+        assert result["won"] is True
+        real_payout = player_repository.get_balance(10001, TEST_GUILD_ID) - balance_before
+
+        actions = dig_repo.get_recent_actions(
+            10001, TEST_GUILD_ID, action_type="boss_fight",
+        )
+        assert actions, "expected a boss_fight audit row"
+        detail = json.loads(actions[0]["detail"])
+        assert detail["won"] is True
+        assert detail["jc_delta"] == real_payout
+        assert detail["jc_delta"] == result["payout"]
+
     def test_loss_applies_knockback(self, dig_service, dig_repo, player_repository, monkeypatch):
         """Boss loss knocks the player back and clears cheers."""
         _register(player_repository, balance=500)

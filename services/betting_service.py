@@ -347,7 +347,11 @@ class BettingService:
                     pid, reward_amount, guild_id
                 )
                 if penalty_info["penalty_applied"] > 0:
-                    bankruptcy_penalty_rate = self.bankruptcy_service.penalty_rate
+                    # Clamp defensively: a misconfigured rate must never debit
+                    # more than the post-garnishment net.
+                    bankruptcy_penalty_rate = max(
+                        0.0, min(1.0, self.bankruptcy_service.penalty_rate)
+                    )
 
             # Apply garnishment + bankruptcy penalty in one atomic balance
             # mutation. The repo credits gross, reads balance to decide

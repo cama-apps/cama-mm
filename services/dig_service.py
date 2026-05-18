@@ -21,11 +21,13 @@ from services.dig._common import (
     _splash_trigger_matches,
     logger,
 )
+from services.dig.boss_info_mixin import BossInfoMixin
 from services.dig.combat_mixin import BossCombatMixin
 from services.dig.dig_core_mixin import DigCoreMixin
 from services.dig.environment_mixin import EnvironmentMixin
 from services.dig.events_mixin import EventsMixin
 from services.dig.gear_mixin import GearMixin
+from services.dig.pinnacle_mixin import PinnacleMixin
 from services.dig.prestige_mixin import PrestigeMixin
 from services.dig.progression_mixin import ProgressionMixin
 from services.dig_constants import (
@@ -96,6 +98,8 @@ def _get_events_with_art() -> set[str]:
 
 class DigService(
     BossCombatMixin,
+    BossInfoMixin,
+    PinnacleMixin,
     GearMixin,
     ProgressionMixin,
     EnvironmentMixin,
