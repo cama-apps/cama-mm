@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+import services.dig_service as dig_service_module
 from repositories.dig_repository import DigRepository
 from services.dig_service import DigService
 
@@ -45,6 +46,68 @@ def _seed_tunnel(dig_service, dig_repo, player_repository, depth: int = 30):
     random.seed(0)
     dig_service.dig(10001, 12345)
     dig_repo.update_tunnel(10001, 12345, depth=depth, luminosity=100)
+
+
+def _threat_event(event_id: str, failure_outcome: dict) -> dict:
+    """A two-branch event whose risky FAILURE carries the given outcome.
+
+    Used to drive a jitter check against a streak_loss / curse payload —
+    the failure outcome is what the threat code reads.
+    """
+    return {
+        "id": event_id,
+        "name": f"Synthetic {event_id}",
+        "description": ("A test passage.",),
+        "min_depth": 0,
+        "max_depth": None,
+        "safe_option": {
+            "label": "Safe",
+            "success": {"description": "Safe.", "advance": 0, "jc": 2,
+                        "cave_in": False, "streak_loss": 0, "curse": None},
+            "failure": None,
+            "success_chance": 1.0,
+        },
+        "risky_option": {
+            "label": "Risky",
+            "success": {"description": "Risky win.", "advance": 0, "jc": 20,
+                        "cave_in": False, "streak_loss": 0, "curse": None},
+            "failure": failure_outcome,
+            "success_chance": 0.5,
+        },
+        "complexity": "choice",
+        "layer": None,
+        "rarity": "common",
+        "requires_dark": False,
+        "social": False,
+        "ascii_art": None,
+        "buff_on_success": None,
+        "desperate_option": None,
+        "boon_options": None,
+        "min_prestige": 0,
+        "next_event_id": None,
+        "chain_only": False,
+        "splash": None,
+        "guild_modifier_on_success": None,
+        "quest_id": None,
+        "quest_step": None,
+    }
+
+
+@pytest.fixture
+def inject_event():
+    """Append a synthetic event to EVENT_POOL and tear it down after."""
+    added: list[str] = []
+
+    def _add(event: dict) -> dict:
+        dig_service_module.EVENT_POOL.append(event)
+        added.append(event["id"])
+        return event
+
+    yield _add
+
+    dig_service_module.EVENT_POOL[:] = [
+        e for e in dig_service_module.EVENT_POOL if e["id"] not in added
+    ]
 
 
 class TestEventVariance:
@@ -138,3 +201,73 @@ class TestEventVariance:
             r = dig_service.resolve_event(10001, 12345, "underground_stream", "safe")
             rolls.add(r.get("jc_delta", 0))
         assert len(rolls) >= 3, f"variance not firing — only {len(rolls)} unique rolls"
+
+
+class TestThreatPayloadUnjittered:
+    """The outcome jitter scales JC and shifts advance only. A streak_loss or
+    curse on a failure outcome must pass through untouched — jitter must not
+    corrupt a threat payload."""
+
+    def test_streak_loss_payload_not_jittered(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A failure outcome with streak_loss=3, resolved across 60 seeds,
+        always reports streak_loss=3 — the jitter never scales it. With a
+        fixed 10-day streak, setback = 3 + floor(10/20) = 3 every time."""
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        _seed_tunnel(dig_service, dig_repo, player_repository)
+        inject_event(_threat_event(
+            "variance_streak",
+            {"description": "Momentum lost.", "advance": 0, "jc": 0,
+             "cave_in": False, "streak_loss": 3, "curse": None},
+        ))
+
+        seen = set()
+        for i in range(60):
+            random.seed(i + 1)
+            dig_repo.update_tunnel(10001, 12345, streak_days=10)
+            # Force the risky pick to FAIL so the streak_loss outcome fires.
+            monkeypatch.setattr(
+                "services.dig.events_mixin.random.random", lambda: 0.99,
+            )
+            r = dig_service.resolve_event(10001, 12345, "variance_streak", "risky")
+            assert r["success"]
+            seen.add(r.get("streak_loss"))
+        assert seen == {3}, f"streak_loss was jittered — saw {sorted(seen)}"
+
+    def test_curse_payload_not_jittered(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A failure outcome carrying a curse (duration_digs=2) resolved
+        across 60 seeds always applies that exact curse — duration and
+        effect pass through the jitter unchanged."""
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        _seed_tunnel(dig_service, dig_repo, player_repository)
+        curse = {
+            "id": "variance_hex", "name": "Variance Hex",
+            "duration_digs": 2, "effect": {"advance_bonus": -3},
+        }
+        inject_event(_threat_event(
+            "variance_curse",
+            {"description": "Hexed.", "advance": 0, "jc": 0,
+             "cave_in": False, "streak_loss": 0, "curse": curse},
+        ))
+
+        durations = set()
+        for i in range(60):
+            random.seed(i + 1)
+            # Clear any curse left by the prior iteration's dig.
+            dig_repo.update_tunnel(10001, 12345, temp_curses=None)
+            monkeypatch.setattr(
+                "services.dig.events_mixin.random.random", lambda: 0.99,
+            )
+            r = dig_service.resolve_event(10001, 12345, "variance_curse", "risky")
+            assert r["success"]
+            applied = r.get("curse_applied")
+            assert applied is not None and applied["id"] == "variance_hex"
+            tunnel = dig_repo.get_tunnel(10001, 12345)
+            active = dig_service._get_active_curse(dict(tunnel))
+            assert active is not None
+            assert active["effect"] == {"advance_bonus": -3}, "curse effect jittered"
+            durations.add(active["digs_remaining"])
+        assert durations == {2}, f"curse duration was jittered — saw {sorted(durations)}"

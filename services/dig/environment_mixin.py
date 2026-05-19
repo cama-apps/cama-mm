@@ -248,10 +248,11 @@ class EnvironmentMixin:
         return curse
 
     def _apply_curse_effects(self, curse: dict | None) -> dict:
-        """Extract numeric effects from an active curse. Returns effect dict."""
+        """Extract numeric effects from an active curse. Returns a copy of the
+        effect dict so callers cannot mutate the parsed-curse state."""
         if not curse:
             return {}
-        return curse.get("effect", {})
+        return dict(curse.get("effect", {}))
 
     def _decrement_curse(self, discord_id: int, guild_id, tunnel: dict) -> None:
         """Decrement active curse duration by 1 dig. Clear if expired."""
