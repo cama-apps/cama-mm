@@ -51,8 +51,8 @@ class TestEventVariance:
     def test_jc_jitter_covers_expected_range_and_mean(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """200 resolutions of underground_stream safe (jc=4) should land
-        within [2, 6] and the empirical mean should be near 4."""
+        """200 resolutions of underground_stream safe (jc=3) should land
+        within [2, 4] and the empirical mean should be near 3."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository)
 
@@ -63,10 +63,10 @@ class TestEventVariance:
             assert r["success"]
             rolls.append(r.get("jc_delta", 0))
 
-        assert min(rolls) >= 2  # int(round(4 * 0.5)) = 2
-        assert max(rolls) <= 6  # int(round(4 * 1.5)) = 6
+        assert min(rolls) >= 2  # int(round(3 * 0.5)) = 2
+        assert max(rolls) <= 4  # int(round(3 * 1.5)) = 4
         mean = sum(rolls) / len(rolls)
-        assert 3.5 <= mean <= 4.5, f"mean {mean} not within ±15% of base 4"
+        assert 2.5 <= mean <= 3.5, f"mean {mean} not within ±15% of base 3"
         assert len({*rolls}) >= 3, "no jitter visible across 200 rolls"
 
     def test_zero_jc_outcome_stays_zero(self):

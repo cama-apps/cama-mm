@@ -325,14 +325,14 @@ class TestAscensionSystem:
         effects = dig_service._get_ascension_effects(1)
         assert "advance_penalty" not in effects
         assert "jc_multiplier" in effects
-        assert effects["jc_multiplier"] == 0.25
+        assert effects["jc_multiplier"] == 0.18
 
     def test_ascension_effects_cumulative(self, dig_service):
         """Multiple levels stack their effects."""
         effects = dig_service._get_ascension_effects(3)
-        # Level 1 jc_multiplier=0.25 (no advance_penalty)
+        # Level 1 jc_multiplier=0.18 (no advance_penalty)
         assert "advance_penalty" not in effects
-        assert effects["jc_multiplier"] == 0.25
+        assert effects["jc_multiplier"] == 0.18
         # Level 2 cave_in_bonus=0.03
         assert effects["cave_in_bonus"] == 0.03
         # Level 2 event_chance_multiplier=0.20

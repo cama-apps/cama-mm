@@ -1599,10 +1599,10 @@ class TestLuminosity:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=50, luminosity=10)
 
-        # underground_stream risky has success_chance=0.50
-        # With dark penalty: 0.50 - 0.10 = 0.40
-        # Roll of 0.45 should fail (0.45 >= 0.40)
-        monkeypatch.setattr(random, "random", lambda: 0.45)
+        # underground_stream risky has success_chance=0.62
+        # With dark penalty: 0.62 - 0.10 = 0.52
+        # Roll of 0.58 should fail (0.58 >= 0.52)
+        monkeypatch.setattr(random, "random", lambda: 0.58)
         result = dig_service.resolve_event(10001, guild_id, "underground_stream", "risky")
         assert result["success"]
         # The risky option failed (current was dragged back)
