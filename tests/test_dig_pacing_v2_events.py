@@ -104,6 +104,8 @@ class TestEventTraitMix:
                 risky_failure.jc < 0
                 or risky_failure.advance < 0
                 or risky_failure.cave_in
+                or risky_failure.streak_loss > 0
+                or risky_failure.curse is not None
             )
         is_deflationary = (
             risky.success.jc < 0 or (risky_failure and risky_failure.jc < 0)
@@ -113,16 +115,15 @@ class TestEventTraitMix:
         )
         return is_risky, is_deflationary, is_cross_player
 
-    def test_each_new_event_has_at_least_two_traits(self):
+    def test_each_new_event_carries_a_threat(self):
+        """Post-retune every risky branch carries a real threat — a cave-in,
+        streak loss, curse, or JC loss — so the risky pick is never a free
+        no-downside choice. Guards the pacing-v2 events against that."""
         for e in RANDOM_EVENTS:
             if e.id not in NEW_EVENT_IDS:
                 continue
-            risky, defl, xpl = self._classify(e)
-            count = sum(1 for t in (risky, defl, xpl) if t)
-            assert count >= 2, (
-                f"{e.id} has {count} traits "
-                f"(risky={risky}, defl={defl}, xpl={xpl})"
-            )
+            risky, _defl, _xpl = self._classify(e)
+            assert risky, f"{e.id}: risky branch carries no threat"
 
 
 class TestWealthWeightedTargeting:

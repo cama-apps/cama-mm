@@ -1002,7 +1002,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Haggle for the premium cap",
+            "Bargain hard for a finer cap",
             success=EventOutcome("The Sporewalker beams. The premium cap glows brighter.", 2, 62, False),
             failure=EventOutcome("There is no premium cap. The Sporewalker is confused. And hurt.", 0, -34, False),
             success_chance=0.62,
@@ -1145,7 +1145,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Buy the Cartographer's map",
+            "Pay whatever the Cartographer asks",
             success=EventOutcome("The map shows paths that shouldn't exist. They do anyway.", 2, 112, False),
             failure=EventOutcome("The map is blank. 'That IS The Hollow,' the Cartographer explains.", 0, -60, False),
             success_chance=0.56,
@@ -1169,7 +1169,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Haggle with the merchant",
+            "Gamble your coin on the merchant's price",
             success=EventOutcome("'Fine. Half price. Just take it.' The merchant looks relieved.", 2, 156, False),
             failure=EventOutcome("The price doubles. 'That's what you get for haggling with the void.'", 0, -84, False),
             success_chance=0.50,
@@ -1405,8 +1405,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -1510,8 +1510,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -1684,8 +1684,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -1711,8 +1711,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -1837,8 +1837,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -1885,8 +1885,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -2095,8 +2095,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -2222,8 +2222,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take nothing",
-            success=EventOutcome("You decline.", 0, 0, False),
+            "Leave, but pocket a loose coin on the way out",
+            success=EventOutcome("You pass on the offering and scoop up a stray coin instead.", 0, 1, False),
             failure=None, success_chance=1.0,
         ),
         complexity="boon",
@@ -2316,7 +2316,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Play the trickster's toll",
-            success=EventOutcome("The skeleton shrugs and waves you through. You keep what you have.", 0, 70, False),
+            success=EventOutcome("The skeleton shrugs and waves you through. You keep what you have.", 0, 112, False),
             failure=EventOutcome("Bad game, bad luck. The toll collects itself.", 0, -38, False),
             success_chance=0.56,
         ),
@@ -2424,7 +2424,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=200,
         safe_option=EventChoice(
             "Turn back to refuel",
-            success=EventOutcome("You retreat to the last checkpoint. No coin, but you're alive.", 0, 10, False),
+            success=EventOutcome("You retreat to the last checkpoint. No coin, but you're alive.", 0, 11, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
@@ -2573,7 +2573,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Catch it",
             success=EventOutcome("Elixir of Undermining. Brann beams like it was the plan all along.", 0, 26, False),
-            failure=EventOutcome("You caught the wrong end. Acid gets on the coin pouch.", 0, -14, False),
+            failure=EventOutcome("You caught the wrong end. Acid eats into the coin pouch and keeps eating.", 0, 0, False, curse=TempCurse("hex_branns_potion", "Undermining Acid", 4, {"jc_bonus": -8})),
             success_chance=0.50,
         ),
         rarity="legendary",
@@ -2581,7 +2581,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         desperate_option=EventChoice(
             "Redirect the throw toward the wealthiest digger in the guild",
             success=EventOutcome("Brann approves. Someone wealthy, somewhere, is suddenly less wealthy.", 0, 42, False),
-            failure=EventOutcome("The vial boomerangs. The potion is inside you now.", -5, -21, False),
+            failure=EventOutcome("The vial boomerangs. The potion is inside you now, and it burns.", -5, 0, False, curse=TempCurse("hex_branns_potion", "Undermining Acid", 4, {"jc_bonus": -12})),
             success_chance=0.40,
         ),
         splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=12, trigger="success", mode="burn"),
@@ -2794,16 +2794,16 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Accept a soft tether",
-            success=EventOutcome("The tether holds. You move a little faster, pay a little less.", 1, 98, False),
-            failure=EventOutcome("The tether snaps. The wisp leaves with a grudge.", 0, -52, False),
+            success=EventOutcome("The tether holds. You move a little faster, pay a little less.", 1, 59, False),
+            failure=EventOutcome("The tether snaps. The wisp leaves with a grudge.", 0, -32, False),
             success_chance=0.50,
         ),
         rarity="legendary",
         social=True,
         desperate_option=EventChoice(
             "Full tether pact",
-            success=EventOutcome("The tether sings. Your partner feels the haul land in their pack too.", 2, 157, False),
-            failure=EventOutcome("The tether yanks you both the wrong way. You eat the loss.", -5, -79, False),
+            success=EventOutcome("The tether sings. Your partner feels the haul land in their pack too.", 2, 94, False),
+            failure=EventOutcome("The tether yanks you both the wrong way. You eat the loss.", -5, -48, False),
             success_chance=0.40,
         ),
         splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=10, trigger="success", mode="grant"),
@@ -2972,7 +2972,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Drill on the sergeant's terms",
             success=EventOutcome("You complete the drill. The ghost salutes and dissolves; your form has never been better.", 0, 19, False),
-            failure=None, success_chance=1.0,
+            failure=EventOutcome("The drill never ends. By the time the ghost is satisfied you've lost track of the days.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
         rarity="rare",
         buff_on_success=TempBuff("drilled", "Drilled", 4, {"advance_bonus": 4}),
@@ -3133,7 +3134,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Lend a shoulder for a fee",
             success=EventOutcome("The wheel pops free. The driver presses coin into your palm and is gone.", 0, 10, False),
-            failure=EventOutcome("The wagon tips the wrong way. You pay for what broke.", 0, -6, False),
+            failure=EventOutcome("The wagon lurches loose and slams the props. The passage caves in around you.", 0, 0, True),
             success_chance=0.62,
         ),
     ),
@@ -3730,7 +3731,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Sign the King's contract",
             success=EventOutcome("The bar warms in your grip. Nothing in this stretch can touch you.", 0, 98, False),
-            failure=EventOutcome("The bar takes your tribute and offers nothing back.", 0, -52, False),
+            failure=EventOutcome("The bar takes your tribute and offers nothing back.", 0, -70, False),
             success_chance=0.50,
         ),
         rarity="legendary",
