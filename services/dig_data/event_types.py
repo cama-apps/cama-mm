@@ -21,6 +21,8 @@ class EventOutcome:
     advance: int                    # blocks gained (+) or lost (-)
     jc: int                         # JC gained (+) or lost (-)
     cave_in: bool                   # does this trigger a cave-in?
+    streak_loss: int = 0             # daily-streak days lost (the "streak" threat)
+    curse: TempCurse | None = None   # lingering hex applied (the "curse" threat)
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,21 @@ class TempBuff:
     name: str
     duration_digs: int
     effect: dict = field(default_factory=dict)  # {"cave_in_reduction": 0.10} or {"advance_bonus": 2}
+
+
+@dataclass(frozen=True)
+class TempCurse:
+    """A lingering hex applied by a failed risky event choice.
+
+    Same shape as :class:`TempBuff`, but ``effect`` carries draining keys
+    (e.g. ``{"advance_bonus": -2}``, ``{"jc_bonus": -3}``, ``{"luminosity_drain": 8}``).
+    Stored per-tunnel in the ``temp_curses`` column, kept separate from
+    ``temp_buffs`` so a curse and a buff can be active at the same time.
+    """
+    id: str
+    name: str
+    duration_digs: int
+    effect: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -145,11 +162,30 @@ def pick_description(event: Any) -> str:
 
 
 # Events as dicts
+def _outcome_to_dict(o: EventOutcome | None) -> dict | None:
+    """Convert an EventOutcome to a dict for service-layer access."""
+    if o is None:
+        return None
+    return {
+        "description": o.description,
+        "advance": o.advance,
+        "jc": o.jc,
+        "cave_in": o.cave_in,
+        "streak_loss": o.streak_loss,
+        "curse": {
+            "id": o.curse.id,
+            "name": o.curse.name,
+            "duration_digs": o.curse.duration_digs,
+            "effect": dict(o.curse.effect),
+        } if o.curse else None,
+    }
+
+
 def _choice_to_dict(c: EventChoice) -> dict:
     """Convert an EventChoice to a dict for service-layer access."""
     return {
         "label": c.label,
-        "success": {"description": c.success.description, "advance": c.success.advance, "jc": c.success.jc, "cave_in": c.success.cave_in},
-        "failure": {"description": c.failure.description, "advance": c.failure.advance, "jc": c.failure.jc, "cave_in": c.failure.cave_in} if c.failure else None,
+        "success": _outcome_to_dict(c.success),
+        "failure": _outcome_to_dict(c.failure),
         "success_chance": c.success_chance,
     }

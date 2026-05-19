@@ -486,6 +486,15 @@ class DigService(
         buff_cavein_reduction = buff_effects.get("cave_in_reduction", 0.0)
         self._decrement_buff(discord_id, guild_id, tunnel)
 
+        # 7d. Get and apply active temp curse (event "curse" threat). Mirrors
+        # the buff read/decrement; effects drain rather than boost.
+        active_curse = self._get_active_curse(tunnel)
+        curse_effects = self._apply_curse_effects(active_curse)
+        curse_advance_bonus = curse_effects.get("advance_bonus", 0)
+        curse_jc_bonus = curse_effects.get("jc_bonus", 0)
+        curse_luminosity_drain = curse_effects.get("luminosity_drain", 0)
+        self._decrement_curse(discord_id, guild_id, tunnel)
+
         # 8. Prestige perks, relics, and ASCENSION
         perks = self._get_prestige_perks(tunnel)
         prestige_level = tunnel.get("prestige_level", 0) or 0
@@ -514,6 +523,14 @@ class DigService(
             luminosity = max(0, luminosity - bonus_drain)
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] += bonus_drain
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        # 8e. Apply temp-curse luminosity drain (guttering-light hex). Flat
+        # extra light lost — drains even when the layer has no base drain.
+        if curse_luminosity_drain > 0:
+            luminosity = max(0, luminosity - curse_luminosity_drain)
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] += curse_luminosity_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
@@ -804,6 +821,8 @@ class DigService(
 
         # Apply modifiers
         advance += pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
+        # Temp-curse advance modifier (negative = slowed dig)
+        advance += curse_advance_bonus
         # Weather advance modifier
         advance += int(weather_fx.get("advance_bonus", 0))
         # Ascension advance penalty
@@ -866,6 +885,10 @@ class DigService(
         ) + magma_heart_bonus + int(perk_loot_flat + 0.5)
         # Weather: flat JC bonus/penalty
         jc_earned += int(weather_fx.get("jc_bonus", 0))
+        # Temp-curse JC drain (negative jc_bonus = less JC this dig). The
+        # max(0, ...) clamp below still floors a cursed dig at 0 — a curse
+        # reduces earnings, it never makes a dig cost money.
+        jc_earned += curse_jc_bonus
         # Corruption: fixed JC override
         if corruption and corruption["effects"].get("fixed_jc") is not None:
             jc_earned = corruption["effects"]["fixed_jc"]
@@ -1318,6 +1341,14 @@ class DigService(
         buff_cavein_reduction = buff_effects.get("cave_in_reduction", 0.0)
         self._decrement_buff(discord_id, guild_id, tunnel)
 
+        # Temp curse (event "curse" threat) — read/decrement mirrors the buff.
+        active_curse = self._get_active_curse(tunnel)
+        curse_effects = self._apply_curse_effects(active_curse)
+        curse_advance_bonus = curse_effects.get("advance_bonus", 0)
+        curse_jc_bonus = curse_effects.get("jc_bonus", 0)
+        curse_luminosity_drain = curse_effects.get("luminosity_drain", 0)
+        self._decrement_curse(discord_id, guild_id, tunnel)
+
         # Prestige, ascension, corruption, mutations, pickaxe
         perks = self._get_prestige_perks(tunnel)
         prestige_level = tunnel.get("prestige_level", 0) or 0
@@ -1340,6 +1371,13 @@ class DigService(
             luminosity = max(0, luminosity - bonus_drain)
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] += bonus_drain
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        # Temp-curse luminosity drain (guttering-light hex) — flat extra light.
+        if curse_luminosity_drain > 0:
+            luminosity = max(0, luminosity - curse_luminosity_drain)
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] += curse_luminosity_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
@@ -1601,6 +1639,8 @@ class DigService(
             "weather_info": weather_info,
             "buff_advance_bonus": buff_advance_bonus,
             "buff_cavein_reduction": buff_cavein_reduction,
+            "curse_advance_bonus": curse_advance_bonus,
+            "curse_jc_bonus": curse_jc_bonus,
             "perks": perks,
             "prestige_level": prestige_level,
             "ascension": ascension,

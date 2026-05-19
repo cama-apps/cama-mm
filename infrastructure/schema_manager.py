@@ -402,6 +402,9 @@ class SchemaManager:
             # Drop the obsolete pari-mutuel prediction table. The order-book
             # rework replaced it and the last readers have been removed.
             ("drop_prediction_bets_table", self._migration_drop_prediction_bets_table),
+            # Event curses: per-tunnel lingering hex from a failed risky event
+            # choice (the dig "curse" threat). Mirrors the temp_buffs column.
+            ("add_temp_curses_to_tunnels", self._migration_add_temp_curses_to_tunnels),
         ]
 
     # --- Migrations ---
@@ -2686,6 +2689,15 @@ class SchemaManager:
     def _migration_add_stinger_curse_to_tunnels(self, cursor) -> None:
         """Add ``stinger_curse`` JSON column to tunnels for persistent loss debuffs."""
         self._add_column_if_not_exists(cursor, "tunnels", "stinger_curse", "TEXT")
+
+    def _migration_add_temp_curses_to_tunnels(self, cursor) -> None:
+        """Add ``temp_curses`` JSON column to tunnels for event-driven hexes.
+
+        Holds a single active curse (the dig "curse" threat) as JSON, shaped
+        like a temp buff but with draining effects. Separate from ``temp_buffs``
+        so a curse and a buff can be active at the same time.
+        """
+        self._add_column_if_not_exists(cursor, "tunnels", "temp_curses", "TEXT")
 
     def _migration_clear_active_boss_ids_for_pool_reroll(self, cursor) -> None:
         """Clear locked boss_id on still-active boss_progress entries.

@@ -131,6 +131,9 @@ class EventEncounterView(discord.ui.View):
         succeeded = getattr(result, "succeeded", True)
         cave_in = getattr(result, "cave_in", False)
         cruel = getattr(result, "cruel_echoes", False)
+        streak_loss = getattr(result, "streak_loss", 0) or 0
+        curse_applied = getattr(result, "curse_applied", None)
+        balance_after = getattr(result, "balance_after", None)
 
         color = 0xFF4444 if (not succeeded or cruel or cave_in) else 0x00FF00
         embed = discord.Embed(
@@ -144,8 +147,36 @@ class EventEncounterView(discord.ui.View):
             parts.append(f"{'+'if jc > 0 else ''}{jc} {JOPACOIN_EMOTE}")
         if cave_in:
             parts.append("Cave-in triggered!")
+        if streak_loss > 0:
+            day_word = "day" if streak_loss == 1 else "days"
+            parts.append(f"-{streak_loss} streak {day_word}")
         if parts:
             embed.add_field(name="Outcome", value=" | ".join(parts), inline=False)
+
+        # Fail loud — the player must see what a failed risky pick cost.
+        # Curse: surface the hex name + how many digs it lingers.
+        if curse_applied:
+            # ``result`` is _wrap'd, so curse_applied is a _DictObj — unwrap it.
+            curse_d = getattr(curse_applied, "_d", curse_applied)
+            if not isinstance(curse_d, dict):
+                curse_d = {}
+            digs = curse_d.get("duration_digs", 0)
+            dig_word = "dig" if digs == 1 else "digs"
+            embed.add_field(
+                name=f"Curse: {curse_d.get('name', 'a hex')}",
+                value=f"A hex clings to you for the next {digs} {dig_word}.",
+                inline=False,
+            )
+        # JC threat: a negative outcome that left the player below zero.
+        if balance_after is not None and balance_after < 0:
+            embed.add_field(
+                name="In Debt",
+                value=(
+                    f"That cost dropped you to {balance_after} {JOPACOIN_EMOTE}. "
+                    "You're in the red."
+                ),
+                inline=False,
+            )
 
         boss_encounter = getattr(result, "boss_encounter", False)
         boss_info = getattr(result, "boss_info", None)

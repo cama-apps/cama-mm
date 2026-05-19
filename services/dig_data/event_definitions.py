@@ -13,6 +13,7 @@ from services.dig_data.event_types import (
     RandomEvent,
     SplashConfig,
     TempBuff,
+    TempCurse,
 )
 
 # ---------------------------------------------------------------------------
@@ -31,14 +32,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Wade through carefully",
-            success=EventOutcome("You cross safely and find coins on the far bank.", 0, 4, False),
+            success=EventOutcome("You cross safely and find coins on the far bank.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Dive in and search the riverbed",
             success=EventOutcome("You surface clutching a fistful of treasure!", 0, 10, False),
-            failure=EventOutcome("The current drags you back. You lose ground.", -4, 0, False),
-            success_chance=0.50,
+            failure=EventOutcome("The current drags you back. You lose ground.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -52,14 +53,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Retreat and ventilate",
-            success=EventOutcome("You wait it out. Fresh air returns.", 0, 0, False),
+            success=EventOutcome("You wait it out. Fresh air returns.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Dig through the gas",
-            success=EventOutcome("The gas was harmless! And behind it—gems!", 2, 6, False),
-            failure=EventOutcome("The gas ignites! BOOM!", -8, -12, True),
-            success_chance=0.35,
+            success=EventOutcome("The gas was harmless! And behind it—gems!", 2, 10, False),
+            failure=EventOutcome("The gas ignites! BOOM!", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -73,14 +74,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=15, max_depth=75,
         safe_option=EventChoice(
             "Leave the explosives alone",
-            success=EventOutcome("Smart choice. You hear a muffled 'aww' from behind the wall.", 0, 2, False),
+            success=EventOutcome("Smart choice. You hear a muffled 'aww' from behind the wall.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Repurpose the explosives",
-            success=EventOutcome("KABOOM! A new passage opens up—and some coins fly out!", 5, 8, False),
-            failure=EventOutcome("KABOOM! ...in the wrong direction. Techies sends his regards.", -9, -15, True),
-            success_chance=0.30,
+            success=EventOutcome("KABOOM! A new passage opens up—and some coins fly out!", 2, 23, False),
+            failure=EventOutcome("KABOOM! ...in the wrong direction. Techies sends his regards.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -94,14 +95,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=50,
         safe_option=EventChoice(
             "Give them directions",
-            success=EventOutcome("They thank you and leave a tip. 'We were never here.'", 0, 6, False),
+            success=EventOutcome("They thank you and leave a tip. 'We were never here.'", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Convince them to dig for you",
-            success=EventOutcome("Four Meepos carve through rock at terrifying speed!", 4, 4, False),
-            failure=EventOutcome("They all net you. It takes an hour to untangle.", -3, 0, False),
-            success_chance=0.55,
+            "Trust the clones to lead you deeper",
+            success=EventOutcome("Four Meepos carve through rock at terrifying speed!", 2, 10, False),
+            failure=EventOutcome("They lead you in circles. You lose the way.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -115,14 +116,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=25, max_depth=None,
         safe_option=EventChoice(
             "Walk past it",
-            success=EventOutcome("Wisdom is its own reward. (You find a coin on the ground.)", 0, 2, False),
+            success=EventOutcome("Wisdom is its own reward. (You find a coin on the ground.)", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Open the chest",
-            success=EventOutcome("Jackpot! The 'curse' was just mood lighting!", 0, 16, False),
-            failure=EventOutcome("The chest bites you. Yes, bites.", -6, -15, False),
-            success_chance=0.35,
+            "Open the humming chest",
+            success=EventOutcome("Jackpot! The 'curse' was just mood lighting!", 0, 12, False),
+            failure=EventOutcome("The chest bites you. Yes, bites.", 0, 0, False, curse=TempCurse("hex_cursed_chest", "Chestbite Hex", 3, {"jc_bonus": -3})),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -136,14 +137,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Point them toward the exit",
-            success=EventOutcome("They give you a grateful nod and a couple coins.", 0, 4, False),
+            success=EventOutcome("They give you a grateful nod and a couple coins.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Ask them to help you dig deeper",
-            success=EventOutcome("Together you make great progress!", 3, 2, False),
-            failure=EventOutcome("They panic and cause a minor collapse.", -3, 0, True),
-            success_chance=0.60,
+            success=EventOutcome("Together you make great progress!", 2, 10, False),
+            failure=EventOutcome("They panic and cause a minor collapse.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -157,14 +158,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=90,
         safe_option=EventChoice(
             "Tiptoe around it",
-            success=EventOutcome("You sneak past. A crystal chip falls—finders keepers.", 0, 4, False),
+            success=EventOutcome("You sneak past. A crystal chip falls—finders keepers.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Mine the golem for crystals",
-            success=EventOutcome("You harvest rare crystals before it wakes!", 0, 12, False),
-            failure=EventOutcome("It wakes up. It's not happy.", -8, -12, True),
-            success_chance=0.25,
+            success=EventOutcome("You harvest rare crystals before it wakes!", 0, 23, False),
+            failure=EventOutcome("It wakes up. It's not happy.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -178,14 +179,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=5, max_depth=60,
         safe_option=EventChoice(
             "Admire and move on",
-            success=EventOutcome("The beauty inspires you. Somehow you dig better.", 1, 0, False),
+            success=EventOutcome("The beauty inspires you. Somehow you dig better.", 1, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Eat the glowing mushroom",
-            success=EventOutcome("Incredible! You can see through walls! ...temporarily.", 3, 4, False),
-            failure=EventOutcome("Your stomach disagrees violently. Time lost.", -2, -3, False),
-            success_chance=0.50,
+            success=EventOutcome("Incredible! You can see through walls! ...temporarily.", 2, 23, False),
+            failure=EventOutcome("Your stomach disagrees violently. Time lost.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -199,14 +200,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=60, max_depth=None,
         safe_option=EventChoice(
             "Wait for it to subside",
-            success=EventOutcome("Patience pays off. You continue safely.", 1, 0, False),
+            success=EventOutcome("Patience pays off. You continue safely.", 1, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Sprint through between eruptions",
-            success=EventOutcome("You dash through and find a treasure cache behind!", 3, 10, False),
-            failure=EventOutcome("Terrible timing. You get steamed like a dumpling.", -6, -15, True),
-            success_chance=0.30,
+            success=EventOutcome("You dash through and find a treasure cache behind!", 2, 23, False),
+            failure=EventOutcome("Terrible timing. You get steamed like a dumpling.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -220,14 +221,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=20, max_depth=None,
         safe_option=EventChoice(
             "Take the stairs",
-            success=EventOutcome("Slow and steady. You find a coin on a step.", 1, 2, False),
+            success=EventOutcome("Slow and steady. You find a coin on a step.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Ride the elevator",
-            success=EventOutcome("WHOOSH! Express to the depths!", 6, 0, False),
-            failure=EventOutcome("The rope snaps. You tumble.", -4, -9, True),
-            success_chance=0.40,
+            success=EventOutcome("WHOOSH! Express to the depths!", 2, 10, False),
+            failure=EventOutcome("The rope snaps. You tumble.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -241,14 +242,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=80, max_depth=None,
         safe_option=EventChoice(
             "Ignore the voices",
-            success=EventOutcome("The whispers fade. Probably for the best.", 0, 2, False),
+            success=EventOutcome("The whispers fade. Probably for the best.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Accept the void's bargain",
-            success=EventOutcome("The void is generous today. Dark riches are yours!", 2, 16, False),
-            failure=EventOutcome("The void takes more than it gives.", -9, -21, True),
-            success_chance=0.25,
+            success=EventOutcome("The void is generous today. Dark riches are yours!", 2, 23, False),
+            failure=EventOutcome("The void takes more than it gives.", 0, 0, False, curse=TempCurse("hex_void_whispers", "Void Tithe", 3, {"advance_bonus": -2})),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -262,21 +263,16 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=40,
         safe_option=EventChoice(
             "Pet the mole",
-            success=EventOutcome("The mole is delighted! It shows you a shortcut.", 2, 0, False),
+            success=EventOutcome("The mole is delighted! It shows you a shortcut.", 2, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Follow the mole into its burrow",
-            success=EventOutcome("The mole leads you to its treasure stash!", 3, 8, False),
-            failure=EventOutcome("You get stuck in the burrow. Embarrassing.", -3, 0, False),
-            success_chance=0.55,
+            "Follow the mole into the cramped burrow",
+            success=EventOutcome("The mole leads you to its treasure stash!", 2, 10, False),
+            failure=EventOutcome("You get stuck in the burrow. Embarrassing.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Dirt Layer (0-25)
-    # ===================================================================
-
     RandomEvent(
         id="worm_council",
         name="Worm Council",
@@ -288,16 +284,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Observe respectfully",
-            success=EventOutcome("The motion passes. You are declared an honorary annelid.", 0, 2, False),
+            success=EventOutcome("The motion passes. You are declared an honorary annelid.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Cast a vote",
-            success=EventOutcome("Your vote tips the balance. The worms are grateful.", 1, 4, False),
-            failure=EventOutcome("You voted wrong. The worms are displeased.", -2, 0, False),
-            success_chance=0.65,
+            "Bet a vote on the worms",
+            success=EventOutcome("Your vote tips the balance. The worms are grateful.", 1, 10, False),
+            failure=EventOutcome("You voted wrong. The worms are displeased.", 0, -6, False),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Dirt",
+        complexity="simple",
+        layer="Dirt",
     ),
     RandomEvent(
         id="buried_lunch_box",
@@ -310,14 +307,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Sell the vintage box",
-            success=EventOutcome("A collector would pay good money for this.", 0, 2, False),
+            success=EventOutcome("A collector would pay good money for this.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Eat the ancient sandwich",
-            success=EventOutcome("Aged like fine wine. You feel invigorated.", 1, 6, False),
-            failure=EventOutcome("Food poisoning. Your ancestors are disappointed.", 0, -3, False),
-            success_chance=0.60,
+            success=EventOutcome("Aged like fine wine. You feel invigorated.", 1, 10, False),
+            failure=EventOutcome("Food poisoning. Your ancestors are disappointed.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Dirt",
     ),
@@ -332,16 +329,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Watch and learn",
-            success=EventOutcome("The dog teaches you a new technique. Good boy.", 2, 0, False),
+            success=EventOutcome("The dog teaches you a new technique. Good boy.", 2, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Race the dog",
-            success=EventOutcome("You win! The dog doesn't care. It's just happy to dig.", 3, 2, False),
-            failure=EventOutcome("The dog laps you twice. Humbling.", 0, 0, False),
-            success_chance=0.40,
+            "Race the dog into the dark",
+            success=EventOutcome("You win! The dog doesn't care. It's just happy to dig.", 2, 10, False),
+            failure=EventOutcome("The dog vanishes into the dark and your bearings go with it.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Dirt",
+        complexity="simple",
+        layer="Dirt",
     ),
     RandomEvent(
         id="root_maze",
@@ -354,14 +352,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=5, max_depth=25,
         safe_option=EventChoice(
             "Hack a narrow path",
-            success=EventOutcome("Slow but steady. You squeeze through.", 1, 0, False),
+            success=EventOutcome("Slow but steady. You squeeze through.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Reach for the glint",
-            success=EventOutcome("A handful of buried coins! Worth the scratches.", 3, 4, False),
-            failure=EventOutcome("Tangled. It takes an hour to free yourself.", -3, 0, False),
-            success_chance=0.50,
+            success=EventOutcome("A handful of buried coins! Worth the scratches.", 2, 10, False),
+            failure=EventOutcome("Tangled. It takes an hour to free yourself.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Dirt",
     ),
@@ -376,22 +374,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=30,
         safe_option=EventChoice(
             "Go find it",
-            success=EventOutcome("Found it! And some coins along the way.", -2, 4, False),
+            success=EventOutcome("Found it! And some coins along the way.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Dig with your hands",
-            success=EventOutcome("Surprisingly effective. You find the head AND a geode.", 1, 6, False),
-            failure=EventOutcome("Your hands disagree with this approach.", -3, 0, False),
-            success_chance=0.45,
+            "Claw through the loose rock by hand",
+            success=EventOutcome("Surprisingly effective. You find the head AND a geode.", 1, 10, False),
+            failure=EventOutcome("Your hands disagree with this approach.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Dirt",
+        complexity="simple",
+        layer="Dirt",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Stone Layer (26-50)
-    # ===================================================================
-
     RandomEvent(
         id="toll_keeper",
         name="The Toll Keeper",
@@ -403,16 +397,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Pay the toll (3 JC)",
-            success=EventOutcome("The ghost pockets the coins somehow and steps aside.", 2, -9, False),
+            success=EventOutcome("The ghost pockets the coins somehow and steps aside.", 2, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Answer the riddle",
-            success=EventOutcome("'Correct,' it says, sounding disappointed. It drops its own toll.", 3, 10, False),
-            failure=EventOutcome("Wrong. 'Everyone says fire,' it sighs. It takes your coins anyway.", 0, -6, False),
-            success_chance=0.50,
+            "Wager coin on the ghost's riddle",
+            success=EventOutcome("'Correct,' it says, sounding disappointed. It drops its own toll.", 2, 23, False),
+            failure=EventOutcome("Wrong. 'Everyone says fire,' it sighs. It takes your coins anyway.", 0, -13, False),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Stone",
+        complexity="complex",
+        layer="Stone",
     ),
     RandomEvent(
         id="gravity_pocket",
@@ -425,14 +420,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Wait for gravity to return",
-            success=EventOutcome("It does. Eventually. You feel vaguely insulted.", 0, 0, False),
+            success=EventOutcome("It does. Eventually. You feel vaguely insulted.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Swim downward through the void",
-            success=EventOutcome("You swim through solid rock. Best not to think about it.", 4, 0, False),
-            failure=EventOutcome("You float up instead. Ceiling is farther than you thought.", -4, 0, False),
-            success_chance=0.55,
+            "Swim down through the unstable void",
+            success=EventOutcome("You swim through solid rock. Best not to think about it.", 2, 23, False),
+            failure=EventOutcome("You float up instead. Ceiling is farther than you thought.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Stone",
     ),
@@ -447,14 +442,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Leave them to their eternal dispute",
-            success=EventOutcome("Some arguments aren't worth getting between.", 0, 2, False),
+            success=EventOutcome("Some arguments aren't worth getting between.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Extract both fossils",
-            success=EventOutcome("Museum quality! Separate display cases, obviously.", 0, 8, False),
-            failure=EventOutcome("They crumble to dust the moment you touch them. Of course.", -4, 0, False),
-            success_chance=0.45,
+            "Pry both fossils from the crumbling wall",
+            success=EventOutcome("Museum quality! Separate display cases, obviously.", 0, 23, False),
+            failure=EventOutcome("They crumble to dust the moment you touch them. Of course.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Stone",
     ),
@@ -469,16 +464,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Accept the baguette",
-            success=EventOutcome("The baguette is surprisingly good. She vanishes.", 0, 4, False),
+            success=EventOutcome("The baguette is surprisingly good. She vanishes.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Decline politely",
-            success=EventOutcome("She shrugs and leaves a tip jar. It has coins in it.", 0, 6, False),
-            failure=EventOutcome("She doesn't take rejection well. Baguette to the face.", -2, 0, False),
-            success_chance=0.70,
+            "Refuse and risk her temper",
+            success=EventOutcome("She shrugs and leaves a tip jar. It has coins in it.", 0, 23, False),
+            failure=EventOutcome("She doesn't take rejection well. Baguette to the face.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Stone",
+        complexity="simple",
+        layer="Stone",
     ),
     RandomEvent(
         id="echo_chamber",
@@ -491,22 +487,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Listen",
-            success=EventOutcome("The echoes fade. You feel less alone. Somehow that's worse.", 0, 2, False),
+            success=EventOutcome("The echoes fade. You feel less alone. Somehow that's worse.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Shout into the chamber",
-            success=EventOutcome("Your echo comes back with directions. And coins.", 2, 4, False),
-            failure=EventOutcome("Your echo comes back louder. Much louder. Cave-in.", -4, 0, True),
-            success_chance=0.55,
+            success=EventOutcome("Your echo comes back with directions. And coins.", 2, 23, False),
+            failure=EventOutcome("Your echo comes back louder. Much louder. Cave-in.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Stone", social=True,
+        complexity="simple",
+        layer="Stone",
+        social=True,
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Crystal Layer (51-75)
-    # ===================================================================
-
     RandomEvent(
         id="mirror_tunnel",
         name="Mirror Tunnel",
@@ -518,16 +511,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Ignore it and move on",
-            success=EventOutcome("Smart. The reflection looks disappointed.", 0, 2, False),
+            success=EventOutcome("Smart. The reflection looks disappointed.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Wave back",
-            success=EventOutcome("The reflection smiles and points to a hidden cache.", 2, 8, False),
-            failure=EventOutcome("It grabs your hand and tries to pull you through. You wrench free.", -4, -3, False),
-            success_chance=0.50,
+            "Wave back at the reflection",
+            success=EventOutcome("The reflection smiles and points to a hidden cache.", 2, 23, False),
+            failure=EventOutcome("It grabs your hand and tries to pull you through. You wrench free.", 0, 0, False, curse=TempCurse("hex_mirror_tunnel", "Mirror-Pull", 3, {"advance_bonus": -2})),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Crystal",
+        complexity="complex",
+        layer="Crystal",
     ),
     RandomEvent(
         id="resonance_cascade",
@@ -540,14 +534,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Run",
-            success=EventOutcome("You make it out just as the cascade peaks. Glass everywhere.", 0, 0, False),
+            success=EventOutcome("You make it out just as the cascade peaks. Glass everywhere.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Stand your ground",
-            success=EventOutcome("The shatter opens a massive cavern. You're the first one here.", 5, 8, False),
-            failure=EventOutcome("The shatter opens nothing. Except your skin. Medical bill incoming.", -8, -6, True),
-            success_chance=0.35,
+            success=EventOutcome("The shatter opens a massive cavern. You're the first one here.", 2, 23, False),
+            failure=EventOutcome("The shatter opens nothing. Except your skin. Medical bill incoming.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Crystal",
     ),
@@ -562,16 +556,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Admire the garden",
-            success=EventOutcome("You find a donation jar. It's been a while since anyone else visited.", 0, 4, False),
+            success=EventOutcome("You find a donation jar. It's been a while since anyone else visited.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Harvest a crystal",
-            success=EventOutcome("The gardener isn't coming back. These are yours now.", 0, 10, False),
-            failure=EventOutcome("The crystals fight back. They're pricklier than they look.", -3, -3, False),
-            success_chance=0.45,
+            "Harvest from the bristling crystals",
+            success=EventOutcome("The gardener isn't coming back. These are yours now.", 0, 23, False),
+            failure=EventOutcome("The crystals fight back. They're pricklier than they look.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Crystal",
+        complexity="simple",
+        layer="Crystal",
     ),
     RandomEvent(
         id="gem_rock",
@@ -584,14 +579,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Chip carefully at the edges",
-            success=EventOutcome("A modest haul. Patience rewarded.", 0, 4, False),
+            success=EventOutcome("A modest haul. Patience rewarded.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Swing hard",
-            success=EventOutcome("Uncut diamond! ...wait, wrong game. Still valuable though.", 0, 12, False),
-            failure=EventOutcome("The rock was a mimic. Why is everything down here a mimic.", -3, -6, False),
-            success_chance=0.40,
+            "Swing hard at the warm rock",
+            success=EventOutcome("Uncut diamond! ...wait, wrong game. Still valuable though.", 0, 23, False),
+            failure=EventOutcome("The rock was a mimic. Why is everything down here a mimic.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Crystal",
     ),
@@ -606,22 +601,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Close your eyes and feel the walls",
-            success=EventOutcome("Slow but effective. You emerge on the other side.", 1, 0, False),
+            success=EventOutcome("Slow but effective. You emerge on the other side.", 1, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Follow the brightest beam",
-            success=EventOutcome("The light leads you true. A shortcut reveals itself.", 3, 4, False),
-            failure=EventOutcome("You walk in circles for an hour. The prisms mock you.", -4, 0, False),
-            success_chance=0.50,
+            "Chase the brightest beam through the maze",
+            success=EventOutcome("The light leads you true. A shortcut reveals itself.", 2, 23, False),
+            failure=EventOutcome("You walk in circles for hours. The prisms scatter your sense of direction.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
         layer="Crystal",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Magma Layer (76-100)
-    # ===================================================================
-
     RandomEvent(
         id="lava_surfer",
         name="Lava Surfer",
@@ -633,14 +623,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=105,
         safe_option=EventChoice(
             "Go around",
-            success=EventOutcome("The long way. Safe, boring, and slightly damp.", 1, 0, False),
+            success=EventOutcome("The long way. Safe, boring, and slightly damp.", 1, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Surf the lava",
-            success=EventOutcome("You ride the rapids like a champion. The lava respects you.", 6, 4, False),
-            failure=EventOutcome("You fall in. It's exactly as hot as you'd expect.", -6, -9, True),
-            success_chance=0.40,
+            success=EventOutcome("You ride the rapids like a champion. The lava respects you.", 2, 39, False),
+            failure=EventOutcome("You fall in. It's exactly as hot as you'd expect.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Magma",
     ),
@@ -655,16 +645,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=105,
         safe_option=EventChoice(
             "Trade (5 JC)",
-            success=EventOutcome("It hands you something warm. Your next digs feel... enhanced.", 0, -15, False),
+            success=EventOutcome("It hands you something warm. Your next digs feel... enhanced.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Fight it",
-            success=EventOutcome("You shatter the elemental. Its core is worth a fortune.", 0, 16, False),
-            failure=EventOutcome("Fire hurts. Who knew.", -6, -6, True),
-            success_chance=0.40,
+            "Fight the elemental for its core",
+            success=EventOutcome("You shatter the elemental. Its core is worth a fortune.", 0, 39, False),
+            failure=EventOutcome("Fire hurts. Who knew.", 0, -21, False),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Magma",
+        complexity="complex",
+        layer="Magma",
         buff_on_success=TempBuff("forged", "Forge-Tempered", 3, {"advance_bonus": 4}),
     ),
     RandomEvent(
@@ -678,14 +669,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Wait for it to subside",
-            success=EventOutcome("Patience. The vent cools after an hour.", 0, 2, False),
+            success=EventOutcome("Patience. The vent cools after an hour.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Sprint through between eruptions",
-            success=EventOutcome("Three heartbeats. You made it in two.", 8, 6, False),
-            failure=EventOutcome("Terrible timing. Cooked.", -9, -9, True),
-            success_chance=0.30,
+            success=EventOutcome("Three heartbeats. You made it in two.", 2, 23, False),
+            failure=EventOutcome("Terrible timing. Cooked.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Magma",
     ),
@@ -700,16 +691,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=105,
         safe_option=EventChoice(
             "Keep walking",
-            success=EventOutcome("You knew it wasn't real but you're still disappointed.", 0, 0, False),
+            success=EventOutcome("You knew it wasn't real but you're still disappointed.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Walk toward it anyway",
-            success=EventOutcome("Wait. The bartender WAS real? Free drinks.", 0, 10, False),
-            failure=EventOutcome("It was never real. You wasted an hour.", -3, 0, False),
-            success_chance=0.25,
+            "Wander toward the mirage",
+            success=EventOutcome("Wait. The bartender WAS real? Free drinks.", 0, 39, False),
+            failure=EventOutcome("It was never real. You wander, and the hours bleed away.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Magma",
+        complexity="simple",
+        layer="Magma",
     ),
     RandomEvent(
         id="shooting_star",
@@ -722,22 +714,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Mine the star",
-            success=EventOutcome("Star fragments. Warm to the touch and surprisingly dense.", 0, 8, False),
+            success=EventOutcome("Star fragments. Warm to the touch and surprisingly dense.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Crack it open",
-            success=EventOutcome("The core is pure stardust. Priceless.", 0, 16, False),
-            failure=EventOutcome("It explodes. Stars do that sometimes.", -4, -3, True),
-            success_chance=0.35,
+            success=EventOutcome("The core is pure stardust. Priceless.", 0, 32, False),
+            failure=EventOutcome("It explodes. Stars do that sometimes.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Magma", rarity="uncommon",
+        complexity="simple",
+        layer="Magma",
+        rarity="uncommon",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Dota Hero Encounters
-    # ===================================================================
-
     RandomEvent(
         id="pudge_fishing",
         name="The Chasm Butcher",
@@ -749,14 +738,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=None,
         safe_option=EventChoice(
             "Climb around the chasm",
-            success=EventOutcome("The long way. You find coins in the crevices.", 0, 4, False),
+            success=EventOutcome("The long way. You find coins in the crevices.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Grab the hook",
-            success=EventOutcome("WHEEE! You arrive covered in something but 6 blocks deeper.", 6, 0, False),
-            failure=EventOutcome("The hook misses. You fall. The butcher waves sadly from above.", -6, -6, True),
-            success_chance=0.50,
+            success=EventOutcome("WHEEE! You arrive covered in something but 6 blocks deeper.", 2, 14, False),
+            failure=EventOutcome("The hook misses. You fall. The butcher waves sadly from above.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
     ),
@@ -775,12 +764,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Repair a gadget",
-            success=EventOutcome("It works! A drill that practically digs itself.", 0, 0, False),
-            failure=EventOutcome("It doesn't work. It also sparks. And now your eyebrows are gone.", -3, -3, False),
-            success_chance=0.45,
+            "Spark the half-built gadget to life",
+            success=EventOutcome("It works! A drill that practically digs itself.", 0, 32, False),
+            failure=EventOutcome("It doesn't work. It also sparks. And now your eyebrows are gone.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Crystal", rarity="uncommon",
+        complexity="complex",
+        layer="Crystal",
+        rarity="uncommon",
         buff_on_success=TempBuff("tinker_drill", "Rearm Protocol", 3, {"advance_bonus": 4}),
     ),
     RandomEvent(
@@ -794,16 +785,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Retreat slowly",
-            success=EventOutcome("It lets you go. This time.", 0, 0, False),
+            success=EventOutcome("It lets you go. This time.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Investigate the cracks",
-            success=EventOutcome("An ancient intelligence offers knowledge. Your depth for its wisdom.", 0, 16, False),
-            failure=EventOutcome("It didn't want to talk. It wanted lunch.", -8, -9, True),
-            success_chance=0.35,
+            success=EventOutcome("An ancient intelligence offers knowledge. Your depth for its wisdom.", 0, 53, False),
+            failure=EventOutcome("It didn't want to talk. It wanted lunch.", 0, 0, True),
+            success_chance=0.62,
         ),
-        complexity="complex", rarity="uncommon",
+        complexity="complex",
+        rarity="uncommon",
         buff_on_success=TempBuff("nyx_insight", "Vendetta's Whisper", 3, {"cave_in_reduction": 0.2}),
     ),
     RandomEvent(
@@ -817,16 +809,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=201, max_depth=None,
         safe_option=EventChoice(
             "Browse the shelves",
-            success=EventOutcome("You find a primer on geological theory. +30 luminosity restored.", 0, 4, False),
+            success=EventOutcome("You find a primer on geological theory. +30 luminosity restored.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Ask about the orbs",
-            success=EventOutcome("He almost smiles. 'Choose: cold, energy, or fire.' Cold restores your light. The others... well.", 3, 16, False),
-            failure=EventOutcome("He waves his hand. You're outside. You don't remember leaving.", -6, 0, False),
-            success_chance=0.40,
+            "Ask the old man about the orbs",
+            success=EventOutcome("He almost smiles. 'Choose: cold, energy, or fire.' Cold restores your light. The others... well.", 2, 112, False),
+            failure=EventOutcome("He waves his hand. You are outside, hours gone, the way back unclear.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
-        complexity="complex", layer="Frozen Core", rarity="rare",
+        complexity="complex",
+        layer="Frozen Core",
+        rarity="rare",
     ),
     RandomEvent(
         id="the_dark_rift",
@@ -839,22 +833,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Bow and withdraw",
-            success=EventOutcome("It nods. Respect costs nothing. You find coins by the exit.", 0, 6, False),
+            success=EventOutcome("It nods. Respect costs nothing. You find coins by the exit.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Challenge for passage",
-            success=EventOutcome("You win the challenge. The throne room collapses into a shortcut.", 8, 10, False),
-            failure=EventOutcome("It wasn't really a challenge. More of a demonstration.", -9, -12, True),
-            success_chance=0.35,
+            "Stake your passage on a challenge",
+            success=EventOutcome("You win the challenge. The throne room collapses into a shortcut.", 2, 53, False),
+            failure=EventOutcome("It wasn't really a challenge. More of a demonstration.", 0, -28, False),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Abyss", rarity="uncommon",
+        complexity="complex",
+        layer="Abyss",
+        rarity="uncommon",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Abyss Layer (101-150)
-    # ===================================================================
-
     RandomEvent(
         id="void_market",
         name="Void Market",
@@ -866,16 +857,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Trade depth for wealth (3 blocks for 6 JC)",
-            success=EventOutcome("Fair trade. Your tunnel shortens. Your wallet fattens.", -4, 12, False),
+            success=EventOutcome("Fair trade. Your tunnel shortens. Your wallet fattens.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Trade wealth for depth (6 JC for 5 blocks)",
-            success=EventOutcome("The shadows accept. You feel your tunnel extend.", 5, -18, False),
-            failure=EventOutcome("The shadows take your coins and vanish. No refunds in the void.", 0, -18, False),
-            success_chance=0.75,
+            "Take the shadows' wager",
+            success=EventOutcome("The shadows accept. You feel your tunnel extend.", 2, 53, False),
+            failure=EventOutcome("The shadows take your coins and vanish. No refunds in the void.", 0, -28, False),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Abyss", rarity="uncommon",
+        complexity="complex",
+        layer="Abyss",
+        rarity="uncommon",
     ),
     RandomEvent(
         id="abyssal_fishing",
@@ -888,16 +881,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Peer into the depths",
-            success=EventOutcome("You see your reflection. It winks. You earn 2 JC for your trouble.", 0, 4, False),
+            success=EventOutcome("You see your reflection. It winks. You earn 2 JC for your trouble.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Reach in",
-            success=EventOutcome("Your hand closes around something cold and heavy. Treasure.", 0, 16, False),
-            failure=EventOutcome("Whatever it was, it pulled your coin purse in. And your glove.", 0, -12, False),
-            success_chance=0.50,
+            "Reach into the black pool",
+            success=EventOutcome("Your hand closes around something cold and heavy. Treasure.", 0, 53, False),
+            failure=EventOutcome("Whatever it was, it pulled your coin purse in. And your glove.", 0, 0, False, curse=TempCurse("hex_abyssal_fishing", "Abyssal Lien", 3, {"jc_bonus": -4})),
+            success_chance=0.62,
         ),
-        layer="Abyss", rarity="uncommon",
+        layer="Abyss",
+        rarity="uncommon",
     ),
     RandomEvent(
         id="gravity_inversion",
@@ -910,14 +904,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Grab hold of something",
-            success=EventOutcome("You cling to a stalactite until reality sorts itself out.", 1, 0, False),
+            success=EventOutcome("You cling to a stalactite until reality sorts itself out.", 1, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Fall sideways on purpose",
-            success=EventOutcome("You fall through solid rock. The physics down here are generous.", 5, 4, False),
-            failure=EventOutcome("You fall up, then down, then up again. Nauseating.", -6, -3, False),
-            success_chance=0.45,
+            "Let yourself fall through the shifting rock",
+            success=EventOutcome("You fall through solid rock. The physics down here are generous.", 2, 39, False),
+            failure=EventOutcome("You fall up, then down, then up again. Nauseating.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Abyss",
     ),
@@ -932,22 +926,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Cover your ears",
-            success=EventOutcome("The whispers fade. Some things are better left unheard.", 0, 4, False),
+            success=EventOutcome("The whispers fade. Some things are better left unheard.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Listen carefully",
-            success=EventOutcome("'...and the hero bought a clarity and walked into the trees.' Wait, what? Still, the void pays well for listeners.", 2, 20, False),
-            failure=EventOutcome("The whispers get inside your head. They rearrange things.", -9, -12, True),
-            success_chance=0.30,
+            "Listen to what the walls remember",
+            success=EventOutcome("'...and the hero bought a clarity and walked into the trees.' Wait, what? Still, the void pays well for listeners.", 2, 70, False),
+            failure=EventOutcome("The whispers get inside your head. They rearrange things.", 0, 0, False, curse=TempCurse("hex_whispering_walls_extended", "Rearranged Mind", 4, {"advance_bonus": -3})),
+            success_chance=0.56,
         ),
-        complexity="complex", layer="Abyss", rarity="rare",
+        complexity="complex",
+        layer="Abyss",
+        rarity="rare",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Fungal Depths (151-200)
-    # ===================================================================
-
     RandomEvent(
         id="spore_storm",
         name="Spore Storm",
@@ -959,14 +950,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Retreat and breathe",
-            success=EventOutcome("Fresh air. Relatively speaking. Everything down here is questionable.", 1, 0, False),
+            success=EventOutcome("Fresh air. Relatively speaking. Everything down here is questionable.", 1, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Breathe deep",
-            success=EventOutcome("The spores are... enhancing? You can see further and dig faster.", 4, 6, False),
-            failure=EventOutcome("Spore cough. Your lungs file a formal complaint.", -4, -3, False),
-            success_chance=0.45,
+            success=EventOutcome("The spores are... enhancing? You can see further and dig faster.", 2, 62, False),
+            failure=EventOutcome("Spore cough. Your lungs file a formal complaint.", 0, 0, True),
+            success_chance=0.62,
         ),
         layer="Fungal Depths",
         buff_on_success=TempBuff("spore_enhanced", "Spore-Enhanced", 3, {"advance_bonus": 3}),
@@ -982,16 +973,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Just watch",
-            success=EventOutcome("The network hums. You feel connected to something vast.", 0, 6, False),
+            success=EventOutcome("The network hums. You feel connected to something vast.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Tap in",
-            success=EventOutcome("You see the depths of other miners. Knowledge is power.", 0, 10, False),
-            failure=EventOutcome("The network rejects you. A psychic headache.", -3, 0, False),
-            success_chance=0.55,
+            "Lose yourself in the network",
+            success=EventOutcome("You see the depths of other miners. Knowledge is power.", 0, 84, False),
+            failure=EventOutcome("The network floods your head with other tunnels. You lose track of your own.", 0, 0, False, streak_loss=4),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Fungal Depths", rarity="uncommon", social=True,
+        complexity="complex",
+        layer="Fungal Depths",
+        rarity="uncommon",
+        social=True,
     ),
     RandomEvent(
         id="sporewalker",
@@ -1004,16 +998,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Accept the cap",
-            success=EventOutcome("It tastes like earth and starlight. Your tunnel walls feel more solid.", 0, 6, False),
+            success=EventOutcome("It tastes like earth and starlight. Your tunnel walls feel more solid.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Ask for the premium cap",
-            success=EventOutcome("The Sporewalker beams. The premium cap glows brighter.", 2, 10, False),
-            failure=EventOutcome("There is no premium cap. The Sporewalker is confused. And hurt.", 0, 2, False),
-            success_chance=0.50,
+            "Haggle for the premium cap",
+            success=EventOutcome("The Sporewalker beams. The premium cap glows brighter.", 2, 62, False),
+            failure=EventOutcome("There is no premium cap. The Sporewalker is confused. And hurt.", 0, -34, False),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="Fungal Depths",
+        complexity="simple",
+        layer="Fungal Depths",
         buff_on_success=TempBuff("spore_shield", "Fungal Fortitude", 3, {"cave_in_reduction": 0.1}),
     ),
     RandomEvent(
@@ -1027,22 +1022,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Sit and watch",
-            success=EventOutcome("For a moment, the weight of all that stone above you doesn't matter.", 0, 10, False),
+            success=EventOutcome("For a moment, the weight of all that stone above you doesn't matter.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Climb toward the lights",
-            success=EventOutcome("You reach the bioluminescent canopy. Up close, it's even more beautiful.", 3, 16, False),
-            failure=EventOutcome("You slip. The fall is long but the mushrooms are soft.", -6, 0, False),
-            success_chance=0.40,
+            success=EventOutcome("You reach the bioluminescent canopy. Up close, it's even more beautiful.", 2, 112, False),
+            failure=EventOutcome("You slip. The fall is long but the mushrooms are soft.", 0, 0, True),
+            success_chance=0.56,
         ),
-        complexity="simple", layer="Fungal Depths", rarity="rare",
+        complexity="simple",
+        layer="Fungal Depths",
+        rarity="rare",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Frozen Core (201-275)
-    # ===================================================================
-
     RandomEvent(
         id="time_eddy",
         name="Time Eddy",
@@ -1054,16 +1046,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=201, max_depth=280,
         safe_option=EventChoice(
             "Observe from outside",
-            success=EventOutcome("You learn from watching your past mistakes. The future feels clearer.", 0, 4, False),
+            success=EventOutcome("You learn from watching your past mistakes. The future feels clearer.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Step inside",
-            success=EventOutcome("Time bends around you. For a moment you exist in two places at once. Both of them dig.", 4, 8, False),
-            failure=EventOutcome("You step out and three hours have passed. Time is cruel.", -4, -6, False),
-            success_chance=0.45,
+            success=EventOutcome("Time bends around you. For a moment you exist in two places at once. Both of them dig.", 2, 62, False),
+            failure=EventOutcome("You step out and three hours have passed. Time is cruel.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
-        complexity="complex", layer="Frozen Core",
+        complexity="complex",
+        layer="Frozen Core",
     ),
     RandomEvent(
         id="frozen_ancient",
@@ -1076,16 +1069,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=201, max_depth=280,
         safe_option=EventChoice(
             "Photograph it",
-            success=EventOutcome("For posterity. And selling to tabloids.", 0, 6, False),
+            success=EventOutcome("For posterity. And selling to tabloids.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Chip a piece free",
-            success=EventOutcome("It's warm. Organic. Worth a fortune to the right buyer.", 0, 20, False),
-            failure=EventOutcome("It moved. IT MOVED.", -9, -9, True),
-            success_chance=0.35,
+            success=EventOutcome("It's warm. Organic. Worth a fortune to the right buyer.", 0, 84, False),
+            failure=EventOutcome("It moved. IT MOVED.", 0, 0, True),
+            success_chance=0.62,
         ),
-        layer="Frozen Core", rarity="uncommon",
+        layer="Frozen Core",
+        rarity="uncommon",
     ),
     RandomEvent(
         id="the_still_point",
@@ -1098,16 +1092,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=201, max_depth=280,
         safe_option=EventChoice(
             "Be still",
-            success=EventOutcome("The moment passes. But something lingers — your tunnel feels more permanent.", 0, 0, False),
+            success=EventOutcome("The moment passes. But something lingers — your tunnel feels more permanent.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Try to hold the moment",
-            success=EventOutcome("You can't. But trying earned you something.", 0, 10, False),
-            failure=EventOutcome("The moment shatters. Cold rushes in.", -3, 0, False),
-            success_chance=0.50,
+            "Try to hold the timeless moment",
+            success=EventOutcome("You can't. But trying earned you something.", 0, 112, False),
+            failure=EventOutcome("The moment shatters. You surface unsure how long you stood there.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
-        complexity="simple", layer="Frozen Core", rarity="rare",
+        complexity="simple",
+        layer="Frozen Core",
+        rarity="rare",
         buff_on_success=TempBuff("still_point", "Temporal Anchor", 5, {"cave_in_reduction": 0.16}),
     ),
     RandomEvent(
@@ -1121,22 +1117,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=201, max_depth=None,
         safe_option=EventChoice(
             "Offer yourself a coin",
-            success=EventOutcome("Your other self accepts. You feel generous and broke simultaneously.", 3, -3, False),
+            success=EventOutcome("Your other self accepts. You feel generous and broke simultaneously.", 2, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Fight yourself",
-            success=EventOutcome("You win. Or you lost. The distinction is academic at this depth.", 5, 6, False),
-            failure=EventOutcome("You lose to yourself. The humiliation is paradoxically doubled.", -8, -6, False),
-            success_chance=0.50,
+            "Fight your own reflection",
+            success=EventOutcome("You win. Or you lost. The distinction is academic at this depth.", 2, 112, False),
+            failure=EventOutcome("You lose to yourself. The hours fold back on each other.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
-        complexity="complex", layer="Frozen Core", rarity="rare",
+        complexity="complex",
+        layer="Frozen Core",
+        rarity="rare",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — The Hollow (276+)
-    # ===================================================================
-
     RandomEvent(
         id="the_cartographer",
         name="The Cartographer",
@@ -1148,16 +1141,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Help draw",
-            success=EventOutcome("Your contribution is... noted. The Cartographer pays in concepts that translate to coins.", 2, 10, False),
+            success=EventOutcome("Your contribution is... noted. The Cartographer pays in concepts that translate to coins.", 2, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Buy a map (10 JC)",
-            success=EventOutcome("The map shows paths that shouldn't exist. They do anyway.", 5, -30, False),
-            failure=EventOutcome("The map is blank. 'That IS The Hollow,' the Cartographer explains.", 0, -30, False),
-            success_chance=0.60,
+            "Buy the Cartographer's map",
+            success=EventOutcome("The map shows paths that shouldn't exist. They do anyway.", 2, 112, False),
+            failure=EventOutcome("The map is blank. 'That IS The Hollow,' the Cartographer explains.", 0, -60, False),
+            success_chance=0.56,
         ),
-        complexity="complex", layer="The Hollow", rarity="rare",
+        complexity="complex",
+        layer="The Hollow",
+        rarity="rare",
     ),
     RandomEvent(
         id="the_final_merchant",
@@ -1170,16 +1165,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Browse and leave",
-            success=EventOutcome("'Everyone browses. Nobody buys,' the merchant says. 'Story of my life.'", 0, 4, False),
+            success=EventOutcome("'Everyone browses. Nobody buys,' the merchant says. 'Story of my life.'", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Haggle",
-            success=EventOutcome("'Fine. Half price. Just take it.' The merchant looks relieved.", 3, 16, False),
-            failure=EventOutcome("The price doubles. 'That's what you get for haggling with the void.'", 0, -15, False),
-            success_chance=0.40,
+            "Haggle with the merchant",
+            success=EventOutcome("'Fine. Half price. Just take it.' The merchant looks relieved.", 2, 156, False),
+            failure=EventOutcome("The price doubles. 'That's what you get for haggling with the void.'", 0, -84, False),
+            success_chance=0.50,
         ),
-        complexity="complex", layer="The Hollow", rarity="legendary",
+        complexity="complex",
+        layer="The Hollow",
+        rarity="legendary",
     ),
     RandomEvent(
         id="memory_of_the_surface",
@@ -1192,22 +1189,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Let it pass",
-            success=EventOutcome("You dig with renewed purpose. Or possibly spite. Hard to tell the difference down here.", 0, 10, False),
+            success=EventOutcome("You dig with renewed purpose. Or possibly spite. Hard to tell the difference down here.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Hold onto the memory",
-            success=EventOutcome("The light stays a little longer. Your pickaxe feels lighter.", 3, 16, False),
-            failure=EventOutcome("The memory dissolves. You feel emptier than before.", -4, 0, False),
-            success_chance=0.45,
+            "Chase the fading memory",
+            success=EventOutcome("The light stays a little longer. Your pickaxe feels lighter.", 2, 84, False),
+            failure=EventOutcome("The memory dissolves and takes your sense of how long you have been down here.", 0, 0, False, streak_loss=4),
+            success_chance=0.62,
         ),
-        complexity="simple", layer="The Hollow", rarity="uncommon",
+        complexity="simple",
+        layer="The Hollow",
+        rarity="uncommon",
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Darkness-Only (require Pitch Black luminosity)
-    # ===================================================================
-
     RandomEvent(
         id="things_in_the_dark",
         name="Things in the Dark",
@@ -1219,14 +1213,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Stand very still",
-            success=EventOutcome("It leaves. You'll never know what it was. Maybe that's better.", 0, 0, False),
+            success=EventOutcome("It leaves. You'll never know what it was. Maybe that's better.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Reach out",
-            success=EventOutcome("It was trying to give you something. In the dark. Normally, somehow.", 0, 20, False),
-            failure=EventOutcome("It wasn't friendly.", -8, -9, True),
-            success_chance=0.50,
+            "Reach out to the thing in the dark",
+            success=EventOutcome("It was trying to give you something. In the dark. Normally, somehow.", 0, 23, False),
+            failure=EventOutcome("It wasn't friendly.", 0, 0, False, curse=TempCurse("hex_things_in_the_dark", "Clinging Dark", 3, {"luminosity_drain": 10})),
+            success_chance=0.62,
         ),
         requires_dark=True,
     ),
@@ -1241,16 +1235,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Stay put",
-            success=EventOutcome("The sound fades. You wait for the light to return.", 0, 2, False),
+            success=EventOutcome("The sound fades. You wait for the light to return.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Follow the sound",
-            success=EventOutcome("The path opens into a chamber. You don't need light to feel the treasure.", 5, 10, False),
-            failure=EventOutcome("You followed the wrong sound. Deeper darkness.", -6, -6, False),
-            success_chance=0.45,
+            "Follow the sound into the lightless dark",
+            success=EventOutcome("The path opens into a chamber. You don't need light to feel the treasure.", 2, 23, False),
+            failure=EventOutcome("You followed the wrong sound. The dark swallows your bearings.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
-        complexity="complex", requires_dark=True,
+        complexity="complex",
+        requires_dark=True,
     ),
     RandomEvent(
         id="phosphor_vein",
@@ -1267,18 +1262,15 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Follow the vein deeper",
-            success=EventOutcome("It leads to a mother lode. Light AND wealth.", 3, 12, False),
-            failure=EventOutcome("The vein dead-ends. But at least you can see again.", 0, 2, False),
-            success_chance=0.55,
+            "Follow the vein past the light",
+            success=EventOutcome("It leads to a mother lode. Light AND wealth.", 2, 32, False),
+            failure=EventOutcome("The vein dies and so does the light. You lose the way.", 0, 0, False, streak_loss=4),
+            success_chance=0.62,
         ),
-        complexity="simple", requires_dark=True, rarity="uncommon",
+        complexity="simple",
+        rarity="uncommon",
+        requires_dark=True,
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — Roshan Superboss
-    # ===================================================================
-
     RandomEvent(
         id="roshan_lair",
         name="The Ancient's Lair",
@@ -1290,22 +1282,20 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Flee",
-            success=EventOutcome("Discretion is the better part of valor. The pit remembers you left.", 0, 10, False),
+            success=EventOutcome("Discretion is the better part of valor. The pit remembers you left.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Challenge the ancient",
-            success=EventOutcome("Against all odds, the ancient falls. An aegis shard clatters to the ground. The pit is silent.", 10, 50, False),
-            failure=EventOutcome("The ancient demonstrates why it has survived since the world was young.", -15, -24, True),
-            success_chance=0.20,
+            success=EventOutcome("Against all odds, the ancient falls. An aegis shard clatters to the ground. The pit is silent.", 2, 156, False),
+            failure=EventOutcome("The ancient demonstrates why it has survived since the world was young.", 0, 0, True),
+            success_chance=0.50,
         ),
-        complexity="complex", layer="The Hollow", rarity="legendary", social=True,
+        complexity="complex",
+        layer="The Hollow",
+        rarity="legendary",
+        social=True,
     ),
-
-    # ===================================================================
-    # EXPANSION EVENTS — OSRS / General Easter Eggs
-    # ===================================================================
-
     RandomEvent(
         id="buying_gf",
         name="The Persistent Miner",
@@ -1317,16 +1307,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Walk away slowly",
-            success=EventOutcome("The shouting fades behind you. Some battles are unwinnable.", 0, 2, False),
+            success=EventOutcome("The shouting fades behind you. Some battles are unwinnable.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Offer business advice",
-            success=EventOutcome("They diversify into gem trading. You get a referral bonus.", 0, 8, False),
-            failure=EventOutcome("They counter-offer. You are now somehow the one buying the GF.", 0, -9, False),
-            success_chance=0.50,
+            "Bargain with the shouting miner",
+            success=EventOutcome("They diversify into gem trading. You get a referral bonus.", 0, 53, False),
+            failure=EventOutcome("They counter-offer. You are now somehow the one buying the GF.", 0, -28, False),
+            success_chance=0.62,
         ),
-        complexity="simple", rarity="uncommon",
+        complexity="simple",
+        rarity="uncommon",
     ),
     RandomEvent(
         id="rock_golem_encounter",
@@ -1339,24 +1330,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=50, max_depth=None,
         safe_option=EventChoice(
             "Accept your new companion",
-            success=EventOutcome("It settles on your shoulder. It's heavier than it looks.", 0, 4, False),
+            success=EventOutcome("It settles on your shoulder. It's heavier than it looks.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Try to feed it",
-            success=EventOutcome("It eats a rock and purrs. You didn't know rocks could purr.", 1, 6, False),
-            failure=EventOutcome("It bites your hand. Rock teeth. Actual rock teeth.", -2, 0, False),
-            success_chance=0.65,
+            success=EventOutcome("It eats a rock and purrs. You didn't know rocks could purr.", 1, 19, False),
+            failure=EventOutcome("It bites your hand. Rock teeth. Actual rock teeth.", 0, 0, True),
+            success_chance=0.56,
         ),
-        complexity="simple", rarity="rare",
+        complexity="simple",
+        rarity="rare",
     ),
-
-    # ===================================================================
-    # PRESTIGE EXPANSION EVENTS
-    # ===================================================================
-
-    # --- Minecraft-themed — Dirt/Stone (depth 0-55) ---
-
     RandomEvent(
         id="creeper_ambush",
         name="Creeper Ambush",
@@ -1368,20 +1353,20 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Sprint back",
-            success=EventOutcome("You dive clear as the blast craters the tunnel behind you.", -2, 0, False),
+            success=EventOutcome("You dive clear as the blast craters the tunnel behind you.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Shield with pickaxe",
-            success=EventOutcome("Your pickaxe absorbs the blast. The debris opens a new passage!", 2, 0, False),
-            failure=EventOutcome("The explosion sends you tumbling. Everything goes dark.", -6, 0, True),
-            success_chance=0.60,
+            success=EventOutcome("Your pickaxe absorbs the blast. The debris opens a new passage!", 2, 23, False),
+            failure=EventOutcome("The explosion sends you tumbling. Everything goes dark.", 0, 0, True),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
             "Punch the creeper",
-            success=EventOutcome("One punch. The creeper detonates harmlessly. Gunpowder everywhere — and coins!", 6, 8, False),
-            failure=EventOutcome("You punch it. It detonates. You are not Steve.", -12, 0, True),
-            success_chance=0.15,
+            success=EventOutcome("One punch. The creeper detonates harmlessly. Gunpowder everywhere — and coins!", 3, 37, False),
+            failure=EventOutcome("You punch it. It detonates. You are not Steve.", -2, 0, True),
+            success_chance=0.40,
         ),
     ),
     RandomEvent(
@@ -1395,14 +1380,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Search the cart",
-            success=EventOutcome("A single coin wedged in the seat. Better than nothing.", 0, 2, False),
+            success=EventOutcome("A single coin wedged in the seat. Better than nothing.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Ride the rails",
-            success=EventOutcome("WHOOSH! The cart rockets through the darkness and deposits you deeper!", 5, 0, False),
-            failure=EventOutcome("The rails end abruptly. You and the cart part ways.", -4, 0, False),
-            success_chance=0.50,
+            success=EventOutcome("WHOOSH! The cart rockets through the darkness and deposits you deeper!", 2, 23, False),
+            failure=EventOutcome("The rails end abruptly. You and the cart part ways.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -1424,7 +1409,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="uncommon",
+        complexity="boon",
+        rarity="uncommon",
         boon_options=(
             TempBuff("efficiency", "Efficiency", 3, {"advance_bonus": 4}),
             TempBuff("fortune", "Fortune", 3, {"jc_bonus": 7}),
@@ -1442,14 +1428,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=0, max_depth=80,
         safe_option=EventChoice(
             "Trade politely",
-            success=EventOutcome("A fair deal. The villager nods approvingly. 'Hmm.'", 0, 4, False),
+            success=EventOutcome("A fair deal. The villager nods approvingly. 'Hmm.'", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Haggle aggressively",
-            success=EventOutcome("The villager sweats. You drive a hard bargain. Emeralds rain.", 0, 10, False),
-            failure=EventOutcome("The villager slams the trading window shut. You lose your deposit.", 0, -6, False),
-            success_chance=0.45,
+            "Haggle the villager hard",
+            success=EventOutcome("The villager sweats. You drive a hard bargain. Emeralds rain.", 0, 23, False),
+            failure=EventOutcome("The villager slams the trading window shut. You lose your deposit.", 0, -13, False),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -1463,22 +1449,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=0, max_depth=80,
         safe_option=EventChoice(
             "Look away slowly",
-            success=EventOutcome("It teleports away. You exhale.", 1, 0, False),
+            success=EventOutcome("It teleports away. You exhale.", 1, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Stare back",
-            success=EventOutcome("It flinches first. It drops something valuable before vanishing.", 0, 8, False),
-            failure=EventOutcome("It shrieks. Reality bends. You are somewhere else now.", -8, 0, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Charge it",
-            success=EventOutcome("You tackle an Enderman. It drops a pearl and its dignity.", 3, 16, False),
-            failure=EventOutcome("It teleports behind you. 'Nothing personnel, kid.' Cave-in.", -9, 0, True),
-            success_chance=0.12,
+            "Stare the watcher down",
+            success=EventOutcome("It flinches first. It drops something valuable before vanishing.", 0, 32, False),
+            failure=EventOutcome("It shrieks. Reality bends. You are somewhere else now.", 0, 0, False, curse=TempCurse("hex_enderman_stare", "Voidstare", 3, {"luminosity_drain": 14})),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Charge the watcher",
+            success=EventOutcome("You tackle an Enderman. It drops a pearl and its dignity.", 3, 51, False),
+            failure=EventOutcome("It teleports behind you. 'Nothing personnel, kid.' Cave-in.", -3, 0, False, curse=TempCurse("hex_enderman_stare", "Voidstare", 3, {"luminosity_drain": 21})),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="mob_spawner",
@@ -1491,23 +1477,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Sneak past",
-            success=EventOutcome("You slip through unnoticed. The skeletons argue among themselves.", 1, 0, False),
+            success=EventOutcome("You slip through unnoticed. The skeletons argue among themselves.", 1, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Grab a chest and run",
-            success=EventOutcome("You snatch a chest. Arrows whiz past your ears. Worth it.", 0, 8, False),
-            failure=EventOutcome("An arrow finds your knee. The adventuring is over for today.", -4, 0, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Destroy the spawner",
-            success=EventOutcome("The cage shatters! Both chests are yours. The skeletons dissolve.", 2, 12, False),
-            failure=EventOutcome("The spawner surges. More skeletons than you can count.", -9, 0, True),
-            success_chance=0.20,
+            success=EventOutcome("You snatch a chest. Arrows whiz past your ears. Worth it.", 0, 32, False),
+            failure=EventOutcome("An arrow finds your knee. The adventuring is over for today.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
         buff_on_success=TempBuff("mob_farm", "Mob Farm", 3, {"jc_bonus": 5}),
+        desperate_option=EventChoice(
+            "Destroy the spawner",
+            success=EventOutcome("The cage shatters! Both chests are yours. The skeletons dissolve.", 2, 51, False),
+            failure=EventOutcome("The spawner surges. More skeletons than you can count.", -3, 0, True),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="witch_cauldron",
@@ -1535,9 +1521,6 @@ RANDOM_EVENTS: list[RandomEvent] = [
             TempBuff("green_potion", "Green Potion", 2, {"jc_bonus": 11}),
         ),
     ),
-
-    # --- PoE Delve-themed — Crystal/Abyss (depth 51-150) ---
-
     RandomEvent(
         id="azurite_deposit",
         name="Azurite Deposit",
@@ -1549,14 +1532,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Mine carefully",
-            success=EventOutcome("You chip out a few clean crystals. Respectable haul.", 0, 4, False),
+            success=EventOutcome("You chip out a few clean crystals. Respectable haul.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Blast it open",
-            success=EventOutcome("The vein cracks wide. Azurite shards scatter like blue rain!", 0, 12, False),
-            failure=EventOutcome("The blast destabilizes the passage. Crystals shatter worthlessly.", -4, 0, False),
-            success_chance=0.45,
+            "Blast the vein open",
+            success=EventOutcome("The vein cracks wide. Azurite shards scatter like blue rain!", 0, 39, False),
+            failure=EventOutcome("The blast destabilizes the passage. Crystals shatter worthlessly.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -1570,22 +1553,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Repair with spare parts",
-            success=EventOutcome("A patch job. It'll hold. You lost some parts though.", 1, -6, False),
+            success=EventOutcome("A patch job. It'll hold. You lost some parts though.", 1, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Hotwire it",
-            success=EventOutcome("Sparks fly — then the engine roars. It's running better than before!", 4, 0, False),
-            failure=EventOutcome("The rig catches fire. You abandon the burning wreck.", -6, 0, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Abandon rig and sprint",
-            success=EventOutcome("You outrun the darkness. Barely. Your legs will remember this.", 7, 0, False),
-            failure=EventOutcome("The darkness catches you. Something in it has claws.", -9, 0, True),
-            success_chance=0.15,
+            success=EventOutcome("Sparks fly — then the engine roars. It's running better than before!", 2, 53, False),
+            failure=EventOutcome("The rig dies. The dark folds in and you lose the way.", 0, 0, False, streak_loss=4),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Abandon the rig and run blind",
+            success=EventOutcome("You outrun the darkness. Barely. Your legs will remember this.", 3, 85, False),
+            failure=EventOutcome("The darkness catches you. Something in it has claws.", -3, 0, False, streak_loss=6),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="fossil_cache",
@@ -1598,14 +1581,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Photograph and catalog",
-            success=EventOutcome("Careful documentation. A small finder's fee.", 1, 2, False),
+            success=EventOutcome("Careful documentation. A small finder's fee.", 1, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Extract fossils",
-            success=EventOutcome("Pristine specimens! Collectors will pay handsomely.", 0, 8, False),
-            failure=EventOutcome("They crumble to dust the moment you touch them. Ancient and fragile.", -4, 0, False),
-            success_chance=0.55,
+            "Extract the fragile fossils",
+            success=EventOutcome("Pristine specimens! Collectors will pay handsomely.", 0, 39, False),
+            failure=EventOutcome("They crumble to dust the moment you touch them. Ancient and fragile.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -1619,22 +1602,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Retreat and seal",
-            success=EventOutcome("You back away. The breach closes. Wise.", 0, 0, False),
+            success=EventOutcome("You back away. The breach closes. Wise.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Hold the line",
-            success=EventOutcome("You stand your ground. The breach yields treasure as it closes.", 2, 10, False),
-            failure=EventOutcome("The breach consumes ground you'd already claimed.", -8, 0, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Dive into the breach",
-            success=EventOutcome("You pass through and emerge deeper. Much deeper. With loot.", 5, 24, False),
-            failure=EventOutcome("The breach spits you out. Hard. Very, very hard.", -12, 0, True),
-            success_chance=0.10,
+            success=EventOutcome("You stand your ground. The breach yields treasure as it closes.", 2, 70, False),
+            failure=EventOutcome("The breach consumes ground you'd already claimed.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Dive into the breach",
+            success=EventOutcome("You pass through and emerge deeper. Much deeper. With loot.", 3, 112, False),
+            failure=EventOutcome("The breach spits you out. Hard. Very, very hard.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="vaal_side_area",
@@ -1647,22 +1630,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Walk past",
-            success=EventOutcome("Discretion. Valor. You keep walking.", 0, 0, False),
+            success=EventOutcome("Discretion. Valor. You keep walking.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Enter cautiously",
-            success=EventOutcome("The corruption parts for you. Ancient Vaal gold awaits.", 0, 12, False),
-            failure=EventOutcome("The corruption bites. Your coin pouch feels lighter.", 0, -12, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Smash the corruption altar",
-            success=EventOutcome("The altar shatters! A flood of uncorrupted treasure!", 4, 20, False),
-            failure=EventOutcome("The altar explodes. Corruption everywhere. In you. On you.", -10, 0, True),
-            success_chance=0.15,
+            "Step through the corrupted door",
+            success=EventOutcome("The corruption parts for you. Ancient Vaal gold awaits.", 0, 70, False),
+            failure=EventOutcome("The corruption bites. Your coin pouch feels lighter.", 0, 0, False, curse=TempCurse("hex_vaal_side_area", "Vaal Corruption", 4, {"jc_bonus": -5})),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Smash the corruption altar",
+            success=EventOutcome("The altar shatters! A flood of uncorrupted treasure!", 3, 112, False),
+            failure=EventOutcome("The altar explodes. Corruption everywhere. In you. On you.", -4, 0, False, curse=TempCurse("hex_vaal_side_area", "Vaal Corruption", 4, {"jc_bonus": -8})),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="syndicate_ambush",
@@ -1675,15 +1658,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Pay the toll",
-            success=EventOutcome("They take your coins and let you pass. Professional thieves.", 2, -9, False),
-            failure=EventOutcome("They take your coins AND push you back. Unprofessional thieves.", 0, -15, False),
-            success_chance=0.90,
+            success=EventOutcome("They take your coins and let you pass. Professional thieves.", 2, 10, False),
+            failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Fight back",
-            success=EventOutcome("You scatter the syndicate. They drop their own loot!", 0, 10, False),
-            failure=EventOutcome("They outnumber you. The beating is educational.", -6, 0, False),
-            success_chance=0.45,
+            "Refuse the toll and fight",
+            success=EventOutcome("You scatter the syndicate. They drop their own loot!", 0, 53, False),
+            failure=EventOutcome("They outnumber you. The beating is educational.", 0, -28, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
     ),
@@ -1706,16 +1688,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="uncommon",
+        complexity="boon",
+        rarity="uncommon",
         boon_options=(
             TempBuff("volatile_flare", "Volatile Flare", 2, {"advance_bonus": 6}),
             TempBuff("azurite_tonic", "Azurite Tonic", 2, {"luminosity_restore": 51}),
             TempBuff("smugglers_map", "Smuggler's Map", 3, {"advance_bonus": 4}),
         ),
     ),
-
-    # --- WoW Delves-themed — Fungal/Frozen (depth 151-275+) ---
-
     RandomEvent(
         id="brann_bronzebeard",
         name="Brann Bronzebeard",
@@ -1735,7 +1715,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="uncommon",
+        complexity="boon",
+        rarity="uncommon",
         boon_options=(
             TempBuff("combat_buddy", "Combat Buddy", 3, {"advance_bonus": 4}),
             TempBuff("treasure_finder", "Treasure Finder", 3, {"jc_bonus": 5}),
@@ -1753,14 +1734,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Force open carefully",
-            success=EventOutcome("The lock gives way. Modest treasure inside.", 0, 4, False),
+            success=EventOutcome("The lock gives way. Modest treasure inside.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Smash it",
-            success=EventOutcome("The chest shatters. Dwarven gold scatters everywhere!", 0, 10, False),
-            failure=EventOutcome("The runes were a trap. The blast sends you reeling.", -4, 0, False),
-            success_chance=0.50,
+            success=EventOutcome("The chest shatters. Dwarven gold scatters everywhere!", 0, 62, False),
+            failure=EventOutcome("The runes were a trap. The blast sends you reeling.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -1774,14 +1755,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=130, max_depth=350,
         safe_option=EventChoice(
             "Rest by the fire",
-            success=EventOutcome("You sit. The warmth seeps into your bones. A moment of peace.", 0, 0, False),
+            success=EventOutcome("You sit. The warmth seeps into your bones. A moment of peace.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Sharpen your pickaxe",
-            success=EventOutcome("The whetstone sings. Your pickaxe has never been sharper.", 0, 0, False),
-            failure=EventOutcome("You slip. A cut on the hand. It'll heal.", 0, 0, False),
-            success_chance=0.65,
+            "Sharpen your blade on the slick whetstone",
+            success=EventOutcome("The whetstone sings. Your pickaxe has never been sharper.", 0, 62, False),
+            failure=EventOutcome("You slip. A cut on the hand. It'll heal.", 0, 0, True),
+            success_chance=0.62,
         ),
         buff_on_success=TempBuff("honed_edge", "Honed Edge", 3, {"advance_bonus": 4}),
     ),
@@ -1796,22 +1777,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Find another way",
-            success=EventOutcome("A detour. Longer, but you keep your limbs.", -2, 0, False),
+            success=EventOutcome("A detour. Longer, but you keep your limbs.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Distract and sneak past",
-            success=EventOutcome("You toss a rock. It turns. You sprint. Heart hammering.", 3, 0, False),
-            failure=EventOutcome("Eight eyes. All looking at you. It pounces.", -8, 0, False),
-            success_chance=0.35,
-        ),
-        desperate_option=EventChoice(
-            "Fight Zekvir",
-            success=EventOutcome("Against all odds, you drive it back! Legendary loot drops!", 5, 20, False),
-            failure=EventOutcome("Zekvir wraps you in silk. The ceiling collapses.", -12, 0, True),
-            success_chance=0.12,
+            success=EventOutcome("You toss a rock. It turns. You sprint. Heart hammering.", 2, 112, False),
+            failure=EventOutcome("Eight eyes. All looking at you. It pounces.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Fight Zekvir",
+            success=EventOutcome("Against all odds, you drive it back! Legendary loot drops!", 3, 179, False),
+            failure=EventOutcome("Zekvir wraps you in silk. The ceiling collapses.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="dark_rider",
@@ -1824,22 +1805,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Bow and let it pass",
-            success=EventOutcome("It drops a coin as tribute. Respect, it seems, has value.", 0, 2, False),
+            success=EventOutcome("It drops a coin as tribute. Respect, it seems, has value.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Accept the handshake",
-            success=EventOutcome("A cold grip. Knowledge flows into you. Secrets of the deep.", 0, 10, False),
-            failure=EventOutcome("The grip tightens. It takes something from you.", 0, -9, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Challenge the rider",
-            success=EventOutcome("Your pickaxe meets spectral steel. You win. The mount is yours — briefly.", 3, 16, False),
-            failure=EventOutcome("The rider's lance finds its mark. You crumple.", -9, 0, False),
-            success_chance=0.18,
+            "Take the rider's cold bargain",
+            success=EventOutcome("A cold grip. Knowledge flows into you. Secrets of the deep.", 0, 84, False),
+            failure=EventOutcome("The grip tightens. It takes something from you.", 0, -45, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Challenge the rider",
+            success=EventOutcome("Your pickaxe meets spectral steel. You win. The mount is yours — briefly.", 3, 134, False),
+            failure=EventOutcome("The rider's lance finds its mark. You crumple.", -3, -68, False),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="titan_relic",
@@ -1860,7 +1841,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="rare",
+        complexity="boon",
+        rarity="rare",
         boon_options=(
             TempBuff("power_rune", "Power", 3, {"advance_bonus": 5}),
             TempBuff("protection_rune", "Protection", 5, {"cave_in_reduction": 0.4}),
@@ -1878,19 +1860,16 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Light your torch from it",
-            success=EventOutcome("The flame passes to your torch. The candle keeps burning.", 0, 0, False),
+            success=EventOutcome("The flame passes to your torch. The candle keeps burning.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Take the candle",
-            success=EventOutcome("It comes free. The warmth follows you. Two coins fall from the wax.", 0, 4, False),
-            failure=EventOutcome("It won't move. Wax drips on your hand. The flame flickers reproachfully.", 0, 0, False),
-            success_chance=0.55,
+            "Take the candle and walk on",
+            success=EventOutcome("It comes free. The warmth follows you. Two coins fall from the wax.", 0, 62, False),
+            failure=EventOutcome("The flame gutters out in your hand. The dark closes over your bearings.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
     ),
-
-    # --- Hades-themed — Deep (depth 100+) ---
-
     RandomEvent(
         id="olympian_boon",
         name="Olympian Boon",
@@ -1910,11 +1889,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="uncommon",
+        complexity="boon",
+        rarity="uncommon",
         boon_options=(
             TempBuff("zeus_fury", "Zeus's Fury", 3, {"advance_bonus": 6}),
             TempBuff("athena_shield", "Athena's Shield", 2, {"cave_in_reduction": 1.0}),
-            TempBuff("hermes_speed", "Hermes's Speed", 2, {"cooldown_reduction": 0.50}),
+            TempBuff("hermes_speed", "Hermes's Speed", 2, {"cooldown_reduction": 0.5}),
         ),
     ),
     RandomEvent(
@@ -1928,22 +1908,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Pay the toll",
-            success=EventOutcome("Coins clink into skeletal fingers. The boat glides forward.", 3, -12, False),
+            success=EventOutcome("Coins clink into skeletal fingers. The boat glides forward.", 2, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Negotiate",
-            success=EventOutcome("The ferryman tilts his head. 'Amusing.' He lets you ride free.", 3, 0, False),
-            failure=EventOutcome("'No.' The boat drifts away. You wasted your time.", 0, -6, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Steal the oar",
-            success=EventOutcome("You yank the oar and paddle furiously. Charon watches, impressed.", 5, 4, False),
-            failure=EventOutcome("Charon capsizes the boat. You sink. You surface somewhere worse.", -9, 0, True),
-            success_chance=0.15,
+            "Haggle the ferryman's toll",
+            success=EventOutcome("The ferryman tilts his head. 'Amusing.' He lets you ride free.", 2, 32, False),
+            failure=EventOutcome("'No.' The boat drifts away. You wasted your time.", 0, -17, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Steal Charon's oar",
+            success=EventOutcome("You yank the oar and paddle furiously. Charon watches, impressed.", 3, 51, False),
+            failure=EventOutcome("Charon capsizes the boat. You sink. You surface somewhere worse.", -3, -26, False),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="sisyphus_boulder",
@@ -1956,14 +1936,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Help push",
-            success=EventOutcome("Together, you move it an inch. He smiles. 'That's enough.' He tips you.", 1, 2, False),
+            success=EventOutcome("Together, you move it an inch. He smiles. 'That's enough.' He tips you.", 1, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Loot his camp",
-            success=EventOutcome("While he pushes, you find his stash. He won't notice for eternity.", 0, 8, False),
-            failure=EventOutcome("The boulder rolls back — onto your foot.", -4, 0, False),
-            success_chance=0.55,
+            "Loot the camp under the rolling boulder",
+            success=EventOutcome("While he pushes, you find his stash. He won't notice for eternity.", 0, 23, False),
+            failure=EventOutcome("The boulder rolls back — onto your foot.", 0, -13, False),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -1977,26 +1957,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Leave it sealed",
-            success=EventOutcome("Some doors are best left closed.", 0, 0, False),
+            success=EventOutcome("Some doors are best left closed.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Open carefully",
-            success=EventOutcome("The chains fall. Gold spills through the gap.", 0, 14, False),
-            failure=EventOutcome("Something reaches through the gap. It pulls you in.", -8, 0, True),
-            success_chance=0.30,
-        ),
-        desperate_option=EventChoice(
-            "Shatter the chains",
-            success=EventOutcome("The gate flies open. An arena of riches, and you've already won.", 4, 24, False),
-            failure=EventOutcome("The gate opens both ways. What was inside is now outside. With you.", -12, 0, True),
-            success_chance=0.12,
+            success=EventOutcome("The chains fall. Gold spills through the gap.", 0, 42, False),
+            failure=EventOutcome("Something reaches through the gap. It pulls you in.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Shatter the chains",
+            success=EventOutcome("The gate flies open. An arena of riches, and you've already won.", 3, 67, False),
+            failure=EventOutcome("The gate opens both ways. What was inside is now outside. With you.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
-
-    # --- Dota 2-themed — All depths ---
-
     RandomEvent(
         id="riki_ambush",
         name="Riki's Ambush",
@@ -2008,22 +1985,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Drop coins and run",
-            success=EventOutcome("He takes the coins and vanishes. At least you're alive.", 0, -6, False),
+            success=EventOutcome("He takes the coins and vanishes. At least you're alive.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Throw dust to reveal him",
-            success=EventOutcome("Dust of Appearance! Riki panics. He drops his stash.", 0, 8, False),
-            failure=EventOutcome("He blinks behind you. Classic Riki.", -6, 0, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Grab the blade barehanded",
-            success=EventOutcome("You catch the blade and twist. Riki squeaks and flees, leaving everything.", 2, 14, False),
-            failure=EventOutcome("Blades are sharp. This is not a revelation. It is a reminder.", -9, 0, False),
-            success_chance=0.15,
+            "Throw dust and call his bluff",
+            success=EventOutcome("Dust of Appearance! Riki panics. He drops his stash.", 0, 14, False),
+            failure=EventOutcome("He blinks behind you. Classic Riki.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Grab the blade barehanded",
+            success=EventOutcome("You catch the blade and twist. Riki squeaks and flees, leaving everything.", 2, 22, False),
+            failure=EventOutcome("Blades are sharp. This is not a revelation. It is a reminder.", -3, -11, False),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="bounty_rune",
@@ -2036,14 +2013,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Grab it",
-            success=EventOutcome("Gold flows into your pockets. Easy money.", 0, 6, False),
+            success=EventOutcome("Gold flows into your pockets. Easy money.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Wait for it to multiply",
-            success=EventOutcome("It splits into three! Triple bounty!", 0, 16, False),
-            failure=EventOutcome("It fizzles. You get the scraps.", 0, 2, False),
-            success_chance=0.45,
+            "Gamble the rune will multiply",
+            success=EventOutcome("It splits into three! Triple bounty!", 0, 10, False),
+            failure=EventOutcome("It fizzles. You get the scraps.", 0, -6, False),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -2057,23 +2034,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Decline the trial",
-            success=EventOutcome("The wizard shrugs. 'Your loss.' He vanishes in a puff of condescension.", 0, 0, False),
+            success=EventOutcome("The wizard shrugs. 'Your loss.' He vanishes in a puff of condescension.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Accept the trial",
-            success=EventOutcome("You survive the gauntlet. He slow-claps. 'Not bad.'", 3, 12, False),
-            failure=EventOutcome("The trial overwhelms you. The wizard yawns.", -6, 0, False),
-            success_chance=0.35,
-        ),
-        desperate_option=EventChoice(
-            "Demand the scepter",
-            success=EventOutcome("'Bold.' He hands it over. Power surges through you.", 5, 20, False),
-            failure=EventOutcome("'Greedy.' He snaps his fingers. You are elsewhere.", -12, 0, True),
-            success_chance=0.10,
+            success=EventOutcome("You survive the gauntlet. He slow-claps. 'Not bad.'", 2, 19, False),
+            failure=EventOutcome("The trial overwhelms you. The wizard yawns.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
         buff_on_success=TempBuff("aghanim_blessing", "Arcane Blessing", 3, {"advance_bonus": 5, "jc_bonus": 5}),
+        desperate_option=EventChoice(
+            "Demand the scepter",
+            success=EventOutcome("'Bold.' He hands it over. Power surges through you.", 3, 30, False),
+            failure=EventOutcome("'Greedy.' He snaps his fingers. You are elsewhere.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="tormentor_encounter",
@@ -2086,22 +2063,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=75, max_depth=None,
         safe_option=EventChoice(
             "Take the long way around",
-            success=EventOutcome("You give it a wide berth. It watches you leave.", -3, 0, False),
+            success=EventOutcome("You give it a wide berth. It watches you leave.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Attack while dormant",
-            success=EventOutcome("Critical hit! The Tormentor crumbles. Its core is priceless.", 3, 16, False),
-            failure=EventOutcome("It wakes up. Lightning everywhere. You regret this.", -9, 0, True),
-            success_chance=0.30,
-        ),
-        desperate_option=EventChoice(
-            "Channel everything",
-            success=EventOutcome("You pour everything into one strike. The Tormentor EXPLODES.", 5, 30, False),
-            failure=EventOutcome("It absorbs your energy and uses it against you. Badly.", -15, 0, True),
-            success_chance=0.12,
+            success=EventOutcome("Critical hit! The Tormentor crumbles. Its core is priceless.", 2, 42, False),
+            failure=EventOutcome("It wakes up. Lightning everywhere. You regret this.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Channel everything",
+            success=EventOutcome("You pour everything into one strike. The Tormentor EXPLODES.", 3, 67, False),
+            failure=EventOutcome("It absorbs your energy and uses it against you. Badly.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="neutral_item_drop",
@@ -2122,16 +2099,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="uncommon",
+        complexity="boon",
+        rarity="uncommon",
         boon_options=(
             TempBuff("trusty_shovel", "Trusty Shovel", 3, {"advance_bonus": 4}),
             TempBuff("philosophers_stone", "Philosopher's Stone", 3, {"jc_bonus": 5}),
             TempBuff("spark_of_courage", "Spark of Courage", 3, {"cave_in_reduction": 0.2, "advance_bonus": 3}),
         ),
     ),
-
-    # --- BGO Chaos — All depths ---
-
     RandomEvent(
         id="gambling_den",
         name="The Gambling Den",
@@ -2143,22 +2118,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Watch a round",
-            success=EventOutcome("You observe. One goblin slips you a coin for the audience.", 0, 2, False),
+            success=EventOutcome("You observe. One goblin slips you a coin for the audience.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Play a hand",
-            success=EventOutcome("Full house! The goblins pay up, grudgingly.", 0, 10, False),
-            failure=EventOutcome("The goblins cheat. Of course they cheat.", 0, -12, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Go all in",
-            success=EventOutcome("You stare down three goblins and win. They flip the table.", 0, 30, False),
-            failure=EventOutcome("You lose everything. A goblin pats your shoulder. 'Better luck next time.'", 0, -24, False),
-            success_chance=0.15,
+            "Play a hand against the goblins",
+            success=EventOutcome("Full house! The goblins pay up, grudgingly.", 0, 14, False),
+            failure=EventOutcome("The goblins cheat. Of course they cheat.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Go all in",
+            success=EventOutcome("You stare down three goblins and win. They flip the table.", 0, 22, False),
+            failure=EventOutcome("You lose everything. A goblin pats your shoulder. 'Better luck next time.'", -3, -11, False),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="item_goblin",
@@ -2171,22 +2146,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Pick up dropped coins",
-            success=EventOutcome("Free money on the ground. No complaints.", 0, 4, False),
+            success=EventOutcome("Free money on the ground. No complaints.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Chase it",
-            success=EventOutcome("You corner it! The goblin surrenders the sack.", 0, 10, False),
-            failure=EventOutcome("It's faster than it looks. You trip on a stalagmite.", -3, 0, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Flying tackle",
-            success=EventOutcome("WHAM! You and the goblin slide across the cave floor. The sack is yours!", 0, 16, False),
-            failure=EventOutcome("You miss. You slide into a wall. The goblin laughs.", -4, -6, False),
-            success_chance=0.20,
+            "Chase down the loot goblin",
+            success=EventOutcome("You corner it! The goblin surrenders the sack.", 0, 14, False),
+            failure=EventOutcome("It's faster than it looks. You trip on a stalagmite.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Flying tackle",
+            success=EventOutcome("WHAM! You and the goblin slide across the cave floor. The sack is yours!", 0, 22, False),
+            failure=EventOutcome("You miss. You slide into a wall. The goblin laughs.", -3, -11, False),
+            success_chance=0.40,
+        ),
     ),
     RandomEvent(
         id="mystery_lever",
@@ -2199,15 +2174,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Pull it cautiously",
-            success=EventOutcome("A hidden panel opens. Coins spill out. Crayon was right!", 0, 6, False),
-            failure=EventOutcome("A bucket of water falls on your head. A sign drops: 'GOTCHA'. One coin as consolation.", 0, -3, False),
-            success_chance=0.80,
+            success=EventOutcome("A hidden panel opens. Coins spill out. Crayon was right!", 0, 3, False),
+            failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Yank it hard",
-            success=EventOutcome("The wall rotates! A secret passage opens, blasting you forward!", 6, 0, False),
-            failure=EventOutcome("The lever breaks. The ceiling groans. Run.", -8, 0, False),
-            success_chance=0.40,
+            success=EventOutcome("The wall rotates! A secret passage opens, blasting you forward!", 2, 10, False),
+            failure=EventOutcome("The lever breaks. The ceiling groans. Run.", 0, 0, True),
+            success_chance=0.62,
         ),
     ),
     RandomEvent(
@@ -2221,16 +2195,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Report it to authorities",
-            success=EventOutcome("Bureaucracy wins. The shapeshifter is fined. You get a small settlement.", 0, 2, False),
+            success=EventOutcome("Bureaucracy wins. The shapeshifter is fined. You get a small settlement.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Confront the imposter",
-            success=EventOutcome("'Which one is the real one?' You prove it. The crowd sides with you.", 0, 8, False),
-            failure=EventOutcome("The crowd picks the other one. You are escorted away from your own tunnel.", 0, -9, False),
-            success_chance=0.50,
+            "Stake your name on the crowd",
+            success=EventOutcome("'Which one is the real one?' You prove it. The crowd sides with you.", 0, 14, False),
+            failure=EventOutcome("The crowd picks the other one. You are escorted away from your own tunnel.", 0, -8, False),
+            success_chance=0.62,
         ),
-        rarity="uncommon", social=True,
+        rarity="uncommon",
+        social=True,
     ),
     RandomEvent(
         id="neow_blessing",
@@ -2251,16 +2226,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="legendary",
+        complexity="boon",
+        rarity="legendary",
         boon_options=(
             TempBuff("blessing_depth", "Blessing of Depth", 5, {"advance_bonus": 5}),
             TempBuff("blessing_fortune", "Blessing of Fortune", 5, {"jc_bonus": 11}),
             TempBuff("blessing_iron", "Blessing of Iron", 5, {"cave_in_reduction": 0.4}),
         ),
     ),
-    # ---- Negative-EV "trap" events (rare). Safe option is always weakly
-    # positive so declining is rational; the risky option averages below zero
-    # to punish FOMO plays and drain jopacoin out of circulation. -----------
     RandomEvent(
         id="fools_vein",
         name="Fool's Vein",
@@ -2272,14 +2245,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Pocket a sample and move on",
-            success=EventOutcome("A steady hand keeps a steady coin. You take the small find.", 0, 2, False),
+            success=EventOutcome("A steady hand keeps a steady coin. You take the small find.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Pry the whole vein loose",
-            success=EventOutcome("The vein is real! A jackpot rattles into your pack.", 0, 24, False),
-            failure=EventOutcome("Pyrite. Worthless. Dust rains down and so do a few of your coins.", 0, -12, False),
-            success_chance=0.20,
+            "Wager it isn't fool's gold",
+            success=EventOutcome("The vein is real! A jackpot rattles into your pack.", 0, 19, False),
+            failure=EventOutcome("Pyrite. Worthless. Dust rains down and so do a few of your coins.", 0, -10, False),
+            success_chance=0.56,
         ),
         rarity="rare",
     ),
@@ -2294,14 +2267,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Ignore the song and keep digging",
-            success=EventOutcome("The hum fades as you pass. Nothing lost, nothing gained.", 0, 0, False),
+            success=EventOutcome("The hum fades as you pass. Nothing lost, nothing gained.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Follow the singing",
-            success=EventOutcome("A small hoard glimmers in the hollow. You walk out richer.", 0, 8, False),
-            failure=EventOutcome("The song ends and so does your luck. Coins slip from your belt.", 0, -18, False),
-            success_chance=0.55,
+            "Follow the singing into the hollow",
+            success=EventOutcome("A small hoard glimmers in the hollow. You walk out richer.", 0, 42, False),
+            failure=EventOutcome("The song ends and so does your luck. Coins slip from your belt.", 0, 0, False, curse=TempCurse("hex_sirens_hollow", "Siren-Debt", 4, {"luminosity_drain": 18})),
+            success_chance=0.56,
         ),
         rarity="rare",
     ),
@@ -2316,14 +2289,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=None,
         safe_option=EventChoice(
             "Bow respectfully and move on",
-            success=EventOutcome("A small offering left in thanks. The shrine accepts your respect.", 0, 2, False),
+            success=EventOutcome("A small offering left in thanks. The shrine accepts your respect.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Grab the offerings",
-            success=EventOutcome("The shrine lets you keep them. This time.", 0, 20, False),
-            failure=EventOutcome("The hex lands. You feel lighter — mostly in the coin pouch.", 0, -24, False),
-            success_chance=0.25,
+            "Take the offerings off the cursed altar",
+            success=EventOutcome("The shrine lets you keep them. This time.", 0, 42, False),
+            failure=EventOutcome("The hex lands. You feel lighter — mostly in the coin pouch.", 0, 0, False, curse=TempCurse("hex_hex_cursed_shrine", "Shrine-Hex", 4, {"jc_bonus": -5})),
+            success_chance=0.56,
         ),
         rarity="rare",
     ),
@@ -2338,14 +2311,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=None,
         safe_option=EventChoice(
             "Pay the toll quietly",
-            success=EventOutcome("A few coins change hands. Nothing more.", 0, 0, False),
+            success=EventOutcome("A few coins change hands. Nothing more.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Play the toll",
-            success=EventOutcome("The skeleton shrugs and waves you through. You keep what you have.", 0, 0, False),
-            failure=EventOutcome("Bad game, bad luck. The toll collects itself.", 0, -15, False),
-            success_chance=0.50,
+            "Play the trickster's toll",
+            success=EventOutcome("The skeleton shrugs and waves you through. You keep what you have.", 0, 70, False),
+            failure=EventOutcome("Bad game, bad luck. The toll collects itself.", 0, -38, False),
+            success_chance=0.56,
         ),
         rarity="rare",
     ),
@@ -2360,20 +2333,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Nurse a drink and leave",
-            success=EventOutcome("You drink. You leave. You are none the poorer.", 0, 0, False),
+            success=EventOutcome("You drink. You leave. You are none the poorer.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Sit at the table",
-            success=EventOutcome("The dice smile on you. A tidy pile slides your way.", 0, 12, False),
-            failure=EventOutcome("The house always wins. Even down here.", 0, -15, False),
-            success_chance=0.40,
+            "Sit at the gambler's table",
+            success=EventOutcome("The dice smile on you. A tidy pile slides your way.", 0, 70, False),
+            failure=EventOutcome("The house always wins. Even down here.", 0, -38, False),
+            success_chance=0.56,
         ),
         rarity="rare",
     ),
-    # ---- Splash events (legendary). When the configured trigger outcome
-    # fires, a SplashConfig debits a pool of other players in the guild.
-    # Coin is burned, not transferred to the digger. ------------------------
     RandomEvent(
         id="lumber_collapse",
         name="Lumber Collapse",
@@ -2385,17 +2355,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Shore up the beam",
-            success=EventOutcome("You steady the beam. The mine breathes again.", 0, 0, False),
+            success=EventOutcome("You steady the beam. The mine breathes again.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Gamble that it holds",
-            success=EventOutcome("The beam creaks, settles, holds. You pocket a small find.", 0, 6, False),
-            failure=EventOutcome("The collapse cascades through the network. Two other diggers' stashes get buried with it.", 0, -9, True),
-            success_chance=0.40,
+            success=EventOutcome("The beam creaks, settles, holds. You pocket a small find.", 0, 26, False),
+            failure=EventOutcome("The collapse cascades through the network. Two other diggers' stashes get buried with it.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
-        splash=SplashConfig(strategy="random_active", victim_count=2, penalty_jc=5, trigger="failure"),
+        splash=SplashConfig(strategy="random_active", victim_count=2, penalty_jc=5, trigger="failure", mode="burn"),
     ),
     RandomEvent(
         id="wealth_siphon",
@@ -2408,17 +2378,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=None,
         safe_option=EventChoice(
             "Leave it alone",
-            success=EventOutcome("You pass without engaging the siphon.", 0, 0, False),
+            success=EventOutcome("You pass without engaging the siphon.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Activate the siphon",
-            success=EventOutcome("The siphon pulls from the richest pockets in the guild and dumps a cut into yours.", 0, 16, False),
-            failure=EventOutcome("The siphon sputters and coughs. Nothing happens.", 0, 0, False),
+            "Trigger the wealth siphon",
+            success=EventOutcome("The siphon pulls from the richest pockets in the guild and dumps a cut into yours.", 0, 59, False),
+            failure=EventOutcome("The siphon sputters and coughs. Nothing happens.", 0, -32, False),
             success_chance=0.50,
         ),
         rarity="legendary",
-        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=10, trigger="success"),
+        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=10, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="tunnel_network_breach",
@@ -2431,27 +2401,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Back off and shore it up",
-            success=EventOutcome("You seal the breach. The other diggers never notice.", 0, 0, False),
+            success=EventOutcome("You seal the breach. The other diggers never notice.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Punch through",
-            success=EventOutcome("You crash in and come out with a pile of whatever was lying around.", 2, 10, False),
-            failure=EventOutcome("The collapse spreads down the network. Three other diggers lose coin to the cave-in.", 0, -6, True),
-            success_chance=0.35,
+            success=EventOutcome("You crash in and come out with a pile of whatever was lying around.", 2, 98, False),
+            failure=EventOutcome("The collapse spreads down the network. Three other diggers lose coin to the cave-in.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
-        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=8, trigger="failure"),
+        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=8, trigger="failure", mode="burn"),
     ),
-
-    # ---- Delve-themed roguelike expansion (PoE Delve / WoW Delves / Dota 2).
-    # Bigger absolute swings than the baseline pool; risky/desperate options
-    # land in the ±8-15 / ±20-40 JC band. Five of these carry SplashConfigs
-    # (four burn, one grant).
-    # -------------------------------------------------------------------------
-
-    # --- Path of Exile Delve ---
-
     RandomEvent(
         id="sulphite_drought",
         name="Sulphite Drought",
@@ -2463,24 +2424,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=200,
         safe_option=EventChoice(
             "Turn back to refuel",
-            success=EventOutcome("You retreat to the last checkpoint. No coin, but you're alive.", -2, 0, False),
+            success=EventOutcome("You retreat to the last checkpoint. No coin, but you're alive.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Scavenge the fractured walls",
-            success=EventOutcome("Residual sulphite crystals line the cracks — you bottle what you can.", 0, 24, False),
-            failure=EventOutcome("The fracture widens. Rocks and dust; no fuel.", -4, -30, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Bleed azurite into the crawler",
-            success=EventOutcome("The crawler roars back to life on azurite fumes. Deeper you go.", 2, 60, False),
-            failure=EventOutcome("The crawler chokes on the impurity. You're in the dark, down a lot of coin.", -6, -84, False),
-            success_chance=0.25,
+            success=EventOutcome("Residual sulphite crystals line the cracks — you bottle what you can.", 0, 70, False),
+            failure=EventOutcome("The fracture widens onto blackness. You lose the trail of fuel and time.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Bleed azurite into the crawler",
+            success=EventOutcome("The crawler roars back to life on azurite fumes. Deeper you go.", 2, 112, False),
+            failure=EventOutcome("The crawler chokes on the impurity. You're in the dark, down a lot of coin.", -4, 0, False, streak_loss=8),
+            success_chance=0.40,
+        ),
     ),
-
     RandomEvent(
         id="auls_bullet_hell",
         name="Throne of Aul",
@@ -2492,24 +2452,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=275,
         safe_option=EventChoice(
             "Flee the throne room",
-            success=EventOutcome("You back out the way you came. The ice follows you a little too far.", -3, 0, False),
+            success=EventOutcome("You back out the way you came. The ice follows you a little too far.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Weave between the spear volleys",
-            success=EventOutcome("You thread the needle. A Hollow Fossil lies at the throne's base.", 0, 28, False),
-            failure=EventOutcome("A spear catches your shoulder. You leave a trail of coin on the way out.", -9, -45, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Charge the throne",
-            success=EventOutcome("Impossible, and yet — you strike a chip from the throne itself. The hoard is yours.", 3, 80, False),
-            failure=EventOutcome("The spears rotate through you. The throne is unchanged.", -8, -105, True),
-            success_chance=0.22,
+            success=EventOutcome("You thread the needle. A Hollow Fossil lies at the throne's base.", 0, 156, False),
+            failure=EventOutcome("A spear catches your shoulder. You leave a trail of coin on the way out.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
+        desperate_option=EventChoice(
+            "Charge the throne",
+            success=EventOutcome("Impossible, and yet — you strike a chip from the throne itself. The hoard is yours.", 3, 250, False),
+            failure=EventOutcome("The spears rotate through you. The throne is unchanged.", -5, 0, True),
+            success_chance=0.40,
+        ),
     ),
-
     RandomEvent(
         id="kurgal_summons",
         name="Kurgal's Circle",
@@ -2521,25 +2480,24 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=200,
         safe_option=EventChoice(
             "Evade the summoning circle",
-            success=EventOutcome("You hug the wall and slip past. Kurgal does not turn.", -2, 0, False),
+            success=EventOutcome("You hug the wall and slip past. Kurgal does not turn.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Fight the wraith waves",
-            success=EventOutcome("You shatter the summoning. Kurgal retreats into the obsidian.", 0, 24, False),
-            failure=EventOutcome("A wraith slips past you and out into the network. You hear distant screaming.", -4, -36, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Light the Abyss beacon",
-            success=EventOutcome("The beacon binds Kurgal in his own circle. His hoard is yours.", 2, 56, False),
-            failure=EventOutcome("The beacon detonates. Kurgal's wraiths scatter across the whole network.", -6, -90, False),
-            success_chance=0.22,
+            "Fight into the summoning circle",
+            success=EventOutcome("You shatter the summoning. Kurgal retreats into the obsidian.", 0, 98, False),
+            failure=EventOutcome("A wraith slips past you and out into the network. You hear distant screaming.", 0, 0, False, curse=TempCurse("hex_kurgal_summons", "Blackblooded Mark", 4, {"advance_bonus": -4})),
+            success_chance=0.50,
         ),
         rarity="legendary",
-        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=10, trigger="failure"),
+        desperate_option=EventChoice(
+            "Light the Abyss beacon",
+            success=EventOutcome("The beacon binds Kurgal in his own circle. His hoard is yours.", 2, 157, False),
+            failure=EventOutcome("The beacon detonates. Kurgal's wraiths scatter across the whole network.", -5, 0, False, curse=TempCurse("hex_kurgal_summons", "Blackblooded Mark", 4, {"advance_bonus": -6})),
+            success_chance=0.40,
+        ),
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=10, trigger="failure", mode="burn"),
     ),
-
     RandomEvent(
         id="flare_starvation",
         name="Flare Starvation",
@@ -2551,25 +2509,25 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Burn your own spare",
-            success=EventOutcome("The flare catches. The Stalkers recede for now.", 0, 0, False),
+            success=EventOutcome("The flare catches. The Stalkers recede for now.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Push through the dim",
-            success=EventOutcome("You make the next checkpoint before the light dies. A small score.", 2, 20, False),
-            failure=EventOutcome("A Stalker touches you. Your flare goes out early; your coin with it.", -6, -30, False),
-            success_chance=0.55,
+            success=EventOutcome("You make the next checkpoint before the light dies. A small score.", 2, 26, False),
+            failure=EventOutcome("A Stalker brushes you and the flare dies. The dark erases your bearings.", 0, 0, False, streak_loss=8),
+            success_chance=0.50,
         ),
+        rarity="legendary",
+        requires_dark=True,
         desperate_option=EventChoice(
             "Steal a nearby digger's flare",
-            success=EventOutcome("You cross a tunnel wall and lift a flare from another digger's pack. Their problem now.", 0, 32, False),
-            failure=EventOutcome("The flare snaps in your hand. The Stalkers close in.", -4, -45, False),
-            success_chance=0.30,
+            success=EventOutcome("You cross a tunnel wall and lift a flare from another digger's pack. Their problem now.", 0, 42, False),
+            failure=EventOutcome("The flare snaps in your hand. The Stalkers close in.", -5, 0, False, streak_loss=12),
+            success_chance=0.40,
         ),
-        requires_dark=True, rarity="legendary",
-        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=8, trigger="success"),
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=8, trigger="success", mode="burn"),
     ),
-
     RandomEvent(
         id="resonator_socket",
         name="Resonator Gamble",
@@ -2581,26 +2539,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=275,
         safe_option=EventChoice(
             "Take the Prismatic and leave",
-            success=EventOutcome("A modest crafting bonus, banked. You move on.", 0, 4, False),
+            success=EventOutcome("A modest crafting bonus, banked. You move on.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Socket the Aberrant",
-            success=EventOutcome("Chaotic resonance, but the output is real coin.", 0, 26, False),
-            failure=EventOutcome("The Aberrant shatters. Your pack is lighter by a fossil.", 0, -30, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Stack Faceted and Hollow together",
-            success=EventOutcome("The resonator sings. Gem-tag currency cascades out of the socket.", 2, 70, False),
-            failure=EventOutcome("A Hollow Fossil does not forgive bad company. The resonator detonates.", -8, -96, True),
-            success_chance=0.22,
+            success=EventOutcome("Chaotic resonance, but the output is real coin.", 0, 112, False),
+            failure=EventOutcome("The Aberrant shatters. Your pack is lighter by a fossil.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Stack Faceted and Hollow together",
+            success=EventOutcome("The resonator sings. Gem-tag currency cascades out of the socket.", 2, 179, False),
+            failure=EventOutcome("A Hollow Fossil does not forgive bad company. The resonator detonates.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
-
-    # --- WoW Delves ---
-
     RandomEvent(
         id="branns_potion",
         name="Brann's Gambit",
@@ -2612,29 +2567,25 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Dodge the throw",
-            success=EventOutcome("The vial shatters behind you. You scrape a coin or two from the residue.", -2, 4, False),
+            success=EventOutcome("The vial shatters behind you. You scrape a coin or two from the residue.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Catch it",
-            success=EventOutcome("Elixir of Undermining. Brann beams like it was the plan all along.", 0, 24, False),
-            failure=EventOutcome("You caught the wrong end. Acid gets on the coin pouch.", 0, -30, False),
-            success_chance=0.55,
+            success=EventOutcome("Elixir of Undermining. Brann beams like it was the plan all along.", 0, 26, False),
+            failure=EventOutcome("You caught the wrong end. Acid gets on the coin pouch.", 0, -14, False),
+            success_chance=0.50,
         ),
+        rarity="legendary",
+        social=True,
         desperate_option=EventChoice(
             "Redirect the throw toward the wealthiest digger in the guild",
-            success=EventOutcome("Brann approves. Someone wealthy, somewhere, is suddenly less wealthy.", 0, 36, False),
-            failure=EventOutcome("The vial boomerangs. The potion is inside you now.", -3, -42, False),
-            success_chance=0.30,
+            success=EventOutcome("Brann approves. Someone wealthy, somewhere, is suddenly less wealthy.", 0, 42, False),
+            failure=EventOutcome("The vial boomerangs. The potion is inside you now.", -5, -21, False),
+            success_chance=0.40,
         ),
-        rarity="legendary", social=True,
-        # Splash fires on ANY risky/desperate success, not just the desperate
-        # "redirect" path. Flavor-only leak: players picking risky and
-        # succeeding also tax the richest 3, even though the narrative
-        # attributes the redirect to the desperate choice. Accepted as-is.
-        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=12, trigger="success"),
+        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=12, trigger="success", mode="burn"),
     ),
-
     RandomEvent(
         id="zekvir_challenge",
         name="Zekvir's Lair",
@@ -2646,24 +2597,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=201, max_depth=275,
         safe_option=EventChoice(
             "Skip the arena entirely",
-            success=EventOutcome("You give Zekvir a wide berth. He does not pursue.", -3, 0, False),
+            success=EventOutcome("You give Zekvir a wide berth. He does not pursue.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Enter at the ? tier",
-            success=EventOutcome("You survive the Claw Smashes. The Web Terrors leave a chest behind.", 0, 30, False),
-            failure=EventOutcome("Angler's Web pulls you in. You escape with bruises and a shorter coin pouch.", -6, -45, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Take the ?? tier",
-            success=EventOutcome("Nobody has killed ?? tier. You just did. The loot is unreal.", 3, 90, False),
-            failure=EventOutcome("Zekvir devours you whole. Your pack reappears empty at the tunnel mouth.", -9, -120, True),
-            success_chance=0.20,
+            success=EventOutcome("You survive the Claw Smashes. The Web Terrors leave a chest behind.", 0, 156, False),
+            failure=EventOutcome("Angler's Web pulls you in. You escape with bruises and a shorter coin pouch.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
+        desperate_option=EventChoice(
+            "Take the ?? tier",
+            success=EventOutcome("Nobody has killed ?? tier. You just did. The loot is unreal.", 3, 250, False),
+            failure=EventOutcome("Zekvir devours you whole. Your pack reappears empty at the tunnel mouth.", -5, 0, True),
+            success_chance=0.40,
+        ),
     ),
-
     RandomEvent(
         id="enchanted_candle",
         name="Kriegval's Candle",
@@ -2675,24 +2625,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=200,
         safe_option=EventChoice(
             "Walk slowly and shield the candle",
-            success=EventOutcome("You conserve the flame. Steady coin at a steady pace.", 1, 4, False),
+            success=EventOutcome("You conserve the flame. Steady coin at a steady pace.", 1, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Jog the room",
-            success=EventOutcome("The candle stutters but holds. You clear the room with a handful of coin.", 2, 24, False),
-            failure=EventOutcome("Smothering Shadows catch you mid-stride. The candle dies. You limp out.", -4, -36, False),
-            success_chance=0.55,
-        ),
-        desperate_option=EventChoice(
-            "Sprint the entire gauntlet",
-            success=EventOutcome("Candle out at the exit — a second too late for the Shadows. Huge haul.", 4, 60, False),
-            failure=EventOutcome("Candle out mid-room. The ceiling follows it.", -9, -84, True),
-            success_chance=0.25,
+            success=EventOutcome("The candle stutters but holds. You clear the room with a handful of coin.", 2, 70, False),
+            failure=EventOutcome("The Smothering Shadows take the flame. You lose the room in the dark.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Sprint the entire gauntlet",
+            success=EventOutcome("Candle out at the exit — a second too late for the Shadows. Huge haul.", 3, 112, False),
+            failure=EventOutcome("Candle out mid-room. The ceiling follows it.", -4, 0, False, streak_loss=8),
+            success_chance=0.40,
+        ),
     ),
-
     RandomEvent(
         id="sporbit_cavern",
         name="Mycomancer Cavern",
@@ -2704,24 +2653,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=200,
         safe_option=EventChoice(
             "Wait for the patrol pattern",
-            success=EventOutcome("You slip through on the timing gap. No coin, but no Sporbits either.", 1, 0, False),
+            success=EventOutcome("You slip through on the timing gap. No coin, but no Sporbits either.", 1, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Dash between Sporbits",
-            success=EventOutcome("Threaded it. A fungal cache waits in the far alcove.", 2, 22, False),
-            failure=EventOutcome("A Sporbit's AoE catches you. Spores in the pack, coin on the floor.", -4, -33, False),
-            success_chance=0.50,
-        ),
-        desperate_option=EventChoice(
-            "Trigger a chain explosion",
-            success=EventOutcome("Every Sporbit in the room pops in sequence. The aftermath is all yours.", 3, 64, False),
-            failure=EventOutcome("The chain misfires. You are at the epicentre.", -8, -90, True),
-            success_chance=0.22,
+            success=EventOutcome("Threaded it. A fungal cache waits in the far alcove.", 2, 70, False),
+            failure=EventOutcome("A Sporbit's AoE catches you. Spores in the pack, coin on the floor.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Trigger a chain explosion",
+            success=EventOutcome("Every Sporbit in the room pops in sequence. The aftermath is all yours.", 3, 112, False),
+            failure=EventOutcome("The chain misfires. You are at the epicentre.", -4, 0, True),
+            success_chance=0.40,
+        ),
     ),
-
     RandomEvent(
         id="coffer_key_gamble",
         name="Restored Coffer",
@@ -2733,26 +2681,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=275,
         safe_option=EventChoice(
             "Bank the key for a deeper run",
-            success=EventOutcome("You pocket the key. No coin now, but it's still yours.", 0, 0, False),
+            success=EventOutcome("You pocket the key. No coin now, but it's still yours.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Unlock the Bountiful Coffer here",
-            success=EventOutcome("A tidy Restored Coffer pull. Cosmetics flagged, coin counted.", 0, 28, False),
-            failure=EventOutcome("The coffer was trapped — a bad pull on a bad key.", 0, -24, False),
-            success_chance=0.60,
-        ),
-        desperate_option=EventChoice(
-            "Gamble the key at the Gilded Stash",
-            success=EventOutcome("Seven Myth Dawncrests spill into your pack. The week is made.", 0, 84, False),
-            failure=EventOutcome("The stash was picked clean. Your key is ash.", -3, -105, False),
-            success_chance=0.20,
+            success=EventOutcome("A tidy Restored Coffer pull. Cosmetics flagged, coin counted.", 0, 112, False),
+            failure=EventOutcome("The coffer was trapped — a bad pull on a bad key.", 0, -60, False),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Gamble the key at the Gilded Stash",
+            success=EventOutcome("Seven Myth Dawncrests spill into your pack. The week is made.", 0, 179, False),
+            failure=EventOutcome("The stash was picked clean. Your key is ash.", -4, -91, False),
+            success_chance=0.40,
+        ),
     ),
-
-    # --- Dota 2 ---
-
     RandomEvent(
         id="chain_frost_cascade",
         name="Chain Frost",
@@ -2764,19 +2709,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=275,
         safe_option=EventChoice(
             "Shield against the cold",
-            success=EventOutcome("You weather the pass. A small expense for a clean tunnel.", 0, -15, False),
+            success=EventOutcome("You weather the pass. A small expense for a clean tunnel.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Cast Chain Frost and let it bounce",
-            success=EventOutcome("The frost lands ten times and pays in crystallized coin.", 0, 26, False),
-            failure=EventOutcome("The frost bounces back. Your pack is iced shut.", -3, -36, False),
+            success=EventOutcome("The frost lands ten times and pays in crystallized coin.", 0, 156, False),
+            failure=EventOutcome("The frost bounces back. Your pack is iced shut.", 0, 0, True),
             success_chance=0.50,
         ),
         rarity="legendary",
-        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=8, trigger="always"),
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=8, trigger="always", mode="burn"),
     ),
-
     RandomEvent(
         id="divine_rapier_drop",
         name="Divine Rapier",
@@ -2788,24 +2732,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=275,
         safe_option=EventChoice(
             "Leave the Rapier",
-            success=EventOutcome("Scraps of creep carcass; a small coin in the ash.", 0, 6, False),
+            success=EventOutcome("Scraps of creep carcass; a small coin in the ash.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Pick it up and sprint to the next checkpoint",
-            success=EventOutcome("You clear the tunnel without incident. Rapier sold, pockets heavy.", 2, 70, False),
-            failure=EventOutcome("The Rapier drops at the cave-in. You don't.", -9, -75, True),
+            success=EventOutcome("You clear the tunnel without incident. Rapier sold, pockets heavy.", 2, 156, False),
+            failure=EventOutcome("The Rapier drops at the cave-in. You don't.", 0, 0, True),
             success_chance=0.50,
         ),
+        rarity="legendary",
         desperate_option=EventChoice(
             "Carry it deeper",
-            success=EventOutcome("Two checkpoints later the Rapier is still yours. Nobody can believe it.", 4, 110, False),
-            failure=EventOutcome("A cave-in. A Rapier drop. A very rich stranger a tunnel over.", -12, -150, True),
-            success_chance=0.22,
+            success=EventOutcome("Two checkpoints later the Rapier is still yours. Nobody can believe it.", 3, 250, False),
+            failure=EventOutcome("A cave-in. A Rapier drop. A very rich stranger a tunnel over.", -5, 0, True),
+            success_chance=0.40,
         ),
-        rarity="legendary",
     ),
-
     RandomEvent(
         id="enigma_blackhole",
         name="Event Horizon",
@@ -2817,25 +2760,24 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=151, max_depth=275,
         safe_option=EventChoice(
             "Skirt the event horizon",
-            success=EventOutcome("You take the long way around. It is much longer than you expected.", -2, 0, False),
+            success=EventOutcome("You take the long way around. It is much longer than you expected.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Channel through the edge",
-            success=EventOutcome("The edge scours your pack and leaves coin behind as sediment.", 0, 28, False),
-            failure=EventOutcome("A partial pull. You leave a lot on the other side.", -6, -42, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Drag two diggers in with you",
-            success=EventOutcome("The three of you enter. Only you come back out. Pockets full.", 2, 76, False),
-            failure=EventOutcome("The Hole has opinions about this plan.", -9, -108, True),
-            success_chance=0.25,
+            success=EventOutcome("The edge scours your pack and leaves coin behind as sediment.", 0, 156, False),
+            failure=EventOutcome("A partial pull. You leave a lot on the other side.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
-        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=15, trigger="success"),
+        desperate_option=EventChoice(
+            "Drag two diggers in with you",
+            success=EventOutcome("The three of you enter. Only you come back out. Pockets full.", 2, 250, False),
+            failure=EventOutcome("The Hole has opinions about this plan.", -5, 0, True),
+            success_chance=0.40,
+        ),
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=15, trigger="success", mode="burn"),
     ),
-
     RandomEvent(
         id="io_tether_pact",
         name="Wisp Tether",
@@ -2847,25 +2789,25 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=200,
         safe_option=EventChoice(
             "Decline the tether",
-            success=EventOutcome("The wisp fades. You pay a small tribute for its time.", 0, -6, False),
+            success=EventOutcome("The wisp fades. You pay a small tribute for its time.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Accept a soft tether",
-            success=EventOutcome("The tether holds. You move a little faster, pay a little less.", 1, 20, False),
-            failure=EventOutcome("The tether snaps. The wisp leaves with a grudge.", 0, -24, False),
-            success_chance=0.55,
+            success=EventOutcome("The tether holds. You move a little faster, pay a little less.", 1, 98, False),
+            failure=EventOutcome("The tether snaps. The wisp leaves with a grudge.", 0, -52, False),
+            success_chance=0.50,
         ),
+        rarity="legendary",
+        social=True,
         desperate_option=EventChoice(
             "Full tether pact",
-            success=EventOutcome("The tether sings. Your partner feels the haul land in their pack too.", 2, 50, False),
-            failure=EventOutcome("The tether yanks you both the wrong way. You eat the loss.", -4, -60, False),
-            success_chance=0.30,
+            success=EventOutcome("The tether sings. Your partner feels the haul land in their pack too.", 2, 157, False),
+            failure=EventOutcome("The tether yanks you both the wrong way. You eat the loss.", -5, -79, False),
+            success_chance=0.40,
         ),
-        rarity="legendary", social=True,
         splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=10, trigger="success", mode="grant"),
     ),
-
     RandomEvent(
         id="refresher_shard",
         name="Refresher Shard",
@@ -2877,29 +2819,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=275,
         safe_option=EventChoice(
             "Pocket the shard for later",
-            success=EventOutcome("You bank the shard. A modest finder's bounty for the find.", 0, 2, False),
+            success=EventOutcome("You bank the shard. A modest finder's bounty for the find.", 0, 17, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Double-cast the next event",
-            success=EventOutcome("The next event fires twice. Both land clean.", 0, 36, False),
-            failure=EventOutcome("Both casts miss. The shard shivers apart in your hand.", 0, -45, False),
+            success=EventOutcome("The next event fires twice. Both land clean.", 0, 156, False),
+            failure=EventOutcome("Both casts miss. The shard shivers apart in your hand.", 0, 0, True),
             success_chance=0.50,
         ),
+        rarity="legendary",
         desperate_option=EventChoice(
             "Activate on this event, right now",
-            success=EventOutcome("The Refresher refreshes itself. The cave gives twice over.", 2, 76, False),
-            failure=EventOutcome("Two casts, two misfires. The cave answers with a collapse.", -6, -105, True),
-            success_chance=0.22,
+            success=EventOutcome("The Refresher refreshes itself. The cave gives twice over.", 2, 250, False),
+            failure=EventOutcome("Two casts, two misfires. The cave answers with a collapse.", -5, 0, True),
+            success_chance=0.40,
         ),
-        rarity="legendary",
     ),
-
-    # ---- Risky cross-player expansion. Mixed flavors: chaos burn, zero-sum
-    # theft (mode="steal"), and digger-pays sacrifice. Spread across all depth
-    # bands so cross-player risk is part of the dig identity from the start.
-    # -------------------------------------------------------------------------
-
     RandomEvent(
         id="aegis_whisper",
         name="Aegis Whisper",
@@ -2911,17 +2847,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Leave it buried",
-            success=EventOutcome("You walk past. The chant fades.", 0, 0, False),
+            success=EventOutcome("You walk past. The chant fades.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Make an offering",
-            success=EventOutcome("The shield drinks your coin and breathes a faint protective glow over you.", 0, -8, False),
+            "Pay coin into the buried shield",
+            success=EventOutcome("The shield drinks your coin and breathes a faint protective glow over you.", 0, 14, False),
             failure=EventOutcome("Your coin sinks into the dirt. Nothing happens.", 0, -8, False),
-            success_chance=0.50,
+            success_chance=0.62,
         ),
-        buff_on_success=TempBuff("aegis_aura", "Aegis Aura", 3, {"cave_in_reduction": 0.3}),
         rarity="uncommon",
+        buff_on_success=TempBuff("aegis_aura", "Aegis Aura", 3, {"cave_in_reduction": 0.3}),
     ),
     RandomEvent(
         id="echoing_mime",
@@ -2934,20 +2870,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Avert your eyes",
-            success=EventOutcome("You keep digging. The performance ends without applause.", 0, 0, False),
+            success=EventOutcome("You keep digging. The performance ends without applause.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Mock the mime back",
-            success=EventOutcome("You out-perform it. The mime tips a coin into your palm.", 0, 6, False),
-            failure=EventOutcome("The mime doesn't break character. You feel small.", 0, -3, False),
-            success_chance=0.65,
+            "Trade mockery with the mime",
+            success=EventOutcome("You out-perform it. The mime tips a coin into your palm.", 0, 14, False),
+            failure=EventOutcome("The mime doesn't break character. You feel small.", 0, -8, False),
+            success_chance=0.62,
         ),
-        rarity="uncommon", social=True,
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=2, penalty_jc=4,
-            trigger="always", mode="burn",
-        ),
+        rarity="uncommon",
+        social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=4, trigger="always", mode="burn"),
     ),
     RandomEvent(
         id="crow_snipe",
@@ -2960,20 +2894,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Wave the crow off",
-            success=EventOutcome("The bird carries on its way.", 0, 0, False),
+            success=EventOutcome("The bird carries on its way.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Snipe it down",
-            success=EventOutcome("The pouch hits the dirt at your feet. Someone wealthy is having a worse day than you.", 0, 0, False),
-            failure=EventOutcome("You miss. A guard's whistle sounds; you pay a fine to slip away.", 0, -6, False),
-            success_chance=0.60,
+            "Snipe the courier's pouch",
+            success=EventOutcome("The pouch hits the dirt at your feet. Someone wealthy is having a worse day than you.", 0, 14, False),
+            failure=EventOutcome("You miss. A guard's whistle sounds; you pay a fine to slip away.", 0, -8, False),
+            success_chance=0.62,
         ),
-        rarity="uncommon", social=True,
-        splash=SplashConfig(
-            strategy="richest_n", victim_count=1, penalty_jc=10,
-            trigger="success", mode="steal",
-        ),
+        rarity="uncommon",
+        social=True,
+        splash=SplashConfig(strategy="richest_n", victim_count=1, penalty_jc=10, trigger="success", mode="steal"),
     ),
     RandomEvent(
         id="smoke_detour",
@@ -2986,20 +2918,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=None,
         safe_option=EventChoice(
             "Stick to your own tunnel",
-            success=EventOutcome("You stay the course. Steady progress.", 1, 0, False),
+            success=EventOutcome("You stay the course. Steady progress.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Slip into the smoke",
-            success=EventOutcome("You shortcut clean through and pop out ahead, pockets heavier.", 1, 15, False),
-            failure=EventOutcome("The smoke clears around the wrong people. Two diggers' caches collapse.", 0, -8, False),
-            success_chance=0.55,
+            success=EventOutcome("You shortcut clean through and pop out ahead, pockets heavier.", 1, 19, False),
+            failure=EventOutcome("The smoke clears around the wrong people. Two diggers' caches collapse.", 0, 0, True),
+            success_chance=0.56,
         ),
-        rarity="rare", social=True,
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=2, penalty_jc=6,
-            trigger="failure", mode="burn",
-        ),
+        rarity="rare",
+        social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=6, trigger="failure", mode="burn"),
     ),
     RandomEvent(
         id="strangers_lamp",
@@ -3012,20 +2942,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=None,
         safe_option=EventChoice(
             "Leave the lamp alone",
-            success=EventOutcome("You step around it. Some wishes aren't worth making.", 0, 0, False),
+            success=EventOutcome("You step around it. Some wishes aren't worth making.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Rub the lamp",
-            success=EventOutcome("The genie grants you riches — and tosses a coin to a stranger for good measure.", 0, 15, False),
-            failure=EventOutcome("The lamp coughs out a puff of soot. You're 5 coin lighter for the trouble.", 0, -5, False),
-            success_chance=0.40,
+            "Spend a wish on the lamp",
+            success=EventOutcome("The genie grants you riches — and tosses a coin to a stranger for good measure.", 0, 19, False),
+            failure=EventOutcome("The lamp coughs out a puff of soot. You're 5 coin lighter for the trouble.", 0, -10, False),
+            success_chance=0.56,
         ),
-        rarity="rare", social=True,
-        splash=SplashConfig(
-            strategy="random_active", victim_count=1, penalty_jc=5,
-            trigger="success", mode="grant",
-        ),
+        rarity="rare",
+        social=True,
+        splash=SplashConfig(strategy="random_active", victim_count=1, penalty_jc=5, trigger="success", mode="grant"),
     ),
     RandomEvent(
         id="drill_sergeant",
@@ -3038,16 +2966,16 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=26, max_depth=None,
         safe_option=EventChoice(
             "Crawl past quietly",
-            success=EventOutcome("You sneak through during a count. The ghost never notices.", 0, 0, False),
+            success=EventOutcome("You sneak through during a count. The ghost never notices.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Snap to attention",
-            success=EventOutcome("You complete the drill. The ghost salutes and dissolves; your form has never been better.", 0, -10, False),
+            "Drill on the sergeant's terms",
+            success=EventOutcome("You complete the drill. The ghost salutes and dissolves; your form has never been better.", 0, 19, False),
             failure=None, success_chance=1.0,
         ),
-        buff_on_success=TempBuff("drilled", "Drilled", 4, {"advance_bonus": 4}),
         rarity="rare",
+        buff_on_success=TempBuff("drilled", "Drilled", 4, {"advance_bonus": 4}),
     ),
     RandomEvent(
         id="pit_lords_toll",
@@ -3060,20 +2988,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=None,
         safe_option=EventChoice(
             "Refuse politely",
-            success=EventOutcome("He shrugs and lets you pass. You lose a step backing away.", -1, 0, False),
+            success=EventOutcome("He shrugs and lets you pass. You lose a step backing away.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Roll the bone dice",
-            success=EventOutcome("The dice land in your favor. The pit lord grins and pays out.", 0, 35, False),
-            failure=EventOutcome("The dice land badly. The pit lord cackles, and three diggers feel the floor drop.", 0, -10, False),
-            success_chance=0.45,
+            "Roll the pit lord's bone dice",
+            success=EventOutcome("The dice land in your favor. The pit lord grins and pays out.", 0, 59, False),
+            failure=EventOutcome("The dice land badly. The pit lord cackles, and three diggers feel the floor drop.", 0, -32, False),
+            success_chance=0.50,
         ),
-        rarity="legendary", social=True,
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=3, penalty_jc=8,
-            trigger="failure", mode="burn",
-        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=8, trigger="failure", mode="burn"),
     ),
     RandomEvent(
         id="damned_bottle",
@@ -3086,20 +3012,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Leave it sealed",
-            success=EventOutcome("You walk on. The whispers fade.", 0, 0, False),
+            success=EventOutcome("You walk on. The whispers fade.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Uncork it",
-            success=EventOutcome("The bottle unfastens itself from another digger's stash. The contents are now yours.", 0, 0, False),
-            failure=EventOutcome("The bottle was a curse. It empties your pockets in answer.", 0, -20, False),
+            "Uncork the whispering bottle",
+            success=EventOutcome("The bottle unfastens itself from another digger's stash. The contents are now yours.", 0, 59, False),
+            failure=EventOutcome("The bottle was a curse. It empties your pockets in answer.", 0, 0, False, curse=TempCurse("hex_damned_bottle", "Bottled Curse", 4, {"jc_bonus": -8})),
             success_chance=0.50,
         ),
-        rarity="legendary", social=True,
-        splash=SplashConfig(
-            strategy="random_active", victim_count=1, penalty_jc=15,
-            trigger="success", mode="steal",
-        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(strategy="random_active", victim_count=1, penalty_jc=15, trigger="success", mode="steal"),
     ),
     RandomEvent(
         id="roshpit_gambit",
@@ -3112,20 +3036,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Skirt the pit",
-            success=EventOutcome("You give the pit a wide berth. Boring, safe.", 0, 0, False),
+            success=EventOutcome("You give the pit a wide berth. Boring, safe.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Plunge in",
-            success=EventOutcome("You surface clutching a king's ransom. Two of the richest just felt it leave their stash.", 0, 40, False),
-            failure=EventOutcome("The pit takes its tribute from you instead.", 0, -25, False),
+            "Stake everything on the pit",
+            success=EventOutcome("You surface clutching a king's ransom. Two of the richest just felt it leave their stash.", 0, 59, False),
+            failure=EventOutcome("The pit takes its tribute from you instead.", 0, -32, False),
             success_chance=0.50,
         ),
-        rarity="legendary", social=True,
-        splash=SplashConfig(
-            strategy="richest_n", victim_count=2, penalty_jc=12,
-            trigger="success", mode="burn",
-        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=12, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="wilderness_stalker",
@@ -3138,26 +3060,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Hide and wait them out",
-            success=EventOutcome("You go still until they pass. You lose ground but you keep your purse.", -1, 0, False),
+            success=EventOutcome("You go still until they pass. You lose ground but you keep your purse.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Strike first",
-            success=EventOutcome("You drop them in one strike and lift their take. Whoever they were, they were carrying.", 0, 0, False),
-            failure=EventOutcome("They were better than you. You drag yourself away wounded and lighter.", -1, -25, False),
-            success_chance=0.65,
+            "Strike first and take the stalker's purse",
+            success=EventOutcome("You drop them in one strike and lift their take. Whoever they were, they were carrying.", 0, 98, False),
+            failure=EventOutcome("They were better than you. You drag yourself away wounded and lighter.", 0, -52, False),
+            success_chance=0.50,
         ),
-        rarity="legendary", social=True,
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=1, penalty_jc=20,
-            trigger="success", mode="steal",
-        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=20, trigger="success", mode="steal"),
     ),
-
-    # ---- Rumor pass: a small batch of additional events. Mostly cross-player,
-    # mostly layer-restricted. Splash configs reuse existing strategies.
-    # -------------------------------------------------------------------------
-
     RandomEvent(
         id="wisps_tether",
         name="Wisp's Tether",
@@ -3168,22 +3083,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=75,
         safe_option=EventChoice(
             "Wave the wisp off",
-            success=EventOutcome("The mote drifts away. The cave is colder for its absence.", 0, 0, False),
+            success=EventOutcome("The mote drifts away. The cave is colder for its absence.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Cup the light gently",
-            success=EventOutcome("The wisp doubles in your palm. A second flicker brightens far above.", 0, 6, False),
-            failure=EventOutcome("The mote burns through your fingers and is gone.", 0, -3, False),
-            success_chance=0.60,
+            "Chase the wisp into the gloom",
+            success=EventOutcome("The wisp doubles in your palm. A second flicker brightens far above.", 0, 23, False),
+            failure=EventOutcome("The mote burns out. The dark closes in and your bearings go with it.", 0, 0, False, streak_loss=3),
+            success_chance=0.62,
         ),
-        rarity="common", social=True,
-        splash=SplashConfig(
-            strategy="random_active", victim_count=1, penalty_jc=4,
-            trigger="success", mode="grant",
-        ),
+        social=True,
+        splash=SplashConfig(strategy="random_active", victim_count=1, penalty_jc=4, trigger="success", mode="grant"),
     ),
-
     RandomEvent(
         id="tunnel_echoes",
         name="Tunnel Echoes",
@@ -3194,22 +3105,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Muffle the strike",
-            success=EventOutcome("You ease the swing. Slow and quiet pays a small dividend.", 0, 1, False),
+            success=EventOutcome("You ease the swing. Slow and quiet pays a small dividend.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Swing through it",
-            success=EventOutcome("The stone gives clean. Your strike lands where you wanted.", 0, 5, False),
-            failure=EventOutcome("Your strike rolls long. Something gives way somewhere else.", 0, -3, False),
-            success_chance=0.60,
+            success=EventOutcome("The stone gives clean. Your strike lands where you wanted.", 0, 10, False),
+            failure=EventOutcome("Your strike rolls long. Something gives way somewhere else.", 0, 0, True),
+            success_chance=0.62,
         ),
-        rarity="common", social=True,
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=1, penalty_jc=3,
-            trigger="failure", mode="burn",
-        ),
+        social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=3, trigger="failure", mode="burn"),
     ),
-
     RandomEvent(
         id="stalled_caravan",
         name="Stalled Caravan",
@@ -3220,18 +3127,16 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Walk on by",
-            success=EventOutcome("You don't get involved. The voice fades.", 0, 0, False),
+            success=EventOutcome("You don't get involved. The voice fades.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Lend a shoulder",
-            success=EventOutcome("The wheel pops free. The driver presses coin into your palm and is gone.", 0, 8, False),
-            failure=EventOutcome("The wagon tips the wrong way. You pay for what broke.", 0, -5, False),
-            success_chance=0.65,
+            "Lend a shoulder for a fee",
+            success=EventOutcome("The wheel pops free. The driver presses coin into your palm and is gone.", 0, 10, False),
+            failure=EventOutcome("The wagon tips the wrong way. You pay for what broke.", 0, -6, False),
+            success_chance=0.62,
         ),
-        rarity="common",
     ),
-
     RandomEvent(
         id="volatile_affix",
         name="Volatile Affix",
@@ -3242,19 +3147,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=75,
         safe_option=EventChoice(
             "Step around it",
-            success=EventOutcome("You leave the shard humming. Some bargains aren't worth the noise.", 0, 0, False),
+            success=EventOutcome("You leave the shard humming. Some bargains aren't worth the noise.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Press the shard",
-            success=EventOutcome("The hum settles into your bones. The next few swings feel charged.", 0, 6, False),
-            failure=EventOutcome("The shard cracks against your palm and the hum cuts out.", 0, -8, False),
-            success_chance=0.55,
+            success=EventOutcome("The hum settles into your bones. The next few swings feel charged.", 0, 32, False),
+            failure=EventOutcome("The shard cracks against your palm and the hum cuts out.", 0, 0, True),
+            success_chance=0.62,
         ),
-        buff_on_success=TempBuff("affix_hum", "Affix Hum", 3, {"advance_bonus": 3}),
         rarity="uncommon",
+        buff_on_success=TempBuff("affix_hum", "Affix Hum", 3, {"advance_bonus": 3}),
     ),
-
     RandomEvent(
         id="rivals_cache",
         name="Rival's Cache",
@@ -3265,22 +3169,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Leave it untouched",
-            success=EventOutcome("You reseal the stone and walk on. Some rivals you don't poke.", 0, 0, False),
+            success=EventOutcome("You reseal the stone and walk on. Some rivals you don't poke.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Pry it open",
-            success=EventOutcome("The stash gives. Whoever stocked it is going to feel that.", 0, 0, False),
-            failure=EventOutcome("A snare you didn't see takes its toll.", 0, -6, False),
-            success_chance=0.55,
+            "Crack the rival's cache",
+            success=EventOutcome("The stash gives. Whoever stocked it is going to feel that.", 0, 14, False),
+            failure=EventOutcome("A snare you didn't see takes its toll.", 0, -8, False),
+            success_chance=0.62,
         ),
-        rarity="uncommon", social=True,
-        splash=SplashConfig(
-            strategy="richest_n", victim_count=1, penalty_jc=8,
-            trigger="success", mode="steal",
-        ),
+        rarity="uncommon",
+        social=True,
+        splash=SplashConfig(strategy="richest_n", victim_count=1, penalty_jc=8, trigger="success", mode="steal"),
     ),
-
     RandomEvent(
         id="forsaken_pact",
         name="Forsaken Pact",
@@ -3291,22 +3192,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=150,
         safe_option=EventChoice(
             "Refuse the wording",
-            success=EventOutcome("You walk away. The voice charges a small fee for your time.", 0, -2, False),
+            success=EventOutcome("You walk away. The voice charges a small fee for your time.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Accept the bargain",
-            success=EventOutcome("The pact pays out in your purse. The voice keeps its end.", 0, 20, False),
-            failure=EventOutcome("The cost of breaking the deal pours through the cracks. Others nearby feel it.", 0, -10, False),
-            success_chance=0.50,
+            "Take the careful bargain",
+            success=EventOutcome("The pact pays out in your purse. The voice keeps its end.", 0, 53, False),
+            failure=EventOutcome("The cost of breaking the deal pours through the cracks. Others nearby feel it.", 0, -28, False),
+            success_chance=0.62,
         ),
-        rarity="uncommon", social=True,
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=2, penalty_jc=5,
-            trigger="failure", mode="burn",
-        ),
+        rarity="uncommon",
+        social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=5, trigger="failure", mode="burn"),
     ),
-
     RandomEvent(
         id="mapworks_drift",
         name="Mapworks Drift",
@@ -3317,22 +3215,19 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=51, max_depth=75,
         safe_option=EventChoice(
             "Refold the map",
-            success=EventOutcome("You tuck the parchment away. Some directions you don't follow.", 0, 0, False),
+            success=EventOutcome("You tuck the parchment away. Some directions you don't follow.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Follow the lines",
-            success=EventOutcome("The map sings. You return heavy, and you weren't the only one paid.", 1, 20, False),
-            failure=EventOutcome("The lines led somewhere that isn't there anymore.", 0, -12, False),
-            success_chance=0.55,
+            success=EventOutcome("The map sings. You return heavy, and you weren't the only one paid.", 1, 42, False),
+            failure=EventOutcome("The lines led nowhere that exists. You wander the dark, hours lost.", 0, 0, False, streak_loss=5),
+            success_chance=0.56,
         ),
-        rarity="rare", social=True,
-        splash=SplashConfig(
-            strategy="random_active", victim_count=2, penalty_jc=8,
-            trigger="success", mode="grant",
-        ),
+        rarity="rare",
+        social=True,
+        splash=SplashConfig(strategy="random_active", victim_count=2, penalty_jc=8, trigger="success", mode="grant"),
     ),
-
     RandomEvent(
         id="the_eye_opens",
         name="The Eye Opens",
@@ -3343,36 +3238,27 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=101, max_depth=150,
         safe_option=EventChoice(
             "Avert your eyes",
-            success=EventOutcome("You look away. The dark accepts the courtesy and lets you through.", 0, 3, False),
+            success=EventOutcome("You look away. The dark accepts the courtesy and lets you through.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Meet its gaze",
-            success=EventOutcome("The eye blinks once. Something it had been holding for someone else slides into your hands — and you find you can read the stone the way it does.", 0, 0, False),
-            failure=EventOutcome("It looks longer than you do. The cave answers for both of you.", 0, -50, True),
+            "Meet the listening eye",
+            success=EventOutcome("The eye blinks once. Something it had been holding for someone else slides into your hands — and you find you can read the stone the way it does.", 0, 98, False),
+            failure=EventOutcome("It looks longer than you do. The cave answers for both of you.", 0, 0, False, curse=TempCurse("hex_the_eye_opens", "The Eye's Attention", 4, {"luminosity_drain": 25})),
             success_chance=0.50,
         ),
-        desperate_option=EventChoice(
-            "Speak to it",
-            success=EventOutcome("The dark answers in your own voice. Several caches change hands. You leave knowing things about the rock that no one teaches.", 1, 30, False),
-            failure=EventOutcome("Your voice carries somewhere it shouldn't. The cave folds in on you.", -2, -90, True),
-            success_chance=0.25,
-        ),
+        rarity="legendary",
         buff_on_success=TempBuff("whispered_insight", "Whispered Insight", 3, {"cave_in_reduction": 0.4}),
-        rarity="legendary", social=True, requires_dark=True,
-        splash=SplashConfig(
-            strategy="richest_n", victim_count=1, penalty_jc=28,
-            trigger="success", mode="steal",
+        requires_dark=True,
+        social=True,
+        desperate_option=EventChoice(
+            "Speak to the listening eye",
+            success=EventOutcome("The dark answers in your own voice. Several caches change hands. You leave knowing things about the rock that no one teaches.", 1, 157, False),
+            failure=EventOutcome("Your voice carries somewhere it shouldn't. The cave folds in on you.", -5, 0, False, curse=TempCurse("hex_the_eye_opens", "The Eye's Attention", 4, {"luminosity_drain": 38})),
+            success_chance=0.40,
         ),
+        splash=SplashConfig(strategy="richest_n", victim_count=1, penalty_jc=28, trigger="success", mode="steal"),
     ),
-    # ===================================================================
-    # DETERMINISTIC CHAIN — three-act lore arc (Hollow Court).
-    # Lore-driven, modest payouts. Step 1 (overture) spawns from the
-    # legendary-event pool when prestige >= 6; steps 2 and 3 chain
-    # deterministically from the previous step's resolution via
-    # ``next_event_id`` and are marked ``chain_only`` so they cannot
-    # roll out of narrative order.
-    # ===================================================================
     RandomEvent(
         id="hollow_court_overture",
         name="Overture of the Hollow Court",
@@ -3384,14 +3270,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=200, max_depth=None,
         safe_option=EventChoice(
             "Bow and withdraw",
-            success=EventOutcome("You bow without breaking eye contact and back into the corridor. The court remembers courtesy.", 0, 5, False),
+            success=EventOutcome("You bow without breaking eye contact and back into the corridor. The court remembers courtesy.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Approach the throne",
-            success=EventOutcome("You walk the length of the hall. Something nods, very slightly. You are permitted to continue.", 0, 12, False),
-            failure=EventOutcome("You misstep on a tile that wasn't there. The court does not laugh.", -3, -3, False),
-            success_chance=0.70,
+            "Cross the unsettled floor to the throne",
+            success=EventOutcome("You walk the length of the hall. Something nods, very slightly. You are permitted to continue.", 0, 98, False),
+            failure=EventOutcome("You misstep on a tile that wasn't there. The court does not laugh.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
         min_prestige=6,
@@ -3407,14 +3293,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=200, max_depth=None,
         safe_option=EventChoice(
             "Listen",
-            success=EventOutcome("You learn nothing you can repeat aloud. But you understand something about the tunnels you didn't before.", 0, 8, False),
+            success=EventOutcome("You learn nothing you can repeat aloud. But you understand something about the tunnels you didn't before.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Answer the question that wasn't asked",
-            success=EventOutcome("The court goes still. One of the figures rises and offers you something small and very old.", 0, 20, False),
-            failure=EventOutcome("Whatever you said, it was wrong. The chamber dims a degree.", -2, -5, False),
-            success_chance=0.55,
+            "Answer the question that was not asked",
+            success=EventOutcome("The court goes still. One of the figures rises and offers you something small and very old.", 0, 98, False),
+            failure=EventOutcome("Whatever you said, it was wrong. The chamber dims a degree.", 0, 0, False, curse=TempCurse("hex_hollow_court_audience", "Court Disfavor", 4, {"advance_bonus": -4})),
+            success_chance=0.50,
         ),
         rarity="legendary",
         min_prestige=6,
@@ -3436,25 +3322,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Take the corridor that leads further",
-            success=EventOutcome("You walk a little further than wisdom suggests. When you come back you find a small offering tucked into your pack.", 0, 25, False),
-            failure=EventOutcome("The corridor folds you back into the main tunnel, but not before something costs you.", -4, -8, False),
+            success=EventOutcome("You walk a little further than wisdom suggests. When you come back you find a small offering tucked into your pack.", 0, 98, False),
+            failure=EventOutcome("The corridor folds you back, but the dark keeps a long stretch of your time.", 0, 0, False, streak_loss=8),
             success_chance=0.50,
         ),
         rarity="legendary",
         min_prestige=6,
-        next_event_id=None,
         chain_only=True,
     ),
-
-    # =====================================================================
-    # Roguelike pacing-v2 expansion. Atmospheric only: no proper nouns,
-    # no mechanic exposition in flavor. Each event carries 2 of 3 traits
-    # from {risky, deflationary, cross-player}. Splash uses the existing
-    # resolver; lingering effects use temp_buffs / guild modifiers.
-    # =====================================================================
-
-    # ---- Common tier (4) -----------------------------------------------
-
     RandomEvent(
         id="crimson_drizzle",
         name="Crimson Drizzle",
@@ -3466,18 +3341,16 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Wait under cover",
-            success=EventOutcome("You shelter. The drizzle thins.", 0, 0, False),
+            success=EventOutcome("You shelter. The drizzle thins.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Press on through it",
-            success=EventOutcome("You break out the other side, stained but ahead.", 4, -8, False),
-            failure=EventOutcome("The rain finds something on you and takes it.", 0, -15, False),
-            success_chance=0.55,
+            "Press on through the staining rain",
+            success=EventOutcome("You break out the other side, stained but ahead.", 2, 12, False),
+            failure=EventOutcome("The rain finds something on you and takes it.", 0, 0, False, curse=TempCurse("hex_crimson_drizzle", "Crimson Stain", 3, {"jc_bonus": -3})),
+            success_chance=0.62,
         ),
-        rarity="common",
     ),
-
     RandomEvent(
         id="glyph_pulse",
         name="Glyph Pulse",
@@ -3489,22 +3362,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Step around it",
-            success=EventOutcome("You give the glyph a wide berth.", 0, 0, False),
+            success=EventOutcome("You give the glyph a wide berth.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Press your palm to it (offer 20)",
-            success=EventOutcome("Heat runs into your arm and you feel quicker.", 0, -20, False),
-            failure=EventOutcome("The glyph drinks your offering and gives nothing back.", 0, -20, False),
-            success_chance=0.55,
+            "Press your palm to the salt-glyph",
+            success=EventOutcome("Heat runs into your arm and you feel quicker.", 0, 12, False),
+            failure=EventOutcome("The glyph drinks your offering and gives nothing back.", 0, 0, False, curse=TempCurse("hex_glyph_pulse", "Salt-Glyph Bind", 3, {"advance_bonus": -2})),
+            success_chance=0.62,
         ),
-        rarity="common",
-        buff_on_success=TempBuff(
-            id="glyph_pulse_buff", name="Quickened Step",
-            duration_digs=3, effect={"advance_bonus": 4},
-        ),
+        buff_on_success=TempBuff("glyph_pulse_buff", "Quickened Step", 3, {"advance_bonus": 4}),
     ),
-
     RandomEvent(
         id="mossfire_echo",
         name="Mossfire Echo",
@@ -3516,22 +3384,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Pass without engaging",
-            success=EventOutcome("The fire forgets you and folds back into the rock.", 0, 0, False),
+            success=EventOutcome("The fire forgets you and folds back into the rock.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Feed it a coin (offer 30)",
-            success=EventOutcome("The flame breathes in. Its warmth wraps your shoulders, sharp as iron.", 0, -30, False),
-            failure=EventOutcome("The fire takes your coin and burns colder.", 0, -30, False),
-            success_chance=0.50,
+            "Feed a coin to the fel flame",
+            success=EventOutcome("The flame breathes in. Its warmth wraps your shoulders, sharp as iron.", 0, 12, False),
+            failure=EventOutcome("The fire takes your coin and burns colder.", 0, 0, False, curse=TempCurse("hex_mossfire_echo", "Fel Chill", 3, {"luminosity_drain": 10})),
+            success_chance=0.62,
         ),
-        rarity="common",
-        buff_on_success=TempBuff(
-            id="mossfire_echo_buff", name="Sheltered",
-            duration_digs=3, effect={"cave_in_reduction": 0.2},
-        ),
+        buff_on_success=TempBuff("mossfire_echo_buff", "Sheltered", 3, {"cave_in_reduction": 0.2}),
     ),
-
     RandomEvent(
         id="mana_fountain_crack",
         name="Mana Fountain Crack",
@@ -3543,24 +3406,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Sip a little, leave the rest",
-            success=EventOutcome("You drink politely. Your lantern feels heavier.", 0, 4, False),
+            success=EventOutcome("You drink politely. Your lantern feels heavier.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Drink your fill",
-            success=EventOutcome("The spring fills you up and you set off, brimming.", 3, 6, False),
-            failure=EventOutcome("Something in the water bites back.", 0, -25, False),
-            success_chance=0.55,
+            "Drink your fill from the bursting spring",
+            success=EventOutcome("The spring fills you up and you set off, brimming.", 2, 10, False),
+            failure=EventOutcome("Something in the water bites back.", 0, 0, True),
+            success_chance=0.62,
         ),
-        rarity="common",
-        buff_on_success=TempBuff(
-            id="fountain_buff", name="Spring-touched",
-            duration_digs=3, effect={"cave_in_reduction": 0.2},
-        ),
+        buff_on_success=TempBuff("fountain_buff", "Spring-touched", 3, {"cave_in_reduction": 0.2}),
     ),
-
-    # ---- Uncommon tier (11) --------------------------------------------
-
     RandomEvent(
         id="the_hooked_stranger",
         name="The Hooked Stranger",
@@ -3572,19 +3428,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Step back into shadow",
-            success=EventOutcome("You let the chain drift. It withdraws, disappointed.", 0, 0, False),
+            success=EventOutcome("You let the chain drift. It withdraws, disappointed.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Grab the chain and pull",
-            success=EventOutcome("Whatever was on the other end drops what it carried at your feet.", 0, 0, False),
-            failure=EventOutcome("The chain pulls back. Something comes off you when it lets go.", 0, -20, False),
-            success_chance=0.45,
+            success=EventOutcome("Whatever was on the other end drops what it carried at your feet.", 0, 14, False),
+            failure=EventOutcome("The chain pulls back. Something comes off you when it lets go.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
         splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=30, trigger="success", mode="steal"),
     ),
-
     RandomEvent(
         id="whispering_token",
         name="Whispering Token",
@@ -3596,18 +3451,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=20, max_depth=None,
         safe_option=EventChoice(
             "Leave it",
-            success=EventOutcome("You walk past. The whispering follows for a while, then fades.", 0, 0, False),
+            success=EventOutcome("You walk past. The whispering follows for a while, then fades.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Pocket it",
-            success=EventOutcome("The token settles into your bag and pays out a debt you didn't know you'd struck.", 4, 22, False),
-            failure=EventOutcome("The token bites your palm shut and takes its price.", 0, -28, False),
-            success_chance=0.50,
+            "Pocket the whispering coin",
+            success=EventOutcome("The token settles into your bag and pays out a debt you didn't know you'd struck.", 2, 14, False),
+            failure=EventOutcome("The token bites your palm shut and takes its price.", 0, 0, False, curse=TempCurse("hex_whispering_token", "Whispering Debt", 3, {"jc_bonus": -4})),
+            success_chance=0.62,
         ),
         rarity="uncommon",
     ),
-
     RandomEvent(
         id="the_beasts_pit",
         name="The Beast's Pit",
@@ -3619,19 +3473,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=80, max_depth=None,
         safe_option=EventChoice(
             "Edge around the pit",
-            success=EventOutcome("You skirt the lip and lose a little ground.", -3, -4, False),
+            success=EventOutcome("You skirt the lip and lose a little ground.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Drop in and challenge it",
-            success=EventOutcome("The thing below flinches. You climb out with a fistful of someone else's spoils.", 0, 0, False),
-            failure=EventOutcome("It catches you on the way down. You leave bloody.", -2, -25, True),
-            success_chance=0.45,
+            success=EventOutcome("The thing below flinches. You climb out with a fistful of someone else's spoils.", 0, 32, False),
+            failure=EventOutcome("It catches you on the way down. You leave bloody.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
         splash=SplashConfig(strategy="deepest_n", victim_count=1, penalty_jc=50, trigger="success", mode="steal"),
     ),
-
     RandomEvent(
         id="aegis_denial",
         name="Aegis Denial",
@@ -3643,19 +3496,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=120, max_depth=None,
         safe_option=EventChoice(
             "Leave the ward broken",
-            success=EventOutcome("You leave the ward and the moment passes.", 0, 0, False),
+            success=EventOutcome("You leave the ward and the moment passes.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Bind it to yourself (offer 50)",
-            success=EventOutcome("The ward chooses a target and pulls. The coin it tears loose is someone else's.", 0, -50, False),
-            failure=EventOutcome("The ward chooses you. The shards take their tribute.", 0, -50, False),
-            success_chance=0.50,
+            "Pay to bind the broken ward",
+            success=EventOutcome("The ward chooses a target and pulls. The coin it tears loose is someone else's.", 0, 53, False),
+            failure=EventOutcome("The ward chooses you. The shards take their tribute.", 0, -28, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
         splash=SplashConfig(strategy="deepest_n", victim_count=1, penalty_jc=60, trigger="success", mode="steal"),
     ),
-
     RandomEvent(
         id="sanguine_pact",
         name="Sanguine Pact",
@@ -3667,22 +3519,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=None,
         safe_option=EventChoice(
             "Refuse the bargain",
-            success=EventOutcome("You refuse. The thread snaps and the air settles.", 0, 0, False),
+            success=EventOutcome("You refuse. The thread snaps and the air settles.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Open a finger (offer 40)",
-            success=EventOutcome("The pact takes its cut and quickens your hands.", 0, -40, False),
-            failure=EventOutcome("The pact takes more than was offered.", 0, -55, False),
-            success_chance=0.55,
+            "Open a finger for the blood-pact",
+            success=EventOutcome("The pact takes its cut and quickens your hands.", 0, 14, False),
+            failure=EventOutcome("The pact takes more than was offered.", 0, 0, False, curse=TempCurse("hex_sanguine_pact", "Sanguine Drain", 3, {"advance_bonus": -3})),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        buff_on_success=TempBuff(
-            id="sanguine_pact_buff", name="Sanguine",
-            duration_digs=3, effect={"advance_bonus": 5},
-        ),
+        buff_on_success=TempBuff("sanguine_pact_buff", "Sanguine", 3, {"advance_bonus": 5}),
     ),
-
     RandomEvent(
         id="time_walker",
         name="Time Walker",
@@ -3694,18 +3542,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=30, max_depth=None,
         safe_option=EventChoice(
             "Wait it out",
-            success=EventOutcome("The bronze sand drains away. The corridor returns to normal speed.", 0, 0, False),
+            success=EventOutcome("The bronze sand drains away. The corridor returns to normal speed.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Step through the slowed second",
-            success=EventOutcome("You take three strides for one. Your tunnel jumps a long way ahead.", 6, 0, False),
-            failure=EventOutcome("Time snaps back hard. The walls come with it.", 0, -10, True),
-            success_chance=0.45,
+            success=EventOutcome("You take three strides for one. Your tunnel jumps a long way ahead.", 2, 14, False),
+            failure=EventOutcome("Time snaps back hard. The walls come with it.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
     ),
-
     RandomEvent(
         id="bounty_marker",
         name="Bounty Marker",
@@ -3717,19 +3564,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=40, max_depth=None,
         safe_option=EventChoice(
             "Leave the marker alone",
-            success=EventOutcome("You walk past. Whoever it points at stays unmolested.", 0, -3, False),
+            success=EventOutcome("You walk past. Whoever it points at stays unmolested.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Trip the marker",
-            success=EventOutcome("The marker fires. Wealth bleeds out of someone with too much of it.", 0, -10, False),
-            failure=EventOutcome("The marker turns on you mid-trip.", 0, -25, False),
-            success_chance=0.55,
+            "Trip the bounty marker",
+            success=EventOutcome("The marker fires. Wealth bleeds out of someone with too much of it.", 0, 14, False),
+            failure=EventOutcome("The marker turns on you mid-trip.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
         splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=40, trigger="success", mode="burn"),
     ),
-
     RandomEvent(
         id="mages_archive",
         name="Mage's Archive",
@@ -3741,22 +3587,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=20, max_depth=None,
         safe_option=EventChoice(
             "Leave the books",
-            success=EventOutcome("You leave it for whoever finds it next.", 0, 0, False),
+            success=EventOutcome("You leave it for whoever finds it next.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Read a passage (offer 50)",
-            success=EventOutcome("A useful page settles into your head.", 0, -50, False),
-            failure=EventOutcome("The book takes your coin and writes a name in it. Yours.", 0, -50, False),
-            success_chance=0.50,
+            "Read a passage from the moving book",
+            success=EventOutcome("A useful page settles into your head.", 0, 14, False),
+            failure=EventOutcome("The book takes your coin and writes a name in it. Yours.", 0, 0, False, curse=TempCurse("hex_mages_archive", "Named in the Book", 3, {"advance_bonus": -3})),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        buff_on_success=TempBuff(
-            id="archive_buff", name="Read In",
-            duration_digs=4, effect={"advance_bonus": 4, "cave_in_reduction": 0.1},
-        ),
+        buff_on_success=TempBuff("archive_buff", "Read In", 4, {"advance_bonus": 4, "cave_in_reduction": 0.1}),
     ),
-
     RandomEvent(
         id="phantom_strike",
         name="Phantom Strike",
@@ -3768,18 +3610,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=30, max_depth=None,
         safe_option=EventChoice(
             "Center yourself and continue",
-            success=EventOutcome("You shake the doubling and dig on.", 1, 4, False),
+            success=EventOutcome("You shake the doubling and dig on.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Strike with all three",
-            success=EventOutcome("Three swings land at once. Coin scatters and most of it sticks.", 0, 18, False),
-            failure=EventOutcome("Two of you miss and take it out on the third.", 0, -22, False),
-            success_chance=0.45,
+            success=EventOutcome("Three swings land at once. Coin scatters and most of it sticks.", 0, 14, False),
+            failure=EventOutcome("Two of you miss and take it out on the third.", 0, 0, False, streak_loss=4),
+            success_chance=0.62,
         ),
         rarity="uncommon",
     ),
-
     RandomEvent(
         id="silken_cocoon",
         name="Silken Cocoon",
@@ -3791,22 +3632,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Cut a careful path",
-            success=EventOutcome("You pick between the carapace plates. Slow but unscathed.", -1, 0, False),
+            success=EventOutcome("You pick between the carapace plates. Slow but unscathed.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Push straight through",
-            success=EventOutcome("Chitin cracks under your shoulder. The next swing comes easy.", -2, 0, False),
-            failure=EventOutcome("The silk takes pieces of you with it. Something stirs deeper in.", -3, -8, False),
-            success_chance=0.60,
+            "Shoulder through the brittle chitin",
+            success=EventOutcome("Chitin cracks under your shoulder. The next swing comes easy.", 0, 14, False),
+            failure=EventOutcome("The silk takes pieces of you with it. Something stirs deeper in.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        buff_on_success=TempBuff(
-            id="silken_cocoon_buff", name="Snapped Free",
-            duration_digs=2, effect={"advance_bonus": 7},
-        ),
+        buff_on_success=TempBuff("silken_cocoon_buff", "Snapped Free", 2, {"advance_bonus": 7}),
     ),
-
     RandomEvent(
         id="the_mothers_mark",
         name="The Mother's Mark",
@@ -3818,24 +3655,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=80, max_depth=None,
         safe_option=EventChoice(
             "Avoid its gaze",
-            success=EventOutcome("You keep your eyes down. The pupil drifts away.", 0, -5, False),
+            success=EventOutcome("You keep your eyes down. The pupil drifts away.", 0, 6, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Meet the eye",
-            success=EventOutcome("It sees you back. Something in your shadow changes weight.", 4, 8, False),
-            failure=EventOutcome("It looks past you. You feel its displeasure on your back.", 0, -18, True),
-            success_chance=0.50,
+            "Meet the unblinking eye",
+            success=EventOutcome("It sees you back. Something in your shadow changes weight.", 2, 32, False),
+            failure=EventOutcome("It looks past you. You feel its displeasure on your back.", 0, 0, False, curse=TempCurse("hex_the_mothers_mark", "The Mother's Mark", 3, {"luminosity_drain": 14})),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        buff_on_success=TempBuff(
-            id="mothers_mark", name="Marked",
-            duration_digs=5, effect={"cave_in_reduction": -0.05},
-        ),
+        buff_on_success=TempBuff("mothers_mark", "Marked", 5, {"cave_in_reduction": -0.05}),
     ),
-
-    # ---- Marquee tier (3) ----------------------------------------------
-
     RandomEvent(
         id="helltide_bell",
         name="Helltide Bell",
@@ -3847,23 +3678,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Cover your ears and wait",
-            success=EventOutcome("You hold your hands to your ears. The sound passes through.", 0, -2, False),
+            success=EventOutcome("You hold your hands to your ears. The sound passes through.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Strike the bell yourself",
-            success=EventOutcome("Your blow lands. The toll rolls through the whole mine and stays.", 0, -50, False),
-            failure=EventOutcome("The bell rejects your hand. You leave coin on the floor.", 0, -50, False),
+            "Pay the price and strike the bell",
+            success=EventOutcome("Your blow lands. The toll rolls through the whole mine and stays.", 0, 26, False),
+            failure=EventOutcome("The bell rejects your hand. You leave coin on the floor.", 0, -14, False),
             success_chance=0.50,
         ),
         rarity="legendary",
-        guild_modifier_on_success={
-            "id": "helltide_active",
-            "duration_seconds": 1800,
-            "payload": {"tax_per_dig": 5},
-        },
+        guild_modifier_on_success={'id': 'helltide_active', 'duration_seconds': 1800, 'payload': {'tax_per_dig': 5}},
     ),
-
     RandomEvent(
         id="the_sundering",
         name="The Sundering",
@@ -3875,22 +3701,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=120, max_depth=None,
         safe_option=EventChoice(
             "Back away from the crack",
-            success=EventOutcome("You retreat. The crack closes its eye.", -3, -10, False),
+            success=EventOutcome("You retreat. The crack closes its eye.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Drive your pickaxe into it",
-            success=EventOutcome("The crack flinches and gives up something it had been holding.", 0, 25, False),
-            failure=EventOutcome("The crack opens wider. It is in you now.", 0, -50, True),
-            success_chance=0.45,
+            success=EventOutcome("The crack flinches and gives up something it had been holding.", 0, 98, False),
+            failure=EventOutcome("The crack opens wider. It is in you now.", 0, 0, True),
+            success_chance=0.50,
         ),
         rarity="legendary",
-        buff_on_success=TempBuff(
-            id="sundered", name="Sundered",
-            duration_digs=5, effect={"advance_bonus": -3, "cave_in_reduction": -0.05},
-        ),
+        buff_on_success=TempBuff("sundered", "Sundered", 5, {"advance_bonus": -3, "cave_in_reduction": -0.05}),
     ),
-
     RandomEvent(
         id="the_black_kings_bargain",
         name="The Black King's Bargain",
@@ -3902,24 +3724,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=120, max_depth=None,
         safe_option=EventChoice(
             "Refuse the contract",
-            success=EventOutcome("You decline. The bar dims.", 0, 0, False),
+            success=EventOutcome("You decline. The bar dims.", 0, 10, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Sign the contract (tribute 100)",
-            success=EventOutcome("The bar warms in your grip. Nothing in this stretch can touch you.", 0, -100, False),
-            failure=EventOutcome("The bar takes your tribute and offers nothing back.", 0, -100, False),
-            success_chance=0.55,
+            "Sign the King's contract",
+            success=EventOutcome("The bar warms in your grip. Nothing in this stretch can touch you.", 0, 98, False),
+            failure=EventOutcome("The bar takes your tribute and offers nothing back.", 0, -52, False),
+            success_chance=0.50,
         ),
         rarity="legendary",
-        buff_on_success=TempBuff(
-            id="black_kings_bargain", name="King's Bargain",
-            duration_digs=5, effect={"cave_in_reduction": 1.0, "advance_bonus": -1},
-        ),
+        buff_on_success=TempBuff("black_kings_bargain", "King's Bargain", 5, {"cave_in_reduction": 1.0, "advance_bonus": -1}),
     ),
-
-    # ---- Filler / additional events (2) --------------------------------
-
     RandomEvent(
         id="the_old_gods_tongue",
         name="The Old God's Tongue",
@@ -3931,18 +3747,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=20, max_depth=None,
         safe_option=EventChoice(
             "Walk on the tongue (no coin)",
-            success=EventOutcome("Walking on the tongue costs you blood instead of coin.", -2, 0, False),
+            success=EventOutcome("Walking on the tongue costs you blood instead of coin.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Pay the tongue and pass",
-            success=EventOutcome("The tongue tastes the coin and lets you through.", 2, -20, False),
-            failure=EventOutcome("The tongue tastes more than offered.", 0, -45, False),
-            success_chance=0.55,
+            "Pay the tongue to pass",
+            success=EventOutcome("The tongue tastes the coin and lets you through.", 2, 19, False),
+            failure=EventOutcome("The tongue tastes more than offered.", 0, -10, False),
+            success_chance=0.56,
         ),
         rarity="rare",
     ),
-
     RandomEvent(
         id="crimson_rain_ladder",
         name="Crimson Rain Ladder",
@@ -3954,21 +3769,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=20, max_depth=None,
         safe_option=EventChoice(
             "Wait below the ladder",
-            success=EventOutcome("You let the ladder finish climbing.", 0, -2, False),
+            success=EventOutcome("You let the ladder finish climbing.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Climb behind it",
-            success=EventOutcome("You go up alongside the rain. It splashes the rest of the mine on the way.", 4, 5, False),
-            failure=EventOutcome("The ladder lets go. You come down with it.", -2, -10, True),
-            success_chance=0.45,
+            success=EventOutcome("You go up alongside the rain. It splashes the rest of the mine on the way.", 2, 14, False),
+            failure=EventOutcome("The ladder lets go. You come down with it.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
         splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=12, trigger="success", mode="burn"),
     ),
-
-    # --- Quest: Aghanim's Lost Trial (depth >=25; C C U U R) -----------------
-
     RandomEvent(
         id="agh_s1",
         name="Etched Tile",
@@ -3979,22 +3791,21 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=25, max_depth=None,
         safe_option=EventChoice(
             "Leave it where it lies",
-            success=EventOutcome("You let it be. The hum follows you a few steps and stops.", 0, 1, False),
+            success=EventOutcome("You let it be. The hum follows you a few steps and stops.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Pry it loose and pocket it",
-            success=EventOutcome("It comes free with a clean click. Useful weight.", 1, 6, False),
-            failure=EventOutcome("It shatters in your hand. Shards bite.", -2, 0, False),
-            success_chance=0.55,
+            success=EventOutcome("It comes free with a clean click. Useful weight.", 1, 10, False),
+            failure=EventOutcome("It shatters in your hand. Shards bite.", 0, 0, True),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
             "Press your palm against the glyphs",
-            success=EventOutcome("The tile reads you back. A pattern lodges in your head and stays.", 2, 8, False),
-            failure=EventOutcome("Heat lances up your arm. You drop it; the glyphs go dark.", -3, -3, False),
-            success_chance=0.35,
+            success=EventOutcome("The tile reads you back. A pattern lodges in your head and stays.", 2, 16, False),
+            failure=EventOutcome("Heat lances up your arm. You drop it; the glyphs go dark.", -2, 0, True),
+            success_chance=0.40,
         ),
-        rarity="common",
         quest_id="agh_lost_trial", quest_step=1,
     ),
     RandomEvent(
@@ -4007,22 +3818,21 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Step around it",
-            success=EventOutcome("You move on. It clicks once behind you.", 0, 2, False),
+            success=EventOutcome("You move on. It clicks once behind you.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Work it loose with your pickaxe",
-            success=EventOutcome("It comes free in your palm, articulating against itself.", 1, 7, False),
-            failure=EventOutcome("The pickaxe slips. You leave skin on the brass.", -2, 0, False),
-            success_chance=0.50,
+            success=EventOutcome("It comes free in your palm, articulating against itself.", 1, 10, False),
+            failure=EventOutcome("The pickaxe slips. You leave skin on the brass.", 0, 0, True),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
             "Fit it to the tile in your pack",
-            success=EventOutcome("Brass meets glass. Both go warm. The pattern is one step closer to whole.", 2, 10, False),
-            failure=EventOutcome("Both pieces seize. You almost lose them in the dirt.", -3, -4, False),
-            success_chance=0.32,
+            success=EventOutcome("Brass meets glass. Both go warm. The pattern is one step closer to whole.", 2, 16, False),
+            failure=EventOutcome("Both pieces seize. You almost lose them in the dirt.", -2, 0, True),
+            success_chance=0.40,
         ),
-        rarity="common",
         quest_id="agh_lost_trial", quest_step=2,
     ),
     RandomEvent(
@@ -4040,21 +3850,18 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Open it and pour out a drop",
-            success=EventOutcome("A bead of it lands on your glove. It evaporates upward, smelling of rain.", 2, 10, False),
-            failure=EventOutcome("The vial pops in your hand. The reagent reaches for you.", -3, -6, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Pour the whole vial onto the brass",
-            success=EventOutcome("Brass drinks. The pattern flares — somewhere a tunnel coughs in sympathy.", 3, 14, False),
-            failure=EventOutcome("The reagent burns through everything in your pack.", -4, -10, False),
-            success_chance=0.30,
+            success=EventOutcome("A bead of it lands on your glove. It evaporates upward, smelling of rain.", 2, 14, False),
+            failure=EventOutcome("The vial pops in your hand. The reagent reaches for you.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=1, penalty_jc=2,
-            trigger="success", mode="burn",
+        desperate_option=EventChoice(
+            "Pour the whole vial onto the brass",
+            success=EventOutcome("Brass drinks. The pattern flares — somewhere a tunnel coughs in sympathy.", 3, 22, False),
+            failure=EventOutcome("The reagent burns through everything in your pack.", -3, 0, True),
+            success_chance=0.40,
         ),
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=2, trigger="success", mode="burn"),
         quest_id="agh_lost_trial", quest_step=3,
     ),
     RandomEvent(
@@ -4067,22 +3874,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Note its location and leave",
-            success=EventOutcome("You memorize the door. It hums politely as you go.", 0, 4, False),
+            success=EventOutcome("You memorize the door. It hums politely as you go.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Fit the pieces and turn the lock",
             success=EventOutcome("Tumblers fall. Something inside the door pays attention.", 2, 14, False),
-            failure=EventOutcome("The pieces refuse each other. The door grows cold.", -3, -8, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Force the door open while it's still warm",
-            success=EventOutcome("It gives, reluctantly. A long corridor breathes in welcome.", 4, 18, False),
-            failure=EventOutcome("The door rejects you. Heat lashes the chamber.", -6, -14, True),
-            success_chance=0.28,
+            failure=EventOutcome("The pieces refuse each other. The door grows cold.", 0, 0, True),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Force the door open while it's still warm",
+            success=EventOutcome("It gives, reluctantly. A long corridor breathes in welcome.", 3, 22, False),
+            failure=EventOutcome("The door rejects you. Heat lashes the chamber.", -3, 0, True),
+            success_chance=0.40,
+        ),
         quest_id="agh_lost_trial", quest_step=4,
     ),
     RandomEvent(
@@ -4095,27 +3902,24 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Take what you can carry and leave",
-            success=EventOutcome("You pocket what is loose and go. The room stays patient.", 1, 10, False),
+            success=EventOutcome("You pocket what is loose and go. The room stays patient.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Sit at the bench and try the simplest joining",
-            success=EventOutcome("Reagent meets brass meets glass. The room exhales gold.", 3, 30, False),
-            failure=EventOutcome("Your joining fails loudly. The bench scorches.", -6, -20, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Trigger the whole contraption",
-            success=EventOutcome("Reagent floods the chamber and rolls outward through every tunnel. The guild's mine drinks it for an hour.", 6, 75, False),
-            failure=EventOutcome("The contraption fires in the wrong direction. Most of the reagent is wasted.", -8, -25, True),
-            success_chance=0.25,
+            success=EventOutcome("Reagent meets brass meets glass. The room exhales gold.", 2, 19, False),
+            failure=EventOutcome("Your joining fails loudly. The bench scorches.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Trigger the whole contraption",
+            success=EventOutcome("Reagent floods the chamber and rolls outward through every tunnel. The guild's mine drinks it for an hour.", 3, 30, False),
+            failure=EventOutcome("The contraption fires in the wrong direction. Most of the reagent is wasted.", -4, 0, True),
+            success_chance=0.40,
+        ),
         quest_id="agh_lost_trial", quest_step=5,
     ),
-
-    # --- Quest: The Necropolis Below (prestige >=2; C C U U R) ---------------
-
     RandomEvent(
         id="necro_s1",
         name="Bone Fragment",
@@ -4124,25 +3928,24 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "You uncover a bone splinter, polished as if it has been waiting.",
         ),
         min_depth=None, max_depth=None,
-        min_prestige=2,
         safe_option=EventChoice(
             "Rebury it respectfully",
-            success=EventOutcome("You cover the bone. The air thanks you in a way you cannot name.", 0, 2, False),
+            success=EventOutcome("You cover the bone. The air thanks you in a way you cannot name.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Pocket it for luck",
-            success=EventOutcome("Cold against your hip. Heavier than it should be.", 1, 7, False),
-            failure=EventOutcome("It crumbles to powder. The air goes thin.", -2, 0, False),
-            success_chance=0.50,
+            "Pocket the bone for luck",
+            success=EventOutcome("Cold against your hip. Heavier than it should be.", 1, 12, False),
+            failure=EventOutcome("It crumbles to powder. The air goes thin.", 0, 0, False, curse=TempCurse("hex_necro_s1", "Thin-Air Curse", 3, {"advance_bonus": -2})),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
-            "Whisper a name to it",
-            success=EventOutcome("Something far below sits up to listen.", 2, 11, False),
-            failure=EventOutcome("Wrong name. Wrong everything. The dirt tightens around your ankles.", -3, -5, False),
-            success_chance=0.35,
+            "Whisper a name to the bone",
+            success=EventOutcome("Something far below sits up to listen.", 2, 19, False),
+            failure=EventOutcome("Wrong name. Wrong everything. The dirt tightens around your ankles.", -2, 0, False, curse=TempCurse("hex_necro_s1", "Thin-Air Curse", 3, {"advance_bonus": -3})),
+            success_chance=0.40,
         ),
-        rarity="common",
+        min_prestige=2,
         quest_id="necropolis_below", quest_step=1,
     ),
     RandomEvent(
@@ -4153,25 +3956,24 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "It does not block your path. It only stands there and counts your breaths.",
         ),
         min_depth=None, max_depth=None,
-        min_prestige=2,
         safe_option=EventChoice(
             "Pass with eyes down",
             success=EventOutcome("You walk past. It does not turn its head.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Offer a coin",
-            success=EventOutcome("It accepts. The coin disappears. Your pack feels noticed.", 2, 9, False),
-            failure=EventOutcome("It does not want coin. It wants a name. You do not give one.", -2, -3, False),
-            success_chance=0.50,
+            "Offer the watcher a coin",
+            success=EventOutcome("It accepts. The coin disappears. Your pack feels noticed.", 2, 12, False),
+            failure=EventOutcome("It does not want coin. It wants a name. You do not give one.", 0, 0, False, curse=TempCurse("hex_necro_s2", "Counted Breaths", 3, {"luminosity_drain": 10})),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
-            "Ask who sent it",
-            success=EventOutcome("It gestures further down. A road opens that was not there before.", 2, 12, False),
-            failure=EventOutcome("It turns its facelessness fully on you. You forget several minutes.", -4, -8, False),
-            success_chance=0.32,
+            "Ask the watcher who sent it",
+            success=EventOutcome("It gestures further down. A road opens that was not there before.", 2, 19, False),
+            failure=EventOutcome("It turns its facelessness fully on you. You forget several minutes.", -2, 0, False, curse=TempCurse("hex_necro_s2", "Counted Breaths", 3, {"luminosity_drain": 15})),
+            success_chance=0.40,
         ),
-        rarity="common",
+        min_prestige=2,
         quest_id="necropolis_below", quest_step=2,
     ),
     RandomEvent(
@@ -4182,29 +3984,26 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "An emissary, clearly. He has a ledger. He is checking your name against something.",
         ),
         min_depth=None, max_depth=None,
-        min_prestige=2,
         safe_option=EventChoice(
             "Plead unworthiness",
-            success=EventOutcome("He marks something and waves you on. The ledger sighs.", 0, 4, False),
+            success=EventOutcome("He marks something and waves you on. The ledger sighs.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Sign the ledger",
-            success=EventOutcome("He smiles. The signature pays for itself somewhere down the line.", 2, 12, False),
-            failure=EventOutcome("Your hand cramps on the page. Something is taken in the gap.", -3, -8, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Steal a page from the ledger",
-            success=EventOutcome("The page comes loose; another digger's name fades from a wall somewhere.", 3, 14, False),
-            failure=EventOutcome("He catches your wrist. The ledger drinks from you in payment.", -5, -12, False),
-            success_chance=0.28,
+            "Sign the emissary's ledger",
+            success=EventOutcome("He smiles. The signature pays for itself somewhere down the line.", 2, 14, False),
+            failure=EventOutcome("Your hand cramps on the page. Something is taken in the gap.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=1, penalty_jc=3,
-            trigger="success", mode="steal",
+        desperate_option=EventChoice(
+            "Steal a page from the ledger",
+            success=EventOutcome("The page comes loose; another digger's name fades from a wall somewhere.", 3, 22, False),
+            failure=EventOutcome("He catches your wrist. The ledger drinks from you in payment.", -3, -11, False),
+            success_chance=0.40,
         ),
+        min_prestige=2,
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=3, trigger="success", mode="steal"),
         quest_id="necropolis_below", quest_step=3,
     ),
     RandomEvent(
@@ -4215,25 +4014,25 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "Inside the circle, a question without words. You can wake what is here. You can also send it away.",
         ),
         min_depth=None, max_depth=None,
-        min_prestige=2,
         safe_option=EventChoice(
             "Scatter the circle",
-            success=EventOutcome("Bones roll into dirt. The chamber relaxes.", 1, 5, False),
+            success=EventOutcome("Bones roll into dirt. The chamber relaxes.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Banish what is inside",
-            success=EventOutcome("Something thin slips out and out and out until it isn't.", 2, 13, False),
-            failure=EventOutcome("Banishing requires conviction. You lacked it.", -4, -10, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Raise it and ask its name",
-            success=EventOutcome("It rises and gives a name. You write it where you'll find it again.", 3, 17, False),
-            failure=EventOutcome("What rises is not what was buried.", -6, -16, True),
-            success_chance=0.28,
+            "Banish what waits in the circle",
+            success=EventOutcome("Something thin slips out and out and out until it isn't.", 2, 14, False),
+            failure=EventOutcome("Banishing requires conviction. You lacked it.", 0, 0, False, curse=TempCurse("hex_necro_s4", "Wrong-Name Hex", 3, {"advance_bonus": -3})),
+            success_chance=0.62,
         ),
         rarity="uncommon",
+        desperate_option=EventChoice(
+            "Raise it and ask its name",
+            success=EventOutcome("It rises and gives a name. You write it where you'll find it again.", 3, 22, False),
+            failure=EventOutcome("What rises is not what was buried.", -3, 0, False, curse=TempCurse("hex_necro_s4", "Wrong-Name Hex", 3, {"advance_bonus": -4})),
+            success_chance=0.40,
+        ),
+        min_prestige=2,
         quest_id="necropolis_below", quest_step=4,
     ),
     RandomEvent(
@@ -4244,30 +4043,27 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "You arrive in a hall too big for the tunnels. Cold light. A figure on a throne, who has read every page of the ledger and chosen which to keep.",
         ),
         min_depth=None, max_depth=None,
-        min_prestige=2,
         safe_option=EventChoice(
             "Bow and back away",
-            success=EventOutcome("You retreat. He does not begrudge it. The hall stays for next time.", 1, 8, False),
+            success=EventOutcome("You retreat. He does not begrudge it. The hall stays for next time.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Offer service in exchange for safe passage",
-            success=EventOutcome("He accepts a small service. The room marks you as useful.", 3, 25, False),
-            failure=EventOutcome("He laughs. The standing dead laugh with him.", -8, -30, False),
-            success_chance=0.40,
-        ),
-        desperate_option=EventChoice(
-            "Demand a token of his authority",
-            success=EventOutcome("He is delighted by the impertinence. He hands you a cloak from his own shoulders. It moves of its own accord.", 5, 50, False),
-            failure=EventOutcome("Impertinence has a price. He extracts it from your bones.", -10, -40, True),
-            success_chance=0.25,
+            success=EventOutcome("He accepts a small service. The room marks you as useful.", 2, 19, False),
+            failure=EventOutcome("He laughs. The standing dead laugh with him.", 0, 0, False, curse=TempCurse("hex_necro_s5", "The Necromancer's Note", 4, {"jc_bonus": -5})),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Demand a token of his authority",
+            success=EventOutcome("He is delighted by the impertinence. He hands you a cloak from his own shoulders. It moves of its own accord.", 3, 30, False),
+            failure=EventOutcome("Impertinence has a price. He extracts it from your bones.", -4, 0, False, curse=TempCurse("hex_necro_s5", "The Necromancer's Note", 4, {"jc_bonus": -8})),
+            success_chance=0.40,
+        ),
+        min_prestige=2,
         quest_id="necropolis_below", quest_step=5,
     ),
-
-    # --- Quest: Bolas' Hidden Vault (bet within 7 days; C C U U R) -----------
-
     RandomEvent(
         id="bolas_s1",
         name="Hieroglyph in the Dirt",
@@ -4278,22 +4074,21 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Smear it out and move on",
-            success=EventOutcome("You wipe the glyph; the wall keeps the memory of it.", 0, 2, False),
+            success=EventOutcome("You wipe the glyph; the wall keeps the memory of it.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Trace it with your finger",
-            success=EventOutcome("The line completes under your touch and stays warm.", 1, 7, False),
-            failure=EventOutcome("Your finger cuts on the glyph; the cut does not bleed for a while.", -2, -2, False),
-            success_chance=0.50,
+            success=EventOutcome("The line completes under your touch and stays warm.", 1, 12, False),
+            failure=EventOutcome("Your finger cuts on the glyph; the cut does not bleed for a while.", 0, 0, False, curse=TempCurse("hex_bolas_s1", "Dragon's Notice", 3, {"jc_bonus": -3})),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
             "Spit on it and rub the spit in",
-            success=EventOutcome("The dragon takes a small interest in you. A coin appears at your feet.", 2, 11, False),
-            failure=EventOutcome("The wall takes the spit and gives nothing back.", -3, -5, False),
-            success_chance=0.34,
+            success=EventOutcome("The dragon takes a small interest in you. A coin appears at your feet.", 2, 19, False),
+            failure=EventOutcome("The wall takes the spit and gives nothing back.", -2, 0, False, curse=TempCurse("hex_bolas_s1", "Dragon's Notice", 3, {"jc_bonus": -4})),
+            success_chance=0.40,
         ),
-        rarity="common",
         quest_id="bolas_hidden_vault", quest_step=1,
     ),
     RandomEvent(
@@ -4310,18 +4105,17 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Wedge a tool under it",
-            success=EventOutcome("Leverage works where fingers did not. The coin yields, sullenly.", 1, 8, False),
-            failure=EventOutcome("The coin bites the tool. Your grip rings for an hour.", -2, -3, False),
-            success_chance=0.50,
+            "Pry the stubborn coin loose",
+            success=EventOutcome("Leverage works where fingers did not. The coin yields, sullenly.", 1, 10, False),
+            failure=EventOutcome("The coin bites the tool. Your grip rings for an hour.", 0, -6, False),
+            success_chance=0.62,
         ),
         desperate_option=EventChoice(
-            "Promise it something",
-            success=EventOutcome("You promise the next thing you find. The coin lifts itself into your hand.", 2, 12, False),
-            failure=EventOutcome("It accepts the wrong promise. You feel poorer in a way coin cannot fix.", -3, -7, False),
-            success_chance=0.32,
+            "Promise the coin something",
+            success=EventOutcome("You promise the next thing you find. The coin lifts itself into your hand.", 2, 16, False),
+            failure=EventOutcome("It accepts the wrong promise. You feel poorer in a way coin cannot fix.", -2, -8, False),
+            success_chance=0.40,
         ),
-        rarity="common",
         quest_id="bolas_hidden_vault", quest_step=2,
     ),
     RandomEvent(
@@ -4334,26 +4128,23 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Add one of your own coins, take none",
-            success=EventOutcome("Your tithe lands on top. The pile leans toward you.", 0, 4, False),
+            success=EventOutcome("Your tithe lands on top. The pile leans toward you.", 0, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
-            "Skim a few coins off the top",
-            success=EventOutcome("You take a few. The pile remembers the shape of the hand that took them.", 1, 9, False),
-            failure=EventOutcome("The pile collapses and yours collapses with it.", -3, -8, False),
-            success_chance=0.45,
-        ),
-        desperate_option=EventChoice(
-            "Take the whole pile",
-            success=EventOutcome("You scoop it all. The chamber chooses someone else to feel the lack.", 2, 18, False),
-            failure=EventOutcome("The pile remembers everything you took and forgets nothing.", -5, -14, False),
-            success_chance=0.28,
+            "Skim a few coins off the pile",
+            success=EventOutcome("You take a few. The pile remembers the shape of the hand that took them.", 1, 14, False),
+            failure=EventOutcome("The pile collapses and yours collapses with it.", 0, -8, False),
+            success_chance=0.62,
         ),
         rarity="uncommon",
-        splash=SplashConfig(
-            strategy="active_diggers", victim_count=1, penalty_jc=4,
-            trigger="success", mode="steal",
+        desperate_option=EventChoice(
+            "Take the whole hoarded pile",
+            success=EventOutcome("You scoop it all. The chamber chooses someone else to feel the lack.", 2, 22, False),
+            failure=EventOutcome("The pile remembers everything you took and forgets nothing.", -3, -11, False),
+            success_chance=0.40,
         ),
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=4, trigger="success", mode="steal"),
         quest_id="bolas_hidden_vault", quest_step=3,
     ),
     RandomEvent(
@@ -4366,22 +4157,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Leave a small token",
-            success=EventOutcome("A coin disappears into the altar. You feel lighter and slightly observed.", 1, 5, False),
+            success=EventOutcome("A coin disappears into the altar. You feel lighter and slightly observed.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Offer a meaningful share",
             success=EventOutcome("You give what stings. The altar warms. Something in you marks the loss as deposit.", 2, 14, False),
-            failure=EventOutcome("Your share is judged inadequate. You leave it anyway.", -3, -10, False),
-            success_chance=0.45,
+            failure=EventOutcome("Your share is judged inadequate. You leave it anyway.", 0, -8, False),
+            success_chance=0.62,
         ),
+        rarity="uncommon",
         desperate_option=EventChoice(
             "Empty your pack onto the altar",
             success=EventOutcome("You pour out everything. The altar approves in a register reserved for fools and heirs.", 3, 22, False),
-            failure=EventOutcome("Generosity is taken for weakness. The altar takes more than you offered.", -5, -18, True),
-            success_chance=0.27,
+            failure=EventOutcome("Generosity is taken for weakness. The altar takes more than you offered.", -3, -11, False),
+            success_chance=0.40,
         ),
-        rarity="uncommon",
         quest_id="bolas_hidden_vault", quest_step=4,
     ),
     RandomEvent(
@@ -4394,22 +4185,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Note the door and retreat",
-            success=EventOutcome("You record the location in your head and back out. It will be here.", 1, 10, False),
+            success=EventOutcome("You record the location in your head and back out. It will be here.", 1, 3, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Knock and announce yourself",
-            success=EventOutcome("The door opens politely. A modest sample of the hoard is yours.", 3, 28, False),
-            failure=EventOutcome("Your name does not match the ledger today.", -6, -20, False),
-            success_chance=0.42,
-        ),
-        desperate_option=EventChoice(
-            "Take the hoard",
-            success=EventOutcome("The door yields what it has been holding. Something with teeth nods at the bargain.", 5, 55, False),
-            failure=EventOutcome("Hoards object. This one objects with teeth.", -10, -35, True),
-            success_chance=0.25,
+            success=EventOutcome("The door opens politely. A modest sample of the hoard is yours.", 2, 19, False),
+            failure=EventOutcome("Your name does not match the ledger today.", 0, 0, True),
+            success_chance=0.56,
         ),
         rarity="rare",
+        desperate_option=EventChoice(
+            "Take the hoard",
+            success=EventOutcome("The door yields what it has been holding. Something with teeth nods at the bargain.", 3, 30, False),
+            failure=EventOutcome("Hoards object. This one objects with teeth.", -4, 0, True),
+            success_chance=0.40,
+        ),
         quest_id="bolas_hidden_vault", quest_step=5,
     ),
 ]

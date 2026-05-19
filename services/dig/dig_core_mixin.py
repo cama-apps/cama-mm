@@ -628,6 +628,8 @@ class DigCoreMixin:
             advance = random.randint(base_min, base_max)
 
         advance += p["pickaxe_advance_bonus"] + p["mole_claws_bonus"] + p["buff_advance_bonus"]
+        # Temp-curse advance modifier (negative = slowed dig)
+        advance += int(p.get("curse_advance_bonus", 0))
         advance += int(p["weather_fx"].get("advance_bonus", 0))
         advance -= int(p["ascension"].get("advance_penalty", 0))
         if p["corruption"]:
@@ -681,6 +683,9 @@ class DigCoreMixin:
             + int(p.get("perk_loot_flat", 0) + 0.5)
         )
         jc_earned += int(p["weather_fx"].get("jc_bonus", 0))
+        # Temp-curse JC drain (negative jc_bonus = less JC this dig). The
+        # max(0, ...) clamp below still floors a cursed dig at 0.
+        jc_earned += int(p.get("curse_jc_bonus", 0))
         if p["corruption"] and p["corruption"]["effects"].get("fixed_jc") is not None:
             jc_earned = p["corruption"]["effects"]["fixed_jc"]
         elif p["corruption"] and p["corruption"]["effects"].get("double_half_jc"):
