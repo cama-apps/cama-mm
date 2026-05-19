@@ -118,6 +118,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "pinnacle_last_engaged_at",
         # dig_buff_fun_charges migration
         "grappling_hook_charges", "sonar_skip_pending",
+        # add_temp_curses_to_tunnels migration (event "curse" threat)
+        "temp_curses",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:

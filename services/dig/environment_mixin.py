@@ -228,6 +228,54 @@ class EnvironmentMixin:
         self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=json.dumps(payload))
 
     # ------------------------------------------------------------------
+    # Temp Curses
+    # ------------------------------------------------------------------
+    # Exact parallel of the temp-buff lifecycle above, operating on the
+    # ``temp_curses`` column. Kept separate so a curse and a buff can be
+    # active at the same time without overwriting one another.
+
+    def _get_active_curse(self, tunnel: dict) -> dict | None:
+        """Get the active temp curse, or None if expired/absent."""
+        raw = tunnel.get("temp_curses")
+        if not raw:
+            return None
+        try:
+            curse = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if curse.get("digs_remaining", 0) <= 0:
+            return None
+        return curse
+
+    def _apply_curse_effects(self, curse: dict | None) -> dict:
+        """Extract numeric effects from an active curse. Returns effect dict."""
+        if not curse:
+            return {}
+        return curse.get("effect", {})
+
+    def _decrement_curse(self, discord_id: int, guild_id, tunnel: dict) -> None:
+        """Decrement active curse duration by 1 dig. Clear if expired."""
+        curse = self._get_active_curse(tunnel)
+        if not curse:
+            return
+        remaining = curse.get("digs_remaining", 0) - 1
+        if remaining <= 0:
+            self.dig_repo.update_tunnel(discord_id, guild_id, temp_curses=None)
+        else:
+            curse["digs_remaining"] = remaining
+            self.dig_repo.update_tunnel(discord_id, guild_id, temp_curses=json.dumps(curse))
+
+    def set_temp_curse(self, discord_id: int, guild_id, curse_data: dict) -> None:
+        """Set a temp curse on the tunnel (replaces any existing curse)."""
+        payload = {
+            "id": curse_data.get("id", "unknown"),
+            "name": curse_data.get("name", "Unknown Curse"),
+            "digs_remaining": curse_data.get("duration_digs", 1),
+            "effect": curse_data.get("effect", {}),
+        }
+        self.dig_repo.update_tunnel(discord_id, guild_id, temp_curses=json.dumps(payload))
+
+    # ------------------------------------------------------------------
     # Ascension System Helpers
     # ------------------------------------------------------------------
 
