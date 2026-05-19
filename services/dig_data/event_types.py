@@ -14,6 +14,12 @@ from typing import Any
 # Random Events
 # ---------------------------------------------------------------------------
 
+# Effect keys a TempCurse is allowed to carry. A curse with any other key
+# is a typo — validated at import time so the catalog fails loud rather than
+# silently no-op'ing an unrecognized drain.
+CURSE_EFFECT_KEYS = frozenset({"advance_bonus", "jc_bonus", "luminosity_drain"})
+
+
 @dataclass(frozen=True)
 class EventOutcome:
     """Possible outcome of a choice in a random event."""
@@ -23,6 +29,12 @@ class EventOutcome:
     cave_in: bool                   # does this trigger a cave-in?
     streak_loss: int = 0             # daily-streak days lost (the "streak" threat)
     curse: TempCurse | None = None   # lingering hex applied (the "curse" threat)
+
+    def __post_init__(self) -> None:
+        if self.streak_loss < 0:
+            raise ValueError(
+                f"EventOutcome streak_loss must be >= 0, got {self.streak_loss}"
+            )
 
 
 @dataclass(frozen=True)
@@ -87,6 +99,19 @@ class TempCurse:
     name: str
     duration_digs: int
     effect: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.duration_digs <= 0:
+            raise ValueError(
+                f"TempCurse {self.id!r} duration_digs must be > 0, "
+                f"got {self.duration_digs}"
+            )
+        unknown = set(self.effect) - CURSE_EFFECT_KEYS
+        if unknown:
+            raise ValueError(
+                f"TempCurse {self.id!r} has unknown effect key(s): "
+                f"{sorted(unknown)} (allowed: {sorted(CURSE_EFFECT_KEYS)})"
+            )
 
 
 @dataclass(frozen=True)

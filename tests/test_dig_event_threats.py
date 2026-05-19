@@ -19,6 +19,7 @@ import time
 import pytest
 
 import services.dig_service as dig_service_module
+from commands.dig import EventEncounterView
 from repositories.dig_repository import DigRepository
 from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
 from services.dig_service import DigService
@@ -64,12 +65,27 @@ def _outcome(description="", advance=0, jc=0, cave_in=False, streak_loss=0, curs
     }
 
 
-def _synthetic_event(event_id, *, risky_success, risky_failure, risky_chance=0.5):
+def _synthetic_event(
+    event_id, *, risky_success, risky_failure, risky_chance=0.5,
+    desperate_success=None, desperate_failure=None, desperate_chance=0.5,
+):
     """Build a minimal two-branch event dict and register it in EVENT_POOL.
+
+    When ``desperate_success`` is supplied a third ``desperate_option`` is
+    attached, so the desperate branch (which routes through the same threat
+    code as risky) can be exercised.
 
     Returns the event dict; the caller is responsible for nothing — a
     fixture-scoped cleanup is wired by ``injected_event``.
     """
+    desperate_option = None
+    if desperate_success is not None:
+        desperate_option = {
+            "label": "Desperate",
+            "success": desperate_success,
+            "failure": desperate_failure,
+            "success_chance": desperate_chance,
+        }
     return {
         "id": event_id,
         "name": f"Synthetic {event_id}",
@@ -95,7 +111,7 @@ def _synthetic_event(event_id, *, risky_success, risky_failure, risky_chance=0.5
         "social": False,
         "ascii_art": None,
         "buff_on_success": None,
-        "desperate_option": None,
+        "desperate_option": desperate_option,
         "boon_options": None,
         "min_prestige": 0,
         "next_event_id": None,
@@ -193,9 +209,9 @@ class TestStreakThreat:
     def test_streak_setback_never_resets_to_zero(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
     ):
-        """A short streak hit by a big base loss floors at 0 but the setback
-        is still a clamped subtraction, not a hard reset to 0/1 unprovoked:
-        a 2-day streak losing base 3 (+0 scale) lands at 0."""
+        """A short streak hit by a base loss larger than the streak floors at
+        0: a 2-day streak losing base 3 (+0 scale) lands at 0, and the
+        reported ``streak_loss`` is the 2 days actually held, not a phantom 3."""
         result = self._resolve_streak_failure(
             dig_service, dig_repo, player_repository, monkeypatch, inject_event,
             streak_days=2, streak_loss=3,
@@ -458,6 +474,136 @@ class TestCurseThreat:
         clean = dig_service.dig(10002, 12345)
         assert formerly_cursed["advance"] == clean["advance"]
 
+    def test_desperate_failure_applies_curse(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """The desperate branch routes through the same threat code as risky:
+        a curse on a failed ``desperate_option`` lands on the tunnel exactly
+        like a curse on a failed risky pick. 14 catalog events carry
+        desperate-branch threats — this proves that path resolves."""
+        _register_player(player_repository, 10001)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+
+        event = _synthetic_event(
+            "threat_curse_desperate",
+            risky_success=_outcome("Risky path.", jc=20),
+            risky_failure=_outcome("Risky fails.", jc=-5),
+            desperate_success=_outcome("Against all odds.", jc=200),
+            desperate_failure=_outcome("The gamble curses you.", curse=self.SLOW_CURSE),
+        )
+        inject_event(event)
+        # Force the desperate choice to FAIL (roll >= success_chance of 0.5).
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+        result = dig_service.resolve_event(10001, 12345, event["id"], "desperate")
+
+        assert result["success"]
+        assert result["choice"] == "desperate"
+        curse_applied = result.get("curse_applied")
+        assert curse_applied is not None and curse_applied["id"] == "test_slow_hex"
+
+        tunnel = dig_repo.get_tunnel(10001, 12345)
+        curse = dig_service._get_active_curse(dict(tunnel))
+        assert curse is not None
+        assert curse["id"] == "test_slow_hex"
+        assert curse["digs_remaining"] == 2
+
+    def test_desperate_failure_applies_streak_loss(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A ``streak_loss`` on a failed desperate option knocks days off the
+        streak — the desperate branch is not exempt from the streak threat."""
+        _register_player(player_repository, 10001)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+        dig_repo.update_tunnel(10001, 12345, streak_days=10)
+
+        event = _synthetic_event(
+            "threat_streak_desperate",
+            risky_success=_outcome("Risky path.", jc=20),
+            risky_failure=_outcome("Risky fails.", jc=-5),
+            desperate_success=_outcome("Against all odds.", jc=200),
+            desperate_failure=_outcome("Momentum gone.", streak_loss=3),
+        )
+        inject_event(event)
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+        result = dig_service.resolve_event(10001, 12345, event["id"], "desperate")
+
+        assert result["success"]
+        tunnel = dig_repo.get_tunnel(10001, 12345)
+        # base 3 + floor(10/20)=0 -> setback 3 -> 10-3 = 7
+        assert tunnel["streak_days"] == 7
+        assert result.get("streak_loss") == 3
+
+    def test_second_curse_replaces_first_cleanly(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Applying a second curse while one is active replaces it: the new
+        ``digs_remaining`` is the new curse's ``duration_digs`` — it does not
+        accumulate onto, or merge with, the first curse."""
+        _register_player(player_repository, 10001)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+
+        # First curse: 5-dig advance drain.
+        dig_service.set_temp_curse(10001, 12345, {
+            "id": "first_hex", "name": "First Hex", "duration_digs": 5,
+            "effect": {"advance_bonus": -3},
+        })
+        first = dig_service._get_active_curse(dict(dig_repo.get_tunnel(10001, 12345)))
+        assert first is not None and first["id"] == "first_hex"
+        assert first["digs_remaining"] == 5
+
+        # Second curse: 2-dig JC drain, applied while the first is still live.
+        dig_service.set_temp_curse(10001, 12345, {
+            "id": "second_hex", "name": "Second Hex", "duration_digs": 2,
+            "effect": {"jc_bonus": -10},
+        })
+        second = dig_service._get_active_curse(dict(dig_repo.get_tunnel(10001, 12345)))
+        assert second is not None
+        # Cleanly replaced — identity, duration, and effect are the new curse's.
+        assert second["id"] == "second_hex"
+        assert second["digs_remaining"] == 2, "duration did not reset to the new curse"
+        assert second["digs_remaining"] != 5 + 2, "durations accumulated instead of replacing"
+        assert second["effect"] == {"jc_bonus": -10}, "effects merged instead of replacing"
+        assert "advance_bonus" not in second["effect"]
+
+    def test_second_curse_via_event_replaces_first(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """Two failed risky curse events in a row: the second curse fully
+        replaces the first on the temp_curses column, no merge."""
+        _register_player(player_repository, 10001)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+
+        long_curse = {
+            "id": "long_hex", "name": "Long Hex", "duration_digs": 6,
+            "effect": {"advance_bonus": -2},
+        }
+        short_curse = {
+            "id": "short_hex", "name": "Short Hex", "duration_digs": 1,
+            "effect": {"jc_bonus": -5},
+        }
+        event_long = _synthetic_event(
+            "threat_curse_long",
+            risky_success=_outcome("Quiet.", jc=20),
+            risky_failure=_outcome("Long hex.", curse=long_curse),
+        )
+        event_short = _synthetic_event(
+            "threat_curse_short",
+            risky_success=_outcome("Quiet.", jc=20),
+            risky_failure=_outcome("Short hex.", curse=short_curse),
+        )
+        inject_event(event_long)
+        inject_event(event_short)
+
+        dig_service.resolve_event(10001, 12345, "threat_curse_long", "risky")
+        dig_service.resolve_event(10001, 12345, "threat_curse_short", "risky")
+
+        active = dig_service._get_active_curse(dict(dig_repo.get_tunnel(10001, 12345)))
+        assert active is not None
+        assert active["id"] == "short_hex"
+        assert active["digs_remaining"] == 1
+        assert active["effect"] == {"jc_bonus": -5}
+
 
 # ---------------------------------------------------------------------------
 # JC threat — a real loss with no floor (can push into debt)
@@ -523,3 +669,132 @@ class TestJcThreat:
         assert player_repository.get_balance(10001, 12345) == balance_before + 40
         # No debt surfaced on a positive outcome.
         assert result.get("balance_after") is None
+
+
+# ---------------------------------------------------------------------------
+# Result embed — EventEncounterView surfaces the threat outcomes
+# ---------------------------------------------------------------------------
+
+
+def _embed_fields(embed) -> dict[str, str]:
+    """Flatten a discord.Embed's fields to a {name: value} dict."""
+    return {f.name: f.value for f in embed.fields}
+
+
+class TestEventResultEmbed:
+    """``EventEncounterView._resolve`` renders the streak-loss, curse, and
+    debt outcomes into the result embed. The view is exercised directly —
+    ``_resolve`` takes only the choice string and returns the embed, so no
+    live Discord interaction is needed.
+    """
+
+    def _make_view(self, dig_service, event, discord_id=10001, guild_id=12345):
+        return EventEncounterView(
+            dig_service=dig_service,
+            user_id=discord_id,
+            guild_id=guild_id,
+            event_data=event,
+        )
+
+    async def test_embed_surfaces_streak_loss(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A failed risky pick with streak_loss renders a '-N streak days'
+        line in the Outcome field."""
+        _register_player(player_repository, 10001)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+        dig_repo.update_tunnel(10001, 12345, streak_days=10)
+
+        event = _synthetic_event(
+            "embed_streak",
+            risky_success=_outcome("Held the line.", jc=20),
+            risky_failure=_outcome("Momentum lost.", streak_loss=3),
+        )
+        inject_event(event)
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+
+        embed = await self._make_view(dig_service, event)._resolve("risky")
+        fields = _embed_fields(embed)
+        assert "Outcome" in fields
+        assert "streak" in fields["Outcome"]
+        # base 3 + floor(10/20)=0 -> 3 days lost.
+        assert "3 streak days" in fields["Outcome"]
+
+    async def test_embed_surfaces_curse(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A failed risky pick that applies a curse renders a 'Curse: <name>'
+        field naming the hex and its duration."""
+        _register_player(player_repository, 10001)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+
+        event = _synthetic_event(
+            "embed_curse",
+            risky_success=_outcome("The idol stays quiet.", jc=20),
+            risky_failure=_outcome("The idol wakes.", curse={
+                "id": "embed_hex", "name": "Embed Hex",
+                "duration_digs": 2, "effect": {"advance_bonus": -3},
+            }),
+        )
+        inject_event(event)
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+
+        embed = await self._make_view(dig_service, event)._resolve("risky")
+        fields = _embed_fields(embed)
+        curse_field = next((n for n in fields if n.startswith("Curse:")), None)
+        assert curse_field is not None, f"no Curse field in {list(fields)}"
+        assert "Embed Hex" in curse_field
+        # duration_digs=2 -> "next 2 digs"
+        assert "2 digs" in fields[curse_field]
+
+    async def test_embed_surfaces_debt(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A failed risky pick with a negative JC outcome that pushes the
+        player below zero renders an 'In Debt' field."""
+        # Low starting balance so a -200 JC failure lands the player negative.
+        _register_player(player_repository, 10001, balance=30)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+
+        event = _synthetic_event(
+            "embed_debt",
+            risky_success=_outcome("Paid fair.", jc=40),
+            risky_failure=_outcome("Pockets emptied.", jc=-200),
+        )
+        inject_event(event)
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+        # Pin the JC jitter so the -200 lands as authored (still negative).
+        monkeypatch.setattr("services.dig.events_mixin.random.uniform", lambda a, b: 1.0)
+
+        embed = await self._make_view(dig_service, event)._resolve("risky")
+        fields = _embed_fields(embed)
+        assert "In Debt" in fields, f"no In Debt field in {list(fields)}"
+        assert "red" in fields["In Debt"]
+
+    async def test_embed_omits_threat_fields_on_clean_success(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """A successful risky pick with no threat shows neither a curse, a
+        streak-loss line, nor a debt field — the branches are failure-gated."""
+        _register_player(player_repository, 10001, balance=500)
+        _start_tunnel(dig_service, dig_repo, 10001, 12345, monkeypatch)
+        dig_repo.update_tunnel(10001, 12345, streak_days=10)
+
+        event = _synthetic_event(
+            "embed_clean",
+            risky_success=_outcome("Clean win.", jc=20),
+            risky_failure=_outcome("Hexed.", curse={
+                "id": "embed_hex2", "name": "Embed Hex",
+                "duration_digs": 2, "effect": {"advance_bonus": -3},
+            }, streak_loss=5),
+        )
+        inject_event(event)
+        # Force SUCCESS (roll < 0.5).
+        monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.01)
+
+        embed = await self._make_view(dig_service, event)._resolve("risky")
+        fields = _embed_fields(embed)
+        assert not any(n.startswith("Curse:") for n in fields)
+        assert "In Debt" not in fields
+        if "Outcome" in fields:
+            assert "streak" not in fields["Outcome"]
