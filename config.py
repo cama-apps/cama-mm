@@ -243,30 +243,27 @@ WHEEL_GOLDEN_RECESSION_MID_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_MID_PCT", 
 WHEEL_GOLDEN_RECESSION_REST_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_REST_PCT", 0.02)
 WHEEL_GOLDEN_RECESSION_MID_RANK_END = _parse_int("WHEEL_GOLDEN_RECESSION_MID_RANK_END", 10)
 
-# Mario Kart "fun" wedges — all deflationary (coins burned, no nonprofit credit).
-# Three escalating sizes: banana (spinner only), green shell (spinner + 1 other),
-# bomb-omb (spinner + 3 others). All burns vanish from the economy.
+# Mario Kart wedges — chaos items that target other players, not the spinner.
+# EV values represent TOTAL economic impact (JC created or destroyed per spin),
+# matching the convention used by RED_SHELL/LIGHTNING_BOLT/RECESSION above.
 
-# BANANA_PEEL: spinner slips → flat 15-25 JC burned. Local deflation.
+# BANANA_PEEL: player ranked directly below spinner takes a flat 15-25 JC burn.
+# Spinner unchanged. One player burned per spin → total economic impact ≈ -20.
 WHEEL_BANANA_PEEL_EST_EV = _parse_float("WHEEL_BANANA_PEEL_EST_EV", -20.0)
 WHEEL_BANANA_PEEL_LOSS_MIN = _parse_int("WHEEL_BANANA_PEEL_LOSS_MIN", 15)
 WHEEL_BANANA_PEEL_LOSS_MAX = _parse_int("WHEEL_BANANA_PEEL_LOSS_MAX", 25)
 
-# GREEN_SHELL: spinner + 1 random other each take a flat hit; both burned.
-# EV is spinner's own loss only — victim's loss is an externality.
-WHEEL_GREEN_SHELL_EST_EV = _parse_float("WHEEL_GREEN_SHELL_EST_EV", -20.0)
-WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN = _parse_int("WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN", 15)
-WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX = _parse_int("WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX", 25)
-WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN = _parse_int("WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN", 10)
-WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX = _parse_int("WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX", 22)
+# GREEN_SHELL: spinner atomically steals 15-25 JC from a random other positive-balance
+# player. Zero-sum transfer → total economic impact = 0.
+WHEEL_GREEN_SHELL_EST_EV = _parse_float("WHEEL_GREEN_SHELL_EST_EV", 0.0)
+WHEEL_GREEN_SHELL_STEAL_MIN = _parse_int("WHEEL_GREEN_SHELL_STEAL_MIN", 15)
+WHEEL_GREEN_SHELL_STEAL_MAX = _parse_int("WHEEL_GREEN_SHELL_STEAL_MAX", 25)
 
-# BOMB_OMB: spinner takes a big hit + 3 random others get splashed; all burned.
-# Heavy global deflation per spin.
+# BOMB_OMB: 3 random other positive-balance players each take a 10-20 JC burn.
+# Spinner unchanged. Heavy global deflation per spin → total economic impact ≈ -45.
 WHEEL_BOMB_OMB_EST_EV = _parse_float("WHEEL_BOMB_OMB_EST_EV", -45.0)
-WHEEL_BOMB_OMB_SPINNER_LOSS_MIN = _parse_int("WHEEL_BOMB_OMB_SPINNER_LOSS_MIN", 35)
-WHEEL_BOMB_OMB_SPINNER_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_SPINNER_LOSS_MAX", 60)
 WHEEL_BOMB_OMB_VICTIM_LOSS_MIN = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MIN", 10)
-WHEEL_BOMB_OMB_VICTIM_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MAX", 22)
+WHEEL_BOMB_OMB_VICTIM_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MAX", 20)
 WHEEL_BOMB_OMB_VICTIM_COUNT = _parse_int("WHEEL_BOMB_OMB_VICTIM_COUNT", 3)
 
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)

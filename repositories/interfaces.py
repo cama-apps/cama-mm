@@ -158,6 +158,17 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def get_player_below(self, discord_id: int, guild_id: int):
+        """Get the player ranked one position lower on the balance leaderboard.
+
+        Used for Banana Peel wheel mechanic.
+
+        Returns:
+            Player object of the player ranked below, or None if user is last or not found
+        """
+        ...
+
+    @abstractmethod
     def steal_atomic(
         self,
         thief_discord_id: int,

@@ -391,6 +391,21 @@ class PlayerService:
         """
         return self.player_repo.get_player_above(discord_id, guild_id)
 
+    def get_player_below(self, discord_id: int, guild_id: int):
+        """
+        Get the player ranked one position lower on the balance leaderboard.
+
+        Used for Banana Peel wheel mechanic - the player behind slips on the peel.
+
+        Args:
+            discord_id: The player's Discord ID
+            guild_id: Guild ID
+
+        Returns:
+            Player object of the player ranked below, or None if user is last
+        """
+        return self.player_repo.get_player_below(discord_id, guild_id)
+
     def get_leaderboard_bottom(self, guild_id: int, limit: int = 3, min_balance: int = 1):
         """
         Get players with the lowest positive balance, ascending order.
