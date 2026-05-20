@@ -182,8 +182,11 @@ WHEEL_MAX_REWARD = _parse_int("WHEEL_MAX_REWARD", 100)
 WHEEL_ANIMATION_FRAMES = _parse_int("WHEEL_ANIMATION_FRAMES", 5)  # Number of spin frames
 WHEEL_FRAME_DELAY_MS = _parse_int("WHEEL_FRAME_DELAY_MS", 1000)  # Delay between frames (ms)
 WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -25.0)  # Target expected value per spin
-# Bankrupt wheel target EV: positive so the wheel pays out on average — easier escape.
-WHEEL_BANKRUPT_TARGET_EV = _parse_float("WHEEL_BANKRUPT_TARGET_EV", 25.0)
+# Bankrupt wheel target EV: positive so the wheel pays out on average — easier
+# escape. Trimmed from +25 to +12 once the Mario Kart deflation trio landed; the
+# natural floor of the 22 non-BANKRUPT wedges is around +13, so the old +25 was
+# unreachable and BANKRUPT always clamped to -1.
+WHEEL_BANKRUPT_TARGET_EV = _parse_float("WHEEL_BANKRUPT_TARGET_EV", 12.0)
 
 # Estimated EV for special wedges — total economic impact, not just spinner's personal outcome.
 # Used to adjust BANKRUPT value so overall wheel drain stays at WHEEL_TARGET_EV.
@@ -239,6 +242,32 @@ WHEEL_GOLDEN_RECESSION_TOP_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_TOP_PCT", 
 WHEEL_GOLDEN_RECESSION_MID_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_MID_PCT", 0.035)
 WHEEL_GOLDEN_RECESSION_REST_PCT = _parse_float("WHEEL_GOLDEN_RECESSION_REST_PCT", 0.02)
 WHEEL_GOLDEN_RECESSION_MID_RANK_END = _parse_int("WHEEL_GOLDEN_RECESSION_MID_RANK_END", 10)
+
+# Mario Kart "fun" wedges — all deflationary (coins burned, no nonprofit credit).
+# Three escalating sizes: banana (spinner only), green shell (spinner + 1 other),
+# bomb-omb (spinner + 3 others). All burns vanish from the economy.
+
+# BANANA_PEEL: spinner slips → flat 15-25 JC burned. Local deflation.
+WHEEL_BANANA_PEEL_EST_EV = _parse_float("WHEEL_BANANA_PEEL_EST_EV", -20.0)
+WHEEL_BANANA_PEEL_LOSS_MIN = _parse_int("WHEEL_BANANA_PEEL_LOSS_MIN", 15)
+WHEEL_BANANA_PEEL_LOSS_MAX = _parse_int("WHEEL_BANANA_PEEL_LOSS_MAX", 25)
+
+# GREEN_SHELL: spinner + 1 random other each take a flat hit; both burned.
+# EV is spinner's own loss only — victim's loss is an externality.
+WHEEL_GREEN_SHELL_EST_EV = _parse_float("WHEEL_GREEN_SHELL_EST_EV", -20.0)
+WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN = _parse_int("WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN", 15)
+WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX = _parse_int("WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX", 25)
+WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN = _parse_int("WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN", 10)
+WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX = _parse_int("WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX", 22)
+
+# BOMB_OMB: spinner takes a big hit + 3 random others get splashed; all burned.
+# Heavy global deflation per spin.
+WHEEL_BOMB_OMB_EST_EV = _parse_float("WHEEL_BOMB_OMB_EST_EV", -45.0)
+WHEEL_BOMB_OMB_SPINNER_LOSS_MIN = _parse_int("WHEEL_BOMB_OMB_SPINNER_LOSS_MIN", 35)
+WHEEL_BOMB_OMB_SPINNER_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_SPINNER_LOSS_MAX", 60)
+WHEEL_BOMB_OMB_VICTIM_LOSS_MIN = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MIN", 10)
+WHEEL_BOMB_OMB_VICTIM_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MAX", 22)
+WHEEL_BOMB_OMB_VICTIM_COUNT = _parse_int("WHEEL_BOMB_OMB_VICTIM_COUNT", 3)
 
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)

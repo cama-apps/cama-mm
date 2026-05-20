@@ -103,8 +103,19 @@ from config import (
     LIGHTNING_BOLT_PCT_MAX,
     LIGHTNING_BOLT_PCT_MIN,
     REBELLION_RETRIBUTION_STEAL,
+    WHEEL_BANANA_PEEL_LOSS_MAX,
+    WHEEL_BANANA_PEEL_LOSS_MIN,
+    WHEEL_BOMB_OMB_SPINNER_LOSS_MAX,
+    WHEEL_BOMB_OMB_SPINNER_LOSS_MIN,
+    WHEEL_BOMB_OMB_VICTIM_COUNT,
+    WHEEL_BOMB_OMB_VICTIM_LOSS_MAX,
+    WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
     WHEEL_COOLDOWN_SECONDS,
     WHEEL_GOLDEN_TOP_N,
+    WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX,
+    WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN,
+    WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX,
+    WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN,
     WHEEL_LOSE_PENALTY_COOLDOWN,
 )
 from services.bankruptcy_service import BankruptcyService
@@ -429,7 +440,10 @@ class BettingCommands(commands.Cog):
             await message.edit(embed=result_embed)
             return
 
-        # Use bankrupt wheel for negative balance OR formal bankruptcy penalty
+        # Bankrupt wheel is reserved for players actually in debt (balance < 0).
+        # Penalty-game state is still tracked, but a recovered player (balance >= 0)
+        # spins the regular or golden wheel — no free re-roll on the bankrupt wheel's
+        # higher EV just because their last bankruptcy hasn't expired.
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         is_eligible_for_bad_gamba = balance < 0
         penalty_games_remaining = 0
@@ -440,8 +454,6 @@ class BettingCommands(commands.Cog):
             )
             if state:
                 penalty_games_remaining = state.penalty_games_remaining
-                if penalty_games_remaining > 0:
-                    is_eligible_for_bad_gamba = True
 
         # Golden Wheel eligibility: top-N balance holders get the golden wheel
         # Bankrupt/penalty wheel always takes priority — golden wheel only for non-bad-gamba
@@ -880,6 +892,16 @@ class BettingCommands(commands.Cog):
         recession_count: int = 0
         recession_self_loss: int = 0
 
+        # Mario Kart deflation tracking (all burned, no nonprofit credit)
+        banana_amount: int = 0
+        green_shell_spinner_loss: int = 0
+        green_shell_victim_loss: int = 0
+        green_shell_victim: discord.Member | None = None
+        green_shell_victim_name: str = "someone"
+        bomb_omb_spinner_loss: int = 0
+        bomb_omb_victims: list[tuple[str, int, int]] = []
+        bomb_omb_burn_total: int = 0
+
         if result_value == "RETRIBUTION":
             # War effect: steal from attackers, LOSE for everyone else
             _spinner_is_attacker = False
@@ -1198,6 +1220,84 @@ class BettingCommands(commands.Cog):
                 self.player_service.get_balance, user_id, guild_id
             )
 
+        # --- Mario Kart deflation wedges (coins burned, no nonprofit credit) ---
+        elif result_value == "BANANA_PEEL":
+            banana_amount = random.randint(
+                WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX
+            )
+            await asyncio.to_thread(
+                self.player_service.adjust_balance, user_id, guild_id, -banana_amount
+            )
+            new_balance = await asyncio.to_thread(
+                self.player_service.get_balance, user_id, guild_id
+            )
+
+        elif result_value == "GREEN_SHELL":
+            green_shell_spinner_loss = random.randint(
+                WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN, WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX
+            )
+            await asyncio.to_thread(
+                self.player_service.adjust_balance, user_id, guild_id, -green_shell_spinner_loss
+            )
+            all_players_gs = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            eligible_victims_gs = [
+                p for p in all_players_gs
+                if p.discord_id != user_id and p.jopacoin_balance > 0
+            ]
+            if eligible_victims_gs:
+                victim_p = random.choice(eligible_victims_gs)
+                raw_loss = random.randint(
+                    WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN, WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX
+                )
+                green_shell_victim_loss = min(raw_loss, victim_p.jopacoin_balance)
+                if green_shell_victim_loss > 0:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance,
+                        victim_p.discord_id, guild_id, -green_shell_victim_loss
+                    )
+                    green_shell_victim_name = victim_p.name
+                    if interaction.guild:
+                        green_shell_victim = interaction.guild.get_member(victim_p.discord_id)
+            new_balance = await asyncio.to_thread(
+                self.player_service.get_balance, user_id, guild_id
+            )
+
+        elif result_value == "BOMB_OMB":
+            bomb_omb_spinner_loss = random.randint(
+                WHEEL_BOMB_OMB_SPINNER_LOSS_MIN, WHEEL_BOMB_OMB_SPINNER_LOSS_MAX
+            )
+            await asyncio.to_thread(
+                self.player_service.adjust_balance, user_id, guild_id, -bomb_omb_spinner_loss
+            )
+            bomb_omb_burn_total = bomb_omb_spinner_loss
+            all_players_bo = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            eligible_victims_bo = [
+                p for p in all_players_bo
+                if p.discord_id != user_id and p.jopacoin_balance > 0
+            ]
+            sample_size = min(WHEEL_BOMB_OMB_VICTIM_COUNT, len(eligible_victims_bo))
+            if sample_size > 0:
+                splash_victims = random.sample(eligible_victims_bo, sample_size)
+                for vp in splash_victims:
+                    raw_loss = random.randint(
+                        WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX
+                    )
+                    loss = min(raw_loss, vp.jopacoin_balance)
+                    if loss > 0:
+                        await asyncio.to_thread(
+                            self.player_service.adjust_balance,
+                            vp.discord_id, guild_id, -loss
+                        )
+                        bomb_omb_victims.append((vp.name, loss, vp.discord_id))
+                        bomb_omb_burn_total += loss
+            new_balance = await asyncio.to_thread(
+                self.player_service.get_balance, user_id, guild_id
+            )
+
         # --- Golden Wheel outcome handlers ---
         elif result_value == "HEIST":
             # Steal 5-12% (min 1 JC) from each of the bottom 30 positive-balance players
@@ -1510,6 +1610,12 @@ class BettingCommands(commands.Cog):
             log_result = 0 if takeover_missed else takeover_amount
         elif result_value == "RECESSION":
             log_result = -recession_self_loss
+        elif result_value == "BANANA_PEEL":
+            log_result = -banana_amount
+        elif result_value == "GREEN_SHELL":
+            log_result = -green_shell_spinner_loss
+        elif result_value == "BOMB_OMB":
+            log_result = -bomb_omb_spinner_loss
         else:
             log_result = result_value if isinstance(result_value, int) else 0
 
@@ -1570,6 +1676,14 @@ class BettingCommands(commands.Cog):
             recession_total=recession_total,
             recession_count=recession_count,
             recession_self_loss=recession_self_loss,
+            banana_amount=banana_amount,
+            green_shell_spinner_loss=green_shell_spinner_loss,
+            green_shell_victim=green_shell_victim,
+            green_shell_victim_loss=green_shell_victim_loss,
+            green_shell_victim_name=green_shell_victim_name,
+            bomb_omb_spinner_loss=bomb_omb_spinner_loss,
+            bomb_omb_victims=bomb_omb_victims,
+            bomb_omb_burn_total=bomb_omb_burn_total,
         )
 
         # Add Guardian Aura notification if it triggered
