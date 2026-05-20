@@ -161,8 +161,8 @@ ASCENSION_MODIFIERS: dict[int, AscensionModifier] = {
     1: AscensionModifier(
         level=1, name="Dense Stone",
         penalty="Stone is denser but richer",
-        reward="JC loot +25%",
-        effects={"jc_multiplier": 0.25},
+        reward="JC loot +18%",
+        effects={"jc_multiplier": 0.18},
         gameplay=False,
     ),
     2: AscensionModifier(

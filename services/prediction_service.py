@@ -29,9 +29,9 @@ from repositories.player_repository import PlayerRepository
 
 class PredictionService:
     """
-    Encapsulates prediction market operations:
-    - Creating predictions
-    - Placing bets
+    Encapsulates order-book prediction market operations:
+    - Creating markets and posting ladders
+    - Buying/selling contracts
     - Resolution voting
     - Settlement
     """
@@ -116,112 +116,11 @@ class PredictionService:
             close_message_id=close_message_id,
         )
 
-    def place_bet(
-        self,
-        prediction_id: int,
-        discord_id: int,
-        position: str,
-        amount: int,
-    ) -> dict[str, Any]:
-        """
-        Place a bet on a prediction.
-
-        Args:
-            prediction_id: ID of the prediction
-            discord_id: Discord ID of the bettor
-            position: "yes" or "no"
-            amount: Amount to bet
-
-        Returns:
-            Dict with bet details and updated odds
-        """
-        result = self.prediction_repo.place_bet_atomic(
-            prediction_id=prediction_id,
-            discord_id=discord_id,
-            position=position,
-            amount=amount,
-        )
-
-        # Calculate odds
-        odds = self.calculate_odds(result["yes_total"], result["no_total"])
-        result["odds"] = odds
-
-        return result
-
-    def calculate_odds(self, yes_total: int, no_total: int) -> dict[str, float]:
-        """
-        Calculate pool odds for YES and NO.
-
-        Returns multipliers for each position.
-        """
-        total = yes_total + no_total
-        if total == 0:
-            return {"yes": 0.0, "no": 0.0}
-
-        yes_odds = total / yes_total if yes_total > 0 else 0.0
-        no_odds = total / no_total if no_total > 0 else 0.0
-
-        return {"yes": round(yes_odds, 2), "no": round(no_odds, 2)}
-
-    def get_odds(self, prediction_id: int) -> dict[str, Any]:
-        """
-        Get current odds and totals for a prediction.
-
-        Returns dict with yes_total, no_total, yes_odds, no_odds, etc.
-        """
-        totals = self.prediction_repo.get_prediction_totals(prediction_id)
-        odds = self.calculate_odds(totals["yes_total"], totals["no_total"])
-
-        return {
-            **totals,
-            "odds": odds,
-            "total_pool": totals["yes_total"] + totals["no_total"],
-        }
-
     def get_prediction(self, prediction_id: int) -> dict | None:
-        """Get a prediction by ID with current odds."""
-        pred = self.prediction_repo.get_prediction(prediction_id)
-        if not pred:
-            return None
+        return self.prediction_repo.get_prediction(prediction_id)
 
-        totals = self.prediction_repo.get_prediction_totals(prediction_id)
-        odds = self.calculate_odds(totals["yes_total"], totals["no_total"])
-
-        return {
-            **pred,
-            **totals,
-            "odds": odds,
-            "total_pool": totals["yes_total"] + totals["no_total"],
-        }
-
-    def get_active_predictions(self, guild_id: int) -> list[dict]:
-        """Get all active predictions for a guild with odds."""
-        # First, auto-lock any expired predictions
-        self.check_and_lock_expired(guild_id)
-
-        predictions = self.prediction_repo.get_active_predictions(guild_id)
-        result = []
-        for pred in predictions:
-            # Skip cancelled predictions (shouldn't happen but be safe)
-            if pred["status"] == "cancelled":
-                continue
-            totals = self.prediction_repo.get_prediction_totals(pred["prediction_id"])
-            odds = self.calculate_odds(totals["yes_total"], totals["no_total"])
-            result.append({
-                **pred,
-                **totals,
-                "odds": odds,
-                "total_pool": totals["yes_total"] + totals["no_total"],
-            })
-        return result
-
-    def get_user_active_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
-        """Get all active positions for a user."""
-        return self.prediction_repo.get_user_active_positions(discord_id, guild_id)
-
-    def get_user_resolved_positions(self, discord_id: int, guild_id: int | None = None, limit: int = 20) -> list[dict]:
-        """Get user's resolved positions with payout info."""
-        return self.prediction_repo.get_user_resolved_positions(discord_id, guild_id, limit)
+    def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
+        return self.prediction_repo.get_predictions_by_status(guild_id, status)
 
     def add_resolution_vote(
         self,
@@ -328,115 +227,6 @@ class PredictionService:
             return "no"
         return None
 
-    def resolve(
-        self,
-        prediction_id: int,
-        outcome: str,
-        resolved_by: int,
-    ) -> dict[str, Any]:
-        """
-        Resolve a prediction and settle all bets.
-
-        Args:
-            prediction_id: ID of the prediction
-            outcome: "yes" or "no"
-            resolved_by: Discord ID of user who triggered resolution
-
-        Returns:
-            Dict with settlement results (winners, losers, payouts)
-        """
-        pred = self.prediction_repo.get_prediction(prediction_id)
-        if not pred:
-            raise ValueError("Prediction not found.")
-        if pred["status"] == "resolved":
-            raise ValueError("Prediction already resolved.")
-        if pred["status"] == "cancelled":
-            raise ValueError("Prediction was cancelled.")
-
-        # Compute consensus snapshot before mutating state (for easter egg hooks)
-        totals = self.prediction_repo.get_prediction_totals(prediction_id)
-        yes_total = totals.get("yes_total", 0) or 0
-        no_total = totals.get("no_total", 0) or 0
-        total_pool = yes_total + no_total
-        consensus_data = None
-        if total_pool > 0:
-            losing_total = no_total if outcome == "yes" else yes_total
-            losing_pct = (losing_total / total_pool) * 100
-            if losing_pct >= 90:
-                loser_count = totals.get("yes_bettors", 0) if outcome == "no" else totals.get("no_bettors", 0)
-                consensus_data = {
-                    "consensus_percentage": losing_pct,
-                    "winning_side": outcome,
-                    "loser_count": loser_count or 0,
-                }
-
-        # Atomic resolve + settle: status flip and payouts commit together
-        settlement = self.prediction_repo.resolve_and_settle_atomic(
-            prediction_id=prediction_id,
-            outcome=outcome,
-            resolved_by=resolved_by,
-        )
-
-        return {
-            "prediction_id": prediction_id,
-            "outcome": outcome,
-            "resolved_by": resolved_by,
-            "unanimous_wrong": consensus_data,
-            **settlement,
-        }
-
-    def cancel(self, prediction_id: int, admin_id: int) -> dict[str, Any]:
-        """
-        Cancel a prediction and refund all bets.
-
-        Only admins can cancel predictions (checks internal admin list).
-
-        Args:
-            prediction_id: ID of the prediction
-            admin_id: Discord ID of the admin
-
-        Returns:
-            Dict with refund results
-        """
-        if not self.is_admin(admin_id):
-            raise ValueError("Only admins can cancel predictions.")
-
-        return self.cancel_by_admin(prediction_id, admin_id)
-
-    def cancel_by_admin(self, prediction_id: int, admin_id: int) -> dict[str, Any]:
-        """
-        Cancel a prediction and refund all bets (no admin check).
-
-        Use this when admin permission has already been verified externally.
-
-        Args:
-            prediction_id: ID of the prediction
-            admin_id: Discord ID of the admin
-
-        Returns:
-            Dict with refund results
-        """
-        pred = self.prediction_repo.get_prediction(prediction_id)
-        if not pred:
-            raise ValueError("Prediction not found.")
-        # Allow cancellation of both open and locked predictions; otherwise a
-        # locked-but-unresolvable prediction has no admin escape and bets stay
-        # stuck. Resolved/cancelled predictions still cannot be re-cancelled.
-        if pred["status"] not in ("open", "locked"):
-            raise ValueError(f"Can only cancel open or locked predictions. This one is {pred['status']}.")
-
-        # Cancel prediction
-        self.prediction_repo.cancel_prediction(prediction_id)
-
-        # Refund bets
-        refund_result = self.prediction_repo.refund_prediction_bets(prediction_id)
-
-        return {
-            "prediction_id": prediction_id,
-            "cancelled_by": admin_id,
-            **refund_result,
-        }
-
     def check_and_lock_expired(self, guild_id: int) -> list[int]:
         """
         Check for predictions past their close time and lock them.
@@ -477,81 +267,6 @@ class PredictionService:
             "question": pred["question"],
             "status": "locked",
         }
-
-    def get_prediction_leaderboard(self, guild_id: int | None, limit: int = 10) -> dict:
-        """
-        Get prediction leaderboard data.
-
-        Args:
-            guild_id: Guild ID to filter by
-            limit: Maximum number of entries per category
-
-        Returns:
-            Dict with top_earners and down_bad lists
-        """
-        return self.prediction_repo.get_prediction_leaderboard(guild_id, limit)
-
-    def get_server_prediction_stats(self, guild_id: int | None) -> dict:
-        """
-        Get server-wide prediction stats.
-
-        Args:
-            guild_id: Guild ID to filter by
-
-        Returns:
-            Dict with total_predictions, total_pool, total_bets, etc.
-        """
-        return self.prediction_repo.get_server_prediction_stats(guild_id)
-
-    def get_user_prediction_stats(self, discord_id: int, guild_id: int | None = None) -> dict | None:
-        """
-        Get prediction statistics for a specific user.
-
-        Args:
-            discord_id: User's Discord ID
-            guild_id: Guild ID to filter by
-
-        Returns:
-            Dict with user's prediction stats or None if no stats found
-        """
-        return self.prediction_repo.get_user_prediction_stats(discord_id, guild_id)
-
-    def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
-        """
-        Get predictions filtered by status.
-
-        Args:
-            guild_id: Guild ID
-            status: Status to filter by (open, locked, resolved)
-
-        Returns:
-            List of prediction dicts
-        """
-        return self.prediction_repo.get_predictions_by_status(guild_id, status)
-
-    def get_prediction_totals(self, prediction_id: int) -> dict:
-        """
-        Get bet totals for a prediction.
-
-        Args:
-            prediction_id: Prediction ID
-
-        Returns:
-            Dict with yes_total, no_total, etc.
-        """
-        return self.prediction_repo.get_prediction_totals(prediction_id)
-
-    def get_resolution_summary(self, prediction_id: int) -> dict:
-        """
-        Get resolution vote summary for a prediction.
-
-        Args:
-            prediction_id: Prediction ID
-
-        Returns:
-            Dict with vote counts and voters
-        """
-        return self.prediction_repo.get_resolution_summary(prediction_id)
 
     # =========================================================================
     # Order-book mechanic (feat/predict-orderbook)
@@ -692,6 +407,11 @@ class PredictionService:
         self, discord_id: int, guild_id: int | None = None
     ) -> list[dict]:
         return self.prediction_repo.get_user_open_positions(discord_id, guild_id)
+
+    def get_user_orderbook_stats(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> dict:
+        return self.prediction_repo.get_user_orderbook_stats(discord_id, guild_id)
 
     def list_open_orderbook_markets(self, guild_id: int) -> list[dict]:
         return self.prediction_repo.get_open_orderbook_predictions(guild_id)

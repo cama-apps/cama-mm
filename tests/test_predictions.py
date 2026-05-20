@@ -1218,3 +1218,89 @@ def test_market_chart_auto_zooms_for_narrow_band_markets():
     # The two charts must render to different pixels — gridlines and line
     # positions both depend on the auto-zoomed range.
     assert narrow_bytes != wide_bytes
+
+
+# --------------------------------------------------------------------------- #
+# Per-user order-book stats (profile Predictions tab)
+# --------------------------------------------------------------------------- #
+
+
+def test_get_user_orderbook_stats_empty(prediction_repo):
+    """A user with no order-book activity gets zeroed stats."""
+    stats = prediction_repo.get_user_orderbook_stats(12345, TEST_GUILD_ID)
+    assert stats == {"realized_pnl": 0, "wins": 0, "losses": 0, "resolved_markets": 0}
+
+
+def test_get_user_orderbook_stats_realized_pnl(
+    prediction_service, prediction_repo, player_repository
+):
+    """Realized P&L sums resolved markets only; wins/losses split on P&L sign."""
+    _add_player(player_repository, 1, balance=100_000)
+
+    # Win market: buy YES, resolve YES.
+    win_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="Win market?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=win_pid, discord_id=1, side="yes", contracts=3,
+    )
+    win_cost = prediction_repo.get_position(win_pid, 1)["yes_cost_basis_total"]
+
+    # Loss market: buy YES, resolve NO.
+    loss_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="Loss market?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=loss_pid, discord_id=1, side="yes", contracts=3,
+    )
+    loss_cost = prediction_repo.get_position(loss_pid, 1)["yes_cost_basis_total"]
+
+    # Open market: buy YES, leave open — must NOT count toward realized stats.
+    open_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="Open market?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=open_pid, discord_id=1, side="yes", contracts=3,
+    )
+
+    prediction_service.resolve_orderbook(prediction_id=win_pid, outcome="yes")
+    prediction_service.resolve_orderbook(prediction_id=loss_pid, outcome="no")
+
+    stats = prediction_repo.get_user_orderbook_stats(1, TEST_GUILD_ID)
+
+    expected_pnl = (3 * PREDICTION_CONTRACT_VALUE - win_cost) + (0 - loss_cost)
+    assert stats["realized_pnl"] == expected_pnl
+    assert stats["resolved_markets"] == 2
+    assert stats["wins"] == 1
+    assert stats["losses"] == 1
+
+
+def test_get_player_orderbook_pnl_history(
+    prediction_service, prediction_repo, player_repository
+):
+    """One row per resolved market (delta = payout - cost); open markets excluded."""
+    _add_player(player_repository, 1, balance=100_000)
+
+    win_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="History win?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=win_pid, discord_id=1, side="yes", contracts=3,
+    )
+    win_cost = prediction_repo.get_position(win_pid, 1)["yes_cost_basis_total"]
+
+    open_pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="History open?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=open_pid, discord_id=1, side="yes", contracts=3,
+    )
+
+    prediction_service.resolve_orderbook(prediction_id=win_pid, outcome="yes")
+
+    history = prediction_repo.get_player_orderbook_pnl_history(1, TEST_GUILD_ID)
+
+    assert len(history) == 1  # open market excluded
+    assert history[0]["prediction_id"] == win_pid
+    assert history[0]["delta"] == 3 * PREDICTION_CONTRACT_VALUE - win_cost
+    assert history[0]["settle_time"] > 0

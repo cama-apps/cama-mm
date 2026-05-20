@@ -41,7 +41,7 @@ from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.streaming import get_streaming_dota_player_ids
+from utils.streaming import get_streaming_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
 
@@ -658,12 +658,12 @@ class MatchCommands(commands.Cog):
                 except Exception as exc:
                     logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
 
-        # Streaming bonus: award +1 JC to all lobby players (including excluded) who are Go Live + Dota 2
+        # Streaming bonus: award +1 JC to all lobby players (including excluded) who are Go Live
         # Awarded at both shuffle and record time (intentional: rewards continuous streaming)
         streaming_bonus_names = []
         if guild and hasattr(guild, "get_member") and STREAMING_BONUS > 0:
             all_lobby_ids = list(player_ids) + list(excluded_conditional_ids)
-            streaming_ids = get_streaming_dota_player_ids(guild, all_lobby_ids)
+            streaming_ids = get_streaming_player_ids(guild, all_lobby_ids)
             if streaming_ids:
                 betting_svc = getattr(self.bot, "betting_service", None)
                 if betting_svc:
@@ -1416,7 +1416,7 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         record_result: dict,
     ) -> str:
-        """Award +1 JC to match participants who are Go Live + Dota 2.
+        """Award +1 JC to match participants who are Go Live.
 
         Awarded at both shuffle and record time (intentional: rewards continuous
         streaming). Returns the formatted streaming-bonus line, or "".
@@ -1427,7 +1427,7 @@ class MatchCommands(commands.Cog):
         all_participant_ids = list(record_result.get("winning_player_ids", [])) + list(
             record_result.get("losing_player_ids", [])
         )
-        streaming_ids = get_streaming_dota_player_ids(guild, all_participant_ids)
+        streaming_ids = get_streaming_player_ids(guild, all_participant_ids)
         if not streaming_ids:
             return ""
 

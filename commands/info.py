@@ -36,7 +36,7 @@ logger = logging.getLogger("cama_bot.commands.info")
 
 # Page sizes differ by tab type due to Discord embed field limits (1024 chars)
 SINGLE_SECTION_PAGE_SIZE = 20  # Balance, Glicko, OpenSkill (single list)
-MULTI_SECTION_PAGE_SIZE = 8  # Gambling (4 sections), Predictions (3 sections)
+MULTI_SECTION_PAGE_SIZE = 8  # Gambling (4 sections)
 LEADERBOARD_PAGE_SIZE = 20  # Legacy alias
 GAMBLING_PAGE_SIZE = 8  # Legacy alias
 
@@ -45,7 +45,6 @@ class LeaderboardTab(Enum):
     """Available leaderboard tabs."""
     BALANCE = "balance"
     GAMBLING = "gambling"
-    PREDICTIONS = "predictions"
     GLICKO = "glicko"
     OPENSKILL = "openskill"
     TIPS = "tips"
@@ -99,7 +98,6 @@ class UnifiedLeaderboardView(discord.ui.View):
         tab_buttons = {
             LeaderboardTab.BALANCE: self.balance_btn,
             LeaderboardTab.GAMBLING: self.gambling_btn,
-            LeaderboardTab.PREDICTIONS: self.predictions_btn,
             LeaderboardTab.GLICKO: self.glicko_btn,
             LeaderboardTab.OPENSKILL: self.openskill_btn,
             LeaderboardTab.TIPS: self.tips_btn,
@@ -148,8 +146,6 @@ class UnifiedLeaderboardView(discord.ui.View):
             await self._fetch_balance_data(state)
         elif tab == LeaderboardTab.GAMBLING:
             await self._fetch_gambling_data(state)
-        elif tab == LeaderboardTab.PREDICTIONS:
-            await self._fetch_predictions_data(state)
         elif tab == LeaderboardTab.GLICKO:
             await self._fetch_glicko_data(state)
         elif tab == LeaderboardTab.OPENSKILL:
@@ -255,46 +251,6 @@ class UnifiedLeaderboardView(discord.ui.View):
             len(leaderboard.hall_of_degen),
             len(leaderboard.biggest_gamblers),
             1,  # Prevent division by zero
-        )
-        state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
-
-    async def _fetch_predictions_data(self, state: TabState) -> None:
-        """Fetch predictions leaderboard data."""
-        if not self.cog.prediction_service:
-            state.data = None
-            return
-
-        leaderboard = await asyncio.to_thread(
-            self.cog.prediction_service.get_prediction_leaderboard,
-            self.guild_id, self.limit
-        )
-        server_stats = await asyncio.to_thread(
-            self.cog.prediction_service.get_server_prediction_stats,
-            self.guild_id
-        )
-
-        guild_members = self._get_guild_members()
-
-        # Filter out users who have left the server (only in guild context)
-        if self._should_filter_by_guild():
-            if "top_earners" in leaderboard:
-                leaderboard["top_earners"] = [e for e in leaderboard["top_earners"] if e["discord_id"] in guild_members]
-            if "down_bad" in leaderboard:
-                leaderboard["down_bad"] = [e for e in leaderboard["down_bad"] if e["discord_id"] in guild_members]
-            if "most_accurate" in leaderboard:
-                leaderboard["most_accurate"] = [e for e in leaderboard["most_accurate"] if e["discord_id"] in guild_members]
-
-        state.data = {
-            "leaderboard": leaderboard,
-            "server_stats": server_stats,
-        }
-
-        # Calculate max pages based on longest section
-        max_entries = max(
-            len(leaderboard.get("top_earners", [])),
-            len(leaderboard.get("down_bad", [])),
-            len(leaderboard.get("most_accurate", [])),
-            1,
         )
         state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
 
@@ -450,8 +406,6 @@ class UnifiedLeaderboardView(discord.ui.View):
             return self._build_balance_embed(state)
         elif self.current_tab == LeaderboardTab.GAMBLING:
             return self._build_gambling_embed(state)
-        elif self.current_tab == LeaderboardTab.PREDICTIONS:
-            return self._build_predictions_embed(state)
         elif self.current_tab == LeaderboardTab.GLICKO:
             return self._build_glicko_embed(state)
         elif self.current_tab == LeaderboardTab.OPENSKILL:
@@ -585,73 +539,6 @@ class UnifiedLeaderboardView(discord.ui.View):
             footer_parts.append(
                 f"{s['total_bets']} bets • {s['total_wagered']} JC wagered • "
                 f"{s['unique_gamblers']} players • {s['total_bankruptcies']} bankruptcies"
-            )
-        footer_parts.append(f"Page {state.current_page + 1}/{state.max_page + 1}")
-        embed.set_footer(text=" | ".join(footer_parts))
-
-        return embed
-
-    def _build_predictions_embed(self, state: TabState) -> discord.Embed:
-        """Build Predictions tab embed."""
-        embed = discord.Embed(
-            title="LEADERBOARD > Predictions",
-            color=0xFFD700,
-        )
-
-        if not state.data:
-            embed.description = "Prediction service is not available."
-            return embed
-
-        leaderboard = state.data["leaderboard"]
-        server_stats = state.data["server_stats"]
-
-        if not leaderboard.get("top_earners") and not leaderboard.get("most_accurate"):
-            embed.description = "No prediction data yet! Users need at least 2 resolved predictions to appear."
-            return embed
-
-        start = state.current_page * MULTI_SECTION_PAGE_SIZE
-        end = start + MULTI_SECTION_PAGE_SIZE
-
-        # Top earners
-        if leaderboard.get("top_earners"):
-            page_entries = leaderboard["top_earners"][start:end]
-            if page_entries:
-                lines = []
-                for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_display_name(entry["discord_id"])
-                    pnl = entry["net_pnl"]
-                    pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
-                    lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
-                embed.add_field(name=" Top Earners", value="\n".join(lines), inline=False)
-
-        # Down bad
-        down_bad = [e for e in leaderboard.get("down_bad", []) if e["net_pnl"] < 0]
-        if down_bad:
-            page_entries = down_bad[start:end]
-            if page_entries:
-                lines = []
-                for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_display_name(entry["discord_id"])
-                    lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
-                embed.add_field(name=" Down Bad", value="\n".join(lines), inline=False)
-
-        # Most accurate
-        if leaderboard.get("most_accurate"):
-            page_entries = leaderboard["most_accurate"][start:end]
-            if page_entries:
-                lines = []
-                for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_display_name(entry["discord_id"])
-                    lines.append(f"{i}. **{name}** {entry['win_rate']:.0%} ({entry['wins']}W-{entry['losses']}L)")
-                embed.add_field(name=" Most Accurate", value="\n".join(lines), inline=False)
-
-        # Footer
-        footer_parts = []
-        if server_stats and server_stats.get("total_predictions"):
-            footer_parts.append(
-                f" {server_stats['total_predictions']} predictions • "
-                f"{server_stats['total_bets'] or 0} bets • "
-                f"{server_stats['total_wagered'] or 0} wagered"
             )
         footer_parts.append(f"Page {state.current_page + 1}/{state.max_page + 1}")
         embed.set_footer(text=" | ".join(footer_parts))
@@ -887,10 +774,6 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def gambling_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle_tab_switch(interaction, LeaderboardTab.GAMBLING)
 
-    @discord.ui.button(label="Predictions", style=discord.ButtonStyle.secondary, row=0)
-    async def predictions_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_tab_switch(interaction, LeaderboardTab.PREDICTIONS)
-
     @discord.ui.button(label="Glicko", style=discord.ButtonStyle.secondary, row=0)
     async def glicko_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle_tab_switch(interaction, LeaderboardTab.GLICKO)
@@ -1068,7 +951,6 @@ class InfoCommands(commands.Cog):
                 "`/leaderboard type:glicko` - Glicko-2 rating rankings\n"
                 "`/leaderboard type:openskill` - OpenSkill (fantasy-weighted) rankings\n"
                 "`/leaderboard type:gambling` - Gambling rankings & Hall of Degen\n"
-                "`/leaderboard type:predictions` - Prediction market rankings\n"
                 "`/leaderboard type:tips` - Tipping rankings (generous/popular)\n"
                 "`/leaderboard type:trivia` - Trivia best streaks (7-day)\n"
                 "`/calibration` - Rating system health & calibration stats"
@@ -1097,7 +979,7 @@ class InfoCommands(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="leaderboard", description="View leaderboard (balance, gambling, or predictions)")
+    @app_commands.command(name="leaderboard", description="View leaderboard (balance, gambling, ratings)")
     @app_commands.describe(
         type="Leaderboard type (default: balance)",
         limit="Number of entries to show (default: 100, max: 100)",
@@ -1107,7 +989,6 @@ class InfoCommands(commands.Cog):
         app_commands.Choice(name="Glicko-2 Rating", value="glicko"),
         app_commands.Choice(name="OpenSkill Rating", value="openskill"),
         app_commands.Choice(name="Gambling", value="gambling"),
-        app_commands.Choice(name="Predictions", value="predictions"),
         app_commands.Choice(name="Tips", value="tips"),
         app_commands.Choice(name="Trivia", value="trivia"),
     ])
@@ -1154,7 +1035,6 @@ class InfoCommands(commands.Cog):
             tab_mapping = {
                 "balance": LeaderboardTab.BALANCE,
                 "gambling": LeaderboardTab.GAMBLING,
-                "predictions": LeaderboardTab.PREDICTIONS,
                 "glicko": LeaderboardTab.GLICKO,
                 "openskill": LeaderboardTab.OPENSKILL,
                 "tips": LeaderboardTab.TIPS,

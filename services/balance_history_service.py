@@ -31,7 +31,7 @@ class BalanceHistoryService:
 
     Eight sources are chartable today:
       - ``bets``              settled bets (profit)
-      - ``predictions``       resolved prediction bets (payout − staked)
+      - ``predictions``       resolved prediction markets (realized P&L)
       - ``wheel``             Wheel of Fortune spins (result)
       - ``double_or_nothing`` Double or Nothing spins (balance_after − (balance_before + cost))
       - ``tips``              sent (-(amount+fee)) and received (+amount)
@@ -138,14 +138,11 @@ class BalanceHistoryService:
     def _prediction_events(
         self, discord_id: int, guild_id: int | None
     ) -> list[_Event]:
-        rows = self.prediction_repo.get_player_prediction_history(discord_id, guild_id)
+        rows = self.prediction_repo.get_player_orderbook_pnl_history(discord_id, guild_id)
         out: list[_Event] = []
         for row in rows:
-            staked = int(row["total_amount"] or 0)
-            payout = int(row["payout"] or 0)
-            delta = payout - staked
-            # Drop perfect net-zero events so they don't clutter the chart
-            # (cancelled predictions with full refund fall out this way).
+            delta = int(row["delta"])
+            # Drop perfect net-zero events so they don't clutter the chart.
             if delta == 0:
                 continue
             out.append(
@@ -155,8 +152,6 @@ class BalanceHistoryService:
                     source=SOURCE_PREDICTIONS,
                     detail={
                         "outcome": "won" if delta > 0 else "lost",
-                        "position": row["position"],
-                        "status": row["status"],
                         "prediction_id": row["prediction_id"],
                     },
                 )

@@ -379,6 +379,8 @@ class EventsMixin:
         advance = result.get("advance", 0)
         jc = result.get("jc", 0)
         cave_in = result.get("cave_in", False)
+        streak_loss = result.get("streak_loss", 0) or 0
+        curse = result.get("curse")
         description = result.get("description", "Something happened.")
 
         # Subtle variance on the authored outcome so each fire of a given
@@ -441,6 +443,32 @@ class EventsMixin:
             tunnel_updates["temp_buffs"] = json.dumps(buff_payload)
             buff_applied = buff_data
 
+        # Streak threat — a failed risky pick can knock days off the daily
+        # streak. The setback is partial and scales with streak length
+        # (every 20 days adds +1), so it bites mid-streak players hardest
+        # and only nicks 30+ day buffers. NEVER a full reset.
+        streak_days_lost = 0
+        if streak_loss > 0:
+            current_streak = tunnel.get("streak_days", 0) or 0
+            setback = streak_loss + (current_streak // 20)
+            new_streak = max(0, current_streak - setback)
+            streak_days_lost = current_streak - new_streak
+            tunnel_updates["streak_days"] = new_streak
+
+        # Curse threat — a failed risky pick can apply a lingering hex over
+        # the next few digs. Written to the dedicated temp_curses column so
+        # it never clobbers an active temp buff.
+        curse_applied = None
+        if isinstance(curse, dict):
+            curse_payload = {
+                "id": curse.get("id", "unknown"),
+                "name": curse.get("name", "Unknown Curse"),
+                "digs_remaining": curse.get("duration_digs", 1),
+                "effect": curse.get("effect", {}),
+            }
+            tunnel_updates["temp_curses"] = json.dumps(curse_payload)
+            curse_applied = curse
+
         # Marquee guild modifier (e.g. helltide_active) — set on success.
         guild_modifier_set: dict | None = None
         gm_cfg = event.get("guild_modifier_on_success")
@@ -495,6 +523,8 @@ class EventsMixin:
             log_detail={
                 "event_id": event_id, "choice": choice, "succeeded": succeeded,
                 "advance": advance, "jc": jc, "cave_in": cave_in,
+                "streak_days_lost": streak_days_lost or None,
+                "curse": curse_applied.get("name") if curse_applied else None,
                 "splash_victims": (
                     [{"id": vid, "amount": amt} for vid, amt in splash_result.victims]
                     if splash_result else None
@@ -502,6 +532,14 @@ class EventsMixin:
             },
             log_action_type="event",
         )
+
+        # JC threat — a failed bargain/theft outcome carries a real negative
+        # jc and is NOT floored, so it can push the actor into debt. Surface
+        # the resulting balance when it lands negative so the embed can say
+        # so plainly ("fail loud").
+        balance_after = None
+        if jc < 0:
+            balance_after = self.player_repo.get_balance(discord_id, guild_id)
 
         # Check for event chaining (P7+ random; deterministic via next_event_id when player meets target's min_prestige)
         chain_event = self._chain_event(
@@ -537,6 +575,9 @@ class EventsMixin:
             jc_delta=jc,
             depth_delta=advance,
             cave_in=cave_in,
+            streak_loss=streak_days_lost,
+            curse_applied=curse_applied,
+            balance_after=balance_after,
             message=description,
             buff_applied=buff_applied,
             chain_event=chain_event,

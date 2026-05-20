@@ -147,16 +147,20 @@ class DigCoreMixin:
         jc_earned = random.randint(1, 5)
         new_depth = depth_before + advance
 
-        self.dig_repo.update_tunnel(
+        # Tunnel advance + JC payout commit together so a crash can't
+        # leave the depth written with the player unpaid.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=new_depth,
-            total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
-            last_dig_at=now,
-            total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
-            streak_days=1,
-            streak_last_date=today,
+            balance_delta=jc_earned,
+            tunnel_updates={
+                "depth": new_depth,
+                "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
+                "last_dig_at": now,
+                "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+                "streak_days": 1,
+                "streak_last_date": today,
+            },
         )
-        self.player_repo.add_balance(discord_id, guild_id, jc_earned)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="dig",
@@ -253,7 +257,7 @@ class DigCoreMixin:
         """Pick & apply a cave-in consequence (or catastrophic upgrade).
 
         Mutates ``tunnel_updates`` with any tunnel-state changes (the caller
-        is responsible for the actual write — atomic or incremental). Side
+        is responsible for writing them atomically). Side
         effects that aren't tunnel-state (gear durability tick, inventory
         item removal) are applied to repos directly. Returns
         ``(cave_in_detail, jc_debit)`` where ``jc_debit`` is the JC amount
@@ -568,16 +572,18 @@ class DigCoreMixin:
                     injury_bonus=injury_bonus,
                     tunnel_updates=tunnel_updates,
                 )
-            # Single net add_balance: loot credit minus consequence debit. The
-            # tunnel write below isn't atomic with this, but at least the
-            # balance side flips together.
+            # Net JC change (loot credit minus consequence debit) and the
+            # tunnel write commit together so a crash can't leave depth lost
+            # without the matching balance change.
             net_delta = cave_in_jc - jc_debit
-            if net_delta != 0:
-                self.player_repo.add_balance(discord_id, guild_id, net_delta)
             if catastrophic:
                 new_depth = tunnel_updates["depth"]
 
-            self.dig_repo.update_tunnel(discord_id, guild_id, **tunnel_updates)
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_delta=net_delta,
+                tunnel_updates=tunnel_updates,
+            )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
                 details=json.dumps({
@@ -622,6 +628,8 @@ class DigCoreMixin:
             advance = random.randint(base_min, base_max)
 
         advance += p["pickaxe_advance_bonus"] + p["mole_claws_bonus"] + p["buff_advance_bonus"]
+        # Temp-curse advance modifier (negative = slowed dig)
+        advance += int(p.get("curse_advance_bonus", 0))
         advance += int(p["weather_fx"].get("advance_bonus", 0))
         advance -= int(p["ascension"].get("advance_penalty", 0))
         if p["corruption"]:
@@ -675,6 +683,9 @@ class DigCoreMixin:
             + int(p.get("perk_loot_flat", 0) + 0.5)
         )
         jc_earned += int(p["weather_fx"].get("jc_bonus", 0))
+        # Temp-curse JC drain (negative jc_bonus = less JC this dig). The
+        # max(0, ...) clamp below still floors a cursed dig at 0.
+        jc_earned += int(p.get("curse_jc_bonus", 0))
         if p["corruption"] and p["corruption"]["effects"].get("fixed_jc") is not None:
             jc_earned = p["corruption"]["effects"]["fixed_jc"]
         elif p["corruption"] and p["corruption"]["effects"].get("double_half_jc"):
@@ -800,17 +811,21 @@ class DigCoreMixin:
         run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
         run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
         run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
-        self.dig_repo.update_tunnel(
+        # Tunnel advance + JC payout commit together so a crash can't
+        # leave the depth written with the player unpaid.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=new_depth, total_digs=total_digs, last_dig_at=now,
-            max_depth=max(prev_max_depth, new_depth),
-            total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
-            streak_days=streak, streak_last_date=today,
-            current_run_jc=run_jc,
-            current_run_artifacts=run_artifacts,
-            current_run_events=run_events_count,
+            balance_delta=jc_earned,
+            tunnel_updates={
+                "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
+                "max_depth": max(prev_max_depth, new_depth),
+                "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+                "streak_days": streak, "streak_last_date": today,
+                "current_run_jc": run_jc,
+                "current_run_artifacts": run_artifacts,
+                "current_run_events": run_events_count,
+            },
         )
-        self.player_repo.add_balance(discord_id, guild_id, jc_earned)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({
@@ -882,16 +897,18 @@ class DigCoreMixin:
 
         if cave_in:
             block_loss = outcome.get("cave_in_block_loss", 5)
+            # All cave-in tunnel mutations and the net JC change accumulate
+            # here and commit in one atomic write below, so a crash can't
+            # leave depth lost without the matching injury/balance change.
+            cave_in_tunnel_updates: dict = {}
+            cave_in_balance_delta = 0
             # Enforce game-rule constraints
             grappling_hook_charges = int(p.get("grappling_hook_charges") or 0)
             grappling_absorbed = False
             if grappling_hook_charges > 0:
                 block_loss = 0
                 grappling_absorbed = True
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    grappling_hook_charges=grappling_hook_charges - 1,
-                )
+                cave_in_tunnel_updates["grappling_hook_charges"] = grappling_hook_charges - 1
             elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
@@ -905,7 +922,7 @@ class DigCoreMixin:
             new_depth = max(0, depth_before - block_loss)
 
             if p["thick_skin_saved"]:
-                self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
+                cave_in_tunnel_updates["thick_skin_date"] = today
 
             # Cave-in type from DM (overridden when grappling absorbs)
             cave_in_type = outcome.get("cave_in_type", "stun")
@@ -923,11 +940,8 @@ class DigCoreMixin:
                     "type": "stun", "block_loss": block_loss,
                     "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
                 }
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    injury_state=json.dumps(
-                        {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
-                    ),
+                cave_in_tunnel_updates["injury_state"] = json.dumps(
+                    {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
                 )
             elif cave_in_type == "injury":
                 cave_in_detail = {
@@ -937,18 +951,15 @@ class DigCoreMixin:
                         f"(reduced digging for {3 + injury_bonus} digs)."
                     ),
                 }
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    injury_state=json.dumps(
-                        {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
-                    ),
+                cave_in_tunnel_updates["injury_state"] = json.dumps(
+                    {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
                 )
             else:  # medical_bill
                 med_cost = outcome.get("cave_in_jc_lost", 5)
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 med_cost = min(med_cost, max(0, balance))
                 if med_cost > 0:
-                    self.player_repo.add_balance(discord_id, guild_id, -med_cost)
+                    cave_in_balance_delta -= med_cost
                 cave_in_detail = {
                     "type": "medical_bill", "block_loss": block_loss,
                     "jc_lost": med_cost,
@@ -963,25 +974,24 @@ class DigCoreMixin:
             if loot_chance > 0 and random.random() < loot_chance:
                 loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
                 loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
-                self.player_repo.add_balance(
-                    discord_id, guild_id, random.randint(loot_min, loot_max),
-                )
+                cave_in_balance_delta += random.randint(loot_min, loot_max)
             # Mutation: second_wind
             if p["mutation_fx"].get("post_cave_in_advance"):
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    temp_buffs=json.dumps({
-                        "id": "second_wind", "name": "Second Wind",
-                        "digs_remaining": 1,
-                        "effect": {"advance_bonus": int(p["mutation_fx"]["post_cave_in_advance"])},
-                    }),
-                )
+                cave_in_tunnel_updates["temp_buffs"] = json.dumps({
+                    "id": "second_wind", "name": "Second Wind",
+                    "digs_remaining": 1,
+                    "effect": {"advance_bonus": int(p["mutation_fx"]["post_cave_in_advance"])},
+                })
 
-            self.dig_repo.update_tunnel(
+            cave_in_tunnel_updates.update({
+                "depth": new_depth,
+                "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
+                "last_dig_at": now,
+            })
+            self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
-                depth=new_depth,
-                total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
-                last_dig_at=now,
+                balance_delta=cave_in_balance_delta,
+                tunnel_updates=cave_in_tunnel_updates,
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -1133,16 +1143,20 @@ class DigCoreMixin:
             run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
             run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
             run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
-            self.dig_repo.update_tunnel(
+            # Tunnel advance + JC payout commit together so a crash can't
+            # leave the depth written with the player unpaid.
+            self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
-                depth=new_depth, total_digs=total_digs, last_dig_at=now,
-                total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
-                streak_days=streak, streak_last_date=today,
-                current_run_jc=run_jc,
-                current_run_artifacts=run_artifacts,
-                current_run_events=run_events_count,
+                balance_delta=jc_earned,
+                tunnel_updates={
+                    "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
+                    "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+                    "streak_days": streak, "streak_last_date": today,
+                    "current_run_jc": run_jc,
+                    "current_run_artifacts": run_artifacts,
+                    "current_run_events": run_events_count,
+                },
             )
-            self.player_repo.add_balance(discord_id, guild_id, jc_earned)
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
                 details=json.dumps({

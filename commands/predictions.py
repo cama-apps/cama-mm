@@ -1139,10 +1139,12 @@ class PredictionCommands(commands.Cog):
         cancelled_preds: list[dict] = []
         if show_all:
             resolved_preds = await asyncio.to_thread(
-                self.prediction_service.get_predictions_by_status, guild_id, "resolved"
+                self.prediction_service.get_predictions_by_status,
+                guild_id, "resolved",
             )
             cancelled_preds = await asyncio.to_thread(
-                self.prediction_service.get_predictions_by_status, guild_id, "cancelled"
+                self.prediction_service.get_predictions_by_status,
+                guild_id, "cancelled",
             )
 
         if show_all:

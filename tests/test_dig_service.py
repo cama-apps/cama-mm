@@ -3,6 +3,7 @@ layer transitions, paid digs, and prestige-adjacent gameplay paths."""
 
 import json
 import random
+import sqlite3
 import time
 
 import pytest
@@ -1598,10 +1599,10 @@ class TestLuminosity:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=50, luminosity=10)
 
-        # underground_stream risky has success_chance=0.50
-        # With dark penalty: 0.50 - 0.10 = 0.40
-        # Roll of 0.45 should fail (0.45 >= 0.40)
-        monkeypatch.setattr(random, "random", lambda: 0.45)
+        # underground_stream risky has success_chance=0.62
+        # With dark penalty: 0.62 - 0.10 = 0.52
+        # Roll of 0.58 should fail (0.58 >= 0.52)
+        monkeypatch.setattr(random, "random", lambda: 0.58)
         result = dig_service.resolve_event(10001, guild_id, "underground_stream", "risky")
         assert result["success"]
         # The risky option failed (current was dragged back)
@@ -2042,3 +2043,130 @@ class TestBossErrors:
         assert terminal.get("success") is True
         assert terminal.get("boss_encounter") is True
         assert not terminal.get("paid_dig_available")
+
+
+class _FailOnTunnelUpdateCursor:
+    """Cursor wrapper that raises when it sees an ``UPDATE tunnels`` write.
+
+    Inside ``atomic_tunnel_balance_update`` the balance UPDATE runs *before*
+    the tunnel UPDATE in the same ``BEGIN IMMEDIATE`` transaction, so failing
+    the tunnel write forces a rollback that must also undo the balance write.
+    """
+
+    def __init__(self, real_cursor):
+        self._cursor = real_cursor
+
+    def execute(self, sql, *args, **kwargs):
+        if "update tunnels" in " ".join(sql.lower().split()):
+            raise sqlite3.OperationalError("injected mid-transaction failure")
+        return self._cursor.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _FailOnTunnelUpdateConn:
+    """Connection wrapper that hands out fault-injecting cursors."""
+
+    def __init__(self, real_conn):
+        self._conn = real_conn
+
+    def cursor(self):
+        return _FailOnTunnelUpdateCursor(self._conn.cursor())
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+class TestDigAtomicity:
+    """The tunnel-state + JC-balance writes for a dig must commit as a unit.
+
+    Regression guard: the dig flow used to call ``update_tunnel`` and
+    ``add_balance`` as two separate writes, so a crash between them could
+    advance depth while leaving the player unpaid (or charged). All such
+    pairs now go through ``atomic_tunnel_balance_update``; if the tunnel
+    write fails the balance change must roll back with it.
+    """
+
+    def _inject_tunnel_update_failure(self, dig_repo, monkeypatch):
+        real_get_connection = dig_repo.get_connection
+        monkeypatch.setattr(
+            dig_repo,
+            "get_connection",
+            lambda: _FailOnTunnelUpdateConn(real_get_connection()),
+        )
+
+    def test_first_dig_rolls_back_balance_when_tunnel_write_fails(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """First dig: a failed tunnel write must not leave the JC paid out
+        nor create a partially-advanced tunnel."""
+        _register_player(player_repository, balance=100)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        random.seed(42)
+
+        self._inject_tunnel_update_failure(dig_repo, monkeypatch)
+        with pytest.raises(sqlite3.OperationalError):
+            dig_service.dig(10001, guild_id)
+
+        # Balance untouched: the JC credit rolled back with the tunnel write.
+        assert player_repository.get_balance(10001, guild_id) == 100
+        # The tunnel row exists (created before the dig executes) but the
+        # first-dig advance rolled back — it is still unstarted.
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel is not None
+        assert tunnel["depth"] == 0
+        assert (tunnel["total_digs"] or 0) == 0
+
+    def test_normal_dig_rolls_back_balance_when_tunnel_write_fails(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A non-first dig: a failed tunnel write must roll back the JC
+        payout and leave depth at its pre-dig value."""
+        _register_player(player_repository, balance=100)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # suppress cave-in
+        # First dig succeeds and establishes the tunnel.
+        dig_service.dig(10001, guild_id)
+        tunnel_before = dig_repo.get_tunnel(10001, guild_id)
+        depth_before = tunnel_before["depth"]
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        # Second dig: inject a tunnel-write failure mid-transaction.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        self._inject_tunnel_update_failure(dig_repo, monkeypatch)
+        with pytest.raises(sqlite3.OperationalError):
+            dig_service.dig(10001, guild_id)
+
+        tunnel_after = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel_after["depth"] == depth_before
+        assert tunnel_after["last_dig_at"] == tunnel_before["last_dig_at"]
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+
+    def test_prestige_rolls_back_grant_when_tunnel_reset_fails(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Prestige: a failed tunnel reset must not leave the 1000 JC grant
+        credited without the run actually resetting."""
+        _register_player(player_repository, balance=500)
+        # One dig to create the tunnel row, then force it into a
+        # prestige-eligible state: every tier boss plus the pinnacle defeated.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        boss_progress = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        boss_progress[str(PINNACLE_DEPTH)] = "defeated"
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=PINNACLE_DEPTH,
+            boss_progress=json.dumps(boss_progress),
+        )
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        self._inject_tunnel_update_failure(dig_repo, monkeypatch)
+        with pytest.raises(sqlite3.OperationalError):
+            dig_service.prestige(10001, guild_id, "advance_boost")
+
+        # Grant rolled back: balance unchanged and the tunnel was not reset.
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+        tunnel_after = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel_after["depth"] == PINNACLE_DEPTH
