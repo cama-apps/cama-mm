@@ -2769,6 +2769,56 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return self._row_to_player(row)
 
+    def get_player_below(self, discord_id: int, guild_id: int) -> Player | None:
+        """
+        Get the player ranked one position lower on the balance leaderboard.
+
+        Used for Banana Peel wheel mechanic - the player behind slips on the peel.
+        Mirror of get_player_above with the comparison inverted.
+
+        Args:
+            discord_id: The player's Discord ID
+            guild_id: Guild ID
+
+        Returns:
+            Player object of the player ranked below, or None if user is last or not found
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            user_row = cursor.fetchone()
+            if not user_row:
+                return None
+
+            user_balance = int(user_row["balance"])
+
+            # Find player with the largest balance strictly less than user's, or
+            # tied at user's balance with a higher discord_id (stable tiebreaker).
+            cursor.execute(
+                """
+                SELECT * FROM players
+                WHERE guild_id = ? AND (
+                    COALESCE(jopacoin_balance, 0) < ?
+                    OR (COALESCE(jopacoin_balance, 0) = ? AND discord_id > ?)
+                )
+                ORDER BY COALESCE(jopacoin_balance, 0) DESC,
+                         discord_id ASC
+                LIMIT 1
+                """,
+                (guild_id, user_balance, user_balance, discord_id),
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return self._row_to_player(row)
+
     def get_leaderboard_bottom(
         self, guild_id: int, limit: int = 3, min_balance: int = 1
     ) -> list[Player]:

@@ -218,6 +218,52 @@ class TestPlayerRepository:
         above = player_repository.get_player_above(99999, TEST_GUILD_ID)
         assert above is None
 
+    def test_get_player_below_returns_lower_balance(self, player_repository):
+        """Test get_player_below returns the player ranked one position lower."""
+        player_repository.add(discord_id=3001, discord_username="Poor", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=3002, discord_username="Middle", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=3003, discord_username="Rich", guild_id=TEST_GUILD_ID)
+
+        player_repository.update_balance(3001, TEST_GUILD_ID, 10)
+        player_repository.update_balance(3002, TEST_GUILD_ID, 50)
+        player_repository.update_balance(3003, TEST_GUILD_ID, 100)
+
+        # Rich's player below should be Middle
+        below = player_repository.get_player_below(3003, TEST_GUILD_ID)
+        assert below is not None
+        assert below.discord_id == 3002
+
+        # Middle's player below should be Poor
+        below = player_repository.get_player_below(3002, TEST_GUILD_ID)
+        assert below is not None
+        assert below.discord_id == 3001
+
+        # Poor has no player below (they're last)
+        below = player_repository.get_player_below(3001, TEST_GUILD_ID)
+        assert below is None
+
+    def test_get_player_below_handles_ties(self, player_repository):
+        """Test get_player_below uses the inverse discord_id tiebreaker as get_player_above."""
+        player_repository.add(discord_id=4001, discord_username="Tied1", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=4002, discord_username="Tied2", guild_id=TEST_GUILD_ID)
+
+        player_repository.update_balance(4001, TEST_GUILD_ID, 50)
+        player_repository.update_balance(4002, TEST_GUILD_ID, 50)
+
+        # Player with lower discord_id (4001) should see player with higher discord_id (4002) as below
+        below = player_repository.get_player_below(4001, TEST_GUILD_ID)
+        assert below is not None
+        assert below.discord_id == 4002
+
+        # Player with higher discord_id (4002) has no one below at the same balance
+        below = player_repository.get_player_below(4002, TEST_GUILD_ID)
+        assert below is None
+
+    def test_get_player_below_nonexistent_player(self, player_repository):
+        """Test get_player_below returns None for non-existent player."""
+        below = player_repository.get_player_below(99999, TEST_GUILD_ID)
+        assert below is None
+
     def test_steal_atomic_transfers_coins(self, player_repository):
         """Test steal_atomic atomically transfers coins from victim to thief."""
         # Add thief and victim

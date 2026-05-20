@@ -664,8 +664,10 @@ async def test_wheel_animation_uses_gif():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
+    # Pick a simple positive-int wedge so the spin path is straightforward.
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=5):
+    with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -713,8 +715,10 @@ async def test_wheel_updates_cooldown_in_database():
 
     before_time = int(time.time())
 
+    # Pick a simple positive-int wedge so the spin path is straightforward.
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=5):
+    with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -763,9 +767,11 @@ async def test_wheel_admin_bypasses_cooldown():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
+    # Pick a simple positive-int wedge so the spin path is straightforward.
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock admin check to return True
     with patch("commands.betting.has_admin_permission", return_value=True):
-        with patch("commands.betting.random.randint", return_value=5):
+        with patch("commands.betting.random.randint", return_value=target_idx):
             with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -1497,35 +1503,92 @@ def test_bankrupt_wheel_jackpot_is_gold():
     )
 
 
-@pytest.mark.asyncio
-async def test_banana_peel_burns_spinner_balance():
-    """BANANA_PEEL adjusts spinner balance down and does NOT credit nonprofit."""
-    bot = MagicMock()
-    bot.bankruptcy_service = None
-    betting_service = MagicMock()
-    match_service = MagicMock()
-    player_service = MagicMock()
-    loan_service = MagicMock()
-
-    player_service.get_player.return_value = MagicMock(name="TestPlayer")
-    player_service.get_balance.return_value = 100
-    player_service.get_last_wheel_spin = MagicMock(return_value=None)
-    player_service.set_last_wheel_spin = MagicMock()
-    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.log_wheel_spin = MagicMock(return_value=1)
-    player_service.adjust_balance = MagicMock()
-    bot.garnishment_service = None
-
+def _make_wheel_interaction(user_id: int):
+    """Build a minimal interaction object for /gamba in the gamba channel."""
     message = MagicMock()
     message.edit = AsyncMock()
     interaction = MagicMock()
     interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
-    interaction.user.id = 7001
+    interaction.guild.get_member = MagicMock(return_value=MagicMock(mention=f"@{user_id}"))
+    interaction.user.id = user_id
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock(return_value=message)
+    return interaction
 
+
+def _make_wheel_player_service(spinner_balance: int = 100):
+    """Build a player_service mock with the standard wheel-spin scaffolding."""
+    player_service = MagicMock()
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = spinner_balance
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+    return player_service
+
+
+@pytest.mark.asyncio
+async def test_banana_peel_burns_player_below():
+    """BANANA_PEEL burns from the player ranked directly below the spinner."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7001
+    victim_below = MagicMock(name="Below", discord_id=8001, jopacoin_balance=100)
+    player_service = _make_wheel_player_service()
+    player_service.get_player_below = MagicMock(return_value=victim_below)
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    banana_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BANANA_PEEL")
+    # side_effect: [wedge_idx, loss_roll] — pinning loss to 20 (within 15-25)
+    with patch("commands.betting.random.randint", side_effect=[banana_idx, 20]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    # adjust_balance must hit the victim_below's discord_id, not the spinner's
+    player_service.get_player_below.assert_called_once_with(spinner_id, 123)
+    assert player_service.adjust_balance.call_count == 1
+    call = player_service.adjust_balance.call_args
+    assert call[0][0] == 8001, "BANANA_PEEL must debit the player below, not the spinner"
+    assert call[0][1] == 123
+    assert call[0][2] < 0, "BANANA_PEEL must apply a negative delta to the victim"
+
+    # Spinner never debited
+    spinner_calls = [
+        c for c in player_service.adjust_balance.call_args_list if c[0][0] == spinner_id
+    ]
+    assert spinner_calls == [], "BANANA_PEEL must NOT debit the spinner"
+
+
+@pytest.mark.asyncio
+async def test_banana_peel_misses_when_no_player_below():
+    """BANANA_PEEL with no player below performs no balance changes."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7002
+    player_service = _make_wheel_player_service()
+    player_service.get_player_below = MagicMock(return_value=None)
+
+    interaction = _make_wheel_interaction(spinner_id)
     cmds = BettingCommands(
         bot, betting_service, match_service, player_service, loan_service=loan_service
     )
@@ -1537,14 +1600,294 @@ async def test_banana_peel_burns_spinner_balance():
                 with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
                     await cmds.gamba.callback(cmds, interaction)
 
-    # adjust_balance called with negative spinner loss
-    spinner_calls = [
-        c for c in player_service.adjust_balance.call_args_list if c[0][0] == 7001
+    # No victim → no balance adjustments at all
+    player_service.adjust_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_banana_peel_clamps_to_victim_balance():
+    """BANANA_PEEL clamps the loss to the victim's available balance."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7003
+    # Victim only has 5 JC; loss roll would be 25 → clamped to 5
+    victim_below = MagicMock(name="Below", discord_id=8002, jopacoin_balance=5)
+    player_service = _make_wheel_player_service()
+    player_service.get_player_below = MagicMock(return_value=victim_below)
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    banana_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BANANA_PEEL")
+    # side_effect: [wedge_idx, 25] — 25 > 5, must clamp
+    with patch("commands.betting.random.randint", side_effect=[banana_idx, 25]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    assert player_service.adjust_balance.call_count == 1
+    call = player_service.adjust_balance.call_args
+    assert call[0][0] == 8002
+    # Loss clamped: delta is -5 (victim ends at 0, not negative)
+    assert call[0][2] == -5, f"Expected -5 clamped loss, got {call[0][2]}"
+
+
+@pytest.mark.asyncio
+async def test_green_shell_steals_from_random_other_via_steal_atomic():
+    """GREEN_SHELL transfers from a random other positive-balance player via steal_atomic."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7004
+    victim = MagicMock(name="Victim", discord_id=8003, jopacoin_balance=100)
+    player_service = _make_wheel_player_service()
+    # Exclude spinner from the leaderboard so the top-N golden-wheel check
+    # rejects them; the BOMB/GREEN victim filter doesn't need the spinner present.
+    player_service.get_leaderboard = MagicMock(return_value=[victim])
+    player_service.steal_atomic = MagicMock(return_value={
+        "amount": 20,
+        "thief_new_balance": 70,
+        "victim_new_balance": 80,
+    })
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    green_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "GREEN_SHELL")
+    # side_effect: [wedge_idx, steal_roll] — pinning steal to 20 (within 15-25)
+    with patch("commands.betting.random.randint", side_effect=[green_idx, 20]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    player_service.steal_atomic.assert_called_once_with(
+        thief_discord_id=spinner_id,
+        victim_discord_id=8003,
+        guild_id=123,
+        amount=20,
+    )
+    # steal_atomic handles both sides; adjust_balance must NOT be used here
+    player_service.adjust_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_green_shell_misses_when_no_eligible_victims():
+    """GREEN_SHELL with no eligible victims performs no steal."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7005
+    # Empty leaderboard → no eligible others AND spinner not in top-N (no golden).
+    player_service = _make_wheel_player_service()
+    player_service.get_leaderboard = MagicMock(return_value=[])
+    player_service.steal_atomic = MagicMock()
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    green_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "GREEN_SHELL")
+    with patch("commands.betting.random.randint", return_value=green_idx):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    player_service.steal_atomic.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bomb_omb_burns_three_random_others():
+    """BOMB_OMB burns from exactly 3 different positive-balance victims; spinner unchanged."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7006
+    others = [
+        MagicMock(name=f"V{i}", discord_id=9000 + i, jopacoin_balance=100)
+        for i in range(5)
     ]
-    assert len(spinner_calls) == 1, "Spinner should be adjusted exactly once for BANANA_PEEL"
-    assert spinner_calls[0][0][2] < 0, "BANANA_PEEL must subtract from spinner"
-    # NOT credited to nonprofit fund — coins burned
+    player_service = _make_wheel_player_service()
+    # Exclude spinner — keeps them out of top-N so the regular wheel fires.
+    player_service.get_leaderboard = MagicMock(return_value=others)
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    bomb_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BOMB_OMB")
+    # side_effect: [wedge_idx, loss1, loss2, loss3] — 3 victim losses pinned at 15
+    with patch("commands.betting.random.randint", side_effect=[bomb_idx, 15, 15, 15]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    # Exactly 3 victim debits
+    assert player_service.adjust_balance.call_count == 3, (
+        f"Expected 3 BOMB_OMB victim debits, got {player_service.adjust_balance.call_count}"
+    )
+    victim_ids = [c[0][0] for c in player_service.adjust_balance.call_args_list]
+    deltas = [c[0][2] for c in player_service.adjust_balance.call_args_list]
+    # All targets are distinct, none is the spinner, all deltas negative
+    assert len(set(victim_ids)) == 3, f"Victims must be distinct, got {victim_ids}"
+    assert spinner_id not in victim_ids, "BOMB_OMB must NOT debit the spinner"
+    assert all(d < 0 for d in deltas), f"All BOMB_OMB deltas must be negative, got {deltas}"
+
+
+@pytest.mark.asyncio
+async def test_bomb_omb_clamps_sample_to_eligible_pool():
+    """BOMB_OMB samples at most len(pool) victims when pool < VICTIM_COUNT."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7007
+    others = [
+        MagicMock(name="V1", discord_id=9101, jopacoin_balance=100),
+        MagicMock(name="V2", discord_id=9102, jopacoin_balance=100),
+    ]
+    player_service = _make_wheel_player_service()
+    # Exclude spinner from leaderboard so the top-N golden check rejects them.
+    player_service.get_leaderboard = MagicMock(return_value=others)
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    bomb_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BOMB_OMB")
+    # side_effect: [wedge_idx, loss1, loss2] — only 2 victim losses (pool size 2)
+    # If random.sample(pool, 3) were called instead of (pool, 2), ValueError would raise.
+    with patch("commands.betting.random.randint", side_effect=[bomb_idx, 15, 15]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    assert player_service.adjust_balance.call_count == 2, (
+        f"Expected 2 BOMB_OMB victim debits (pool clamped), got {player_service.adjust_balance.call_count}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bomb_omb_misses_when_no_eligible_victims():
+    """BOMB_OMB with no eligible victims performs no balance changes."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7008
+    # Empty leaderboard → spinner not in top-N, no eligible BOMB_OMB victims.
+    player_service = _make_wheel_player_service()
+    player_service.get_leaderboard = MagicMock(return_value=[])
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    bomb_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BOMB_OMB")
+    with patch("commands.betting.random.randint", return_value=bomb_idx):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    player_service.adjust_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wedge_value", ["BANANA_PEEL", "GREEN_SHELL", "BOMB_OMB"])
+async def test_deflation_wedges_do_not_credit_nonprofit(wedge_value):
+    """None of the three Mario Kart deflation wedges credit the nonprofit fund.
+
+    BANANA and BOMB are burns (coins destroyed); GREEN_SHELL is a zero-sum transfer.
+    None of these routes should hit loan_service.add_to_nonprofit_fund.
+    """
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7100
+    victim = MagicMock(name="Victim", discord_id=8200, jopacoin_balance=100)
+
+    player_service = _make_wheel_player_service()
+    # Provide enough victim infrastructure for any of the three wedges to fire.
+    # Spinner is excluded from the leaderboard so the top-N golden check rejects them.
+    player_service.get_player_below = MagicMock(return_value=victim)
+    player_service.get_leaderboard = MagicMock(return_value=[victim])
+    player_service.steal_atomic = MagicMock(return_value={
+        "amount": 20,
+        "thief_new_balance": 70,
+        "victim_new_balance": 80,
+    })
+
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    wedge_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == wedge_value)
+    # Pad side_effect with extra loss rolls so BOMB_OMB's loop is safe.
+    with patch("commands.betting.random.randint", side_effect=[wedge_idx, 15, 15, 15, 15]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
     loan_service.add_to_nonprofit_fund.assert_not_called()
+
+
+def test_bankrupt_wheel_bankrupt_value_is_real_penalty():
+    """BANKRUPT wedges on the bankrupt wheel must impose a meaningful loss.
+
+    Pins the current ~+12 EV target. Reverting target to ~+25 would clamp the
+    computed BANKRUPT value to -1, which makes the wheel a free roll — this
+    test will fail in that case to surface the regression.
+    """
+    # BANKRUPT wedge labels are rewritten to the computed value (e.g. "-24") at
+    # build time, so identify them by negative int value, not by label.
+    bankrupt_values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
+    assert bankrupt_values, "Bankrupt wheel must contain at least one BANKRUPT wedge"
+    assert any(v <= -5 for v in bankrupt_values), (
+        f"At least one BANKRUPT wedge must have value <= -5 (got {bankrupt_values}); "
+        "if all are clamped near -1, the bankrupt wheel target EV is too high."
+    )
 
 
 @pytest.mark.asyncio

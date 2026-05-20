@@ -105,17 +105,13 @@ from config import (
     REBELLION_RETRIBUTION_STEAL,
     WHEEL_BANANA_PEEL_LOSS_MAX,
     WHEEL_BANANA_PEEL_LOSS_MIN,
-    WHEEL_BOMB_OMB_SPINNER_LOSS_MAX,
-    WHEEL_BOMB_OMB_SPINNER_LOSS_MIN,
     WHEEL_BOMB_OMB_VICTIM_COUNT,
     WHEEL_BOMB_OMB_VICTIM_LOSS_MAX,
     WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
     WHEEL_COOLDOWN_SECONDS,
     WHEEL_GOLDEN_TOP_N,
-    WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX,
-    WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN,
-    WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX,
-    WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN,
+    WHEEL_GREEN_SHELL_STEAL_MAX,
+    WHEEL_GREEN_SHELL_STEAL_MIN,
     WHEEL_LOSE_PENALTY_COOLDOWN,
 )
 from services.bankruptcy_service import BankruptcyService
@@ -892,15 +888,20 @@ class BettingCommands(commands.Cog):
         recession_count: int = 0
         recession_self_loss: int = 0
 
-        # Mario Kart deflation tracking (all burned, no nonprofit credit)
-        banana_amount: int = 0
-        green_shell_spinner_loss: int = 0
-        green_shell_victim_loss: int = 0
+        # Mario Kart wedge tracking. Spinner is untouched by banana and bomb
+        # (those burn from other players); green shell is a zero-sum steal that
+        # credits the spinner via steal_atomic.
+        banana_victim: discord.Member | None = None
+        banana_victim_name: str = "the player behind you"
+        banana_victim_loss: int = 0
+        banana_missed: bool = False
         green_shell_victim: discord.Member | None = None
         green_shell_victim_name: str = "someone"
-        bomb_omb_spinner_loss: int = 0
+        green_shell_amount: int = 0
+        green_shell_missed: bool = False
         bomb_omb_victims: list[tuple[str, int, int]] = []
         bomb_omb_burn_total: int = 0
+        bomb_omb_missed: bool = False
 
         if result_value == "RETRIBUTION":
             # War effect: steal from attackers, LOSE for everyone else
@@ -1220,83 +1221,140 @@ class BettingCommands(commands.Cog):
                 self.player_service.get_balance, user_id, guild_id
             )
 
-        # --- Mario Kart deflation wedges (coins burned, no nonprofit credit) ---
+        # --- Mario Kart deflation wedges (coins burned/stolen, no nonprofit credit) ---
         elif result_value == "BANANA_PEEL":
-            banana_amount = random.randint(
-                WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX
+            # Hit the player ranked directly below the spinner; burn from them.
+            # Spinner balance unchanged.
+            below = await asyncio.to_thread(
+                self.player_service.get_player_below, user_id, guild_id
             )
-            await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, -banana_amount
-            )
-            new_balance = await asyncio.to_thread(
-                self.player_service.get_balance, user_id, guild_id
-            )
-
-        elif result_value == "GREEN_SHELL":
-            green_shell_spinner_loss = random.randint(
-                WHEEL_GREEN_SHELL_SPINNER_LOSS_MIN, WHEEL_GREEN_SHELL_SPINNER_LOSS_MAX
-            )
-            await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, -green_shell_spinner_loss
-            )
-            all_players_gs = await asyncio.to_thread(
-                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
-            )
-            eligible_victims_gs = [
-                p for p in all_players_gs
-                if p.discord_id != user_id and p.jopacoin_balance > 0
-            ]
-            if eligible_victims_gs:
-                victim_p = random.choice(eligible_victims_gs)
+            if not below or below.jopacoin_balance <= 0:
+                banana_missed = True
+            else:
                 raw_loss = random.randint(
-                    WHEEL_GREEN_SHELL_VICTIM_LOSS_MIN, WHEEL_GREEN_SHELL_VICTIM_LOSS_MAX
+                    WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX
                 )
-                green_shell_victim_loss = min(raw_loss, victim_p.jopacoin_balance)
-                if green_shell_victim_loss > 0:
+                banana_victim_loss = min(raw_loss, below.jopacoin_balance)
+                try:
                     await asyncio.to_thread(
                         self.player_service.adjust_balance,
-                        victim_p.discord_id, guild_id, -green_shell_victim_loss
+                        below.discord_id, guild_id, -banana_victim_loss
                     )
-                    green_shell_victim_name = victim_p.name
+                except Exception as exc:
+                    logger.warning(
+                        "BANANA_PEEL: failed to burn from victim %s in guild %s: %s",
+                        below.discord_id, guild_id, exc,
+                    )
+                    banana_missed = True
+                    banana_victim_loss = 0
+                else:
+                    banana_victim_name = below.name
                     if interaction.guild:
-                        green_shell_victim = interaction.guild.get_member(victim_p.discord_id)
-            new_balance = await asyncio.to_thread(
-                self.player_service.get_balance, user_id, guild_id
-            )
+                        banana_victim = interaction.guild.get_member(below.discord_id)
+                        if banana_victim is None:
+                            logger.debug(
+                                "BANANA_PEEL: victim %s not in guild cache",
+                                below.discord_id,
+                            )
+                    logger.info(
+                        "BANANA_PEEL: spinner=%s burned %s JC from victim=%s in guild=%s",
+                        user_id, banana_victim_loss, below.discord_id, guild_id,
+                    )
+            # Spinner balance unchanged — no adjust_balance call for the spinner.
 
-        elif result_value == "BOMB_OMB":
-            bomb_omb_spinner_loss = random.randint(
-                WHEEL_BOMB_OMB_SPINNER_LOSS_MIN, WHEEL_BOMB_OMB_SPINNER_LOSS_MAX
-            )
-            await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, -bomb_omb_spinner_loss
-            )
-            bomb_omb_burn_total = bomb_omb_spinner_loss
-            all_players_bo = await asyncio.to_thread(
+        elif result_value == "GREEN_SHELL":
+            # Pick a random other positive-balance player and steal a flat amount.
+            # Zero-sum: spinner gains exactly what the victim loses.
+            leaderboard_gs = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
-            eligible_victims_bo = [
-                p for p in all_players_bo
+            eligible_gs = [
+                p for p in leaderboard_gs
                 if p.discord_id != user_id and p.jopacoin_balance > 0
             ]
-            sample_size = min(WHEEL_BOMB_OMB_VICTIM_COUNT, len(eligible_victims_bo))
-            if sample_size > 0:
-                splash_victims = random.sample(eligible_victims_bo, sample_size)
-                for vp in splash_victims:
+            if not eligible_gs:
+                green_shell_missed = True
+            else:
+                victim_p = random.choice(eligible_gs)
+                raw_steal = random.randint(
+                    WHEEL_GREEN_SHELL_STEAL_MIN, WHEEL_GREEN_SHELL_STEAL_MAX
+                )
+                green_shell_amount = min(raw_steal, victim_p.jopacoin_balance)
+                if green_shell_amount <= 0:
+                    green_shell_missed = True
+                else:
+                    try:
+                        steal_res = await asyncio.to_thread(
+                            functools.partial(
+                                self.player_service.steal_atomic,
+                                thief_discord_id=user_id,
+                                victim_discord_id=victim_p.discord_id,
+                                guild_id=guild_id,
+                                amount=green_shell_amount,
+                            )
+                        )
+                        new_balance = steal_res["thief_new_balance"]
+                        green_shell_victim_name = victim_p.name
+                        if interaction.guild:
+                            green_shell_victim = interaction.guild.get_member(victim_p.discord_id)
+                            if green_shell_victim is None:
+                                logger.debug(
+                                    "GREEN_SHELL: victim %s not in guild cache",
+                                    victim_p.discord_id,
+                                )
+                        logger.info(
+                            "GREEN_SHELL: spinner=%s stole %s JC from victim=%s in guild=%s",
+                            user_id, green_shell_amount, victim_p.discord_id, guild_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "GREEN_SHELL: steal_atomic failed (spinner=%s victim=%s guild=%s): %s",
+                            user_id, victim_p.discord_id, guild_id, exc,
+                        )
+                        green_shell_missed = True
+                        green_shell_amount = 0
+
+        elif result_value == "BOMB_OMB":
+            # Sample N random other positive-balance players; burn a flat amount
+            # from each. Spinner unchanged.
+            leaderboard_bo = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            eligible_bo = [
+                p for p in leaderboard_bo
+                if p.discord_id != user_id and p.jopacoin_balance > 0
+            ]
+            sample_size = min(WHEEL_BOMB_OMB_VICTIM_COUNT, len(eligible_bo))
+            if sample_size <= 0:
+                bomb_omb_missed = True
+            else:
+                splash = random.sample(eligible_bo, sample_size)
+                for vp in splash:
                     raw_loss = random.randint(
                         WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX
                     )
                     loss = min(raw_loss, vp.jopacoin_balance)
-                    if loss > 0:
+                    if loss <= 0:
+                        continue
+                    try:
                         await asyncio.to_thread(
                             self.player_service.adjust_balance,
                             vp.discord_id, guild_id, -loss
                         )
                         bomb_omb_victims.append((vp.name, loss, vp.discord_id))
                         bomb_omb_burn_total += loss
-            new_balance = await asyncio.to_thread(
-                self.player_service.get_balance, user_id, guild_id
-            )
+                    except Exception as exc:
+                        logger.warning(
+                            "BOMB_OMB: failed to burn from victim=%s (spinner=%s guild=%s): %s",
+                            vp.discord_id, user_id, guild_id, exc,
+                        )
+                if bomb_omb_burn_total == 0:
+                    bomb_omb_missed = True
+                else:
+                    logger.info(
+                        "BOMB_OMB: spinner=%s burned %s JC across %s victims in guild=%s",
+                        user_id, bomb_omb_burn_total, len(bomb_omb_victims), guild_id,
+                    )
 
         # --- Golden Wheel outcome handlers ---
         elif result_value == "HEIST":
@@ -1611,11 +1669,11 @@ class BettingCommands(commands.Cog):
         elif result_value == "RECESSION":
             log_result = -recession_self_loss
         elif result_value == "BANANA_PEEL":
-            log_result = -banana_amount
+            log_result = 0  # spinner balance unchanged; burn lands on victim
         elif result_value == "GREEN_SHELL":
-            log_result = -green_shell_spinner_loss
+            log_result = green_shell_amount  # spinner gained the stolen amount
         elif result_value == "BOMB_OMB":
-            log_result = -bomb_omb_spinner_loss
+            log_result = 0  # spinner balance unchanged; splash lands on victims
         else:
             log_result = result_value if isinstance(result_value, int) else 0
 
@@ -1676,14 +1734,17 @@ class BettingCommands(commands.Cog):
             recession_total=recession_total,
             recession_count=recession_count,
             recession_self_loss=recession_self_loss,
-            banana_amount=banana_amount,
-            green_shell_spinner_loss=green_shell_spinner_loss,
+            banana_victim=banana_victim,
+            banana_victim_name=banana_victim_name,
+            banana_victim_loss=banana_victim_loss,
+            banana_missed=banana_missed,
             green_shell_victim=green_shell_victim,
-            green_shell_victim_loss=green_shell_victim_loss,
             green_shell_victim_name=green_shell_victim_name,
-            bomb_omb_spinner_loss=bomb_omb_spinner_loss,
+            green_shell_amount=green_shell_amount,
+            green_shell_missed=green_shell_missed,
             bomb_omb_victims=bomb_omb_victims,
             bomb_omb_burn_total=bomb_omb_burn_total,
+            bomb_omb_missed=bomb_omb_missed,
         )
 
         # Add Guardian Aura notification if it triggered
