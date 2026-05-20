@@ -58,9 +58,12 @@ class TestBankruptWheelEV:
     def test_normal_wheel_target_ev_unchanged(self):
         """The non-bankrupt wheel should still be at its normal -25 target."""
         from config import (
+            WHEEL_BANANA_PEEL_EST_EV,
             WHEEL_BLUE_SHELL_EST_EV,
+            WHEEL_BOMB_OMB_EST_EV,
             WHEEL_COMEBACK_EST_EV,
             WHEEL_COMMUNE_EST_EV,
+            WHEEL_GREEN_SHELL_EST_EV,
             WHEEL_LIGHTNING_BOLT_EST_EV,
             WHEEL_RED_SHELL_EST_EV,
             WHEEL_TARGET_EV,
@@ -73,6 +76,9 @@ class TestBankruptWheelEV:
             "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
             "COMMUNE": WHEEL_COMMUNE_EST_EV,
             "COMEBACK": WHEEL_COMEBACK_EST_EV,
+            "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
+            "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
+            "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
         }
 
         total = 0.0

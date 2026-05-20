@@ -57,6 +57,14 @@ def build_wheel_result_embed(
     recession_total: int = 0,
     recession_count: int = 0,
     recession_self_loss: int = 0,
+    banana_amount: int = 0,
+    green_shell_spinner_loss: int = 0,
+    green_shell_victim: discord.Member | None = None,
+    green_shell_victim_loss: int = 0,
+    green_shell_victim_name: str = "someone",
+    bomb_omb_spinner_loss: int = 0,
+    bomb_omb_victims: list | None = None,
+    bomb_omb_burn_total: int = 0,
 ) -> discord.Embed:
     """Build the final result embed after the wheel stops."""
     label, value = result[0], result[1]  # (label, value, color)
@@ -316,6 +324,56 @@ def build_wheel_result_embed(
             f"You lost **{recession_self_loss}** {JOPACOIN_EMOTE}.\n"
             f"Total drained from the server: **{recession_total}** {JOPACOIN_EMOTE} (sent to nonprofit).\n\n"
             f"*Pride goes before the fall — and it drags the rest down with it.*"
+        )
+
+    # --- Mario Kart deflation wedges (all burned, vanish from economy) ---
+    elif value == "BANANA_PEEL":
+        title = "🍌 BANANA PEEL! 🍌"
+        color = discord.Color.from_str("#ffe14a")
+        description = (
+            f"**BANANA**\n\n"
+            f"🍌 You slipped on a banana peel!\n\n"
+            f"Lost **{banana_amount}** {JOPACOIN_EMOTE} — coins vanish into the void.\n\n"
+            f"*Should've watched where you were spinning.*"
+        )
+
+    elif value == "GREEN_SHELL":
+        title = "🟢 GREEN SHELL! 🟢"
+        color = discord.Color.from_str("#228b22")
+        victim_display = (
+            green_shell_victim.mention if green_shell_victim else f"**{green_shell_victim_name}**"
+        )
+        if green_shell_victim_loss > 0:
+            description = (
+                f"**GREEN**\n\n"
+                f"🐢 A green shell ricochets across the room!\n\n"
+                f"You lost **{green_shell_spinner_loss}** {JOPACOIN_EMOTE}.\n"
+                f"{victim_display} got clipped for **{green_shell_victim_loss}** {JOPACOIN_EMOTE}.\n\n"
+                f"*Total burned: {green_shell_spinner_loss + green_shell_victim_loss} {JOPACOIN_EMOTE}. "
+                f"Gone, baby, gone.*"
+            )
+        else:
+            description = (
+                f"**GREEN**\n\n"
+                f"🐢 The shell bounced off the walls and hit only you.\n\n"
+                f"You lost **{green_shell_spinner_loss}** {JOPACOIN_EMOTE} — burned.\n\n"
+                f"*No one else around to catch a stray.*"
+            )
+
+    elif value == "BOMB_OMB":
+        title = "💣 BOMB-OMB! 💣"
+        color = discord.Color.from_str("#0d0d0d")
+        victim_lines = ""
+        if bomb_omb_victims:
+            for vname, vamt, _ in bomb_omb_victims:
+                victim_lines += f"💥 **{vname}** lost **{vamt}** {JOPACOIN_EMOTE}\n"
+        description = (
+            f"**BOMB**\n\n"
+            f"💣 KABOOM! The wheel detonates.\n\n"
+            f"You took **{bomb_omb_spinner_loss}** {JOPACOIN_EMOTE} of direct damage.\n"
+            f"{victim_lines}"
+            f"Total vaporized: **{bomb_omb_burn_total}** {JOPACOIN_EMOTE} (burned, not banked).\n\n"
+            f"*Nothing personal. Just physics.*"
         )
 
     # --- Mana bonus wedge embeds ---

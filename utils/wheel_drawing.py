@@ -258,34 +258,34 @@ def _is_numbered_wedge(wedge: tuple) -> bool:
 
 
 # Base wheel wedge configuration: (label, base_value, color)
-# 24 wedges at 15 degrees each (dropped 35 and 45 from original 26 for legibility)
-# BANKRUPT value will be adjusted based on WHEEL_TARGET_EV
-# Wedges ordered by color: black/gray, green, blue, purple, orange (BOLT here), red, gold
+# 24 wedges at 15 degrees each. BANKRUPT value adjusted to hit WHEEL_TARGET_EV.
+# Wedges sorted by hex color code (ascending). Trimmed one each of 5/15/20 to
+# make room for the Mario Kart deflation trio (BANANA_PEEL, GREEN_SHELL, BOMB_OMB).
 _BASE_WHEEL_WEDGES = [
+    ("BOMB", "BOMB_OMB", "#0d0d0d"),
     ("BANKRUPT", -100, "#1a1a1a"),
     ("BANKRUPT", -100, "#1a1a1a"),
-    ("LOSE", 0, "#4a4a4a"),
+    ("GREEN", "GREEN_SHELL", "#228b22"),
+    ("30", 30, "#2980b9"),
     ("5", 5, "#2d5a27"),
-    ("5", 5, "#2d5a27"),
-    ("10", 10, "#3d7a37"),
-    ("10", 10, "#3d7a37"),
-    ("15", 15, "#4d9a47"),
-    ("15", 15, "#4d9a47"),
-    ("20", 20, "#5dba57"),
-    ("20", 20, "#5dba57"),
     ("25", 25, "#3498db"),
     ("BLUE", "BLUE_SHELL", "#3498db"),
-    ("30", 30, "#2980b9"),
+    ("10", 10, "#3d7a37"),
+    ("10", 10, "#3d7a37"),
+    ("LOSE", 0, "#4a4a4a"),
+    ("15", 15, "#4d9a47"),
+    ("20", 20, "#5dba57"),
+    ("50", 50, "#7d3c98"),
+    ("50", 50, "#7d3c98"),
     ("40", 40, "#9b59b6"),
-    ("50", 50, "#7d3c98"),
-    ("50", 50, "#7d3c98"),
-    ("60", 60, "#e67e22"),
-    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
-    ("70", 70, "#d35400"),
-    ("RED", "RED_SHELL", "#e74c3c"),
     ("80", 80, "#c0392b"),
+    ("70", 70, "#d35400"),
+    ("60", 60, "#e67e22"),
+    ("RED", "RED_SHELL", "#e74c3c"),
     ("100", 100, "#f1c40f"),
     ("100", 100, "#f1c40f"),
+    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
+    ("BANANA", "BANANA_PEEL", "#ffe14a"),
 ]
 
 
@@ -297,7 +297,9 @@ def _load_special_wedge_evs() -> None:
     if _SPECIAL_WEDGE_EST_EVS:
         return
     from config import (
+        WHEEL_BANANA_PEEL_EST_EV,
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_BOMB_OMB_EST_EV,
         WHEEL_CHAIN_REACTION_EST_EV,
         WHEEL_COMEBACK_EST_EV,
         WHEEL_COMMUNE_EST_EV,
@@ -305,6 +307,7 @@ def _load_special_wedge_evs() -> None:
         WHEEL_EMERGENCY_EST_EV,
         WHEEL_EXTEND_1_EST_EV,
         WHEEL_EXTEND_2_EST_EV,
+        WHEEL_GREEN_SHELL_EST_EV,
         WHEEL_JAILBREAK_EST_EV,
         WHEEL_LIGHTNING_BOLT_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
@@ -323,6 +326,9 @@ def _load_special_wedge_evs() -> None:
         "CHAIN_REACTION": WHEEL_CHAIN_REACTION_EST_EV,
         "TOWN_TRIAL": WHEEL_TOWN_TRIAL_EST_EV,
         "DISCOVER": WHEEL_DISCOVER_EST_EV,
+        "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
+        "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
+        "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
     })
 
 
@@ -392,37 +398,34 @@ WHEEL_WEDGES = _calculate_adjusted_wedges(WHEEL_TARGET_EV)
 # recalculates it to maintain WHEEL_BANKRUPT_TARGET_EV.
 # Numeric wedges are buffed vs. the normal wheel — bankrupt players need bigger
 # pay-outs to overcome the BANKRUPT/EXTEND/CHAIN_REACTION drag.
-# Wedges ordered by color (spectrum): black/gray → green → teal → blue → orange → red.
+# Wedges sorted by hex color code (ascending). Trimmed one each of 50/75 (green)
+# and 75 (orange) to seat the Mario Kart deflation trio. Jackpot 100s recolored
+# from green to gold for consistency with the regular wheel.
 _BASE_BANKRUPT_WHEEL_WEDGES = [
-    # Black/gray
-    ("BANKRUPT", -100, "#1a1a1a"),
-    ("BANKRUPT", -100, "#1a1a1a"),
-    ("LOSE", 0, "#4a4a4a"),
-    # Greens (dark to bright)
-    ("JAIL", "JAILBREAK", "#0a2a0a"),       # Remove 1 penalty game
-    ("SEIZE", "COMMUNE", "#1a2a1a"),         # All +balance players donate 1 JC to spinner
-    ("30", 30, "#2d5a27"),
-    ("50", 50, "#3d7a37"),
-    ("50", 50, "#3d7a37"),
-    ("75", 75, "#4d9a47"),
-    ("75", 75, "#4d9a47"),
-    ("100", 100, "#5dba57"),
-    ("100", 100, "#5dba57"),
-    # Teal/blue
-    ("FIND", "DISCOVER", "#1a2a2a"),         # Spinner picks from 3 options (60s)
-    ("CHAIN", "CHAIN_REACTION", "#1a1a3a"),  # Copy last normal wheel result
     ("CLUTCH", "COMEBACK", "#0a1a2a"),       # One-use pardon: next BANKRUPT becomes LOSE
-    ("BLUE", "BLUE_SHELL", "#3498db"),
-    # Olive/orange transition
-    ("50", 50, "#3a3a1a"),
-    ("75", 75, "#3a3500"),
-    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
+    ("JAIL", "JAILBREAK", "#0a2a0a"),        # Remove 1 penalty game
+    ("BOMB", "BOMB_OMB", "#0d0d0d"),
+    ("BANKRUPT", -100, "#1a1a1a"),
+    ("BANKRUPT", -100, "#1a1a1a"),
+    ("CHAIN", "CHAIN_REACTION", "#1a1a3a"),  # Copy last normal wheel result
+    ("SEIZE", "COMMUNE", "#1a2a1a"),         # All +balance players donate 1 JC to spinner
+    ("FIND", "DISCOVER", "#1a2a2a"),         # Spinner picks from 3 options (60s)
+    ("GREEN", "GREEN_SHELL", "#228b22"),
     ("SOS", "EMERGENCY", "#2a1a00"),         # All +balance players lose ≤10 JC
-    # Reds
     ("TRIAL", "TOWN_TRIAL", "#2a1a1a"),      # Server-wide vote (3 options, 5 min)
-    ("+1", "EXTEND_1", "#8B0000"),
+    ("30", 30, "#2d5a27"),
+    ("BLUE", "BLUE_SHELL", "#3498db"),
+    ("50", 50, "#3a3a1a"),
+    ("50", 50, "#3d7a37"),
+    ("LOSE", 0, "#4a4a4a"),
+    ("75", 75, "#4d9a47"),
     ("+2", "EXTEND_2", "#660000"),
+    ("+1", "EXTEND_1", "#8b0000"),
     ("RED", "RED_SHELL", "#e74c3c"),
+    ("100", 100, "#f1c40f"),                 # Jackpot — gold
+    ("100", 100, "#f1c40f"),                 # Jackpot — gold
+    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
+    ("BANANA", "BANANA_PEEL", "#ffe14a"),
 ]
 
 
@@ -509,36 +512,33 @@ BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_BANKRUPT_TARGE
 # OVEREXTENDED is the "pride goes before the fall" penalty (dynamic, like BANKRUPT).
 # All string values are golden-wheel-specific mechanics plus RED/BLUE_SHELL.
 _BASE_GOLDEN_WHEEL_WEDGES = [
-    # OVEREXTENDED penalty (dynamic, calculated to hit WHEEL_GOLDEN_TARGET_EV)
-    ("OVEREXTENDED", -398, "#4a3000"),
-    ("OVEREXTENDED", -398, "#4a3000"),
-    # Numeric wins — gold color palette, ascending value
-    ("20", 20, "#b8860b"),
-    ("30", 30, "#c8a000"),
-    ("40", 40, "#daa520"),
-    ("50", 50, "#d4a000"),
-    ("50", 50, "#d4a000"),
-    ("60", 60, "#e8b400"),
-    ("60", 60, "#e8b400"),
-    ("80", 80, "#f0c000"),
-    ("80", 80, "#f0c000"),
-    ("100", 100, "#f5c500"),
-    ("150", 150, "#e8d080"),
-    # Crown Jewel jackpot
-    ("CROWN", 250, "#fffacd"),
-    # Existing shell mechanics (gold-themed colors on golden wheel)
-    ("RED", "RED_SHELL", "#cc6600"),
+    # 24 wedges. OVEREXTENDED is dynamic (calibrated to WHEEL_GOLDEN_TARGET_EV).
+    # Sorted by hex color code (ascending). Trimmed one each of 50/60/80 to
+    # make room for the Mario Kart deflation trio.
+    ("BOMB", "BOMB_OMB", "#0d0d0d"),
+    ("GREEN", "GREEN_SHELL", "#228b22"),
+    ("RECESSION", "RECESSION", "#3a0a0a"),    # Server-wide deflation; richer lose more
     ("BLUE", "BLUE_SHELL", "#4080c0"),
-    # New golden-exclusive mechanics
+    ("OVEREXTENDED", -398, "#4a3000"),
+    ("OVEREXTENDED", -398, "#4a3000"),
+    ("DIVIDEND", "DIVIDEND", "#4a7000"),
+    ("TRICKLE", "TRICKLE_DOWN", "#5c7a00"),
+    ("TAKEOVER", "HOSTILE_TAKEOVER", "#6a2a80"),
+    ("COMPOUND", "COMPOUND_INTEREST", "#6b8c00"),
     ("HEIST", "HEIST", "#7a5c00"),
     ("HEIST", "HEIST", "#7a5c00"),
     ("CRASH", "MARKET_CRASH", "#8a4000"),
-    ("COMPOUND", "COMPOUND_INTEREST", "#6b8c00"),
-    ("TRICKLE", "TRICKLE_DOWN", "#5c7a00"),
-    ("DIVIDEND", "DIVIDEND", "#4a7000"),
-    ("TAKEOVER", "HOSTILE_TAKEOVER", "#6a2a80"),
-    # RECESSION — server-wide deflation; richer players lose more
-    ("RECESSION", "RECESSION", "#3a0a0a"),
+    ("20", 20, "#b8860b"),
+    ("30", 30, "#c8a000"),
+    ("RED", "RED_SHELL", "#cc6600"),
+    ("50", 50, "#d4a000"),
+    ("40", 40, "#daa520"),
+    ("60", 60, "#e8b400"),
+    ("150", 150, "#e8d080"),
+    ("80", 80, "#f0c000"),
+    ("100", 100, "#f5c500"),
+    ("BANANA", "BANANA_PEEL", "#ffe14a"),
+    ("CROWN", 250, "#fffacd"),                # Crown Jewel jackpot
 ]
 
 _GOLDEN_SPECIAL_WEDGE_EST_EVS: dict[str, float] = {}
@@ -549,7 +549,9 @@ def _load_golden_special_wedge_evs() -> None:
     if _GOLDEN_SPECIAL_WEDGE_EST_EVS:
         return
     from config import (
+        WHEEL_BANANA_PEEL_EST_EV,
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_BOMB_OMB_EST_EV,
         WHEEL_GOLDEN_COMPOUND_EST_EV,
         WHEEL_GOLDEN_DIVIDEND_EST_EV,
         WHEEL_GOLDEN_HEIST_EST_EV,
@@ -557,6 +559,7 @@ def _load_golden_special_wedge_evs() -> None:
         WHEEL_GOLDEN_MARKET_CRASH_EST_EV,
         WHEEL_GOLDEN_RECESSION_EST_EV,
         WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
+        WHEEL_GREEN_SHELL_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
     )
     _GOLDEN_SPECIAL_WEDGE_EST_EVS.update({
@@ -569,6 +572,9 @@ def _load_golden_special_wedge_evs() -> None:
         "DIVIDEND": WHEEL_GOLDEN_DIVIDEND_EST_EV,
         "HOSTILE_TAKEOVER": WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV,
         "RECESSION": WHEEL_GOLDEN_RECESSION_EST_EV,
+        "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
+        "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
+        "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
     })
 
 
@@ -641,9 +647,12 @@ def compute_live_golden_wedges(
     from config import (
         LIGHTNING_BOLT_PCT_MAX,
         LIGHTNING_BOLT_PCT_MIN,
+        WHEEL_BANANA_PEEL_EST_EV,
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_BOMB_OMB_EST_EV,
         WHEEL_GOLDEN_RECESSION_TOP_PCT,
         WHEEL_GOLDEN_TARGET_EV,
+        WHEEL_GREEN_SHELL_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
     )
 
@@ -692,6 +701,9 @@ def compute_live_golden_wedges(
         "DIVIDEND": dividend_ev,
         "HOSTILE_TAKEOVER": hostile_ev,
         "RECESSION": recession_ev,
+        "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
+        "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
+        "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
     }
 
     num_wedges = len(_BASE_GOLDEN_WHEEL_WEDGES)

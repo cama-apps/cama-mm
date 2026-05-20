@@ -6,8 +6,11 @@ import pytest
 
 from commands.betting import BettingCommands
 from config import (
+    WHEEL_BANANA_PEEL_EST_EV,
     WHEEL_BLUE_SHELL_EST_EV,
+    WHEEL_BOMB_OMB_EST_EV,
     WHEEL_COOLDOWN_SECONDS,
+    WHEEL_GREEN_SHELL_EST_EV,
     WHEEL_LIGHTNING_BOLT_EST_EV,
     WHEEL_RED_SHELL_EST_EV,
     WHEEL_TARGET_EV,
@@ -79,9 +82,10 @@ async def test_wheel_cooldown_expired_allows_spin():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a predictable result (index 3 = "5") and disable explosion
+    # Pick a simple positive-int wedge so the spin path is straightforward.
+    five_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=3):
+    with patch("commands.betting.random.randint", return_value=five_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -186,9 +190,10 @@ async def test_wheel_positive_no_debt_adds_directly():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a positive result (index 3 = "5") and disable explosion
+    # Pick the index of a +5 wedge so the test survives wheel reordering.
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=3):
+    with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -337,17 +342,18 @@ async def test_wheel_bankrupt_subtracts_balance():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get Bankrupt (index 0) and disable explosion
+    # Mock random to hit a BANKRUPT wedge and disable explosion
+    bankrupt_idx_a = next(i for i, w in enumerate(WHEEL_WEDGES) if isinstance(w[1], int) and w[1] < 0)
+    bankrupt_value = WHEEL_WEDGES[bankrupt_idx_a][1]
+    assert bankrupt_value < 0, "Bankrupt should have negative value"
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=0):
+    with patch("commands.betting.random.randint", return_value=bankrupt_idx_a):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
                     await commands.gamba.callback(commands, interaction)
 
     # Should subtract the bankrupt value (negative)
-    bankrupt_value = WHEEL_WEDGES[0][1]
-    assert bankrupt_value < 0, "Bankrupt should have negative value"
     player_service.adjust_balance.assert_called_once_with(1004, 123, bankrupt_value)
 
 
@@ -387,16 +393,17 @@ async def test_wheel_bankrupt_credits_nonprofit_fund():
         bot, betting_service, match_service, player_service, loan_service=loan_service
     )
 
-    # Mock random to get Bankrupt (index 0) and disable explosion
+    # Mock random to hit a BANKRUPT wedge and disable explosion
+    bankrupt_idx_b = next(i for i, w in enumerate(WHEEL_WEDGES) if isinstance(w[1], int) and w[1] < 0)
+    bankrupt_value = WHEEL_WEDGES[bankrupt_idx_b][1]
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=0):
+    with patch("commands.betting.random.randint", return_value=bankrupt_idx_b):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
                     await cmds.gamba.callback(cmds, interaction)
 
     # Should credit the nonprofit fund with the absolute loss value
-    bankrupt_value = WHEEL_WEDGES[0][1]
     loan_service.add_to_nonprofit_fund.assert_called_once_with(123, abs(int(bankrupt_value)))
 
 
@@ -411,8 +418,11 @@ async def test_wheel_bankrupt_ignores_max_debt():
 
     # User is registered and already at -400 (near MAX_DEBT of 500)
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
-    # With balance=-400 (negative), bankrupt wheel is used, so use BANKRUPT_WHEEL_WEDGES[0][1]
-    bankrupt_value = BANKRUPT_WHEEL_WEDGES[0][1]
+    # With balance=-400 (negative), bankrupt wheel is used
+    bankrupt_idx_b = next(
+        i for i, w in enumerate(BANKRUPT_WHEEL_WEDGES) if isinstance(w[1], int) and w[1] < 0
+    )
+    bankrupt_value = BANKRUPT_WHEEL_WEDGES[bankrupt_idx_b][1]
     # Three get_balance calls: (1) for is_eligible_for_bad_gamba check, (2) before processing, (3) after adjust
     player_service.get_balance.side_effect = [-400, -400, -400 + bankrupt_value]
 
@@ -439,9 +449,8 @@ async def test_wheel_bankrupt_ignores_max_debt():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get Bankrupt (index 0) and disable explosion
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=0):
+    with patch("commands.betting.random.randint", return_value=bankrupt_idx_b):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -484,9 +493,10 @@ async def test_wheel_lose_turn_no_change():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get "Lose a Turn" (index 2) and disable explosion
+    # Find the LOSE wedge (value == 0) dynamically and disable explosion
+    lose_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 0)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=2):
+    with patch("commands.betting.random.randint", return_value=lose_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -544,7 +554,7 @@ async def test_wheel_jackpot_result():
 
 
 def test_wheel_wedges_has_correct_count():
-    """Verify WHEEL_WEDGES has exactly 24 wedges (22 base + 2 shells)."""
+    """Verify WHEEL_WEDGES has exactly 24 wedges."""
     assert len(WHEEL_WEDGES) == 24
 
 
@@ -562,12 +572,12 @@ def test_wheel_wedges_distribution():
 
     assert bankrupt_count == 2, f"Expected 2 Bankrupt wedges, got {bankrupt_count}"
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
-    assert small_count == 4, f"Expected 4 small win wedges, got {small_count}"
-    assert medium_count == 5, f"Expected 5 medium win wedges, got {medium_count}"
+    assert small_count == 3, f"Expected 3 small win wedges, got {small_count}"
+    assert medium_count == 3, f"Expected 3 medium win wedges, got {medium_count}"
     assert good_count == 4, f"Expected 4 good win wedges, got {good_count}"
     assert great_count == 3, f"Expected 3 great win wedges, got {great_count}"
     assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
-    assert special_count == 3, f"Expected 3 special wedges, got {special_count}"
+    assert special_count == 6, f"Expected 6 special wedges, got {special_count}"
 
 
 def test_wheel_expected_value_matches_config():
@@ -582,6 +592,9 @@ def test_wheel_expected_value_matches_config():
         "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
         "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
         "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
+        "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
+        "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
+        "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
     }
     # Sum integer wedges + estimated EVs for special wedges
     total_value = 0.0
@@ -607,12 +620,15 @@ def test_wheel_bankrupt_always_negative():
 def test_wheel_special_wedges_have_string_values():
     """Verify special wedges have string values for special handling."""
     special_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], str)]
-    assert len(special_wedges) == 3, "Should have exactly 3 special wedges"
+    assert len(special_wedges) == 6, "Should have exactly 6 special wedges"
 
     special_values = {w[1] for w in special_wedges}
     assert "RED_SHELL" in special_values, "Should have RED_SHELL wedge"
     assert "BLUE_SHELL" in special_values, "Should have BLUE_SHELL wedge"
     assert "LIGHTNING_BOLT" in special_values, "Should have LIGHTNING_BOLT wedge"
+    assert "BANANA_PEEL" in special_values, "Should have BANANA_PEEL wedge"
+    assert "GREEN_SHELL" in special_values, "Should have GREEN_SHELL wedge"
+    assert "BOMB_OMB" in special_values, "Should have BOMB_OMB wedge"
 
 
 @pytest.mark.asyncio
@@ -1292,22 +1308,23 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
 # ============================================================================
 
 def test_bankrupt_wheel_has_correct_numbered_count():
-    """Bankrupt wheel has 9 numbered positive-value wedges (1,2,5,10,10,15,15,20,20)."""
+    """Bankrupt wheel keeps a meaningful pool of positive numeric wedges after the
+    Mario Kart trio took 3 slots."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     numbered = sum(
         1 for w in BANKRUPT_WHEEL_WEDGES
         if isinstance(w[1], int) and w[1] > 0
     )
-    assert numbered == 9, f"Expected 9 numbered wedges, got {numbered}"
+    assert numbered == 6, f"Expected 6 numbered wedges, got {numbered}"
 
 
 def test_bankrupt_wheel_has_positive_numeric_wedges():
-    """Bankrupt wheel should have positive numeric wedges to support its +25 EV target."""
+    """Bankrupt wheel should still have a few sizeable positive numeric wedges."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
-    assert len(values) >= 8, f"Expected at least 8 positive numerics, got {len(values)}"
+    assert len(values) >= 5, f"Expected at least 5 positive numerics, got {len(values)}"
     assert max(values) >= 75, "Bankrupt wheel should reach at least 75 JC to deliver positive EV"
 
 
@@ -1423,6 +1440,165 @@ def test_bankrupt_wheel_ev_maintained():
     expected_value = total_value / len(BANKRUPT_WHEEL_WEDGES)
     assert abs(expected_value - WHEEL_BANKRUPT_TARGET_EV) <= 1, (
         f"Bankrupt wheel EV ~{WHEEL_BANKRUPT_TARGET_EV}, got {expected_value:.2f}"
+    )
+
+
+# ============================================================================
+# Mario Kart deflation wedges (BANANA_PEEL / GREEN_SHELL / BOMB_OMB)
+# ============================================================================
+
+def test_mario_kart_wedges_on_all_wheels():
+    """Banana / Green / Bomb appear on the regular, bankrupt, and golden wheels."""
+    from utils.wheel_drawing import (
+        BANKRUPT_WHEEL_WEDGES,
+        GOLDEN_WHEEL_WEDGES,
+        WHEEL_WEDGES,
+    )
+    for wheel_name, wheel in (
+        ("regular", WHEEL_WEDGES),
+        ("bankrupt", BANKRUPT_WHEEL_WEDGES),
+        ("golden", GOLDEN_WHEEL_WEDGES),
+    ):
+        values = {w[1] for w in wheel if isinstance(w[1], str)}
+        for mechanic in ("BANANA_PEEL", "GREEN_SHELL", "BOMB_OMB"):
+            assert mechanic in values, f"{mechanic} missing from {wheel_name} wheel"
+
+
+def test_wheels_sorted_by_color_code():
+    """Each wheel's wedges are ordered by ascending hex color string."""
+    from utils.wheel_drawing import (
+        BANKRUPT_WHEEL_WEDGES,
+        GOLDEN_WHEEL_WEDGES,
+        WHEEL_WEDGES,
+    )
+    for wheel_name, wheel in (
+        ("regular", WHEEL_WEDGES),
+        ("bankrupt", BANKRUPT_WHEEL_WEDGES),
+        ("golden", GOLDEN_WHEEL_WEDGES),
+    ):
+        colors = [w[2].lower() for w in wheel]
+        assert colors == sorted(colors), (
+            f"{wheel_name} wheel wedges out of color order:\n{colors}"
+        )
+
+
+def test_bankrupt_wheel_jackpot_is_gold():
+    """Bankrupt wheel's 100-JC jackpot wedges should share the regular wheel's gold (#f1c40f)."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
+
+    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 100}
+    bankrupt_jackpot_colors = {w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 100}
+
+    assert bankrupt_jackpot_colors == regular_jackpot_colors, (
+        f"Bankrupt jackpot colors {bankrupt_jackpot_colors} should match regular {regular_jackpot_colors}"
+    )
+    assert bankrupt_jackpot_colors == {"#f1c40f"}, (
+        f"Jackpot color should be gold #f1c40f, got {bankrupt_jackpot_colors}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_banana_peel_burns_spinner_balance():
+    """BANANA_PEEL adjusts spinner balance down and does NOT credit nonprofit."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 100
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+    bot.garnishment_service = None
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 7001
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    banana_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BANANA_PEEL")
+    with patch("commands.betting.random.randint", return_value=banana_idx):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    # adjust_balance called with negative spinner loss
+    spinner_calls = [
+        c for c in player_service.adjust_balance.call_args_list if c[0][0] == 7001
+    ]
+    assert len(spinner_calls) == 1, "Spinner should be adjusted exactly once for BANANA_PEEL"
+    assert spinner_calls[0][0][2] < 0, "BANANA_PEEL must subtract from spinner"
+    # NOT credited to nonprofit fund — coins burned
+    loan_service.add_to_nonprofit_fund.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wheel_positive_balance_with_penalty_skips_bankrupt_wheel():
+    """A player with balance >= 0 must never see the bankrupt wheel, even if
+    they still have penalty_games_remaining > 0 from a previous bankruptcy."""
+    bot = MagicMock()
+    bk_service = MagicMock()
+    bk_state = MagicMock()
+    bk_state.penalty_games_remaining = 4
+    bk_service.get_state = MagicMock(return_value=bk_state)
+    bot.bankruptcy_service = bk_service
+
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Recovered player: balance >= 0, still has penalty games pending
+    player_service.get_player.return_value = MagicMock(name="Recovered")
+    player_service.get_balance.return_value = 0
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+    player_service.get_leaderboard = MagicMock(return_value=[])
+    bot.garnishment_service = None
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 7002
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(bot, betting_service, match_service, player_service)
+
+    # Pick LOSE so the spin path is simple and doesn't matter which wheel
+    lose_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 0)
+    with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()) as mock_gif:
+        with patch("commands.betting.random.randint", return_value=lose_idx):
+            with patch("commands.betting.random.random", return_value=1.0):
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    # GIF args: (size, label, is_eligible_for_bad_gamba, is_golden, ...)
+    mock_gif.assert_called_once()
+    is_bankrupt_flag = mock_gif.call_args.args[2]
+    assert is_bankrupt_flag is False, (
+        f"Penalty-state player with balance >= 0 must NOT get bankrupt wheel "
+        f"(is_eligible_for_bad_gamba={is_bankrupt_flag})"
     )
 
 

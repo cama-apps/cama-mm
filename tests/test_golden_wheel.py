@@ -95,6 +95,9 @@ class TestGoldenWheelWedges:
             "DIVIDEND": float(max(10, int(total_positive_balance * 0.005))),
             "HOSTILE_TAKEOVER": float(max(1, int(rank_next_balance * 0.115))),
             "RECESSION": -float(max(0, int(spinner_balance * config.WHEEL_GOLDEN_RECESSION_TOP_PCT))),
+            "BANANA_PEEL": config.WHEEL_BANANA_PEEL_EST_EV,
+            "GREEN_SHELL": config.WHEEL_GREEN_SHELL_EST_EV,
+            "BOMB_OMB": config.WHEEL_BOMB_OMB_EST_EV,
         }
 
         int_sum = sum(v for _, v, _ in wedges if isinstance(v, int))
