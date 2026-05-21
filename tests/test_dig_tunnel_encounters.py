@@ -180,3 +180,153 @@ class TestEncounterEndToEnd:
             for pid in (digger, 10002, 10003, 10004)
         )
         assert total_after == total_before - 3
+
+    def test_empty_pool_pays_nothing(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Proportional payout closes the silent net-inflation hole: with no
+        eligible victims the burn is 0, so the digger is paid 0 — the event
+        cannot mint coin against an empty/poor pool."""
+        digger = 10001
+        _register(player_repository, digger, guild_id, 50)  # only player present
+        dig_repo.create_tunnel(digger, guild_id, "T")
+        dig_repo.update_tunnel(digger, guild_id, depth=120)
+
+        monkeypatch.setattr(random, "random", lambda: 0.01)   # risky success
+        monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+
+        result = dig_service.resolve_event(digger, guild_id, "hungering_dark", "risky")
+
+        assert result["succeeded"] is True
+        # richest_n found no other positive-balance players -> nothing burned ->
+        # payout scaled to 0. No coin minted.
+        assert result["jc_delta"] == 0
+        assert result["splash"] is None
+        assert player_repository.get_balance(digger, guild_id) == 50
+
+    def test_partial_burn_scales_payout(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """When victims can only cover part of the nominal burn, the payout
+        scales by the same ratio and the event stays net-deflationary."""
+        digger = 10001
+        _register(player_repository, digger, guild_id, 50)
+        # The only two other players are each too poor to cover the full 4 JC.
+        _register(player_repository, 10002, guild_id, 3)
+        _register(player_repository, 10003, guild_id, 3)
+        dig_repo.create_tunnel(digger, guild_id, "T")
+        dig_repo.update_tunnel(digger, guild_id, depth=120)
+
+        total_before = sum(
+            player_repository.get_balance(p, guild_id) for p in (digger, 10002, 10003)
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+
+        result = dig_service.resolve_event(digger, guild_id, "hungering_dark", "risky")
+
+        # nominal burn 2*4=8; victims hold only 3 each -> burned 6; ratio 0.75;
+        # payout 5 -> round(5*0.75)=4.
+        assert result["jc_delta"] == 4
+        assert player_repository.get_balance(10002, guild_id) == 0
+        assert player_repository.get_balance(10003, guild_id) == 0
+        assert player_repository.get_balance(digger, guild_id) == 54
+        total_after = sum(
+            player_repository.get_balance(p, guild_id) for p in (digger, 10002, 10003)
+        )
+        # Net: digger +4, burned 6 => -2. Still deflationary despite the clamp.
+        assert total_after == total_before - 2
+
+    def test_failure_does_not_burn(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """trigger='success' means a failed risky pick burns nobody; the digger
+        eats the authored failure loss and no splash fires."""
+        digger = 10001
+        _register(player_repository, digger, guild_id, 50)
+        _register(player_repository, 10002, guild_id, 1000)
+        dig_repo.create_tunnel(digger, guild_id, "T")
+        dig_repo.update_tunnel(digger, guild_id, depth=120)
+
+        monkeypatch.setattr(random, "random", lambda: 0.99)   # > 0.60 => failure
+        monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+
+        result = dig_service.resolve_event(digger, guild_id, "hungering_dark", "risky")
+        assert result["succeeded"] is False
+        assert result["splash"] is None
+        assert result["jc_delta"] == -5                       # authored failure jc
+        assert player_repository.get_balance(10002, guild_id) == 1000  # untouched
+
+    def test_active_diggers_burn_full_when_funded(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """turf_war (active_diggers): three funded recent diggers each lose the
+        full 5 JC and the digger gets the full +8 since the burn lands whole."""
+        digger = 10001
+        _register(player_repository, digger, guild_id, 50)
+        for vid in (10002, 10003, 10004):
+            _register(player_repository, vid, guild_id, 100)
+            dig_repo.log_action(actor_id=vid, guild_id=guild_id, action_type="dig", detail={})
+        dig_repo.create_tunnel(digger, guild_id, "T")
+        dig_repo.update_tunnel(digger, guild_id, depth=120)
+
+        total_before = sum(
+            player_repository.get_balance(p, guild_id)
+            for p in (digger, 10002, 10003, 10004)
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+        monkeypatch.setattr(random, "sample", lambda pop, k: list(pop)[:k])
+
+        result = dig_service.resolve_event(digger, guild_id, "turf_war", "risky")
+        assert result["succeeded"] is True
+        assert result["jc_delta"] == 8
+        for vid in (10002, 10003, 10004):
+            assert player_repository.get_balance(vid, guild_id) == 95
+        assert player_repository.get_balance(digger, guild_id) == 58
+        total_after = sum(
+            player_repository.get_balance(p, guild_id)
+            for p in (digger, 10002, 10003, 10004)
+        )
+        assert total_after == total_before - 7   # +8 digger, -15 burned
+
+    def test_random_active_burn_full_when_funded(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """the_tear (random_active): three funded active players each lose 7 and
+        the digger gets the full +10."""
+        import datetime
+        digger = 10001
+        _register(player_repository, digger, guild_id, 50)
+        for vid in (10002, 10003, 10004):
+            _register(player_repository, vid, guild_id, 100)
+        # random_active draws from the lottery pool, which needs last_match_date.
+        with player_repository.connection() as conn:
+            conn.cursor().execute(
+                "UPDATE players SET last_match_date = ? WHERE guild_id = ?",
+                (datetime.datetime.now(datetime.UTC).isoformat(), guild_id),
+            )
+        dig_repo.create_tunnel(digger, guild_id, "T")
+        dig_repo.update_tunnel(digger, guild_id, depth=120)
+
+        total_before = sum(
+            player_repository.get_balance(p, guild_id)
+            for p in (digger, 10002, 10003, 10004)
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        monkeypatch.setattr(random, "uniform", lambda a, b: 1.0)
+        monkeypatch.setattr(random, "sample", lambda pop, k: list(pop)[:k])
+
+        result = dig_service.resolve_event(digger, guild_id, "the_tear", "risky")
+        assert result["succeeded"] is True
+        assert result["jc_delta"] == 10
+        burned = sum(
+            100 - player_repository.get_balance(v, guild_id) for v in (10002, 10003, 10004)
+        )
+        assert burned == 21                       # 3 * 7
+        assert player_repository.get_balance(digger, guild_id) == 60
+        total_after = sum(
+            player_repository.get_balance(p, guild_id)
+            for p in (digger, 10002, 10003, 10004)
+        )
+        assert total_after == total_before - 11   # +10 digger, -21 burned

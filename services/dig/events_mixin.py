@@ -513,6 +513,30 @@ class EventsMixin:
                 mode=splash_cfg.get("mode", "burn"),
             )
 
+        # A burn-on-success event only pays out in proportion to the JC it
+        # actually destroyed: when the targeted players are broke or the pool
+        # is empty the burn fizzles, so the payout scales toward zero. Keeps
+        # the event net-deflationary instead of minting coin it never removed.
+        if (
+            splash_result is not None
+            and splash_cfg.get("mode", "burn") == "burn"
+            and jc > 0
+        ):
+            nominal_burn = int(splash_cfg.get("victim_count", 0)) * int(
+                splash_cfg.get("penalty_jc", 0)
+            )
+            burn_ratio = (
+                min(1.0, splash_result.total_burned / nominal_burn)
+                if nominal_burn > 0
+                else 0.0
+            )
+            if burn_ratio < 1.0:
+                logger.info(
+                    "Dig burn-event %r payout scaled to %.2f (burned %d/%d)",
+                    event_id, burn_ratio, splash_result.total_burned, nominal_burn,
+                )
+            jc = int(round(jc * burn_ratio))
+
         # Depth shift + JC credit/debit + optional buff + audit log commit
         # together, so the actor can't be paid without the depth/buff
         # applied (or vice versa).
