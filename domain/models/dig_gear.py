@@ -90,7 +90,7 @@ class GearLoadout:
     amulet: GearPiece | None = None
     relics: list[dict] = field(default_factory=list)
 
-    def combat_modifiers(self) -> dict[str, float]:
+    def combat_modifiers(self) -> dict[str, float | int]:
         """Return the boss-combat deltas this loadout contributes.
 
         Caller decides how to fold these into base stats — see

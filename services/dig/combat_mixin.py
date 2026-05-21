@@ -1483,16 +1483,12 @@ class BossCombatMixin:
         player_dmg = int(state_row["player_dmg"])
         boss_hit = float(state_row["boss_hit"])
         boss_dmg = int(state_row["boss_dmg"])
-        # Crit is persisted at fight start (gear-adjusted, includes amulet);
-        # older rows pre-migration fall back to the risk-tier baseline.
-        crit_chance = state_row["crit_chance"] if state_row["crit_chance"] is not None else 0.0
-        crit_bonus = state_row["crit_bonus"] if state_row["crit_bonus"] is not None else 0
-        if not crit_chance and not crit_bonus:
-            _crit_stats = BOSS_DUEL_STATS.get(state_row["risk_tier"], {})
-            crit_chance = float(_crit_stats.get("crit_chance", 0) or 0)
-            crit_bonus = int(_crit_stats.get("crit_bonus", 0) or 0)
-        crit_chance = float(crit_chance)
-        crit_bonus = int(crit_bonus)
+        # Crit was persisted (gear-adjusted, already includes amulet + the
+        # risk-tier baseline) when the fight started, so the stored value is
+        # authoritative. A zero here means zero — no risk-tier recompute,
+        # which would resurrect crit on a fight where it was deliberately 0.
+        crit_chance = float(state_row["crit_chance"] or 0.0)
+        crit_bonus = int(state_row["crit_bonus"] or 0)
 
         at_boss = int(state_row["tier"])
 
