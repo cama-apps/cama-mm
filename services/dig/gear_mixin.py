@@ -199,12 +199,13 @@ class GearMixin:
         )
 
     def _get_loadout(self, discord_id: int, guild_id) -> GearLoadout:
-        """Bundle a player's three equipped gear slots + their relics."""
+        """Bundle a player's four equipped gear slots + their relics."""
         equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
         return GearLoadout(
             weapon=self._hydrate_gear_piece(equipped.get("weapon")),
             armor=self._hydrate_gear_piece(equipped.get("armor")),
             boots=self._hydrate_gear_piece(equipped.get("boots")),
+            amulet=self._hydrate_gear_piece(equipped.get("amulet")),
             relics=self._get_equipped_relics_for_player(discord_id, guild_id),
         )
 
@@ -227,6 +228,9 @@ class GearMixin:
         out["player_dmg"] = int(base["player_dmg"]) + int(mods["player_dmg"])
         out["boss_hit"] = boss_hit
         out["boss_dmg"] = int(base["boss_dmg"])
+        # Amulet crit stats stack additively on the risk-tier baseline.
+        out["crit_chance"] = float(base.get("crit_chance", 0) or 0) + float(mods["crit_chance"])
+        out["crit_bonus"] = int(base.get("crit_bonus", 0) or 0) + int(mods["crit_bonus"])
         return out
 
     def _get_active_pickaxe_tier(self, discord_id: int, guild_id, tunnel: dict) -> int:
@@ -262,6 +266,7 @@ class GearMixin:
             "weapon": serialize(loadout.weapon),
             "armor":  serialize(loadout.armor),
             "boots":  serialize(loadout.boots),
+            "amulet": serialize(loadout.amulet),
             "relics": list(loadout.relics),
         }
 
@@ -466,7 +471,7 @@ class GearMixin:
         if random.random() >= GEAR_BOSS_DROP_RATE:
             return None
         tier = GEAR_DROP_DEPTH_TIER_MAP[at_boss]
-        slot_choice = random.choice(["weapon", "armor", "boots"])
+        slot_choice = random.choice(["weapon", "armor", "boots", "amulet"])
         gear_id = self.dig_repo.add_gear(
             discord_id, guild_id, slot_choice, tier, source="boss_drop",
         )

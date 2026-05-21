@@ -472,7 +472,7 @@ class PinnacleMixin:
                         },
                         "gear_snapshot_ids": [
                             int(p.id)
-                            for p in (loadout.weapon, loadout.armor, loadout.boots)
+                            for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                             if p is not None
                         ],
                     }),
@@ -482,6 +482,8 @@ class PinnacleMixin:
                     "player_dmg": player_dmg,
                     "boss_hit": boss_hit_chance,
                     "boss_dmg": boss_dmg,
+                    "crit_chance": crit_chance,
+                    "crit_bonus": crit_bonus,
                 }
                 self.dig_repo.save_active_duel(discord_id, guild_id, state)
                 return self._ok(
@@ -534,7 +536,7 @@ class PinnacleMixin:
             pre_loadout = self._get_loadout(discord_id, guild_id)
             name_by_id = {
                 p.id: p.tier_def.name
-                for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots)
+                for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots, pre_loadout.amulet)
                 if p is not None
             }
             gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
@@ -627,11 +629,16 @@ class PinnacleMixin:
         player_dmg = int(state_row["player_dmg"])
         boss_hit_chance = float(state_row["boss_hit"])
         boss_dmg = int(state_row["boss_dmg"])
-        # Crit carries through paused/resumed fights — pull from the
-        # risk-tier table since it's not persisted in the duel state.
-        _crit_stats = BOSS_DUEL_STATS.get(state_row["risk_tier"], {})
-        crit_chance = float(_crit_stats.get("crit_chance", 0) or 0)
-        crit_bonus = int(_crit_stats.get("crit_bonus", 0) or 0)
+        # Crit is persisted at fight start (gear-adjusted, includes amulet);
+        # older rows pre-migration fall back to the risk-tier baseline.
+        crit_chance = state_row["crit_chance"] if state_row["crit_chance"] is not None else 0.0
+        crit_bonus = state_row["crit_bonus"] if state_row["crit_bonus"] is not None else 0
+        if not crit_chance and not crit_bonus:
+            _crit_stats = BOSS_DUEL_STATS.get(state_row["risk_tier"], {})
+            crit_chance = float(_crit_stats.get("crit_chance", 0) or 0)
+            crit_bonus = int(_crit_stats.get("crit_bonus", 0) or 0)
+        crit_chance = float(crit_chance)
+        crit_bonus = int(crit_bonus)
 
         # Continue remaining auto-rounds if option didn't decide it.
         if won is None:
@@ -689,7 +696,7 @@ class PinnacleMixin:
                 pre_loadout = self._get_loadout(discord_id, guild_id)
                 name_by_id = {
                     p.id: p.tier_def.name
-                    for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots)
+                    for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots, pre_loadout.amulet)
                     if p is not None
                 }
                 gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
