@@ -667,6 +667,7 @@ class DigCoreMixin:
             + p["ascension"].get("jc_multiplier", 0)
             + p["weather_fx"].get("jc_multiplier", 0)
         )
+        jc_mult = max(0.0, jc_mult - p["ascension"].get("jc_layer_penalty", 0))
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id,
             weather_code=self._get_weather_code(guild_id, layer_name),

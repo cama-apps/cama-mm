@@ -859,8 +859,11 @@ class DigService(
         jc_min = layer.get("jc_min", 1)
         jc_max = layer.get("jc_max", 3)
         jc_earned = random.randint(jc_min, jc_max)
-        # Ascension JC multiplier + weather JC multiplier
+        # Ascension JC multiplier + weather JC multiplier; high-prestige
+        # ascensions subtract a small layer penalty to dampen normal-dig
+        # income (does not affect milestones, perks, or flat bonuses).
         jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0) + weather_fx.get("jc_multiplier", 0)
+        jc_mult = max(0.0, jc_mult - ascension.get("jc_layer_penalty", 0))
         weather_code_now = self._get_weather_code(guild_id, layer_name)
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id, weather_code=weather_code_now,
@@ -1491,6 +1494,7 @@ class DigService(
             + ascension.get("jc_multiplier", 0)
             + weather_fx.get("jc_multiplier", 0)
         )
+        jc_mult = max(0.0, jc_mult - ascension.get("jc_layer_penalty", 0))
         jc_mult *= self._luminosity_jc_multiplier(luminosity)
         jc_mult *= self._post_pinnacle_decay_factor(depth_before, discord_id, guild_id)
         # Relic yield (deterministic only — preview shows static range)
