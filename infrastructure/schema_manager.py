@@ -405,6 +405,13 @@ class SchemaManager:
             # Event curses: per-tunnel lingering hex from a failed risky event
             # choice (the dig "curse" threat). Mirrors the temp_buffs column.
             ("add_temp_curses_to_tunnels", self._migration_add_temp_curses_to_tunnels),
+            # Persist the amulet's crit_chance / crit_bonus in paused boss
+            # duels so resumed fights keep the gear-derived crit instead of
+            # falling back to the bare risk-tier baseline.
+            (
+                "add_amulet_crit_to_dig_active_duels",
+                self._migration_add_amulet_crit_to_dig_active_duels,
+            ),
         ]
 
     # --- Migrations ---
@@ -2541,11 +2548,22 @@ class SchemaManager:
                 player_dmg INTEGER NOT NULL,
                 boss_hit REAL NOT NULL,
                 boss_dmg INTEGER NOT NULL,
+                crit_chance REAL NOT NULL DEFAULT 0,
+                crit_bonus INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 last_interaction_at INTEGER NOT NULL,
                 PRIMARY KEY (discord_id, guild_id)
             )
             """
+        )
+
+    def _migration_add_amulet_crit_to_dig_active_duels(self, cursor) -> None:
+        """Add crit_chance / crit_bonus columns to paused boss-duel rows."""
+        self._add_column_if_not_exists(
+            cursor, "dig_active_duels", "crit_chance", "REAL NOT NULL DEFAULT 0",
+        )
+        self._add_column_if_not_exists(
+            cursor, "dig_active_duels", "crit_bonus", "INTEGER NOT NULL DEFAULT 0",
         )
 
     def _migration_upgrade_boss_progress_json(self, cursor) -> None:
