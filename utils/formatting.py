@@ -67,6 +67,7 @@ def format_betting_display(
     dire_total: int,
     betting_mode: str,
     lock_until: int | None = None,
+    locked: bool = False,
 ) -> tuple[str, str]:
     """
     Format the betting display for embeds.
@@ -76,11 +77,17 @@ def format_betting_display(
         dire_total: Total jopacoin bet on Dire
         betting_mode: "house" or "pool"
         lock_until: Unix timestamp when betting closes
+        locked: If True, render a closed state instead of the countdown
 
     Returns:
         (field_name, field_value) tuple for the embed field.
     """
-    lock_text = f"Closes <t:{int(lock_until)}:R>" if lock_until else ""
+    if locked:
+        lock_text = "🔒 Betting closed"
+    elif lock_until:
+        lock_text = f"Closes <t:{int(lock_until)}:R>"
+    else:
+        lock_text = ""
 
     if betting_mode == "pool":
         radiant_mult, dire_mult = calculate_pool_odds(radiant_total, dire_total)

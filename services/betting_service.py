@@ -420,6 +420,25 @@ class BettingService:
             guild_id, discord_id, since_ts=since_ts, pending_match_id=pending_match_id
         )
 
+    def get_top_voluntary_bettor(
+        self, guild_id: int | None, pending_state: PendingMatchState | None = None
+    ) -> dict | None:
+        """Return the single largest voluntary (non-blind) bet for the pending match.
+
+        Used to pick the "biggest bettor" called out in the last-call reminder.
+        Returns None when there are no voluntary bets (e.g. only auto-liquidity).
+        """
+        since_ts = self._since_ts(pending_state)
+        if pending_state is None or since_ts is None:
+            return None
+        bets = self.bet_repo.get_bets_for_pending_match(
+            guild_id, since_ts=since_ts, pending_match_id=pending_state.pending_match_id
+        )
+        voluntary = [b for b in bets if not b.get("is_blind")]
+        if not voluntary:
+            return None
+        return max(voluntary, key=lambda b: b.get("amount", 0))
+
     def refund_pending_bets(
         self, guild_id: int | None, pending_state: PendingMatchState | None,
         pending_match_id: int | None = None

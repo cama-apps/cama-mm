@@ -78,3 +78,20 @@ class TestBettingDisplay:
         """Pool mode with equal bets shows 2x for both."""
         field_name, field_value = format_betting_display(100, 100, "pool")
         assert "(2.00x)" in field_value
+
+    def test_format_locked_pool_shows_closed_not_countdown(self):
+        """Locked pool display shows a closed state instead of a countdown."""
+        field_name, field_value = format_betting_display(
+            100, 200, "pool", lock_until=1704067200, locked=True
+        )
+        assert field_name == "💰 Pool Betting"
+        assert "Betting closed" in field_value
+        assert "<t:" not in field_value  # no live/relative timestamp once locked
+
+    def test_format_locked_house_shows_closed_not_countdown(self):
+        """Locked house display shows a closed state instead of a countdown."""
+        field_name, field_value = format_betting_display(
+            100, 200, "house", lock_until=1704067200, locked=True
+        )
+        assert "Betting closed" in field_value
+        assert "<t:" not in field_value
