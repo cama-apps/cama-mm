@@ -1283,6 +1283,77 @@ class TestStreaks:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["streak_days"] == 1
 
+    def test_streak_resets_after_one_missed_day_without_charm(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """Missing exactly one game date resets the streak without protection."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        dig_service.dig(10001, guild_id)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 86400)
+        dig_service.dig(10001, guild_id)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 3 * 86400)
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result.get("streak_charm_used") is not True
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["streak_days"] == 1
+
+    def test_streak_charm_saves_exactly_one_missed_day(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """A Streak Charm is consumed to bridge one missed game date."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        dig_service.dig(10001, guild_id)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 86400)
+        dig_service.dig(10001, guild_id)
+        streak_before = dig_repo.get_tunnel(10001, guild_id)["streak_days"]
+        dig_repo.add_inventory_item(10001, guild_id, "streak_charm")
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 3 * 86400)
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["streak_charm_used"] is True
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["streak_days"] == streak_before + 1
+        assert [
+            item for item in dig_repo.get_inventory(10001, guild_id)
+            if item["item_type"] == "streak_charm"
+        ] == []
+
+    def test_streak_charm_does_not_save_longer_gap(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """A Streak Charm only covers one missed game date, not longer gaps."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        dig_service.dig(10001, guild_id)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 86400)
+        dig_service.dig(10001, guild_id)
+        dig_repo.add_inventory_item(10001, guild_id, "streak_charm")
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 4 * 86400)
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result.get("streak_charm_used") is not True
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["streak_days"] == 1
+        assert any(
+            item["item_type"] == "streak_charm"
+            for item in dig_repo.get_inventory(10001, guild_id)
+        )
+
     def test_streak_bonus_at_thresholds(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Bonus JC at 3/7/14/30 day streaks."""
         _register_player(player_repository, balance=500)

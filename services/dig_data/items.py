@@ -276,7 +276,13 @@ CONSUMABLES: dict[str, Consumable] = {
             "legendary_weight_mult": 1.5,
         },
     ),
+    "streak_charm": Consumable(
+        id="streak_charm",
+        name="Streak Charm",
+        cost=15,
+        description="Passively saves one daily dig streak after exactly one missed day.",
+        params={"missed_day_saves": 1},
+    ),
 }
 
 HARD_HAT_USES: int = 3
-
