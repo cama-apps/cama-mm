@@ -724,6 +724,55 @@ class TestPhaseTransitionEvents:
         assert "pending_phase_event_id" not in entry
 
 
+class TestAmuletCritPersistence:
+    """A paused multi-phase fight must keep the amulet's gear-derived crit.
+
+    Cautious risk contributes 0 crit, so any non-zero crit persisted in the
+    duel row can only come from the equipped amulet. This guards the
+    fight-start snapshot (the crit could silently be lost on resume if it
+    weren't persisted) and the resume read's no-resurrection behavior.
+    """
+
+    def test_amulet_crit_persisted_in_paused_duel(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10001)
+        # Void-Touched amulet (tier 7: crit 0.10 / +1), added directly to
+        # bypass the prestige buy-gate — combat doesn't re-check it.
+        gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "amulet", 7)
+        dig_repo.equip_gear(gid, 10001, TEST_GUILD_ID, "amulet")
+        # Nobody hits (0.99), so the fight survives to grothak's mechanic and
+        # pauses instead of resolving.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
+
+        active = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        assert active is not None, "expected the fight to pause on a mechanic"
+        # Cautious base crit is 0; the amulet is the sole source.
+        assert active["crit_chance"] == pytest.approx(0.10)
+        assert active["crit_bonus"] == 1
+
+        # Resume must read the persisted crit (not recompute from risk-tier)
+        # and finish the fight without error.
+        resumed = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=0)
+        assert resumed["success"]
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
+
+    def test_paused_duel_without_amulet_persists_zero_crit(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        # No amulet: persisted crit must be 0. The resume path must NOT
+        # resurrect a risk-tier crit from this 0 (the removed fallback bug).
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10002)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.start_boss_duel(10002, TEST_GUILD_ID, "cautious", wager=10)
+
+        active = dig_repo.get_active_duel(10002, TEST_GUILD_ID)
+        assert active is not None, "expected the fight to pause on a mechanic"
+        assert active["crit_chance"] == pytest.approx(0.0)
+        assert active["crit_bonus"] == 0
+
+
 class TestWagerTaper:
     """Payout multiplier tapers toward break-even at high win chance, so
     softening a boss to a near-sure win then betting big stops printing money.

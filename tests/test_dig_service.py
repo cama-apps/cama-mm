@@ -601,6 +601,60 @@ class TestMilestones:
         assert result["milestone_bonus"] == MILESTONES[100]
 
 
+class TestHighPrestigeLayerPenalty:
+    """The P4+ jc_layer_penalty dampens the layer-roll path of normal dig.
+
+    P1 grants +18% loot at every prestige >= 1, so P3 and P4 share the same
+    jc_multiplier; only the P4 layer penalty (-5%) differs. Comparing the two
+    isolates the penalty end-to-end through dig() and guards the three
+    jc_mult subtraction sites — the aggregator test alone can't catch a
+    missing or mis-placed subtraction.
+    """
+
+    def _dig_once(self, dig_service, dig_repo, player_repository, guild_id,
+                  discord_id, prestige):
+        _register_player(player_repository, discord_id=discord_id,
+                         guild_id=guild_id, balance=500)
+        # Abyss layer (depth 101-150): JC roll range (1,4), advance (1,2).
+        # All lower bosses defeated so advance isn't capped at a boundary.
+        dig_repo.create_tunnel(discord_id, guild_id, "T")
+        boss_defeated = json.dumps(
+            {str(b): "defeated" for b in (25, 50, 75, 100)}
+        )
+        dig_repo.update_tunnel(
+            discord_id, guild_id, depth=120, max_depth=120,
+            prestige_level=prestige, luminosity=100,
+            boss_progress=boss_defeated,
+        )
+        return dig_service.dig(discord_id, guild_id)
+
+    def test_p4_layer_penalty_reduces_layer_payout(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
+        # Inflate ONLY the JC roll (Abyss range 1..4) to a large base so the
+        # multiplier difference dwarfs int() truncation noise; advance (1..2)
+        # stays at its minimum so no milestone/boundary is crossed.
+        monkeypatch.setattr(
+            random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
+        )
+
+        jc_p3 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30001, 3,
+        )["jc_earned"]
+        jc_p4 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30002, 4,
+        )["jc_earned"]
+
+        # P3: base 10000 x (1 + 0.18 P1 loot) = 11800, no penalty.
+        # P4: x (1 + 0.18 - 0.05) = 11300. abs=1 absorbs float truncation.
+        assert jc_p3 == pytest.approx(11800, abs=1)
+        assert jc_p4 == pytest.approx(11300, abs=1)
+        # The penalty must actually bite: P4 strictly below P3 by ~5% of base.
+        assert jc_p3 - jc_p4 == pytest.approx(500, abs=2)
+
+
 class TestDecay:
     """Tests for tunnel depth decay mechanics."""
 
