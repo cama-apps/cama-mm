@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -26,10 +27,13 @@ async def update_shuffle_message_wagers(
     cog: BettingCommands,
     guild_id: int | None,
     pending_match_id: int | None = None,
+    locked: bool = False,
 ) -> None:
     """Refresh the shuffle message's wager field with current totals.
 
-    Updates both the main channel message and the thread copy.
+    Updates the main channel message, the command-channel copy, and the thread
+    copy. Pass ``locked=True`` to render the closed state (no live countdown)
+    once betting has locked.
     """
     pending_state = await asyncio.to_thread(
         cog.match_service.get_last_shuffle, guild_id, pending_match_id
@@ -44,7 +48,7 @@ async def update_shuffle_message_wagers(
     lock_until = pending_state.bet_lock_until
     betting_mode = pending_state.betting_mode
     field_name, field_value = format_betting_display(
-        totals["radiant"], totals["dire"], betting_mode, lock_until
+        totals["radiant"], totals["dire"], betting_mode, lock_until, locked=locked
     )
 
     # Update main channel message (lobby channel)
@@ -131,7 +135,9 @@ async def send_betting_reminder(
 ) -> None:
     """Send a reminder message replying to the shuffle embed with current bet totals.
 
-    reminder_type: "warning" (5 minutes left) or "closed" (betting closed).
+    reminder_type: "warning" (terse one-liner), "last_call" (terse + an AI
+        betting-announcer hype line), or "closed" (final notice; also flips the
+        embed to a locked state).
     pending_match_id: Specific match ID for concurrent match support.
     """
     pending_state = await asyncio.to_thread(
@@ -161,17 +167,18 @@ async def send_betting_reminder(
     if reminder_type == "warning":
         if not lock_until:
             return
-        content = (
-            f"⏰ **5 minutes remaining until betting closes!** (<t:{int(lock_until)}:R>)\n"
-            f"Mode: {mode_label}\n\n"
-            f"Current bets:\n{totals_text}"
+        content = f"⏰ **Betting closes <t:{int(lock_until)}:R>** — {totals_text}"
+    elif reminder_type == "last_call":
+        if not lock_until:
+            return
+        flavor = await _betting_last_call_flavor(
+            cog, guild_id, pending_state, totals_text, lock_until
         )
+        content = f"🎲 **Last call — betting closes <t:{int(lock_until)}:R>** — {totals_text}"
+        if flavor:
+            content += f"\n\n💬 {flavor}"
     elif reminder_type == "closed":
-        content = (
-            f"🔒 **Betting is now closed!**\n"
-            f"Mode: {mode_label}\n\n"
-            f"Final bets:\n{totals_text}"
-        )
+        content = f"🔒 **Betting closed!** Final {mode_label} pool — {totals_text}"
     else:
         return
 
@@ -202,3 +209,52 @@ async def send_betting_reminder(
                     await thread_message.reply(content, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
+
+    # On close, flip the embed itself to a locked state so it stops showing a
+    # stale "Closes <t:..:R>" countdown (which Discord renders as a past date).
+    # A re-opened/extended window is already filtered upstream in
+    # _run_bet_reminder_after_delay (current_lock != lock_until), so reaching
+    # here means this window genuinely closed at its scheduled time.
+    if reminder_type == "closed":
+        try:
+            await update_shuffle_message_wagers(cog, guild_id, pending_match_id, locked=True)
+        except Exception as exc:
+            logger.warning(f"Failed to flip betting embed to closed state: {exc}", exc_info=True)
+
+
+async def _betting_last_call_flavor(
+    cog: BettingCommands,
+    guild_id: int | None,
+    pending_state,
+    standings: str,
+    lock_until: int | None,
+) -> str | None:
+    """Build the 1-minute last-call flavor line, or None.
+
+    Picks the biggest voluntary (non-blind) bettor as the callout target; falls
+    back to an empty-pool taunt when nobody has bet. Reuses the betting persona
+    roster via FlavorTextService; returns None if no flavor service is wired.
+    """
+    flavor_service = getattr(cog, "flavor_text_service", None)
+    if flavor_service is None:
+        return None
+    top = await asyncio.to_thread(
+        functools.partial(
+            cog.betting_service.get_top_voluntary_bettor, guild_id, pending_state=pending_state
+        )
+    )
+    seconds_left = max(0, int(lock_until) - int(time.time())) if lock_until else 60
+    event_details = {
+        "standings": standings,
+        "seconds_left": seconds_left,
+        "leader_team": top.get("team_bet_on") if top else None,
+        "leader_amount": top.get("amount") if top else None,
+    }
+    leader_discord_id = top.get("discord_id") if top else None
+    try:
+        return await flavor_service.generate_betting_last_call(
+            guild_id, event_details, leader_discord_id=leader_discord_id
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to generate last-call flavor: {exc}", exc_info=True)
+        return None
