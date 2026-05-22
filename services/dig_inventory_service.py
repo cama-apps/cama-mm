@@ -73,6 +73,8 @@ class DigInventoryService:
         """Queue an item for next dig."""
         if item_type not in CONSUMABLE_ITEMS:
             return _error(f"Unknown item type: {item_type}")
+        if item_type == "streak_charm":
+            return _error("Streak Charm is passive and triggers automatically.")
 
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:

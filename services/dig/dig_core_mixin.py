@@ -193,6 +193,36 @@ class DigCoreMixin:
             decay_info=decay_info,
         )
 
+    def _consume_streak_charm(self, discord_id: int, guild_id) -> bool:
+        """Consume one passive Streak Charm if the player has one."""
+        inventory = self.dig_repo.get_inventory(discord_id, guild_id) or []
+        if not any(i.get("item_type") == "streak_charm" for i in inventory):
+            return False
+        self.dig_repo.remove_inventory_item(discord_id, guild_id, "streak_charm")
+        return True
+
+    def _calculate_daily_streak(
+        self, discord_id: int, guild_id, tunnel: dict, today: str
+    ) -> tuple[int, bool]:
+        """Return today's streak value and whether a Streak Charm was consumed."""
+        streak = tunnel.get("streak_days", 0) or 0
+        streak_last = tunnel.get("streak_last_date")
+        today_dt = datetime.datetime.strptime(today, "%Y-%m-%d")
+        yesterday = (today_dt - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        grace_day = (today_dt - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+
+        if streak_last == yesterday:
+            return streak + 1, False
+        if streak_last == today:
+            return streak, False
+        if (
+            streak_last == grace_day
+            and streak > 0
+            and self._consume_streak_charm(discord_id, guild_id)
+        ):
+            return streak + 1, True
+        return 1, False
+
     def _resolve_queued_items(
         self, discord_id: int, guild_id
     ) -> tuple[list[str], list[str], dict[str, bool]]:
@@ -714,17 +744,9 @@ class DigCoreMixin:
         jc_earned += milestone_bonus
 
         # Streak
-        streak = tunnel.get("streak_days", 0) or 0
-        streak_last = tunnel.get("streak_last_date")
-        yesterday = (
-            datetime.datetime.strptime(today, "%Y-%m-%d") - datetime.timedelta(days=1)
-        ).strftime("%Y-%m-%d")
-        if streak_last == yesterday:
-            streak += 1
-        elif streak_last == today:
-            pass
-        else:
-            streak = 1
+        streak, streak_charm_used = self._calculate_daily_streak(
+            discord_id, guild_id, tunnel, today
+        )
         streak_bonus = 0
         for threshold in sorted(STREAKS.keys(), reverse=True):
             if streak >= threshold:
@@ -834,6 +856,7 @@ class DigCoreMixin:
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter, "cave_in": False,
                 "corruption": p["corruption"]["id"] if p["corruption"] else None,
+                "streak_charm_used": streak_charm_used,
             }),
         )
 
@@ -861,6 +884,7 @@ class DigCoreMixin:
             boss_scout=boss_scout,
             sonar_skipped=sonar_skip_consumed,
             weather=p["weather_info"],
+            streak_charm_used=streak_charm_used,
         )
 
     def apply_dig_outcome(self, preconditions: dict, outcome: dict) -> dict:
@@ -1045,17 +1069,9 @@ class DigCoreMixin:
             jc_earned += milestone_bonus
 
             # Streak (deterministic bookkeeping)
-            streak = tunnel.get("streak_days", 0) or 0
-            streak_last = tunnel.get("streak_last_date")
-            yesterday = (
-                datetime.datetime.strptime(today, "%Y-%m-%d") - datetime.timedelta(days=1)
-            ).strftime("%Y-%m-%d")
-            if streak_last == yesterday:
-                streak += 1
-            elif streak_last == today:
-                pass
-            else:
-                streak = 1
+            streak, streak_charm_used = self._calculate_daily_streak(
+                discord_id, guild_id, tunnel, today
+            )
             streak_bonus = 0
             for threshold in sorted(STREAKS.keys(), reverse=True):
                 if streak >= threshold:
@@ -1166,6 +1182,7 @@ class DigCoreMixin:
                     "boss_encounter": boss_encounter, "cave_in": False,
                     "corruption": p["corruption"]["id"] if p["corruption"] else None,
                     "dm_mode": True,
+                    "streak_charm_used": streak_charm_used,
                 }),
             )
 
@@ -1192,6 +1209,7 @@ class DigCoreMixin:
                 boss_scout=boss_scout,
                 sonar_skipped=sonar_skip_consumed,
                 weather=p["weather_info"],
+                streak_charm_used=streak_charm_used,
             )
 
         return result
@@ -1203,4 +1221,3 @@ class DigCoreMixin:
             return self._error("That player doesn't have a tunnel.")
         self.dig_repo.update_tunnel(discord_id, guild_id, last_dig_at=0)
         return self._ok(reset=True)
-

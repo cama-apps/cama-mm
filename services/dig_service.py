@@ -5,7 +5,6 @@ Handles all game logic: digging, cave-ins, bosses, prestige,
 items, artifacts, sabotage, and traps.
 """
 
-import datetime
 import json
 import random
 import time
@@ -927,19 +926,9 @@ class DigService(
         jc_earned += milestone_bonus
 
         # 15. Update streak
-        streak = tunnel.get("streak_days", 0) or 0
-        streak_last = tunnel.get("streak_last_date")
-        yesterday = (
-            datetime.datetime.strptime(today, "%Y-%m-%d")
-            - datetime.timedelta(days=1)
-        ).strftime("%Y-%m-%d")
-
-        if streak_last == yesterday:
-            streak += 1
-        elif streak_last == today:
-            pass  # Already dug today, keep streak
-        else:
-            streak = 1
+        streak, streak_charm_used = self._calculate_daily_streak(
+            discord_id, guild_id, tunnel, today
+        )
 
         streak_bonus = 0
         for threshold in sorted(STREAKS.keys(), reverse=True):
@@ -1104,6 +1093,7 @@ class DigService(
                 "boss_encounter": boss_encounter,
                 "cave_in": False,
                 "corruption": corruption["id"] if corruption else None,
+                "streak_charm_used": streak_charm_used,
             },
             log_action_type="dig",
         )
@@ -1139,6 +1129,7 @@ class DigService(
             boss_scout=boss_scout,
             sonar_skipped=sonar_skip_consumed,
             weather=weather_info,
+            streak_charm_used=streak_charm_used,
         )
 
     # ------------------------------------------------------------------
@@ -1695,4 +1686,3 @@ class DigService(
         state the DM uses to decide the outcome.
         """
         return self._compute_preconditions(discord_id, guild_id, paid)
-

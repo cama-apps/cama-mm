@@ -76,6 +76,21 @@ class TestBuyItem:
         # The returned item_id must point at the row that was actually inserted.
         assert result["item_id"] == inventory[0]["id"]
 
+    def test_buy_streak_charm_adds_passive_item(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        """Streak Charm is bought through normal inventory storage."""
+        _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        result = inv_service.buy_item(10001, guild_id, "streak_charm")
+
+        assert result["success"]
+        assert result["cost"] == ITEM_PRICES["streak_charm"]
+        inventory = dig_repo.get_inventory(10001, guild_id)
+        assert len(inventory) == 1
+        assert inventory[0]["item_type"] == "streak_charm"
+
     def test_buy_item_unknown_type_rejected(self, inv_service, player_repository, guild_id):
         """An item type not in the price list is rejected before any charge."""
         _register_player(player_repository, balance=100)
@@ -172,6 +187,20 @@ class TestUseItem:
 
         assert not result["success"]
         assert "Unknown item type" in result["error"]
+
+    def test_use_streak_charm_rejected_as_passive(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        """Streak Charm cannot be queued because it triggers automatically."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.add_item(10001, guild_id, "streak_charm")
+
+        result = inv_service.use_item(10001, guild_id, "streak_charm")
+
+        assert not result["success"]
+        assert "passive" in result["error"]
+        assert dig_repo.get_queued_items(10001, guild_id) == []
 
     def test_use_item_requires_tunnel(self, inv_service, player_repository, guild_id):
         """No tunnel means nothing to dig with — use_item fails."""
