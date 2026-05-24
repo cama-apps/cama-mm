@@ -43,10 +43,12 @@ class PredictionService:
         prediction_repo: IPredictionRepository,
         player_repo: PlayerRepository,
         admin_user_ids: list[int] | None = None,
+        bankruptcy_service=None,
     ):
         self.prediction_repo = prediction_repo
         self.player_repo = player_repo
         self.admin_user_ids = set(admin_user_ids or [])
+        self.bankruptcy_service = bankruptcy_service
 
     def is_admin(self, user_id: int) -> bool:
         """Check if user is an admin."""
@@ -479,10 +481,30 @@ class PredictionService:
     def resolve_orderbook(
         self, prediction_id: int, outcome: str, resolved_by: int | None = None
     ) -> dict:
-        """Atomic settle: cancel levels, pay contract holders, mark resolved."""
-        return self.prediction_repo.settle_prediction_orderbook(
+        """Atomic settle: cancel levels, pay contract holders, mark resolved.
+
+        Applies the bankruptcy debuff to each winner's profit as a follow-up
+        debit: the gross payout is credited inside the atomic settlement, then
+        the penalty share of profit (payout − cost basis) is docked here as a
+        coin sink. Stake (cost basis) is always returned whole.
+        """
+        result = self.prediction_repo.settle_prediction_orderbook(
             prediction_id, outcome, resolved_by=resolved_by
         )
+        if self.bankruptcy_service:
+            guild_id = result.get("guild_id")
+            winners = result.get("winners", [])
+            penalties = self.bankruptcy_service.debit_bankruptcy_penalty(
+                [(w["discord_id"], int(w.get("profit", 0))) for w in winners],
+                guild_id,
+            )
+            for w in winners:
+                pen = penalties.get(w["discord_id"], 0)
+                if pen:
+                    w["bankruptcy_penalty"] = pen
+                    w["payout"] = int(w.get("payout", 0)) - pen
+                    w["profit"] = int(w.get("profit", 0)) - pen
+        return result
 
     def cancel_orderbook(self, prediction_id: int) -> dict:
         """Cost-basis refund. Same admin gating enforced at the command layer."""
