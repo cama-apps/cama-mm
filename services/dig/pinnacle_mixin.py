@@ -40,9 +40,9 @@ from services.dig_constants import (
     PINNACLE_POOL_IDS,
     PINNACLE_RELIC_BASE_NAME,
     PINNACLE_RELIC_STAT_POOL,
-    PINNACLE_RELIC_SUFFIX_POOL,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
+    pinnacle_suffix_from_stats,
 )
 
 
@@ -179,12 +179,14 @@ class PinnacleMixin:
         """
         prestige_level = tunnel.get("prestige_level", 0) or 0
         base_name = PINNACLE_RELIC_BASE_NAME[pinnacle_id]
-        suffix = random.choice(PINNACLE_RELIC_SUFFIX_POOL)
         # Pick two distinct stats from the pool.
         stat_pool = list(PINNACLE_RELIC_STAT_POOL)
         random.shuffle(stat_pool)
         rolled_stats = stat_pool[:2]
         stat_ids = [s.id for s in rolled_stats]
+        # Name the relic after its rolled stats so two relics with different
+        # rolls never share a name (the old random suffix ignored the stats).
+        suffix = pinnacle_suffix_from_stats(stat_ids)
         artifact_id = f"pinnacle:{base_name}:{suffix}:{stat_ids[0]}:{stat_ids[1]}"
         relic_db_id = self.dig_repo.add_artifact(
             discord_id, guild_id, artifact_id, is_relic=True,

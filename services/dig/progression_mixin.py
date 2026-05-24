@@ -1084,7 +1084,7 @@ class ProgressionMixin:
                     }),
                 )
             except Exception:
-                logger.debug("Vendetta Coin reflect failed", exc_info=True)
+                logger.warning("Vendetta Coin reflect failed", exc_info=True)
                 vendetta_reflect = 0
                 vendetta_bonus = 0
 

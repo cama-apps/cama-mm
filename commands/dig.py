@@ -364,7 +364,7 @@ class DigCommands(commands.Cog):
             result = await self._run_dig(interaction.user.id, guild_id)
         except Exception as e:
             logger.error("Dig error: %s", e, exc_info=True)
-            await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
+            await safe_followup(interaction, content="The earth resists. Try again in a moment.", ephemeral=True)
             return
 
         # Non-cooldown errors (cooldown is handled by the paid_dig_available branch)
