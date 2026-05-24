@@ -1,8 +1,8 @@
 """Dig boss-combat gear: slots, tier defs, owned pieces, and loadouts.
 
-Three persistent slots (Weapon / Armor / Boots) modify boss-fight stats
-in :func:`services.dig_service.DigService.fight_boss`. The Relic slot is
-the existing prestige-scaled artifact slot — relics live in the
+Four persistent slots (Weapon / Armor / Boots / Amulet) modify boss-fight
+stats in :func:`services.dig_service.DigService.fight_boss`. The Relic
+slot is the existing prestige-scaled artifact slot — relics live in the
 ``dig_artifacts`` table and are exposed here as plain dicts so a
 :class:`GearLoadout` can present the full equipped set in one object.
 
@@ -10,6 +10,7 @@ Stat axes per slot:
     Weapon  +player_dmg, +player_hit
     Armor   +player_hp (absorbs more boss hits)
     Boots   -boss_hit (dodge)
+    Amulet  +crit_chance, +crit_bonus (occasional bonus damage)
     Relic   existing dig effects only (this branch)
 
 The user spec said "Armor reduces boss_dmg taken"; we implement that
@@ -32,6 +33,7 @@ class GearSlot(str, Enum):
     WEAPON = "weapon"
     ARMOR = "armor"
     BOOTS = "boots"
+    AMULET = "amulet"
     RELIC = "relic"
 
 
@@ -47,6 +49,8 @@ class GearTierDef:
     player_hit: float = 0.0
     player_hp_bonus: int = 0
     boss_hit_reduction: float = 0.0
+    crit_chance: float = 0.0
+    crit_bonus: int = 0
     # Dig-flow stats — only weapons populate these. Mirrors the legacy
     # PICKAXE_TIERS entries so weapon = pickaxe at the gameplay level.
     advance_bonus: int = 0
@@ -83,10 +87,11 @@ class GearLoadout:
     weapon: GearPiece | None = None
     armor: GearPiece | None = None
     boots: GearPiece | None = None
+    amulet: GearPiece | None = None
     relics: list[dict] = field(default_factory=list)
 
-    def combat_modifiers(self) -> dict[str, float]:
-        """Return the four boss-combat deltas this loadout contributes.
+    def combat_modifiers(self) -> dict[str, float | int]:
+        """Return the boss-combat deltas this loadout contributes.
 
         Caller decides how to fold these into base stats — see
         ``DigService._apply_gear_to_combat``. Empty slots contribute 0.
@@ -96,4 +101,6 @@ class GearLoadout:
             "player_hit": self.weapon.tier_def.player_hit if self.weapon else 0.0,
             "player_hp_bonus": self.armor.tier_def.player_hp_bonus if self.armor else 0,
             "boss_hit_reduction": self.boots.tier_def.boss_hit_reduction if self.boots else 0.0,
+            "crit_chance": self.amulet.tier_def.crit_chance if self.amulet else 0.0,
+            "crit_bonus": self.amulet.tier_def.crit_bonus if self.amulet else 0,
         }

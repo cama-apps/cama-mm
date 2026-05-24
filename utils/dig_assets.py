@@ -315,6 +315,7 @@ def compose_items_used(item_ids: list[str]) -> discord.File | None:
 _SHOP_ITEM_IDS = [
     "dynamite", "hard_hat", "lantern", "reinforcement", "torch",
     "grappling_hook", "sonar_pulse", "depth_charge", "void_bait",
+    "streak_charm",
 ]
 
 
@@ -322,7 +323,8 @@ def compose_shop_grid() -> discord.File | None:
     """Compose a 3x3 grid of all shop item icons for the shop embed."""
     icon_size = 80
     gap = 6
-    cols, rows = 3, 3
+    cols = 3
+    rows = (len(_SHOP_ITEM_IDS) + cols - 1) // cols
     grid_w = cols * icon_size + (cols - 1) * gap
     grid_h = rows * icon_size + (rows - 1) * gap
     grid = Image.new("RGBA", (grid_w, grid_h), (0, 0, 0, 0))

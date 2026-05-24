@@ -5,7 +5,6 @@ Handles all game logic: digging, cave-ins, bosses, prestige,
 items, artifacts, sabotage, and traps.
 """
 
-import datetime
 import json
 import random
 import time
@@ -859,8 +858,11 @@ class DigService(
         jc_min = layer.get("jc_min", 1)
         jc_max = layer.get("jc_max", 3)
         jc_earned = random.randint(jc_min, jc_max)
-        # Ascension JC multiplier + weather JC multiplier
+        # Ascension JC multiplier + weather JC multiplier; high-prestige
+        # ascensions subtract a small layer penalty to dampen normal-dig
+        # income (does not affect milestones, perks, or flat bonuses).
         jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0) + weather_fx.get("jc_multiplier", 0)
+        jc_mult = max(0.0, jc_mult - ascension.get("jc_layer_penalty", 0))
         weather_code_now = self._get_weather_code(guild_id, layer_name)
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id, weather_code=weather_code_now,
@@ -924,19 +926,9 @@ class DigService(
         jc_earned += milestone_bonus
 
         # 15. Update streak
-        streak = tunnel.get("streak_days", 0) or 0
-        streak_last = tunnel.get("streak_last_date")
-        yesterday = (
-            datetime.datetime.strptime(today, "%Y-%m-%d")
-            - datetime.timedelta(days=1)
-        ).strftime("%Y-%m-%d")
-
-        if streak_last == yesterday:
-            streak += 1
-        elif streak_last == today:
-            pass  # Already dug today, keep streak
-        else:
-            streak = 1
+        streak, streak_charm_used = self._calculate_daily_streak(
+            discord_id, guild_id, tunnel, today
+        )
 
         streak_bonus = 0
         for threshold in sorted(STREAKS.keys(), reverse=True):
@@ -1101,6 +1093,7 @@ class DigService(
                 "boss_encounter": boss_encounter,
                 "cave_in": False,
                 "corruption": corruption["id"] if corruption else None,
+                "streak_charm_used": streak_charm_used,
             },
             log_action_type="dig",
         )
@@ -1136,6 +1129,7 @@ class DigService(
             boss_scout=boss_scout,
             sonar_skipped=sonar_skip_consumed,
             weather=weather_info,
+            streak_charm_used=streak_charm_used,
         )
 
     # ------------------------------------------------------------------
@@ -1491,6 +1485,7 @@ class DigService(
             + ascension.get("jc_multiplier", 0)
             + weather_fx.get("jc_multiplier", 0)
         )
+        jc_mult = max(0.0, jc_mult - ascension.get("jc_layer_penalty", 0))
         jc_mult *= self._luminosity_jc_multiplier(luminosity)
         jc_mult *= self._post_pinnacle_decay_factor(depth_before, discord_id, guild_id)
         # Relic yield (deterministic only — preview shows static range)
@@ -1691,4 +1686,3 @@ class DigService(
         state the DM uses to decide the outcome.
         """
         return self._compute_preconditions(discord_id, guild_id, paid)
-

@@ -79,6 +79,10 @@ def _select_deepest_n(repos, guild_id: int, digger_id: int, count: int) -> list[
     try:
         rows = repos.dig_repo.get_leaderboard(guild_id, limit=count + 2)
     except Exception:
+        logger.warning(
+            "deepest_n splash: get_leaderboard failed for guild %s; no victims selected",
+            guild_id, exc_info=True,
+        )
         return []
     out: list[int] = []
     for row in rows or []:

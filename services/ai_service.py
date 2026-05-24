@@ -543,6 +543,77 @@ GAMBLING HISTORY:
 
 Write a single comment in the persona's voice about this player's performance."""
             call_temperature = 0.95
+        elif event_type == "bet_last_call":
+            # BET_LAST_CALL: betting-announcer persona making the final-minute push
+            angle = event_details.get("angle", "taunt_crowd")
+            has_bettor = event_details.get("has_bettor", False)
+            leader_name = event_details.get("leader_name")
+            leader_team = event_details.get("leader_team")
+            leader_amount = event_details.get("leader_amount")
+            standings = event_details.get("standings", "")
+            seconds_left = event_details.get("seconds_left", 60)
+
+            persona_examples = persona.examples if persona else examples
+            persona_examples_block = (
+                "\n".join(f"- {ex}" for ex in persona_examples) if persona_examples else "None"
+            )
+            persona_voice = (
+                persona.system_prompt
+                if persona
+                else "You are a hype announcer for a Dota 2 gambling Discord."
+            )
+            persona_name = persona.name if persona else "the announcer"
+
+            if not has_bettor:
+                angle_line = (
+                    "Nobody has placed a real bet yet — the pool is empty or only has "
+                    "auto-liquidity. Mock the empty pool and DARE someone to be the first in."
+                )
+            elif angle == "roast_leader":
+                angle_line = (
+                    f"ROAST the current biggest bettor ({leader_name}) using their gambling "
+                    "history, and imply everyone else is too scared to challenge them."
+                )
+            elif angle == "hype_leader":
+                angle_line = (
+                    f"HYPE UP the current biggest bettor ({leader_name}) so everyone else fears "
+                    "missing out — make them want to bet to deny the payout."
+                )
+            else:
+                angle_line = (
+                    "TAUNT everyone who hasn't bet yet. Dare them to step up before the window "
+                    "slams shut."
+                )
+
+            system_prompt = f"""{persona_voice}
+
+You are making the FINAL CALL for betting on a Dota 2 inhouse match — the window closes in about {seconds_left} seconds.
+
+RULES:
+- Stay in character as {persona_name}.
+- GOAL: get more people to place a bet RIGHT NOW.
+- {angle_line}
+- You may reference the live standings/odds below.
+- PG-13. No slurs.
+- One short, punchy line, soft-cap ~30 words.
+
+Example lines from this persona:
+{persona_examples_block}"""
+
+            leader_block = ""
+            if has_bettor and leader_name:
+                leader_block = (
+                    f"Biggest bettor so far: {leader_name} "
+                    f"({leader_amount} on {leader_team})\n"
+                    f"Their bet win rate: {player_context.get('bet_win_rate') or 'Unknown'} | "
+                    f"Degen score: {player_context.get('degen_score') or 'Unknown'}/100 | "
+                    f"Bankruptcies: {player_context.get('bankruptcy_count', 0)}\n"
+                )
+            user_prompt = f"""Live standings: {standings or 'no bets yet'}
+{leader_block}Seconds until betting closes: {seconds_left}
+
+Write a single FINAL-CALL line in the persona's voice to drive last-second bets."""
+            call_temperature = 0.95
         else:
             # Regular roast events
             system_prompt = f"""You are a snarky commentator for a Dota 2 gambling Discord.

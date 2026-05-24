@@ -49,6 +49,7 @@ def _build_gear_embed(
     embed.add_field(name="Weapon", value=_slot_value("weapon"), inline=False)
     embed.add_field(name="Armor",  value=_slot_value("armor"),  inline=False)
     embed.add_field(name="Boots",  value=_slot_value("boots"),  inline=False)
+    embed.add_field(name="Amulet", value=_slot_value("amulet"), inline=False)
 
     relics = loadout.get("relics") or []
     if relics:
