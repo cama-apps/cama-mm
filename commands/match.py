@@ -543,7 +543,7 @@ class MatchCommands(commands.Cog):
             return
 
         # `guild` and `guild_id` already computed before the match check
-        mode = "pool"  # betting_mode.value if betting_mode else "pool"
+        mode = "pool"  # house mode retired; new matches always use pool betting
         rs = rating_system.value if rating_system else "glicko"
         if rating_system is None and random.random() < OPENSKILL_SHUFFLE_CHANCE:
             rs = "openskill"
@@ -794,17 +794,11 @@ class MatchCommands(commands.Cog):
             balance_info += f"\n📺 **Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}):** {', '.join(streaming_bonus_names)}"
         embed.add_field(name="📊 Balance", value=balance_info, inline=False)
 
-        # Betting instructions (mode-aware)
-        if mode == "pool":
-            betting_note = (
-                f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
-                "Pool betting: odds determined by bet distribution."
-            )
-        else:
-            betting_note = (
-                f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
-                "1:1 payouts."
-            )
+        # Betting instructions (house mode retired; all matches use pool betting)
+        betting_note = (
+            f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
+            "Pool betting: odds determined by bet distribution."
+        )
         embed.add_field(name="📝 How to Bet", value=betting_note, inline=False)
 
         # Show blind bet summary if any were created

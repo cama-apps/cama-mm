@@ -1949,7 +1949,10 @@ class DraftCommands(commands.Cog):
                     else:
                         await interaction.response.send_message(msg, ephemeral=True)
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Failed to notify user of draft completion error for guild %s",
+                        guild_id, exc_info=True,
+                    )
             finally:
                 await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
             return
