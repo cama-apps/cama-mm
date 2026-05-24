@@ -104,3 +104,58 @@ async def test_enabled_ai_none_falls_back_to_static():
         TEST_GUILD_ID, {"standings": "x", "seconds_left": 60}, leader_discord_id=None
     )
     assert result in LAST_CALL_EXAMPLES
+
+
+# --- generate_betting_warning (the 5-minute warning tier) ---
+
+
+@pytest.mark.asyncio
+async def test_warning_disabled_returns_static():
+    svc, ai_service = _service(ai_enabled=False)
+    result = await svc.generate_betting_warning(
+        TEST_GUILD_ID,
+        {"standings": "R 100 | D 500", "seconds_left": 300},
+        underdog_side="radiant",
+    )
+    assert result in LAST_CALL_EXAMPLES
+    ai_service.generate_flavor.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_warning_routes_to_bet_warning_event_with_underdog():
+    svc, ai_service = _service(ai_enabled=True, ai_result="UNDERDOG ROAST")
+    result = await svc.generate_betting_warning(
+        TEST_GUILD_ID,
+        {"standings": "R 100 | D 500", "seconds_left": 300},
+        leader_discord_id=None,
+        underdog_side="radiant",
+    )
+    assert result == "UNDERDOG ROAST"
+    kwargs = ai_service.generate_flavor.call_args.kwargs
+    # Distinct event type from the last call so prompts can diverge.
+    assert kwargs["event_type"] == "bet_warning"
+    assert kwargs["event_details"]["underdog_side"] == "radiant"
+    assert kwargs["event_details"]["angle"] in {"roast_underdog", "hype_underdog"}
+    assert kwargs["persona"].key in BETTING_PERSONAS
+
+
+@pytest.mark.asyncio
+async def test_warning_without_underdog_uses_crowd_angle():
+    svc, ai_service = _service(ai_enabled=True, ai_result="CROWD TAUNT")
+    result = await svc.generate_betting_warning(
+        TEST_GUILD_ID, {"standings": "R 200 | D 200", "seconds_left": 300}, leader_discord_id=None
+    )
+    assert result == "CROWD TAUNT"
+    kwargs = ai_service.generate_flavor.call_args.kwargs
+    assert kwargs["event_details"]["underdog_side"] is None
+    assert kwargs["event_details"]["angle"] == "taunt_crowd"
+    assert kwargs["event_details"]["has_bettor"] is False
+
+
+@pytest.mark.asyncio
+async def test_warning_ai_none_falls_back_to_static():
+    svc, ai_service = _service(ai_enabled=True, ai_result=None)
+    result = await svc.generate_betting_warning(
+        TEST_GUILD_ID, {"standings": "x", "seconds_left": 300}, underdog_side="dire"
+    )
+    assert result in LAST_CALL_EXAMPLES

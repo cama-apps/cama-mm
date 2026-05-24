@@ -226,6 +226,7 @@ class BettingCommands(commands.Cog):
         reminder_type: str,
         lock_until: int | None,
         pending_match_id: int | None = None,
+        is_final_warning: bool = False,
     ) -> None:
         """Send a reminder message replying to the shuffle embed with current bet totals."""
         await _send_betting_reminder_helper(
@@ -234,6 +235,7 @@ class BettingCommands(commands.Cog):
             reminder_type=reminder_type,
             lock_until=lock_until,
             pending_match_id=pending_match_id,
+            is_final_warning=is_final_warning,
         )
 
     def _create_wheel_gif_file(

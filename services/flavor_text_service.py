@@ -500,6 +500,83 @@ class FlavorTextService:
             logger.error(f"Failed to generate betting last call: {e}, using fallback")
             return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
 
+    async def generate_betting_warning(
+        self,
+        guild_id: int | None,
+        event_details: dict[str, Any],
+        leader_discord_id: int | None = None,
+        underdog_side: str | None = None,
+    ) -> str | None:
+        """Generate the mid-window "warning" betting hype line (default 5 min out).
+
+        Mirrors :meth:`generate_betting_last_call` but frames urgency as minutes
+        left rather than a final call, and — when ``underdog_side`` is set (the
+        pool is lopsided) — has the persona roast or hype that under-bet side to
+        drum up balancing action. Falls back to a static example when AI is
+        disabled or the call fails. Kept separate from the last-call path so the
+        1-minute line is unaffected.
+        """
+        ai_enabled = True
+        if guild_id is not None and self.guild_config_repo:
+            ai_enabled = await asyncio.to_thread(self.guild_config_repo.get_ai_enabled, guild_id)
+        if not ai_enabled:
+            return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
+
+        persona = pick_betting_persona()
+        has_bettor = leader_discord_id is not None
+        if underdog_side:
+            angle = random.choice(["roast_underdog", "hype_underdog"])
+        elif has_bettor:
+            angle = random.choice(["taunt_crowd", "roast_leader", "hype_leader"])
+        else:
+            angle = "taunt_crowd"
+
+        player_context_dict: dict[str, Any] = {}
+        details = {
+            **event_details,
+            "angle": angle,
+            "has_bettor": has_bettor,
+            "underdog_side": underdog_side,
+        }
+        if has_bettor:
+            context = await asyncio.to_thread(
+                PlayerContext.from_services,
+                leader_discord_id,
+                self.player_repo,
+                self.bankruptcy_service,
+                self.loan_service,
+                self.gambling_stats_service,
+                guild_id=guild_id,
+            )
+            if context:
+                player_context_dict = {
+                    "username": context.username,
+                    "balance": context.balance,
+                    "bet_win_rate": (
+                        f"{context.bet_win_rate:.0f}%"
+                        if context.bet_win_rate is not None
+                        else None
+                    ),
+                    "degen_score": context.degen_score,
+                    "bankruptcy_count": context.bankruptcy_count,
+                }
+                details.setdefault("leader_name", context.username)
+
+        try:
+            result = await self.ai_service.generate_flavor(
+                event_type="bet_warning",
+                player_context=player_context_dict,
+                event_details=details,
+                examples=persona.examples,
+                persona=persona,
+            )
+            if result is None:
+                return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
+            return result
+        except Exception as e:
+            logger.error(f"Failed to generate betting warning: {e}, using fallback")
+            return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
+
     async def generate_data_insight(
         self,
         guild_id: int | None,

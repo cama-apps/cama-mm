@@ -1911,6 +1911,12 @@ class MatchCommands(commands.Cog):
         if 0 < BET_LAST_CALL_OFFSET < seconds_until_close:
             offset_types[BET_LAST_CALL_OFFSET] = "last_call"
 
+        # The smallest active "warning" offset (closest to lock; 5 min by
+        # default) is the enriched tier: it gets the AI persona flavor line and
+        # the lopsided-pool underdog ping. Larger warnings stay terse.
+        warning_offsets = [off for off, rtype in offset_types.items() if rtype == "warning"]
+        final_warning_offset = min(warning_offsets) if warning_offsets else None
+
         tasks = [
             asyncio.create_task(
                 self._run_bet_reminder_after_delay(
@@ -1919,6 +1925,7 @@ class MatchCommands(commands.Cog):
                     reminder_type=rtype,
                     lock_until=bet_lock_until,
                     pending_match_id=pending_match_id,
+                    is_final_warning=(rtype == "warning" and off == final_warning_offset),
                 )
             )
             for off, rtype in sorted(offset_types.items(), reverse=True)
@@ -1953,6 +1960,7 @@ class MatchCommands(commands.Cog):
         reminder_type: str,
         lock_until: int | None,
         pending_match_id: int | None = None,
+        is_final_warning: bool = False,
     ) -> None:
         """Sleep for delay_seconds then send the requested reminder, if still relevant."""
         try:
@@ -1978,6 +1986,7 @@ class MatchCommands(commands.Cog):
                 reminder_type=reminder_type,
                 lock_until=lock_until,
                 pending_match_id=pending_match_id,
+                is_final_warning=is_final_warning,
             )
         except asyncio.CancelledError:
             # Task was cancelled because match ended/aborted

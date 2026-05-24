@@ -113,6 +113,9 @@ BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 900)  # 15 minutes
 # offset (seconds before lock); the AI "last call" fires at BET_LAST_CALL_OFFSET.
 BET_REMINDER_OFFSETS = _parse_int_list("BET_REMINDER_OFFSETS", [600, 300])  # 10m, 5m left
 BET_LAST_CALL_OFFSET = _parse_int("BET_LAST_CALL_OFFSET", 60)  # 1m left
+# When the live pool is at least this lopsided (favorite money / underdog money),
+# the final warning @-pings the under-bet team to drum up action.
+BET_UNDERDOG_PING_RATIO = _parse_float("BET_UNDERDOG_PING_RATIO", 4.0)
 HOUSE_PAYOUT_MULTIPLIER = _parse_float("HOUSE_PAYOUT_MULTIPLIER", 1.0)
 
 # Auto-liquidity (blind bets) configuration

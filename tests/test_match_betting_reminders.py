@@ -34,6 +34,15 @@ def _scheduled(commands):
     }
 
 
+def _final_warning_flags(commands):
+    """Return {delay_seconds: is_final_warning} for each scheduled 'warning'."""
+    return {
+        call.kwargs["delay_seconds"]: call.kwargs.get("is_final_warning", False)
+        for call in commands._run_bet_reminder_after_delay.call_args_list
+        if call.kwargs["reminder_type"] == "warning"
+    }
+
+
 @pytest.mark.asyncio
 async def test_full_window_schedules_warnings_lastcall_and_close(monkeypatch):
     commands = _make_commands(monkeypatch)
@@ -105,3 +114,36 @@ async def test_last_call_offset_overrides_warning_at_same_offset(monkeypatch):
     # No two reminders share a delay (no duplicate at the overlapped offset).
     delays = [c.kwargs["delay_seconds"] for c in commands._run_bet_reminder_after_delay.call_args_list]
     assert len(delays) == len(set(delays))
+
+
+@pytest.mark.asyncio
+async def test_only_smallest_warning_is_flagged_final(monkeypatch):
+    commands = _make_commands(monkeypatch)
+    now = 2_000_000
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    # Default offsets [600, 300] over a 900s window: the 10-min warning
+    # (off=600 -> delay 300) stays terse; the 5-min warning (off=300 ->
+    # delay 600) is the enriched final warning.
+    await commands._schedule_betting_reminders(guild_id=5, bet_lock_until=now + 900)
+
+    assert _final_warning_flags(commands) == {300: False, 600: True}
+    # last_call and close are never flagged as the final warning.
+    others = [
+        c for c in commands._run_bet_reminder_after_delay.call_args_list
+        if c.kwargs["reminder_type"] != "warning"
+    ]
+    assert others and all(not c.kwargs.get("is_final_warning", False) for c in others)
+
+
+@pytest.mark.asyncio
+async def test_single_warning_window_marks_it_final(monkeypatch):
+    commands = _make_commands(monkeypatch)
+    now = 7_000_000
+    monkeypatch.setattr(time, "time", lambda: now)
+
+    # 400s window: the 600 offset is skipped, leaving only the 300 (5-min)
+    # warning — which, as the smallest, is the final warning.
+    await commands._schedule_betting_reminders(guild_id=1, bet_lock_until=now + 400)
+
+    assert _final_warning_flags(commands) == {100: True}
