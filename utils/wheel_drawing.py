@@ -751,12 +751,18 @@ def compute_live_golden_wedges(
     else:
         overextended_value = -1
 
-    return [
-        (str(overextended_value) if (isinstance(v, int) and v < 0) else label,
-         overextended_value if (isinstance(v, int) and v < 0) else v,
-         color)
-        for label, v, color in _BASE_GOLDEN_WHEEL_WEDGES
-    ]
+    # Sort into rainbow (hue) order to match GOLDEN_WHEEL_WEDGES. EV is already
+    # baked into overextended_value above (order-independent), so reordering the
+    # returned wedges is purely cosmetic.
+    return sorted(
+        [
+            (str(overextended_value) if (isinstance(v, int) and v < 0) else label,
+             overextended_value if (isinstance(v, int) and v < 0) else v,
+             color)
+            for label, v, color in _BASE_GOLDEN_WHEEL_WEDGES
+        ],
+        key=lambda w: _hue_sort_key(w[2]),
+    )
 
 
 # Calculate golden wheel wedges (24-slice), then arrange into rainbow (hue) order
