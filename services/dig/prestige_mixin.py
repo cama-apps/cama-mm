@@ -35,12 +35,13 @@ class PrestigeMixin:
             if (v.get("status") if isinstance(v, dict) else v) == "defeated"
         )
         run_jc = tunnel.get("current_run_jc", 0) or 0
-        run_artifacts = tunnel.get("current_run_artifacts", 0) or 0
         run_events = tunnel.get("current_run_events", 0) or 0
         prestige_level = tunnel.get("prestige_level", 0) or 0
 
+        # Artifacts-found no longer contributes to the score — relics are unique
+        # rewards, not a per-run collection metric.
         base = (depth * 1 + bosses_defeated * 50
-                + int(run_jc * 0.5) + run_artifacts * 25 + run_events * 10)
+                + int(run_jc * 0.5) + run_events * 10)
         multiplier = 1 + prestige_level * 0.1
         # P10 "The Endless" doubles score multiplier
         ascension = self._get_ascension_effects(prestige_level)

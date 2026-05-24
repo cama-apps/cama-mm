@@ -573,21 +573,20 @@ class TestRunScoring:
     """Test run score calculation."""
 
     def test_calculate_run_score_basic(self, dig_service):
-        """Score based on depth + bosses + JC + artifacts + events."""
+        """Score based on depth + bosses + JC + events (artifacts-found is not scored)."""
         tunnel = {
             "depth": 100,
             "boss_progress": json.dumps({"25": "defeated", "50": "defeated", "75": "active", "100": "active"}),
             "current_run_jc": 40,
-            "current_run_artifacts": 2,
             "current_run_events": 5,
             "prestige_level": 0,
         }
         score = dig_service._calculate_run_score(tunnel)
-        # base = depth*1 + bosses_defeated*50 + int(jc*0.5) + artifacts*25 + events*10
-        # = 100 + 2*50 + int(40*0.5) + 2*25 + 5*10
-        # = 100 + 100 + 20 + 50 + 50 = 320
+        # base = depth*1 + bosses_defeated*50 + int(jc*0.5) + events*10
+        # = 100 + 2*50 + int(40*0.5) + 5*10
+        # = 100 + 100 + 20 + 50 = 270
         # multiplier = 1 + 0*0.1 = 1.0
-        expected = int(320 * 1.0)
+        expected = int(270 * 1.0)
         assert score == expected
 
     def test_score_multiplier_at_higher_prestige(self, dig_service):

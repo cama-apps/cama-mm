@@ -76,13 +76,16 @@ class DigLeaderboardService:
         artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
         rarity_by_id = {a["id"]: a["rarity"] for a in ARTIFACT_POOL}
         collection = {}
+        kept = 0
         for a in artifacts:
             a = dict(a)
-            rarity = rarity_by_id.get(a.get("artifact_id"), "common")
-            if rarity not in collection:
-                collection[rarity] = []
-            collection[rarity].append(a)
-        return {"artifacts": collection, "total": len(artifacts)}
+            rarity = rarity_by_id.get(a.get("artifact_id"))
+            if rarity is None:
+                # No longer in the catalog (e.g. a deleted collectible) — drop it.
+                continue
+            collection.setdefault(rarity, []).append(a)
+            kept += 1
+        return {"artifacts": collection, "total": kept}
 
     def get_guild_stats(self, guild_id) -> dict:
         """Aggregate stats for the guild."""
