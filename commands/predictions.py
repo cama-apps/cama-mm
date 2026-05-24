@@ -33,7 +33,7 @@ from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
 from utils.drawing.predictions import draw_market_fair_history
 from utils.formatting import JOPACOIN_EMOTE, format_duration_short
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.predictions")
 
@@ -292,7 +292,7 @@ class BuyContractsModal(discord.ui.Modal):
         except Exception as e:
             logger.exception(f"Error buying contracts: {e}")
             await interaction.followup.send(
-                "An error occurred placing your order.", ephemeral=True
+                friendly_error("place your order"), ephemeral=True
             )
             return
 
@@ -386,7 +386,7 @@ class SellContractsModal(discord.ui.Modal):
         except Exception as e:
             logger.exception(f"Error selling contracts: {e}")
             await interaction.followup.send(
-                "An error occurred selling your contracts.", ephemeral=True
+                friendly_error("sell your contracts"), ephemeral=True
             )
             return
 

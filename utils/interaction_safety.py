@@ -9,6 +9,17 @@ import discord
 logger = logging.getLogger("cama_bot.utils.interaction_safety")
 
 
+def friendly_error(action: str) -> str:
+    """User-facing error text with a consistent voice and no leaked internals.
+
+    ``action`` is a short verb phrase for what failed, e.g.
+    ``friendly_error("load the leaderboard")`` ->
+    "❌ Couldn't load the leaderboard right now — try again in a moment."
+    Always pair this with a ``logger`` call that records the real exception.
+    """
+    return f"❌ Couldn't {action} right now — try again in a moment."
+
+
 async def safe_defer(interaction: discord.Interaction, *, ephemeral: bool = False) -> bool:
     """
     Defer the interaction if it is still valid.

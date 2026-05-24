@@ -28,6 +28,7 @@ from utils.drawing import (
     draw_rating_history_chart,
     draw_role_graph,
 )
+from utils.embeds import COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_RED
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -39,12 +40,6 @@ from utils.rating_insights import (
 )
 
 logger = logging.getLogger("cama_bot.commands.profile")
-
-# Embed colors
-COLOR_BLUE = 0x3498DB
-COLOR_GREEN = 0x57F287
-COLOR_RED = 0xED4245
-COLOR_ORANGE = 0xF39C12
 
 
 class ProfileView(discord.ui.View):

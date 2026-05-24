@@ -8,6 +8,13 @@ from rating_system import CamaRatingSystem
 from utils.formatting import FROGLING_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 
+# Shared embed color palette. Centralized here so commands stop each redefining
+# their own COLOR_* constants (and drifting). Values are unchanged.
+COLOR_BLUE = 0x3498DB
+COLOR_GREEN = 0x57F287
+COLOR_RED = 0xED4245
+COLOR_ORANGE = 0xF39C12
+
 
 def _get_penalty_games(bankruptcy_repo, discord_id: int, guild_id: int | None) -> int:
     if not bankruptcy_repo or discord_id <= 0:
