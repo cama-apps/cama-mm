@@ -14,7 +14,7 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from utils.drawing import draw_hero_grid
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.herogrid")
 
@@ -197,7 +197,7 @@ class HeroGridCommands(commands.Cog):
             logger.error(f"Error generating hero grid: {e}", exc_info=True)
             await safe_followup(
                 interaction,
-                content="Failed to generate hero grid image. Please try again.",
+                content=friendly_error("generate the hero grid"),
             )
 
 

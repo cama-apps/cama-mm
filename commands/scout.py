@@ -19,15 +19,13 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from utils.drawing import draw_scout_report
+from utils.embeds import COLOR_BLUE
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.scout")
 
 # Heroes per page
 HEROES_PER_PAGE = 10
-
-# Embed color for /scout links (matches commands/profile.py COLOR_BLUE)
-COLOR_BLUE = 0x3498DB
 
 # Discord's hard limit on an embed field's value length.
 EMBED_FIELD_LIMIT = 1024

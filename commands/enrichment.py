@@ -18,7 +18,7 @@ from services.opendota_player_service import OpenDotaPlayerService
 from services.permissions import has_admin_permission
 from utils.drawing import draw_matches_table
 from utils.embeds import _determine_lane_outcomes, create_enriched_match_embed
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 from utils.match_views import EnrichedMatchView
 
 logger = logging.getLogger("cama_bot.commands.enrichment")
@@ -948,7 +948,7 @@ class EnrichmentCommands(commands.Cog):
             logger.error(f"Error generating recent matches image: {e}")
             await safe_followup(
                 interaction,
-                content="Failed to generate match image. Please try again.",
+                content=friendly_error("generate the match image"),
             )
 
 

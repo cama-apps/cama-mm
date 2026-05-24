@@ -22,7 +22,7 @@ from utils.drawing import draw_rating_distribution
 from utils.embed_safety import truncate_field
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
 from utils.hero_lookup import classify_hero_role, get_hero_short_name
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.rating_insights import (
     compute_calibration_stats,
@@ -497,7 +497,7 @@ class UnifiedLeaderboardView(discord.ui.View):
                     pnl = entry.net_pnl
                     pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
                     lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
-                embed.add_field(name=" Top Earners", value="\n".join(lines), inline=False)
+                embed.add_field(name="Top Earners", value="\n".join(lines), inline=False)
 
         # Down bad
         down_bad = [e for e in leaderboard.down_bad if e.net_pnl < 0]
@@ -508,7 +508,7 @@ class UnifiedLeaderboardView(discord.ui.View):
                 for i, entry in enumerate(page_entries, start + 1):
                     name = self._get_name_for_gambling(entry.discord_id)
                     lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
-                embed.add_field(name=" Down Bad", value="\n".join(lines), inline=False)
+                embed.add_field(name="Down Bad", value="\n".join(lines), inline=False)
 
         # Hall of Degen
         if leaderboard.hall_of_degen:
@@ -518,7 +518,7 @@ class UnifiedLeaderboardView(discord.ui.View):
                 for i, entry in enumerate(page_entries, start + 1):
                     name = self._get_name_for_gambling(entry.discord_id)
                     lines.append(f"{i}. **{name}** {entry.degen_score} {entry.degen_emoji} {entry.degen_title}")
-                embed.add_field(name=" Hall of Degen", value="\n".join(lines), inline=False)
+                embed.add_field(name="Hall of Degen", value="\n".join(lines), inline=False)
 
         # Biggest gamblers
         if leaderboard.biggest_gamblers:
@@ -528,7 +528,7 @@ class UnifiedLeaderboardView(discord.ui.View):
                 for i, entry in enumerate(page_entries, start + 1):
                     name = self._get_name_for_gambling(entry.discord_id)
                     lines.append(f"{i}. **{name}** {entry.total_wagered} {JOPACOIN_EMOTE} wagered")
-                embed.add_field(name=" Biggest Gamblers", value="\n".join(lines), inline=False)
+                embed.add_field(name="Biggest Gamblers", value="\n".join(lines), inline=False)
 
         # Footer
         footer_parts = []
@@ -1067,7 +1067,7 @@ class InfoCommands(commands.Cog):
             try:
                 await safe_followup(
                     interaction,
-                    content=f"❌ Error: {str(e)}",
+                    content=friendly_error("load the leaderboard"),
                     ephemeral=True,
                 )
             except Exception:
@@ -1520,7 +1520,7 @@ class InfoCommands(commands.Cog):
             logger.error(f"Error in calibration command: {str(e)}", exc_info=True)
             await safe_followup(
                 interaction,
-                content=f"❌ Error: {str(e)}",
+                content=friendly_error("render the calibration chart"),
                 ephemeral=True,
             )
 

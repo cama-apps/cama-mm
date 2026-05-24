@@ -875,7 +875,11 @@ class LobbyCommands(commands.Cog):
                 ephemeral=True,
             )
         else:  # "error"
-            await safe_followup(interaction, content="❌ Ready check failed.", ephemeral=True)
+            await safe_followup(
+                interaction,
+                content="❌ Ready check failed — make sure a lobby exists, then try again.",
+                ephemeral=True,
+            )
 
     async def _execute_readycheck(
         self,

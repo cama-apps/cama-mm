@@ -16,7 +16,7 @@ from utils.drawing import (
     draw_prediction_over_time,
     draw_rating_comparison_chart,
 )
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.rating_analysis")
 
@@ -260,7 +260,7 @@ class RatingAnalysisCommands(commands.Cog):
             logger.error(f"Calibration curve error: {e}")
             await safe_followup(
                 interaction,
-                content=f"Failed to generate calibration data: {e}",
+                content=friendly_error("generate the calibration data"),
             )
             return
 
@@ -294,7 +294,7 @@ class RatingAnalysisCommands(commands.Cog):
             logger.error(f"Calibration chart error: {e}")
             await safe_followup(
                 interaction,
-                content=f"Failed to generate calibration chart: {e}",
+                content=friendly_error("generate the calibration chart"),
             )
 
     async def _handle_trend(self, interaction: discord.Interaction):
@@ -317,7 +317,7 @@ class RatingAnalysisCommands(commands.Cog):
             logger.error(f"Trend analysis error: {e}")
             await safe_followup(
                 interaction,
-                content=f"Failed to analyze trends: {e}",
+                content=friendly_error("analyze rating trends"),
             )
             return
 
@@ -355,7 +355,7 @@ class RatingAnalysisCommands(commands.Cog):
             logger.error(f"Trend chart error: {e}")
             await safe_followup(
                 interaction,
-                content=f"Failed to generate trend chart: {e}",
+                content=friendly_error("generate the trend chart"),
             )
 
     async def _handle_player(

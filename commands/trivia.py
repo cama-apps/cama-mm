@@ -19,7 +19,7 @@ from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question
 from utils.formatting import JOPACOIN_EMOTE
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.trivia")
 
@@ -477,9 +477,13 @@ class TriviaCog(commands.Cog):
             logger.exception("Trivia command error: %s", error)
             try:
                 if not interaction.response.is_done():
-                    await interaction.response.send_message("An error occurred.", ephemeral=True)
+                    await interaction.response.send_message(
+                        friendly_error("pull up a trivia question"), ephemeral=True
+                    )
                 else:
-                    await interaction.followup.send("An error occurred.", ephemeral=True)
+                    await interaction.followup.send(
+                        friendly_error("pull up a trivia question"), ephemeral=True
+                    )
             except discord.HTTPException:
                 pass
 

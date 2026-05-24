@@ -12,16 +12,13 @@ import discord
 from config import BANKRUPTCY_PENALTY_RATE
 from utils.drawing import draw_balance_chart
 from utils.drawing.balance_history import SOURCE_LABELS
+from utils.embeds import COLOR_GREEN, COLOR_ORANGE, COLOR_RED
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
 
 if TYPE_CHECKING:
     from commands.profile import ProfileCommands
 
 logger = logging.getLogger("cama_bot.commands.profile.economy")
-
-COLOR_GREEN = 0x57F287
-COLOR_RED = 0xED4245
-COLOR_ORANGE = 0xF39C12
 
 
 async def build_economy_embed(
