@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from config import BET_UNDERDOG_PING_RATIO
 from utils.formatting import format_betting_display
 
 if TYPE_CHECKING:
@@ -132,6 +133,7 @@ async def send_betting_reminder(
     reminder_type: str,
     lock_until: int | None,
     pending_match_id: int | None = None,
+    is_final_warning: bool = False,
 ) -> None:
     """Send a reminder message replying to the shuffle embed with current bet totals.
 
@@ -139,6 +141,10 @@ async def send_betting_reminder(
         betting-announcer hype line), or "closed" (final notice; also flips the
         embed to a locked state).
     pending_match_id: Specific match ID for concurrent match support.
+    is_final_warning: True only for the smallest warning offset (the last warning
+        before the 1-minute last call; 5 min by default). That tier gets the AI
+        persona flavor line and, when the pool is at least BET_UNDERDOG_PING_RATIO
+        lopsided, @-pings the under-bet team. Other warnings stay terse.
     """
     pending_state = await asyncio.to_thread(
         cog.match_service.get_last_shuffle, guild_id, pending_match_id=pending_match_id
@@ -164,10 +170,22 @@ async def send_betting_reminder(
     )
     mode_label = "Pool" if betting_mode == "pool" else "House (1:1)"
 
+    allowed_mentions = discord.AllowedMentions.none()
+
     if reminder_type == "warning":
         if not lock_until:
             return
         content = f"⏰ **Betting closes <t:{int(lock_until)}:R>** — {totals_text}"
+        if is_final_warning:
+            underdog_side, ping_ids = _underdog_status(pending_state, totals)
+            flavor = await _betting_warning_flavor(
+                cog, guild_id, pending_state, totals_text, lock_until, underdog_side
+            )
+            if flavor:
+                content += f"\n\n💬 {flavor}"
+            if ping_ids:
+                content += "\n" + " ".join(f"<@{pid}>" for pid in ping_ids)
+                allowed_mentions = discord.AllowedMentions(users=True)
     elif reminder_type == "last_call":
         if not lock_until:
             return
@@ -193,7 +211,7 @@ async def send_betting_reminder(
             if target_channel is None:
                 target_channel = await cog.bot.fetch_channel(target_channel_id)
             if target_channel:
-                await target_channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                await target_channel.send(content, allowed_mentions=allowed_mentions)
     except Exception as exc:
         logger.warning(f"Failed to send betting reminder to channel: {exc}", exc_info=True)
 
@@ -206,7 +224,7 @@ async def send_betting_reminder(
             if thread:
                 thread_message = await thread.fetch_message(thread_message_id)
                 if thread_message:
-                    await thread_message.reply(content, allowed_mentions=discord.AllowedMentions.none())
+                    await thread_message.reply(content, allowed_mentions=allowed_mentions)
         except Exception as exc:
             logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
@@ -257,4 +275,74 @@ async def _betting_last_call_flavor(
         )
     except Exception as exc:
         logger.warning(f"Failed to generate last-call flavor: {exc}", exc_info=True)
+        return None
+
+
+def _underdog_status(pending_state, totals) -> tuple[str | None, list[int]]:
+    """Detect a lopsided pool and return the under-bet side and its players.
+
+    "Underdog" here is the lower-money side of the live pool (the long-shot
+    payout). Returns ``(underdog_side, real_ids)`` — ``underdog_side`` set to
+    "radiant"/"dire" — when one side has money and the other has none, or the
+    favorite's money is at least ``BET_UNDERDOG_PING_RATIO`` times the underdog's.
+    Otherwise returns ``(None, [])`` (balanced, or an empty pool with nothing to
+    compare). ``real_ids`` filters that side's roster to real players (id > 0).
+    """
+    radiant = totals.get("radiant", 0) or 0
+    dire = totals.get("dire", 0) or 0
+    hi = max(radiant, dire)
+    lo = min(radiant, dire)
+    if hi <= 0:
+        return None, []  # empty pool — no ratio, no ping
+    if lo > 0 and hi / lo < BET_UNDERDOG_PING_RATIO:
+        return None, []  # not lopsided enough to ping
+    underdog_side = "radiant" if radiant <= dire else "dire"
+    team_ids = (
+        getattr(pending_state, "radiant_team_ids", None)
+        if underdog_side == "radiant"
+        else getattr(pending_state, "dire_team_ids", None)
+    )
+    real_ids = [pid for pid in (team_ids or []) if isinstance(pid, int) and pid > 0]
+    return underdog_side, real_ids
+
+
+async def _betting_warning_flavor(
+    cog: BettingCommands,
+    guild_id: int | None,
+    pending_state,
+    standings: str,
+    lock_until: int | None,
+    underdog_side: str | None,
+) -> str | None:
+    """Build the final-warning flavor line (default 5 min out), or None.
+
+    Same persona path as the last-call line, but the urgency reads in minutes
+    and — when the pool is lopsided — the persona roasts/hypes ``underdog_side``.
+    Returns None if no flavor service is wired.
+    """
+    flavor_service = getattr(cog, "flavor_text_service", None)
+    if flavor_service is None:
+        return None
+    top = await asyncio.to_thread(
+        functools.partial(
+            cog.betting_service.get_top_voluntary_bettor, guild_id, pending_state=pending_state
+        )
+    )
+    seconds_left = max(0, int(lock_until) - int(time.time())) if lock_until else 300
+    event_details = {
+        "standings": standings,
+        "seconds_left": seconds_left,
+        "leader_team": top.get("team_bet_on") if top else None,
+        "leader_amount": top.get("amount") if top else None,
+    }
+    leader_discord_id = top.get("discord_id") if top else None
+    try:
+        return await flavor_service.generate_betting_warning(
+            guild_id,
+            event_details,
+            leader_discord_id=leader_discord_id,
+            underdog_side=underdog_side,
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to generate betting warning flavor: {exc}", exc_info=True)
         return None

@@ -163,6 +163,64 @@ class TestAIService:
         assert "temperature" not in call_kwargs
 
     @pytest.mark.asyncio
+    async def test_generate_flavor_bet_warning_frames_minutes_not_final_call(self, ai_service):
+        """The mid-window warning prompt frames urgency in minutes and roasts the
+        under-bet side — it must NOT reuse the 1-minute 'FINAL CALL' wording."""
+        mock_response = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "generate_flavor_text"
+        mock_tool_call.function.arguments = json.dumps({"comment": "ok"})
+        mock_response.choices = [MagicMock(message=MagicMock(tool_calls=[mock_tool_call]))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            await ai_service.generate_flavor(
+                event_type="bet_warning",
+                player_context={},
+                event_details={
+                    "angle": "roast_underdog",
+                    "underdog_side": "dire",
+                    "has_bettor": False,
+                    "standings": "R 500 | D 100",
+                    "seconds_left": 300,
+                },
+                examples=["example line"],
+            )
+
+        system_content = mock_completion.call_args.kwargs["messages"][0]["content"]
+        assert "minute" in system_content.lower()
+        assert "FINAL CALL" not in system_content.upper()
+        # Underdog-aware roast targets the under-bet side by name.
+        assert "Dire" in system_content
+        assert mock_completion.call_args.kwargs.get("temperature") == 0.95
+
+    @pytest.mark.asyncio
+    async def test_generate_flavor_bet_last_call_still_says_final_call(self, ai_service):
+        """Guard the 1-minute path: its prompt must still scream FINAL CALL."""
+        mock_response = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "generate_flavor_text"
+        mock_tool_call.function.arguments = json.dumps({"comment": "ok"})
+        mock_response.choices = [MagicMock(message=MagicMock(tool_calls=[mock_tool_call]))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            await ai_service.generate_flavor(
+                event_type="bet_last_call",
+                player_context={},
+                event_details={
+                    "angle": "taunt_crowd",
+                    "has_bettor": False,
+                    "standings": "x",
+                    "seconds_left": 60,
+                },
+                examples=["example line"],
+            )
+
+        system_content = mock_completion.call_args.kwargs["messages"][0]["content"]
+        assert "FINAL CALL" in system_content
+
+    @pytest.mark.asyncio
     async def test_complete_returns_text_content(self, ai_service):
         """Test that complete returns the text content from the response."""
         mock_response = MagicMock()

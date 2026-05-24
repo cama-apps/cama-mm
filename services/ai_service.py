@@ -614,6 +614,97 @@ Example lines from this persona:
 
 Write a single FINAL-CALL line in the persona's voice to drive last-second bets."""
             call_temperature = 0.95
+        elif event_type == "bet_warning":
+            # BET_WARNING: betting-announcer persona a few minutes out. Less
+            # frantic than the final call; when the pool is lopsided, roast or
+            # hype the under-bet ("underdog") side to drum up balancing action.
+            angle = event_details.get("angle", "taunt_crowd")
+            has_bettor = event_details.get("has_bettor", False)
+            leader_name = event_details.get("leader_name")
+            leader_team = event_details.get("leader_team")
+            leader_amount = event_details.get("leader_amount")
+            standings = event_details.get("standings", "")
+            underdog_side = event_details.get("underdog_side")
+            seconds_left = event_details.get("seconds_left", 300)
+            minutes_left = max(1, round(seconds_left / 60))
+
+            persona_examples = persona.examples if persona else examples
+            persona_examples_block = (
+                "\n".join(f"- {ex}" for ex in persona_examples) if persona_examples else "None"
+            )
+            persona_voice = (
+                persona.system_prompt
+                if persona
+                else "You are a hype announcer for a Dota 2 gambling Discord."
+            )
+            persona_name = persona.name if persona else "the announcer"
+
+            underdog_label = {"radiant": "Radiant", "dire": "Dire"}.get(underdog_side or "", "")
+            if angle == "roast_underdog" and underdog_label:
+                angle_line = (
+                    f"The pool is badly lopsided AGAINST {underdog_label} — barely anyone is "
+                    f"backing them. ROAST {underdog_label} and the cowards too scared to take "
+                    "the long-shot payout. Keep it qualitative; don't quote exact numbers."
+                )
+            elif angle == "hype_underdog" and underdog_label:
+                angle_line = (
+                    f"The pool is badly lopsided AGAINST {underdog_label}, so a fat underdog "
+                    f"payout is sitting there unclaimed. HYPE the value of backing {underdog_label} "
+                    "and dare people to take the long shot. Keep it qualitative; don't quote exact numbers."
+                )
+            elif angle == "roast_leader":
+                angle_line = (
+                    f"ROAST the current biggest bettor ({leader_name}) using their gambling "
+                    "history, and nudge everyone else to get in while there's still time."
+                )
+            elif angle == "hype_leader":
+                angle_line = (
+                    f"HYPE UP the current biggest bettor ({leader_name}) so everyone else fears "
+                    "missing out — make them want to bet to deny the payout."
+                )
+            elif not has_bettor:
+                angle_line = (
+                    "Nobody has placed a real bet yet — the pool is empty or only has "
+                    "auto-liquidity. Mock the empty pool and DARE someone to be the first in."
+                )
+            else:
+                angle_line = (
+                    "TAUNT everyone who hasn't bet yet. Nudge them to get their bets in while "
+                    "there's still plenty of time."
+                )
+
+            system_prompt = f"""{persona_voice}
+
+You are rallying bettors on a Dota 2 inhouse match — about {minutes_left} minute(s) left before betting closes. There's still time, so build momentum; do NOT scream a final warning.
+
+RULES:
+- Stay in character as {persona_name}.
+- GOAL: get more people to place a bet.
+- {angle_line}
+- You may reference the live standings/odds below, but keep it qualitative.
+- PG-13. No slurs.
+- One short, punchy line, soft-cap ~30 words.
+
+Example lines from this persona:
+{persona_examples_block}"""
+
+            leader_block = ""
+            if has_bettor and leader_name:
+                leader_block = (
+                    f"Biggest bettor so far: {leader_name} "
+                    f"({leader_amount} on {leader_team})\n"
+                    f"Their bet win rate: {player_context.get('bet_win_rate') or 'Unknown'} | "
+                    f"Degen score: {player_context.get('degen_score') or 'Unknown'}/100 | "
+                    f"Bankruptcies: {player_context.get('bankruptcy_count', 0)}\n"
+                )
+            underdog_block = (
+                f"Under-bet side (long-shot payout): {underdog_label}\n" if underdog_label else ""
+            )
+            user_prompt = f"""Live standings: {standings or 'no bets yet'}
+{leader_block}{underdog_block}Minutes until betting closes: ~{minutes_left}
+
+Write a single line in the persona's voice to drive bets, matching the angle above."""
+            call_temperature = 0.95
         else:
             # Regular roast events
             system_prompt = f"""You are a snarky commentator for a Dota 2 gambling Discord.
