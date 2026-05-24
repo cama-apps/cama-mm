@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from infrastructure.schema_manager import SchemaManager
-from utils.debug_logging import debug_log as _database_debug_log
 
 if TYPE_CHECKING:
     from domain.models.player import Player
@@ -35,16 +34,6 @@ class Database:
             db_path: Path to SQLite database file. If not provided,
                      uses DB_PATH environment variable or defaults to cama_shuffle.db
         """
-        # region agent log
-        _database_debug_log(
-            "H2",
-            "database.py:Database.__init__",
-            "entering Database.__init__",
-            {"db_path": db_path},
-            run_id="pre-fix",
-        )
-        # endregion agent log
-
         raw_path = db_path or os.getenv("DB_PATH", DEFAULT_DB_PATH)
         self._is_memory = raw_path == ":memory:"
         self._memory_connection: sqlite3.Connection | None = None
@@ -75,16 +64,6 @@ class Database:
         if not self._is_memory:
             self._anchor_connection = sqlite3.connect(self.db_path)
             self._anchor_connection.execute("PRAGMA journal_mode=WAL")
-
-        # region agent log
-        _database_debug_log(
-            "H2",
-            "database.py:Database.__init__",
-            "schema initialization completed",
-            {"db_path": self.db_path},
-            run_id="pre-fix",
-        )
-        # endregion agent log
 
     def get_connection(self) -> sqlite3.Connection:
         """Get database connection."""
