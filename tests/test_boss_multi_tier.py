@@ -147,9 +147,9 @@ class TestRosterShape:
     """Cross-referential invariants between BossDef, mechanics, and stingers."""
 
     def test_pool_size_per_tier(self):
-        # Tiers 25/50/75/100 have 3 bosses each. Tiers 150/200/275 have 4
-        # (the 4th is a late-prestige addition gated by prestige_required=3).
-        expected = {25: 3, 50: 3, 75: 3, 100: 3, 150: 4, 200: 4, 275: 4}
+        # Tiers 25/50/75/100 have 3 bosses each. Tiers 150/200/275 have 5
+        # (a P3 late-prestige addition + a P4 twisted-homage addition).
+        expected = {25: 3, 50: 3, 75: 3, 100: 3, 150: 5, 200: 5, 275: 5}
         for tier, pool in BOSSES_BY_TIER.items():
             assert len(pool) == expected[tier], f"tier {tier} has {len(pool)} bosses"
 
@@ -178,8 +178,8 @@ class TestRosterShape:
     def test_boss_ids_unique(self):
         all_ids = [b.boss_id for pool in BOSSES_BY_TIER.values() for b in pool]
         assert len(all_ids) == len(set(all_ids))
-        # 21 base bosses + 3 late-prestige additions (prestige_required=3).
-        assert len(all_ids) == 24
+        # 21 base + 3 late-prestige (P3) + 3 twisted-homage (P4) additions.
+        assert len(all_ids) == 27
 
 
 class TestMechanicInvariants:

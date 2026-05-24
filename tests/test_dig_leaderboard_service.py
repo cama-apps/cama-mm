@@ -1,12 +1,11 @@
 """Read-only display aggregators for the dig minigame.
 
 Covers ``DigLeaderboardService``: leaderboard ASCII rendering, hall of fame
-filtering/ordering, artifact collection grouping, the guild museum registry,
-and aggregate guild stats. These are pure ``dig_repo`` reads, so the tests
+filtering/ordering, artifact collection grouping, and aggregate guild stats.
+These are pure ``dig_repo`` reads, so the tests
 seed real rows and assert the shaping the embed layer depends on.
 """
 
-import time
 
 import pytest
 
@@ -177,61 +176,8 @@ class TestGetCollection:
         assert result["total"] == 1
 
 
-# ─────────────────────────────────────────────────────────────────────────
-# get_museum
-# ─────────────────────────────────────────────────────────────────────────
-
-
-class TestGetMuseum:
-    """get_museum returns the guild-wide artifact discovery registry."""
-
-    def test_empty_museum_reports_total_possible(self, lb_service, dig_repo, guild_id):
-        """An empty registry still reports the full pool as total_possible."""
-        result = lb_service.get_museum(guild_id)
-
-        assert result["entries"] == []
-        assert result["total_discovered"] == 0
-        # total_possible is the size of ARTIFACT_POOL regardless of finds.
-        assert result["total_possible"] == len(ARTIFACT_POOL)
-        assert result["by_layer"] == {}
-
-    def test_museum_counts_discovered_artifacts(self, lb_service, dig_repo, guild_id):
-        """Each registered artifact id shows up once in the registry."""
-        now = int(time.time())
-        dig_repo.register_artifact_find("mole_claws", guild_id, finder_id=1, found_at=now)
-        dig_repo.register_artifact_find("crystal_compass", guild_id, finder_id=2, found_at=now)
-        # A repeat find of the same artifact must not add a second entry.
-        dig_repo.register_artifact_find("mole_claws", guild_id, finder_id=3, found_at=now)
-
-        result = lb_service.get_museum(guild_id)
-
-        assert result["total_discovered"] == 2
-        found_ids = {e["artifact_id"] for e in result["entries"]}
-        assert found_ids == {"mole_claws", "crystal_compass"}
-
-    def test_museum_preserves_first_finder(self, lb_service, dig_repo, guild_id):
-        """The registry keeps the original finder even after later finds."""
-        now = int(time.time())
-        dig_repo.register_artifact_find("mole_claws", guild_id, finder_id=1, found_at=now)
-        dig_repo.register_artifact_find("mole_claws", guild_id, finder_id=2, found_at=now + 10)
-
-        entry = lb_service.get_museum(guild_id)["entries"][0]
-
-        assert entry["first_finder_id"] == 1
-        assert entry["total_found"] == 2
-
-    def test_museum_groups_entries_by_pool_layer(
-        self, lb_service, dig_repo, guild_id
-    ):
-        """Registry entries bucket under the artifact's ARTIFACT_POOL layer."""
-        now = int(time.time())
-        # mole_claws is a "Dirt"-layer artifact in the pool.
-        dig_repo.register_artifact_find("mole_claws", guild_id, finder_id=1, found_at=now)
-
-        by_layer = lb_service.get_museum(guild_id)["by_layer"]
-
-        assert list(by_layer) == ["Dirt"]
-        assert len(by_layer["Dirt"]) == 1
+# (The guild artifact museum was removed — see get_collection for the
+# player-scoped relic collection that remains.)
 
 
 # ─────────────────────────────────────────────────────────────────────────

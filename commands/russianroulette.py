@@ -83,7 +83,6 @@ ROULETTE_ENTRIES: list[RouletteEntry] = [
     RouletteEntry("dig leaderboard"),
     RouletteEntry("dig halloffame"),
     RouletteEntry("dig shop"),
-    RouletteEntry("dig museum"),
     RouletteEntry("dig flex"),
     RouletteEntry("dig inventory"),
     RouletteEntry("dig weather"),

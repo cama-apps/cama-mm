@@ -50,8 +50,8 @@ def test_new_relics_have_lore_and_effects():
 
 
 def test_total_artifact_count_matches_expected():
-    # 35 base + 3 P5-gated relics + 8 new
-    assert len(ALL_ARTIFACTS) == 46
+    # Relics-only catalog after the non-functional collectibles were cut.
+    assert len(ALL_ARTIFACTS) == 30
 
 
 def test_post_pinnacle_decay_factor_root_network_slows_decay():

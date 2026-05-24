@@ -229,190 +229,91 @@ RELICS: list[ArtifactDef] = [
         is_relic=True,
         effect="Idle income: 0.5 JC/min while away (cap 100/day)",
     ),
-]
-
-# Collectible (non-relic) Artifacts (14) ────────────────────────
-COLLECTIBLE_ARTIFACTS: list[ArtifactDef] = [
+    # ── Prestige-4 boss-trophy relics ──────────────────────────────
+    # Carve-drop from a specific boss (see TROPHY_RELIC_IDS); each has a
+    # conditional mid-fight effect resolved in the boss duel loop.
     ArtifactDef(
-        id="ancient_shovel",
-        name="Ancient Shovel",
-        layer="Dirt",
-        rarity="Common",
-        lore_text="A wooden shovel from the First Diggers. The handle is worn smooth by countless hands.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="petrified_worm",
-        name="Petrified Worm",
-        layer="Dirt",
-        rarity="Common",
-        lore_text="A worm the size of your forearm, frozen in stone mid-wriggle. Unsettling.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="rusty_coin",
-        name="Rusty Coin",
-        layer="Dirt",
-        rarity="Common",
-        lore_text="An old Jopacoin, so corroded you can barely make out the grinning face on it.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="fossil_imprint",
-        name="Fossil Imprint",
-        layer="Stone",
-        rarity="Common",
-        lore_text="The impression of a creature that hasn't existed for millennia. It looks... angry.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="stone_tablet",
-        name="Stone Tablet",
-        layer="Stone",
-        rarity="Uncommon",
-        lore_text="Covered in runes that roughly translate to: 'Kilroy was here.'",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="geode_heart",
-        name="Geode Heart",
-        layer="Stone",
-        rarity="Uncommon",
-        lore_text="Crack it open and amethyst crystals sparkle inside. Too pretty to sell.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="singing_shard",
-        name="Singing Shard",
-        layer="Crystal",
-        rarity="Common",
-        lore_text="This crystal fragment emits a faint melody when held. The tune is oddly catchy.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="prismatic_lens",
-        name="Prismatic Lens",
-        layer="Crystal",
-        rarity="Uncommon",
-        lore_text="Light bends impossibly through this lens, revealing colors that shouldn't exist.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="frozen_flame",
-        name="Frozen Flame",
-        layer="Crystal",
+        id="weeping_fang",
+        name="Weeping Fang",
+        layer="Fungal Depths",
         rarity="Rare",
-        lore_text="A flame trapped in crystal, still flickering after centuries. It's warm to the touch.",
-        is_relic=False, effect=None,
+        lore_text="A fang that never stops weeping. Whatever it bit is still out there, somewhere, getting slower.",
+        is_relic=True,
+        effect="Venom: bosses lose 1 HP per round (4 rounds)",
+        min_prestige=4,
     ),
     ArtifactDef(
-        id="lava_pearl",
-        name="Lava Pearl",
-        layer="Magma",
-        rarity="Uncommon",
-        lore_text="Formed over millennia in a magma pocket. It glows with inner heat and smugness.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="charred_diary",
-        name="Charred Diary",
-        layer="Magma",
-        rarity="Common",
-        lore_text="Most pages are ash, but one reads: 'Day 412. Still hot. Still digging. Send help.'",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="void_fragment",
-        name="Void Fragment",
-        layer="Abyss",
-        rarity="Uncommon",
-        lore_text="A shard of absolute nothing. Looking at it too long makes you question your life choices.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="abyssal_eye",
-        name="Abyssal Eye",
-        layer="Abyss",
-        rarity="Rare",
-        lore_text="It blinks. You're sure it blinks. The Void Warden says it's 'decorative.'",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="entropy_marble",
-        name="Entropy Marble",
-        layer="Abyss",
+        id="runebitten_shard",
+        name="Runebitten Shard",
+        layer="Frozen Core",
         rarity="Legendary",
-        lore_text="Contains a miniature universe in its final moments. Beautiful and deeply unsettling.",
-        is_relic=False, effect=None,
-    ),
-    # Fungal Depths collectibles
-    ArtifactDef(
-        id="glowing_spore",
-        name="Glowing Spore",
-        layer="Fungal Depths",
-        rarity="Common",
-        lore_text="It pulses like a heartbeat. Don't name it. You'll get attached.",
-        is_relic=False, effect=None,
+        lore_text="A splinter of a blade that remembers a name. Held too long, it starts trying out yours.",
+        is_relic=True,
+        effect="Lifesteal: heal 1 HP on your first hit each boss fight",
+        min_prestige=4,
     ),
     ArtifactDef(
-        id="fungal_scripture",
-        name="Fungal Scripture",
-        layer="Fungal Depths",
-        rarity="Uncommon",
-        lore_text="Written in spore patterns. Roughly translates to: 'We were here before the stone.'",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="sovereign_cap",
-        name="Sovereign's Cap",
-        layer="Fungal Depths",
-        rarity="Rare",
-        lore_text="A mushroom cap the size of a dinner plate, still warm from the Sporeling Sovereign's head.",
-        is_relic=False, effect=None,
-    ),
-    # Frozen Core collectibles
-    ArtifactDef(
-        id="ice_memory",
-        name="Ice Memory",
-        layer="Frozen Core",
-        rarity="Common",
-        lore_text="A crystal of frozen time. Inside, a snowflake falls forever.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="paradox_coin",
-        name="Paradox Coin",
-        layer="Frozen Core",
-        rarity="Uncommon",
-        lore_text="Both heads and tails simultaneously. Useless for coin flips. Priceless for philosophers.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="chrono_shard",
-        name="Chrono Shard",
-        layer="Frozen Core",
-        rarity="Rare",
-        lore_text="It shows you what this cave looked like a million years ago: exactly the same.",
-        is_relic=False, effect=None,
-    ),
-    # The Hollow collectibles
-    ArtifactDef(
-        id="hollow_whisper",
-        name="Hollow Whisper",
-        layer="The Hollow",
-        rarity="Uncommon",
-        lore_text="A captured whisper from The Hollow. It says your name sometimes.",
-        is_relic=False, effect=None,
-    ),
-    ArtifactDef(
-        id="depth_record",
-        name="Depth Record",
+        id="aching_spine",
+        name="Aching Spine",
         layer="The Hollow",
         rarity="Legendary",
-        lore_text="A stone tablet recording the deepest dig ever attempted. The last entry is dated tomorrow.",
-        is_relic=False, effect=None,
+        lore_text="It is still growing. You keep it in a box. The box is never quite big enough.",
+        is_relic=True,
+        effect="Regrowth: heal 1 HP after any round you take no damage",
+        min_prestige=4,
     ),
-    # Special — Roshan drop
+    ArtifactDef(
+        id="listening_shard",
+        name="Listening Shard",
+        layer="Fungal Depths",
+        rarity="Rare",
+        lore_text="Hold it to your ear. It tells you what hasn't happened yet, in a voice you almost recognize.",
+        is_relic=True,
+        effect="Forewarned: the boss cannot hit you on round 1",
+        min_prestige=3,
+    ),
+    ArtifactDef(
+        id="hateborn_ember",
+        name="Hateborn Ember",
+        layer="Frozen Core",
+        rarity="Rare",
+        lore_text="It runs warm. It runs warmer when you do. It has never once gone cold.",
+        is_relic=True,
+        effect="Last stand: +1 damage to bosses while at 1 HP",
+        min_prestige=3,
+    ),
+    # ── Prestige-4 general relics (dig-find in deep layers + boss pool) ──
+    ArtifactDef(
+        id="deepveined_coal",
+        name="Deepveined Coal",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="It burns brightest where there's no light to spare. It seems to prefer it that way.",
+        is_relic=True,
+        effect="+20% JC while in the dark",
+        min_prestige=4,
+    ),
+    ArtifactDef(
+        id="diviners_knot",
+        name="Diviner's Knot",
+        layer="Frozen Core",
+        rarity="Rare",
+        lore_text="A tangle of cold cord with a single true end. Find it and the dark owes you a favor.",
+        is_relic=True,
+        effect="+10% success on risky events",
+        min_prestige=4,
+    ),
+    ArtifactDef(
+        id="pathfinders_spur",
+        name="Pathfinder's Spur",
+        layer="Fungal Depths",
+        rarity="Rare",
+        lore_text="The deeper you go, the harder it pulls. It wants to see the bottom too.",
+        is_relic=True,
+        effect="+1 advance per dig at depth 150+",
+        min_prestige=4,
+    ),
+    # Special — Roshan drop (functional relic; kept after non-relic collectibles were cut).
     ArtifactDef(
         id="aegis_fragment",
         name="Aegis Fragment",
@@ -422,26 +323,21 @@ COLLECTIBLE_ARTIFACTS: list[ArtifactDef] = [
         is_relic=True,
         effect="Revives from next cave-in (consumed on use)",
     ),
-    ArtifactDef(
-        id="cheese",
-        name="Cheese",
-        layer="The Hollow",
-        rarity="Legendary",
-        lore_text="Aged in the deepest pit of the world. The smell alone could wake an ancient.",
-        is_relic=False, effect=None,
-    ),
-    # PoE nod
-    ArtifactDef(
-        id="frozen_azurite",
-        name="Frozen Azurite",
-        layer="Frozen Core",
-        rarity="Uncommon",
-        lore_text="A deep blue crystal that hums with stored energy. Cartographers prize these above gold.",
-        is_relic=False, effect=None,
-    ),
 ]
 
-ALL_ARTIFACTS: list[ArtifactDef] = RELICS + COLLECTIBLE_ARTIFACTS
+# Signature trophy relics carve-drop from a specific boss (see BossDef.trophy_relic_id)
+# and are excluded from the random prestige-relic pool and the dig-time roll, so the
+# only way to get one is to beat the boss it belongs to.
+TROPHY_RELIC_IDS: frozenset[str] = frozenset({
+    "weeping_fang", "runebitten_shard", "aching_spine",
+    "listening_shard", "hateborn_ember",
+})
+
+# Per-kill chance a boss's signature trophy carves, rolled until the player owns it.
+TROPHY_CARVE_RATE: float = 0.25
+
+
+ALL_ARTIFACTS: list[ArtifactDef] = list(RELICS)
 
 ARTIFACT_BY_ID: dict[str, ArtifactDef] = {a.id: a for a in ALL_ARTIFACTS}
 

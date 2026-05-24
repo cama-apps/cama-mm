@@ -1,4 +1,4 @@
-"""Views for prestige, mutations, the museum, and the paginated dig guide."""
+"""Views for prestige, mutations, and the paginated dig guide."""
 
 from __future__ import annotations
 
@@ -254,29 +254,3 @@ class DigGuideView(discord.ui.View):
         self.current += 1
         self._sync_buttons()
         await interaction.response.edit_message(embed=GUIDE_PAGES[self.current], view=self)
-
-
-class MuseumView(discord.ui.View):
-    """Paginated museum display by layer."""
-
-    def __init__(self, pages: list[discord.Embed]):
-        super().__init__(timeout=180)
-        self.pages = pages
-        self.current = 0
-        self._sync_buttons()
-
-    def _sync_buttons(self) -> None:
-        self.prev_btn.disabled = self.current == 0
-        self.next_btn.disabled = self.current >= len(self.pages) - 1
-
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current -= 1
-        self._sync_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.current], view=self)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
-    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.current += 1
-        self._sync_buttons()
-        await interaction.response.edit_message(embed=self.pages[self.current], view=self)

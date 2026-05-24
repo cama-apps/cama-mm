@@ -345,6 +345,10 @@ class EventsMixin:
         # New-style EventChoice resolution
         success_chance = option.get("success_chance", 1.0)
 
+        # Relic: Diviner's Knot — +10% success on risky choices.
+        if choice == "risky" and self._has_relic(discord_id, guild_id, "diviners_knot"):
+            success_chance = min(1.0, success_chance + 0.10)
+
         # Dark luminosity: risky/desperate options are harder
         if choice in ("risky", "desperate") and luminosity < LUMINOSITY_DIM:
             success_chance = max(0.05, success_chance - LUMINOSITY_DARK_RISKY_PENALTY)

@@ -791,68 +791,6 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return cursor.fetchone() is not None
 
-    # ── Artifact Registry ────────────────────────────────────────────────
-
-    def register_artifact_find(
-        self, artifact_id: str, guild_id: int, finder_id: int, found_at: int,
-    ) -> bool:
-        """Register an artifact find. Returns True if this is the first finder."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM dig_artifact_registry WHERE artifact_id = ? AND guild_id = ?",
-                (artifact_id, gid),
-            )
-            existing = cursor.fetchone()
-            if existing:
-                cursor.execute(
-                    """
-                    UPDATE dig_artifact_registry
-                    SET total_found = total_found + 1
-                    WHERE artifact_id = ? AND guild_id = ?
-                    """,
-                    (artifact_id, gid),
-                )
-                return False
-            else:
-                cursor.execute(
-                    """
-                    INSERT INTO dig_artifact_registry
-                        (artifact_id, guild_id, first_finder_id, first_found_at, total_found)
-                    VALUES (?, ?, ?, ?, 1)
-                    """,
-                    (artifact_id, gid, finder_id, found_at),
-                )
-                return True
-
-    def get_registry(self, guild_id: int) -> list[dict]:
-        """Get all registered artifacts for a guild."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM dig_artifact_registry
-                WHERE guild_id = ?
-                ORDER BY first_found_at ASC
-                """,
-                (gid,),
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
-    def get_registry_entry(self, artifact_id: str, guild_id: int) -> dict | None:
-        """Get a single registry entry."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM dig_artifact_registry WHERE artifact_id = ? AND guild_id = ?",
-                (artifact_id, gid),
-            )
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
     # ── Atomic Operations ────────────────────────────────────────────────
 
     def atomic_tunnel_balance_update(

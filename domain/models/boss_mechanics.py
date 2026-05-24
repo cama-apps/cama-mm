@@ -2168,6 +2168,221 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         safe_option_idx=0,
     ),
 
+    # ================================================================
+    # TIER 150 — prestige-4 (The Blightcoil)
+    # ================================================================
+    "blightcoil_wards": BossMechanic(
+        id="blightcoil_wards",
+        archetype="summon_swarm",
+        trigger_round=3,
+        prompt_title="The Blightcoil spits a ring of plague-wards",
+        prompt_description="Three twitching pods hiss open around you, breathing spores.",
+        options=(
+            MechanicOption(
+                label="Smash the nearest ward",
+                flavor="Crush it before it ripens.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,             "You stomp one flat; the others keep hissing."),
+                    OutcomeRoll(0.40, -2, 0, None, "bleed",          "Spores burst up your arm as it pops."),
+                ),
+            ),
+            MechanicOption(
+                label="Push through to the coil",
+                flavor="Ignore the pods, reach the source.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -2, -2, None, None,            "You wade through the haze and land a hit on the coil."),
+                    OutcomeRoll(0.55, -3, 0, None, "bleed",          "The wards drain you on the way in."),
+                ),
+            ),
+            MechanicOption(
+                label="Torch the whole ring",
+                flavor="Burn the garden down.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, 0, -3, None, None,             "The pods catch and chain-burst into the Blightcoil."),
+                    OutcomeRoll(0.70, -3, 0, None, "burn",           "Spore-gas is flammable. So, briefly, were you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "blightcoil_nova": BossMechanic(
+        id="blightcoil_nova",
+        archetype="channel_aoe",
+        trigger_round=4,
+        prompt_title="The Blightcoil swells with a venom nova",
+        prompt_description="It draws a long breath. The chamber goes green at the edges.",
+        options=(
+            MechanicOption(
+                label="Hold your breath and back off",
+                flavor="Retreat to clean air.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,             "You reach clean air; a little gets in anyway."),
+                    OutcomeRoll(0.40, -2, 0, None, "bleed",          "You inhale at exactly the wrong moment."),
+                ),
+            ),
+            MechanicOption(
+                label="Charge before it releases",
+                flavor="Cut the breath short.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -3, None, None,            "A pick to the throat cuts the nova off at the source."),
+                    OutcomeRoll(0.60, -3, 0, None, "bleed",          "It exhales in your face. The garden takes root."),
+                ),
+            ),
+            MechanicOption(
+                label="Lance a pod to vent the gas",
+                flavor="Give the nova somewhere else to go.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, 0, -2, None, "reveal",         "The nova vents sideways through the pod and exposes the coil."),
+                    OutcomeRoll(0.65, -2, 0, None, "bleed",          "Wrong pod. The gas funnels straight to you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    # ================================================================
+    # TIER 200 — prestige-4 (The Rimebound King)
+    # ================================================================
+    "rimebound_harvest": BossMechanic(
+        id="rimebound_harvest",
+        archetype="channel_big_hit",
+        trigger_round=3,
+        prompt_title="The Rimebound King raises the runeblade to reap",
+        prompt_description="Frost crawls up the blade. It is hungry for something warm.",
+        options=(
+            MechanicOption(
+                label="Keep your distance",
+                flavor="Stay out of the arc.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,             "The reap falls short; only the cold reaches your fingers."),
+                    OutcomeRoll(0.40, -2, 0, None, "frostbite",      "The edge of the arc catches you; the chill sinks in."),
+                ),
+            ),
+            MechanicOption(
+                label="Step inside the swing",
+                flavor="Too close for the blade.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -3, None, None,            "Inside the arc, you hammer the breastplate twice."),
+                    OutcomeRoll(0.55, -2, 0, None, "frostbite",      "He shortens his grip. The blade still finds you."),
+                ),
+            ),
+            MechanicOption(
+                label="Catch the blade on your pick",
+                flavor="Bind it and crack his guard.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, 0, -3, None, None,             "Sparks fly; you wrench the runeblade wide and crack his guard."),
+                    OutcomeRoll(0.70, -3, 1, None, "frostbite",      "The blade drinks through the pick. He stands a little taller."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "rimebound_raise": BossMechanic(
+        id="rimebound_raise",
+        archetype="summon_swarm",
+        trigger_round=4,
+        prompt_title="The Rimebound King raises a frozen thrall",
+        prompt_description="A corpse of ice claws its way up from the floor between you.",
+        options=(
+            MechanicOption(
+                label="Shatter the thrall first",
+                flavor="Put it down before it stands.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, None,             "You smash it to slush before it finds its feet."),
+                    OutcomeRoll(0.45, -2, 0, None, None,             "It grabs you as it breaks; cold hands, slow to let go."),
+                ),
+            ),
+            MechanicOption(
+                label="Ignore it, press the King",
+                flavor="The crown is the real target.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -2, -3, None, None,            "You leave the thrall behind and bury your pick in the King."),
+                    OutcomeRoll(0.60, -3, 0, None, "frostbite",      "The thrall hamstrings you from behind."),
+                ),
+            ),
+            MechanicOption(
+                label="Turn the thrall against him",
+                flavor="Shove it into the throne.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, 0, -3, None, "reveal",         "You drive the thrall into the King; both stagger, his guard opens."),
+                    OutcomeRoll(0.70, -2, 0, "player", None,         "The thrall obeys only the crown. It pins you for the round."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    # ================================================================
+    # TIER 275 — prestige-4 (The Spineback)
+    # ================================================================
+    "spineback_regrowth": BossMechanic(
+        id="spineback_regrowth",
+        archetype="bind_debuff",
+        trigger_round=3,
+        prompt_title="The Spineback's black spines harden over",
+        prompt_description="The wounds you opened crust with new growth. It is healing in front of you.",
+        options=(
+            MechanicOption(
+                label="Break the fresh white spines",
+                flavor="Hit the soft new growth.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, "reveal",        "You snap the soft growth; it can't harden there. It flinches."),
+                    OutcomeRoll(0.45, -2, 0, None, None,             "Wrong spine — the hardened plates turn your blow."),
+                ),
+            ),
+            MechanicOption(
+                label="Hammer the black plates",
+                flavor="Chip the hardened armor.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -1, -1, None, None,            "You chip a black plate; slow going, but it holds still for it."),
+                    OutcomeRoll(0.70, -3, 0, None, "bleed",          "The plates are stone now. Your pick skips into a spine."),
+                ),
+            ),
+            MechanicOption(
+                label="Strike before it finishes",
+                flavor="Catch it mid-regrowth.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, 0, -3, None, None,             "You catch it mid-knit; the new growth tears away with the old."),
+                    OutcomeRoll(0.60, -3, 0, None, "bleed",          "It finished first. The fresh spines are already sharp."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "spineback_divebomb": BossMechanic(
+        id="spineback_divebomb",
+        archetype="charge_telegraph",
+        trigger_round=5,
+        prompt_title="The Spineback launches off the wall",
+        prompt_description="It hits the ceiling and folds, spines-first, into a dive straight down at you.",
+        options=(
+            MechanicOption(
+                label="Dive aside at the last instant",
+                flavor="Wait for the commit.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,             "You throw yourself clear; the impact craters where you stood."),
+                    OutcomeRoll(0.40, -2, 0, None, None,             "A trailing spine rakes your back as it lands."),
+                ),
+            ),
+            MechanicOption(
+                label="Meet it with a raised pick",
+                flavor="Set the pick like a spear.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, 0, -3, None, None,             "It impales itself on the drop. The sound is tremendous."),
+                    OutcomeRoll(0.70, -3, 0, "player", None,         "It is far heavier than you. You're driven into the floor."),
+                ),
+            ),
+            MechanicOption(
+                label="Roll under to the soft belly",
+                flavor="Get beneath the spines.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -3, None, "reveal",        "You slide under the spines and open its underside."),
+                    OutcomeRoll(0.60, -3, 0, None, "bleed",          "The belly is armored too. The spines are not kind."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
 }
 
 

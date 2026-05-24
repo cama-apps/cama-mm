@@ -210,6 +210,28 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=None,
         flavor_on_loss="The pit pulled. You came out a long way back, with less to show for it.",
     ),
+    # ------------------- Prestige-4 additions -------------------
+    "blightcoil_venom": StingerEffect(
+        id="blightcoil_venom",
+        extra_knockback=0,
+        extended_cooldown_s=1800,
+        cursed_status=CURSE_DRAIN_NEXT_REWARD,
+        flavor_on_loss="The spores settle into your lungs. Your next haul tastes thin and green.",
+    ),
+    "rimebound_soulchill": StingerEffect(
+        id="rimebound_soulchill",
+        extra_knockback=0,
+        extended_cooldown_s=2700,
+        cursed_status=CURSE_HALVE_NEXT_WAGER,
+        flavor_on_loss="The cold gets into your hands. You won't trust them with a real bet for a while.",
+    ),
+    "spineback_rend": StingerEffect(
+        id="spineback_rend",
+        extra_knockback=16,
+        extended_cooldown_s=0,
+        cursed_status=None,
+        flavor_on_loss="A spine the size of a door hurls you back up the shaft. You land far from where you fell.",
+    ),
 }
 
 
