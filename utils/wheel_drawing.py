@@ -1,5 +1,6 @@
 """Wheel of Fortune image generation using Pillow."""
 
+import colorsys
 import io
 import math
 import random
@@ -257,9 +258,24 @@ def _is_numbered_wedge(wedge: tuple) -> bool:
     return isinstance(wedge[1], int) and wedge[1] > 0
 
 
+def _hue_sort_key(color_hex: str) -> tuple[int, float]:
+    """Rainbow sort key for a wedge color: (hue_bucket, value).
+
+    Hue is quantized into 12 buckets of 30° so visually-similar colors form a
+    band; within a band, wedges sort darkest→lightest by value. Achromatic
+    colors (black/gray) have hue 0, so they land in the first (red) bucket and,
+    being dark, lead it — clustering at the violet→red seam, darkest first.
+    """
+    raw = color_hex.lstrip("#")
+    r, g, b = (int(raw[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, _sat, val = colorsys.rgb_to_hsv(r, g, b)
+    return (round(hue * 12) % 12, val)
+
+
 # Base wheel wedge configuration: (label, base_value, color)
 # 24 wedges at 15 degrees each. BANKRUPT value adjusted to hit WHEEL_TARGET_EV.
-# Wedges sorted by hex color code (ascending). Trimmed one each of 5/15/20 to
+# Exported WHEEL_WEDGES is sorted into rainbow (hue) order at build time, so the
+# order of this base list is not significant. Trimmed one each of 5/15/20 to
 # make room for the Mario Kart deflation trio (BANANA_PEEL, GREEN_SHELL, BOMB_OMB).
 _BASE_WHEEL_WEDGES = [
     ("BOMB", "BOMB_OMB", "#0d0d0d"),
@@ -389,8 +405,11 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
     return adjusted
 
 
-# Calculate wedges based on configured target EV
-WHEEL_WEDGES = _calculate_adjusted_wedges(WHEEL_TARGET_EV)
+# Calculate wedges based on configured target EV, then arrange into rainbow (hue) order
+WHEEL_WEDGES = sorted(
+    _calculate_adjusted_wedges(WHEEL_TARGET_EV),
+    key=lambda w: _hue_sort_key(w[2]),
+)
 
 
 # Hardcoded 24-slice bankrupt wheel for players in bankruptcy penalty.
@@ -398,9 +417,10 @@ WHEEL_WEDGES = _calculate_adjusted_wedges(WHEEL_TARGET_EV)
 # recalculates it to maintain WHEEL_BANKRUPT_TARGET_EV.
 # Numeric wedges are buffed vs. the normal wheel — bankrupt players need bigger
 # pay-outs to overcome the BANKRUPT/EXTEND/CHAIN_REACTION drag.
-# Wedges sorted by hex color code (ascending). Trimmed one each of 50/75 (green)
-# and 75 (orange) to seat the Mario Kart deflation trio. Jackpot 100s recolored
-# from green to gold for consistency with the regular wheel.
+# Exported BANKRUPT_WHEEL_WEDGES is sorted into rainbow (hue) order at build time.
+# Trimmed one each of 50/75 (green) and 75 (orange) to seat the Mario Kart
+# deflation trio. Jackpot 100s recolored from green to gold for consistency with
+# the regular wheel.
 _BASE_BANKRUPT_WHEEL_WEDGES = [
     ("CLUTCH", "COMEBACK", "#0a1a2a"),       # One-use pardon: next BANKRUPT becomes LOSE
     ("JAIL", "JAILBREAK", "#0a2a0a"),        # Remove 1 penalty game
@@ -501,8 +521,11 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
     return adjusted
 
 
-# Calculate bankrupt wheel wedges (24-slice wheel for players in bankruptcy penalty)
-BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_BANKRUPT_TARGET_EV)
+# Calculate bankrupt wheel wedges (24-slice), then arrange into rainbow (hue) order
+BANKRUPT_WHEEL_WEDGES = sorted(
+    _calculate_bankrupt_adjusted_wedges(WHEEL_BANKRUPT_TARGET_EV),
+    key=lambda w: _hue_sort_key(w[2]),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -513,8 +536,8 @@ BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_BANKRUPT_TARGE
 # All string values are golden-wheel-specific mechanics plus RED/BLUE_SHELL.
 _BASE_GOLDEN_WHEEL_WEDGES = [
     # 24 wedges. OVEREXTENDED is dynamic (calibrated to WHEEL_GOLDEN_TARGET_EV).
-    # Sorted by hex color code (ascending). Trimmed one each of 50/60/80 to
-    # make room for the Mario Kart deflation trio.
+    # Exported GOLDEN_WHEEL_WEDGES is sorted into rainbow (hue) order at build
+    # time. Trimmed one each of 50/60/80 to make room for the deflation trio.
     ("BOMB", "BOMB_OMB", "#0d0d0d"),
     ("GREEN", "GREEN_SHELL", "#228b22"),
     ("RECESSION", "RECESSION", "#3a0a0a"),    # Server-wide deflation; richer lose more
@@ -736,8 +759,11 @@ def compute_live_golden_wedges(
     ]
 
 
-# Calculate golden wheel wedges (24-slice, exclusive to top-N holders)
-GOLDEN_WHEEL_WEDGES = _calculate_golden_adjusted_wedges(WHEEL_GOLDEN_TARGET_EV)
+# Calculate golden wheel wedges (24-slice), then arrange into rainbow (hue) order
+GOLDEN_WHEEL_WEDGES = sorted(
+    _calculate_golden_adjusted_wedges(WHEEL_GOLDEN_TARGET_EV),
+    key=lambda w: _hue_sort_key(w[2]),
+)
 
 
 def get_wheel_wedges(is_bankrupt: bool = False, is_golden: bool = False, mana_color: str | None = None) -> list[tuple[str, int | str, str]]:
