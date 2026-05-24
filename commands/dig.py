@@ -72,7 +72,7 @@ from services.dig_constants import (
 from services.dig_constants import get_layer as get_layer_def
 from services.permissions import has_admin_permission
 from utils.formatting import JOPACOIN_EMOTE
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -1373,7 +1373,7 @@ class DigCommands(commands.Cog):
                 embed.set_image(url=f"attachment://{shop_file.filename}")
         except Exception:
             pass
-        await safe_followup(interaction, embed=embed, file=shop_file)
+        await send_public_or_ephemeral(interaction, embed=embed, file=shop_file)
 
     # ------------------------------------------------------------------
     # 8b. /dig buy — Buy an item from the shop
@@ -1992,7 +1992,7 @@ class DigCommands(commands.Cog):
             embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
             embed.set_footer(text=f"0/{MAX_INVENTORY_SLOTS} slots used")
 
-        await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
+        await send_public_or_ephemeral(interaction, embed=embed, file=inv_pickaxe_file)
 
     # ------------------------------------------------------------------
     # 16a. /dig gear — Manage boss-combat gear loadout
