@@ -174,6 +174,36 @@ class BankruptcyService(IBankruptcyService):
             "penalty_applied": penalty_applied,
         }
 
+    def debit_bankruptcy_penalty(
+        self, items: list[tuple[int, int]], guild_id: int | None = None
+    ) -> dict[int, int]:
+        """Debit the bankruptcy penalty share of already-credited winnings.
+
+        Used by batch-settled payout sources (bet settlement, prediction
+        resolution) that credit the gross payout inside a repo transaction and
+        then dock the penalty as a follow-up. ``items`` is a list of
+        ``(discord_id, profit)`` pairs where ``profit`` is the net winnings the
+        debuff applies to (stake / cost-basis already excluded).
+
+        For each player still under penalty (``penalty_games > 0``), the penalty
+        share of their profit is debited as a coin sink. Players not under
+        penalty, or with non-positive profit, are skipped. Applies regardless of
+        the player's balance (these sources are not garnished).
+
+        Returns ``{discord_id: penalty_debited}`` for players actually charged.
+        """
+        penalties: dict[int, int] = {}
+        for discord_id, profit in items:
+            if profit <= 0:
+                continue
+            penalty = self.apply_penalty_to_winnings(discord_id, profit, guild_id)[
+                "penalty_applied"
+            ]
+            if penalty > 0:
+                self.player_repo.add_balance(discord_id, guild_id, -penalty)
+                penalties[discord_id] = penalty
+        return penalties
+
     def on_game_won(self, discord_id: int, guild_id: int | None = None) -> int:
         """
         Called when a player wins a game. Decrements their penalty counter.
