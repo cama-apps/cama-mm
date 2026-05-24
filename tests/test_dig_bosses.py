@@ -1159,7 +1159,8 @@ class TestLatePrestigeBossPool:
         # that surface boss names to a player must pass the player's real
         # prestige explicitly to avoid leaking gated names.
         for tier in self.AFFECTED_TIERS:
-            assert len(get_boss_pool_for_tier(tier)) == 4
+            # 3 grandfathered/Dota + 1 P3 late-prestige + 1 P4 twisted-homage = 5
+            assert len(get_boss_pool_for_tier(tier)) == 5
 
     def test_unaffected_tiers_unchanged(self):
         # Tiers without late-prestige additions should return 3 entries at any prestige.

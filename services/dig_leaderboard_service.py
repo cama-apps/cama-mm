@@ -1,6 +1,6 @@
 """Read-only display aggregators for the dig minigame.
 
-Leaderboard / hall of fame / museum / collection / guild-stats queries —
+Leaderboard / hall of fame / guild-stats queries —
 all of them are pure ``dig_repo`` reads with light shaping for the embed
 layer. No tunnel-state mutation, no balance changes, no cross-service
 dependencies.
@@ -26,7 +26,7 @@ def _ok(**kwargs) -> dict:
 
 
 class DigLeaderboardService:
-    """Leaderboard, hall of fame, museum, and collection read aggregators."""
+    """Leaderboard, hall of fame, and guild-stats read aggregators."""
 
     def __init__(self, dig_repo: DigRepository) -> None:
         self.dig_repo = dig_repo
@@ -83,27 +83,6 @@ class DigLeaderboardService:
                 collection[rarity] = []
             collection[rarity].append(a)
         return {"artifacts": collection, "total": len(artifacts)}
-
-    def get_museum(self, guild_id) -> dict:
-        """Return guild artifact registry with first finders and counts."""
-        entries = self.dig_repo.get_registry(guild_id)
-        entries = [dict(e) for e in entries]
-        layer_by_id = {a["id"]: a["layer"] for a in ARTIFACT_POOL}
-
-        # Group by the artifact's layer (resolved from the pool by id).
-        by_layer = {}
-        for e in entries:
-            layer = layer_by_id.get(e.get("artifact_id")) or "unknown"
-            if layer not in by_layer:
-                by_layer[layer] = []
-            by_layer[layer].append(e)
-
-        return {
-            "entries": entries,
-            "by_layer": by_layer,
-            "total_discovered": len(entries),
-            "total_possible": len(ARTIFACT_POOL),
-        }
 
     def get_guild_stats(self, guild_id) -> dict:
         """Aggregate stats for the guild."""

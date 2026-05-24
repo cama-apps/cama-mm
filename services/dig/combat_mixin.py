@@ -43,6 +43,8 @@ from services.dig_constants import (
     RETREAT_BLOCK_LOSS_MAX,
     RETREAT_BLOCK_LOSS_MIN,
     WIN_CHANCE_CAP,
+    get_phase2_for,
+    get_phase3_for,
 )
 
 
@@ -603,10 +605,15 @@ class BossCombatMixin:
             _phase_entry.get("status") if isinstance(_phase_entry, dict)
             else _phase_entry
         )
+        _phase_boss_id = (
+            _phase_entry.get("boss_id", "") if isinstance(_phase_entry, dict) else ""
+        )
         if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
-            phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
+            _ph = get_phase2_for(_phase_boss_id, at_boss)
+            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
         elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
-            phase2_penalty = abs(BOSS_PHASE3[at_boss].win_odds_penalty)
+            _ph = get_phase3_for(_phase_boss_id, at_boss)
+            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
 
         # Pending phase-transition event (rolled when this boss entered its
         # next phase): a one-shot environmental effect applied to this fight.
@@ -842,7 +849,10 @@ class BossCombatMixin:
                 # Phase transition — boss transforms, fight again. Tunnel
                 # update + audit log commit together via atomic helper.
                 next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
-                phase_def = BOSS_PHASE2[at_boss] if needs_phase2 else BOSS_PHASE3[at_boss]
+                phase_def = (
+                    get_phase2_for(active_boss_id, at_boss) if needs_phase2
+                    else get_phase3_for(active_boss_id, at_boss)
+                )
                 next_phase_num = 2 if needs_phase2 else 3
                 # Roll an environmental transition event. Its flavor surfaces
                 # in the embed; the event id rides on the boss entry so its
@@ -1183,10 +1193,15 @@ class BossCombatMixin:
             _phase_entry.get("status") if isinstance(_phase_entry, dict)
             else _phase_entry
         )
+        _phase_boss_id = (
+            _phase_entry.get("boss_id", "") if isinstance(_phase_entry, dict) else ""
+        )
         if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
-            phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
+            _ph = get_phase2_for(_phase_boss_id, at_boss)
+            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
         elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
-            phase2_penalty = abs(BOSS_PHASE3[at_boss].win_odds_penalty)
+            _ph = get_phase3_for(_phase_boss_id, at_boss)
+            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
 
         # Pending phase-transition event (rolled when this boss entered its
         # next phase): a one-shot environmental effect applied to this fight.
@@ -1286,7 +1301,9 @@ class BossCombatMixin:
 
         # Run auto-rounds until trigger or resolution.
         round_log: list[dict] = []
-        status_effects: dict = {}
+        status_effects: dict = self._trophy_status_seed(
+            discord_id, guild_id, player_start_hp=player_hp,
+        )
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
             # If a mechanic is scheduled for THIS round, pause and persist.
@@ -1595,6 +1612,7 @@ class BossCombatMixin:
         to decrement DOTs and clear one-shot effects.
         """
         entry: dict = {"round": round_num}
+        hp_at_round_start = player_hp  # snapshot for Aching Spine regrowth
 
         # Start-of-round effects
         if status_effects.get("boss_exposed_next_round"):
@@ -1608,6 +1626,12 @@ class BossCombatMixin:
         if bleed > 0:
             player_hp -= 1
             status_effects["bleed_rounds_remaining"] = bleed - 1
+        # Trophy — Weeping Fang: venom chips the boss for the first 4 rounds.
+        venom = int(status_effects.get("trophy_venom", 0))
+        if venom > 0:
+            boss_hp -= 1
+            status_effects["trophy_venom"] = venom - 1
+            entry["venom"] = True
         if boss_hp <= 0:
             entry["boss_hp"] = 0
             entry["player_hp"] = max(0, player_hp)
@@ -1628,10 +1652,19 @@ class BossCombatMixin:
             crit_this_round = False
             if player_roll:
                 dmg_this_round = player_dmg
+                # Trophy — Hateborn Ember: last stand, +1 damage while at 1 HP.
+                if player_hp == 1 and status_effects.get("trophy_laststand"):
+                    dmg_this_round += 1
+                    entry["laststand"] = True
                 if crit_chance > 0 and random.random() < crit_chance:
                     dmg_this_round += crit_bonus
                     crit_this_round = True
                 boss_hp -= dmg_this_round
+                # Trophy — Runebitten Shard: heal 1 on the first landed hit.
+                if status_effects.get("trophy_lifesteal"):
+                    player_hp += 1
+                    status_effects["trophy_lifesteal"] = False
+                    entry["lifesteal"] = True
             entry["player_hit"] = player_roll
             entry["crit"] = crit_this_round
             entry["boss_hp"] = max(0, boss_hp)
@@ -1645,7 +1678,12 @@ class BossCombatMixin:
 
         # Boss swing
         if skip != "boss":
-            boss_roll = random.random() < boss_hit
+            # Trophy — Listening Shard: forewarned, the boss can't land on round 1.
+            if round_num == 1 and status_effects.get("trophy_forewarned"):
+                boss_roll = False
+                entry["forewarned"] = True
+            else:
+                boss_roll = random.random() < boss_hit
             if boss_roll:
                 actual_dmg = boss_dmg + (1 if frost else 0)
                 player_hp -= actual_dmg
@@ -1659,7 +1697,40 @@ class BossCombatMixin:
         if player_hp <= 0:
             return entry, player_hp, boss_hp, False
 
+        # Trophy — Aching Spine: regrow 1 HP after a round you took no damage,
+        # capped at your fight-start HP. Only on a non-terminal round.
+        if (
+            status_effects.get("trophy_regrowth")
+            and player_hp == hp_at_round_start
+            and player_hp < int(status_effects.get("trophy_start_hp", player_hp))
+        ):
+            player_hp += 1
+            entry["player_hp"] = max(0, player_hp)
+            entry["regrowth"] = True
+
         return entry, player_hp, boss_hp, None
+
+    def _trophy_status_seed(self, discord_id: int, guild_id, *, player_start_hp: int) -> dict:
+        """Build the initial ``status_effects`` carrying equipped trophy-relic flags.
+
+        These flags persist across a mid-fight prompt pause (``status_effects``
+        is serialized into the active-duel row and reloaded on resume) and are
+        consumed in :meth:`_run_one_round`.
+        """
+        se: dict = {}
+        if self._has_relic(discord_id, guild_id, "weeping_fang"):
+            se["trophy_venom"] = 4
+        if self._has_relic(discord_id, guild_id, "runebitten_shard"):
+            se["trophy_lifesteal"] = True
+        if self._has_relic(discord_id, guild_id, "aching_spine"):
+            se["trophy_regrowth"] = True
+        if self._has_relic(discord_id, guild_id, "listening_shard"):
+            se["trophy_forewarned"] = True
+        if self._has_relic(discord_id, guild_id, "hateborn_ember"):
+            se["trophy_laststand"] = True
+        if se:
+            se["trophy_start_hp"] = int(player_start_hp)
+        return se
 
     def _apply_option_outcome_to_state(
         self, *, option, player_hp: int, boss_hp: int, status_effects: dict,
@@ -1812,7 +1883,10 @@ class BossCombatMixin:
 
             if needs_phase2 or needs_phase3:
                 next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
-                phase_def = BOSS_PHASE2[at_boss] if needs_phase2 else BOSS_PHASE3[at_boss]
+                phase_def = (
+                    get_phase2_for(boss.boss_id if boss else "", at_boss) if needs_phase2
+                    else get_phase3_for(boss.boss_id if boss else "", at_boss)
+                )
                 next_phase_num = 2 if needs_phase2 else 3
                 phase_event = random.choice(PHASE_TRANSITION_EVENTS)
                 # Mark next phase status, preserving boss_id when present.
@@ -1962,6 +2036,7 @@ class BossCombatMixin:
             prestige_relic_drop = self._maybe_drop_prestige_relic(
                 discord_id, guild_id, tunnel.get("prestige_level", 0) or 0,
             )
+            trophy_relic_drop = self._maybe_carve_trophy_relic(discord_id, guild_id, boss)
 
             return self._ok(
                 won=True,
@@ -1988,6 +2063,7 @@ class BossCombatMixin:
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
                 prestige_relic_drop=prestige_relic_drop,
+                trophy_relic_drop=trophy_relic_drop,
                 luminosity_display=self._luminosity_combat_display(tunnel),
             )
 

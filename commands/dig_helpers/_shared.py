@@ -37,7 +37,6 @@ PROGRESSIVE_TIPS = [
     "Tip: /dig insure protects you from catastrophic cave-ins.",
     "Tip: Prestige resets depth but unlocks powerful perks.",
     "Tip: Bosses guard layer transitions. Bring friends to cheer!",
-    "Tip: Relics from /dig museum are rare — gift duplicates to friends.",
     "Tip: Higher pickaxe tiers dig more blocks per action.",
     "Tip: Streaks grant bonus JC — keep digging daily!",
     "Tip: /dig flex shows off your mining stats and titles.",
@@ -134,8 +133,7 @@ GUIDE_PAGES = [
             "Each prestige lets you choose one perk that persists across resets. "
             "Choose wisely — they shape your digging strategy.\n\n"
             "**Relics**\n"
-            "Some relics are only available at higher prestige levels. Collect "
-            "them all and fill the `/dig museum`!"
+            "Some relics are only available at higher prestige levels."
         ),
         color=LAYER_COLORS["Magma"],
     ),

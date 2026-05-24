@@ -341,24 +341,6 @@ class TestArtifacts:
         assert len(artifacts) == 1
         assert artifacts[0]["artifact_id"] == artifact_id
 
-    def test_artifact_registered_in_guild(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """First finder tracked in registry."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        artifact_id = ALL_ARTIFACTS[0].id
-        is_first = dig_repo.register_artifact_find(artifact_id, guild_id, 10001, 1_000_000)
-        assert is_first is True
-
-        # Second find is not first
-        _register_player(player_repository, discord_id=10002)
-        is_first2 = dig_repo.register_artifact_find(artifact_id, guild_id, 10002, 1_000_001)
-        assert is_first2 is False
-
-        entry = dig_repo.get_registry_entry(artifact_id, guild_id)
-        assert entry["first_finder_id"] == 10001
-        assert entry["total_found"] == 2
-
     def test_gift_relic_transfers(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Relic moves from giver to receiver."""
         _register_player(player_repository, discord_id=10001)
@@ -494,14 +476,13 @@ class TestNewItemsAndArtifacts:
 
     def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
-        # 35 base + 3 P5-gated relics + 8 new relics (mana / risk / social /
-        # weather themes added in the manashop+relic rework).
-        assert len(ALL_ARTIFACTS) == 46
+        # Relics-only catalog after the non-functional collectibles were cut.
+        assert len(ALL_ARTIFACTS) == 30
 
     def test_fungal_artifacts_exist(self):
         from services.dig_constants import ALL_ARTIFACTS
         fungal = [a for a in ALL_ARTIFACTS if a.layer == "Fungal Depths"]
-        assert len(fungal) >= 4  # 1 relic + 3 collectibles
+        assert len(fungal) >= 4  # Fungal-layer relics (collectibles were cut)
 
     def test_aegis_fragment_exists(self):
         from services.dig_constants import ARTIFACT_BY_ID
@@ -755,12 +736,19 @@ class TestPrestigeRelicPool:
     def test_drop_can_return_relic_at_p5(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """A P5 player with a max-luck roll gets a P5-gated relic."""
+        """A P5 player with a max-luck roll gets a relic from the boss pool."""
+        from services.dig_constants import RELICS, TROPHY_RELIC_IDS
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(random, "random", lambda: 0.0)
         result = dig_service._maybe_drop_prestige_relic(10001, 12345, prestige_level=5)
         assert result is not None
-        assert result["id"] in {"hollow_fang", "echo_lantern", "patient_stone"}
+        # The boss pool is every min-prestige>0 relic up to the player's prestige,
+        # minus signature trophies (carve-only) — P5 relics + the P4 generals.
+        eligible = {
+            r.id for r in RELICS
+            if 0 < r.min_prestige <= 5 and r.id not in TROPHY_RELIC_IDS
+        }
+        assert result["id"] in eligible
 
     def test_drop_rate_gates_unlucky_roll(
         self, dig_service, dig_repo, player_repository, monkeypatch,

@@ -56,7 +56,6 @@ from commands.dig_helpers.gear_views import (
 )
 from commands.dig_helpers.progression_views import (
     DigGuideView,
-    MuseumView,
     MutationSelectionView,
     PrestigePerksView,
 )
@@ -96,7 +95,6 @@ __all__ = [
     "GearPanelView",
     "GearSelectView",
     "MutationSelectionView",
-    "MuseumView",
     "PaidDigView",
     "PrestigePerksView",
     # Re-exported helpers used by tests / embed builders.
@@ -1494,67 +1492,6 @@ class DigCommands(commands.Cog):
         except Exception:
             pass
         await safe_followup(interaction, embed=buy_embed, file=item_file, ephemeral=True)
-
-    # ------------------------------------------------------------------
-    # 9. /dig museum — Guild artifact museum
-    # ------------------------------------------------------------------
-
-    @dig.command(name="museum", description="View the guild artifact museum")
-    @require_guild
-    async def dig_museum(self, interaction: discord.Interaction):
-        if not await require_dig_channel(interaction):
-            return
-
-        player = await _check_registered(interaction, self.bot)
-        if not player:
-            return
-
-        await safe_defer(interaction)
-
-        guild_id = interaction.guild.id
-        try:
-            museum = await asyncio.to_thread(
-                self.dig_service.get_museum, guild_id
-            )
-        except Exception as e:
-            logger.error("Museum error: %s", e)
-            await safe_followup(interaction, content="Museum unavailable.", ephemeral=True)
-            return
-
-        # Build pages by layer
-        layer_order = ["Dirt", "Stone", "Crystal", "Magma", "Abyss"]
-        pages = []
-        artifacts_by_layer = museum.get("by_layer", {}) if isinstance(museum, dict) else {}
-
-        for layer_name in layer_order:
-            artifacts = artifacts_by_layer.get(layer_name, [])
-            embed = discord.Embed(
-                title=f"Museum — {layer_name} Layer",
-                color=_layer_color(layer_name),
-            )
-            if artifacts:
-                lines = []
-                for a in artifacts:
-                    if a.get("discovered", False):
-                        finder = a.get("first_finder", "Unknown")
-                        count = a.get("total_found", 1)
-                        lines.append(f"**{a.get('name', '?')}** — First found by {finder} (x{count})")
-                    else:
-                        lines.append("**???** — Undiscovered")
-                embed.description = "\n".join(lines)
-            else:
-                embed.description = "No artifacts catalogued for this layer yet."
-            pages.append(embed)
-
-        if not pages:
-            await safe_followup(interaction, content="Museum is empty.", ephemeral=True)
-            return
-
-        if len(pages) == 1:
-            await safe_followup(interaction, embed=pages[0])
-        else:
-            view = MuseumView(pages)
-            await safe_followup(interaction, embed=pages[0], view=view)
 
     # ------------------------------------------------------------------
     # 10. /dig_flex — Show stats and titles

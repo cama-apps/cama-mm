@@ -24,6 +24,8 @@ from services.dig_constants import (
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     RELIC_SLOTS_BASE,
+    TROPHY_CARVE_RATE,
+    TROPHY_RELIC_IDS,
     format_relic_label,
 )
 
@@ -40,6 +42,7 @@ class GearMixin:
         guild_id,
         *,
         weather_code: str | None = None,
+        luminosity: int | None = None,
         include_random: bool = True,
     ) -> float:
         """Combined JC-yield multiplier from yield-affecting relics.
@@ -48,6 +51,7 @@ class GearMixin:
         - Bloodstone: 50/50 ×1.5 or ×0.75 (only when ``include_random`` is True
           — preview paths pass False so the range stays representative)
         - Stormcaller: storm weather ×1.5, sunny ×1.10, else ×1.0
+        - Deepveined Coal: ×1.20 while in the dark (Dark / Pitch-Black luminosity)
         """
         mult = 1.0
         if self._has_relic(discord_id, guild_id, "echo_lantern"):
@@ -60,6 +64,12 @@ class GearMixin:
                 mult *= 1.5
             elif w == "sunny":
                 mult *= 1.10
+        if (
+            luminosity is not None
+            and self._get_luminosity_level(luminosity) in ("dark", "pitch_black")
+            and self._has_relic(discord_id, guild_id, "deepveined_coal")
+        ):
+            mult *= 1.20
         return mult
 
     def _relic_storm_negates_hazard(
@@ -437,6 +447,14 @@ class GearMixin:
             return self._error("That artifact isn't a relic and can't be equipped.")
         if int(target.get("equipped", 0)) == 1:
             return self._error("That relic is already equipped.")
+        # Relics are unique — refuse to equip a second copy of the same relic
+        # (guards against duplicate rows left over from before relics were unique).
+        target_aid = target.get("artifact_id")
+        if any(
+            a.get("artifact_id") == target_aid and int(a.get("equipped", 0)) == 1
+            for a in artifacts
+        ):
+            return self._error("You already have that relic equipped.")
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         prestige = int(tunnel.get("prestige_level", 0) or 0) if tunnel else 0
         cap = prestige + RELIC_SLOTS_BASE
@@ -493,9 +511,16 @@ class GearMixin:
         """
         from services.dig_constants import RELICS
 
+        # Relics are unique — don't drop one the player already owns.
+        owned = {
+            dict(a).get("artifact_id")
+            for a in (self.dig_repo.get_artifacts(discord_id, guild_id) or [])
+        }
         eligible = [
             r for r in RELICS
             if r.min_prestige > 0 and r.min_prestige <= prestige_level
+            and r.id not in TROPHY_RELIC_IDS
+            and r.id not in owned
         ]
         if not eligible:
             return None
@@ -504,6 +529,33 @@ class GearMixin:
         choice = random.choice(eligible)
         self.dig_repo.add_artifact(discord_id, guild_id, choice.id, is_relic=True)
         return {"id": choice.id, "name": choice.name, "rarity": choice.rarity}
+
+    def _maybe_carve_trophy_relic(self, discord_id: int, guild_id, boss_def) -> dict | None:
+        """Carve a boss's signature trophy relic on defeat (MH-style).
+
+        Rolls ``TROPHY_CARVE_RATE`` per kill until the player owns the trophy;
+        once owned it never re-drops (dig has no duplicate sink). Returns the
+        relic descriptor on a successful carve, else ``None``.
+        """
+        trophy_id = getattr(boss_def, "trophy_relic_id", "") or ""
+        if not trophy_id:
+            return None
+        owned = {
+            dict(a).get("artifact_id")
+            for a in (self.dig_repo.get_artifacts(discord_id, guild_id) or [])
+        }
+        if trophy_id in owned:
+            return None
+        if random.random() >= TROPHY_CARVE_RATE:
+            return None
+        self.dig_repo.add_artifact(discord_id, guild_id, trophy_id, is_relic=True)
+        from services.dig_constants import ARTIFACT_BY_ID
+        defn = ARTIFACT_BY_ID.get(trophy_id)
+        return {
+            "id": trophy_id,
+            "name": defn.name if defn else trophy_id,
+            "rarity": defn.rarity if defn else "Rare",
+        }
 
     def _get_queued_items_for_tunnel(self, discord_id: int, guild_id) -> list[dict]:
         """Get items queued for next dig from inventory table."""
@@ -564,10 +616,13 @@ class GearMixin:
     # ------------------------------------------------------------------
 
     def roll_artifact(self, discord_id: int, guild_id, depth: int, *, extra_rate_mod: float = 1.0) -> dict | None:
-        """
-        Roll for an artifact drop. Returns artifact info or None.
+        """Roll for a raw-dig relic find. Returns relic info or None.
 
-        Rates: common 5%, uncommon 2%, rare 0.5%, legendary 0.1%
+        Only **entry-level basic relics** (min-prestige 0, Rare) are findable
+        from digging, and only ones the player doesn't already own (relics are
+        unique). Everything else — legendaries, prestige-gated relics, trophies
+        — comes from bosses or prestige grants. Find chance is the Rare rate
+        (0.5%) scaled by the same find modifiers as before.
         """
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
@@ -592,61 +647,44 @@ class GearMixin:
         # Post-pinnacle decay applies to artifact rate
         rate_mod *= self._post_pinnacle_decay_factor(depth, discord_id, guild_id)
 
-        # Roll for each rarity tier
-        tiers = [
-            ("common", 0.05),
-            ("uncommon", 0.02),
-            ("rare", 0.005),
-            ("legendary", 0.001),
-        ]
-
-        hit_rarity = None
-        for rarity, base_rate in reversed(tiers):  # Check legendary first
-            if random.random() < base_rate * rate_mod:
-                hit_rarity = rarity
-                break
-
-        if hit_rarity is None:
+        # Single find roll at the Rare rate (scaled by the modifiers above).
+        if random.random() >= 0.005 * rate_mod:
             return None
 
-        # Pick from pool
-        eligible = [
-            a for a in ARTIFACT_POOL
-            if a.get("rarity") == hit_rarity
-            and layer_name in a.get("layers", [layer_name])
-        ]
+        # Findable pool: entry-level basic relics only (min-prestige 0, Rare),
+        # excluding any the player already owns (relics are unique). Prefer the
+        # current layer, fall back to any layer.
+        owned = {
+            dict(a).get("artifact_id")
+            for a in (self.dig_repo.get_artifacts(discord_id, guild_id) or [])
+        }
 
-        if not eligible:
-            # Fallback: any artifact of that rarity
-            eligible = [a for a in ARTIFACT_POOL if a.get("rarity") == hit_rarity]
+        def _pool(require_layer: bool) -> list[dict]:
+            return [
+                a for a in ARTIFACT_POOL
+                if a.get("is_relic")
+                and int(a.get("min_prestige", 0) or 0) == 0
+                and (a.get("rarity") or "").lower() == "rare"
+                and a.get("id") not in owned
+                and (
+                    not require_layer
+                    or (a.get("layer") or "").lower() == layer_name.lower()
+                )
+            ]
 
+        eligible = _pool(require_layer=True) or _pool(require_layer=False)
         if not eligible:
             return None
 
         artifact = random.choice(eligible)
-
-        # Add to player artifacts
-        self.dig_repo.add_artifact(
-            discord_id, guild_id,
-            artifact_id=artifact["id"],
-            name=artifact["name"],
-            rarity=hit_rarity,
-            artifact_type=artifact.get("type", "trophy"),
-        )
-
-        # Register in guild museum
-        self.dig_repo.register_museum_artifact(
-            guild_id,
-            artifact_id=artifact["id"],
-            first_finder_id=discord_id,
-        )
-
+        self.dig_repo.add_artifact(discord_id, guild_id, artifact["id"], is_relic=True)
         return {
             "id": artifact["id"],
             "name": artifact["name"],
-            "rarity": hit_rarity,
-            "type": artifact.get("type", "trophy"),
-            "description": artifact.get("description", ""),
+            "rarity": "rare",
+            "type": "relic",
+            "is_relic": True,
+            "description": artifact.get("lore_text", ""),
         }
 
     def gift_relic(self, giver_id: int, receiver_id: int, guild_id, artifact_id: str) -> dict:
@@ -703,14 +741,6 @@ class GearMixin:
     def get_collection(self, discord_id: int, guild_id) -> dict:
         """Return all artifacts grouped by layer and rarity."""
         return self.leaderboard_service.get_collection(discord_id, guild_id)
-
-    # ------------------------------------------------------------------
-    # Museum
-    # ------------------------------------------------------------------
-
-    def get_museum(self, guild_id) -> dict:
-        """Return guild artifact registry with first finders and counts."""
-        return self.leaderboard_service.get_museum(guild_id)
 
     # ------------------------------------------------------------------
     # Events

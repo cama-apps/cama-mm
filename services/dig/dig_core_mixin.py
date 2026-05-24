@@ -628,6 +628,9 @@ class DigCoreMixin:
             advance = random.randint(base_min, base_max)
 
         advance += p["pickaxe_advance_bonus"] + p["mole_claws_bonus"] + p["buff_advance_bonus"]
+        # Relic: Pathfinder's Spur — +1 advance in the deep layers (depth 150+).
+        if depth_before >= 150 and self._has_relic(discord_id, guild_id, "pathfinders_spur"):
+            advance += 1
         # Temp-curse advance modifier (negative = slowed dig)
         advance += int(p.get("curse_advance_bonus", 0))
         advance += int(p["weather_fx"].get("advance_bonus", 0))
@@ -670,6 +673,7 @@ class DigCoreMixin:
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id,
             weather_code=self._get_weather_code(guild_id, layer_name),
+            luminosity=luminosity,
         )
         jc_earned = (
             int(

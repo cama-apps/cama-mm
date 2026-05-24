@@ -543,6 +543,17 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
                     value=f"**{rd.get('name', 'Relic')}**",
                     inline=False,
                 )
+        trophy_drop = getattr(result, "trophy_relic_drop", None)
+        if trophy_drop:
+            td = trophy_drop if isinstance(trophy_drop, dict) else (
+                trophy_drop._d if hasattr(trophy_drop, "_d") else None
+            )
+            if td:
+                embed.add_field(
+                    name="Trophy Carved",
+                    value=f"**{td.get('name', 'Trophy')}**",
+                    inline=False,
+                )
     else:
         loss = abs(getattr(result, "jc_delta", 0)) or amount
         knockback = getattr(result, "knockback", 0)

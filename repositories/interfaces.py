@@ -1794,16 +1794,6 @@ class IDigRepository(ABC):
     @abstractmethod
     def repair_gear(self, gear_id: int, to_durability: int) -> None: ...
 
-    # Artifact Registry
-    @abstractmethod
-    def register_artifact_find(self, artifact_id: str, guild_id: int, finder_id: int, found_at: int) -> bool: ...
-
-    @abstractmethod
-    def get_registry(self, guild_id: int) -> list[dict]: ...
-
-    @abstractmethod
-    def get_registry_entry(self, artifact_id: str, guild_id: int) -> dict | None: ...
-
     # Atomic Operations
     @abstractmethod
     def atomic_tunnel_balance_update(

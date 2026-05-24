@@ -31,6 +31,7 @@ class BossDef:
     # the {boss} token to reference the boss name.
     victory_lines: tuple[str, ...] = ()
     defeat_lines: tuple[str, ...] = ()
+    trophy_relic_id: str = ""        # signature trophy relic carve-dropped on defeat
 
 
 # Fallback flavor pools — used when a BossDef doesn't define its own.
@@ -619,43 +620,44 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "xalatath": BossDef(
         depth=150,
         boss_id="xalatath",
-        name="Xal'atath",
-        title="Voidweaver",
+        name="The Whispering Edge",
+        title="What the Dark Reads Aloud",
         ascii_art=(
-            "   . - . - .\n"
-            "  -  ((  )) -\n"
-            " .   \\___/   .\n"
-            "  -  ~vvv~  -\n"
-            "   . - . - .\n"
+            "   \\  .--.  /\n"
+            "    \\(    )/\n"
+            "  --)  \"\"  (--\n"
+            "    /(    )\\\n"
+            "   /  '--'  \\\n"
         ),
         dialogue=[
-            "You carry something. I can taste the shape of it.",
-            "Again. The carrying hasn't helped.",
-            "Still holding it? Set it down. It weighs differently than you think.",
-            "STILL. After everything I said.",
-            "Set it down. I am bored of asking.",
+            "I have read ahead. You do poorly in the part that comes next.",
+            "Again. The page hasn't changed. You still don't like the ending.",
+            "Set me down and listen. No? Then I'll narrate while you bleed.",
+            "STILL carrying me toward your own grave. How literary.",
+            "Go. I'll be here, reading aloud to the next one.",
         ],
         mechanic_pool=("xalatath_void_pull", "xalatath_whisper_madness"),
         stinger_id="xalatath_unraveling",
         prestige_required=3,
+        trophy_relic_id="listening_shard",
         victory_lines=(
-            "{boss} folds. The whisper folds with her. Stone stops carrying it.",
+            "{boss} folds. The whisper folds with it. Stone stops carrying the sound.",
             "{boss} unravels into syllables that don't fit anywhere. They leave.",
-            "{boss} lays down quietly. You realize you can hear yourself again.",
-            "Something in {boss}'s mouth stops moving. The cave gets less wrong.",
+            "{boss} goes dull and quiet. You realize you can hear yourself again.",
+            "Something stops reading over your shoulder. The cave gets less wrong.",
         ),
         defeat_lines=(
-            "{boss} keeps speaking. The words go in. They don't come out.",
-            "You leave. You leave it. You don't know what 'it' was. {boss} is calmer now.",
-            "Something walks home in your boots. {boss} is patient.",
-            "{boss} folds the whisper back into her teeth. She'll save it for later.",
+            "{boss} keeps narrating. You don't like your character's choices.",
+            "You leave with a sentence stuck in your head that isn't yours. {boss} is satisfied.",
+            "Something walks home reciting. {boss} saved its place.",
+            "{boss} reads you the way back. It is the long way.",
         ),
     ),
     "lilith": BossDef(
         depth=200,
         boss_id="lilith",
-        name="Lilith",
-        title="Daughter of Hatred",
+        name="The Red Mother",
+        title="All Things Return to Hatred",
         ascii_art=(
             "  \\  ___  /\n"
             " \\ /     \\ /\n"
@@ -665,15 +667,16 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "    \\ v /\n"
         ),
         dialogue=[
-            "All things return to hatred. You are no exception.",
-            "You return. Hatred is patient. Hatred waited.",
-            "Bleed. The deep drinks bleed. The deep is grateful.",
-            "YOU. AGAIN. My hatred is tireless. Is yours?",
-            "Come, then. Cycle is cycle. Eternity is exhausting.",
+            "Come to me. Everything does, in the end, on its knees.",
+            "You return. A mother never forgets a face she's bled.",
+            "Bleed for me. The deep is thirsty and I am its favorite child.",
+            "YOU. AGAIN. My patience is long. My children are longer.",
+            "Go, then. Hatred keeps. I'll warm your seat by the dark.",
         ],
         mechanic_pool=("lilith_blood_nova", "lilith_wing_descent"),
         stinger_id="lilith_hemorrhage",
         prestige_required=3,
+        trophy_relic_id="hateborn_ember",
         victory_lines=(
             "{boss} kneels. Hatred has a posture and it doesn't fit her any more.",
             "{boss} bleeds out gracefully — no more graceful than blood allows.",
@@ -727,6 +730,126 @@ _DOTA_BOSSES: dict[str, BossDef] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Prestige-4 "twisted homage" bosses. Seed evenly into the existing deep-tier
+# pools (one per tier) and only appear once a tunnel has prestiged four times.
+# Each carve-drops a signature trophy relic (trophy_relic_id) on defeat.
+# ---------------------------------------------------------------------------
+_PRESTIGE4_BOSSES: dict[str, BossDef] = {
+    "blightcoil": BossDef(
+        depth=150,
+        boss_id="blightcoil",
+        name="The Blightcoil",
+        title="It Seeds the Garden Below",
+        ascii_art=(
+            "    ~~ssss~~\n"
+            "   ( v    v )\n"
+            "  /  )____(  \\\n"
+            "  \\ ~~~~~~~~ /\n"
+            "   \\||||||//\n"
+            "    ~spores~\n"
+        ),
+        dialogue=[
+            "Breathe deep. The garden is always accepting new soil.",
+            "You return. The spores remembered the shape of your lungs.",
+            "Hold still — you're so nearly ready to bloom.",
+            "YOU AGAIN. Do you know how long it takes to re-seed a tunnel?",
+            "Fine. Go. You'll be coughing up little green ideas for weeks.",
+        ],
+        mechanic_pool=("blightcoil_wards", "blightcoil_nova"),
+        stinger_id="blightcoil_venom",
+        prestige_required=4,
+        trophy_relic_id="weeping_fang",
+        victory_lines=(
+            "{boss} sags into the mulch it spent so long tending.",
+            "{boss} exhales one last spore and goes quiet in the damp.",
+            "The wards wilt. {boss} settles into the floor it seeded.",
+            "{boss} coils smaller and smaller, then is only soil again.",
+        ),
+        defeat_lines=(
+            "{boss} doesn't chase. The spores in your chest do that for it.",
+            "You leave coughing. {boss} is already re-seeding the dark behind you.",
+            "{boss} watches you stagger off, patient as rot.",
+            "Something green takes root on the climb up. {boss} hums, pleased.",
+        ),
+    ),
+    "rimebound_king": BossDef(
+        depth=200,
+        boss_id="rimebound_king",
+        name="The Rimebound King",
+        title="Crowned in Ice, Hollow Beneath",
+        ascii_art=(
+            "    ,@@@@@,\n"
+            "   { ^   ^ }\n"
+            "   {  >|<  }\n"
+            "    \\ === /\n"
+            "   __|||||__\n"
+            "  [_=ICE=_]\n"
+        ),
+        dialogue=[
+            "Kneel. The cold does not ask twice.",
+            "You return to my frozen hall. The throne has been... so quiet.",
+            "I had a kingdom. Now I have a draft and a dirt-sized intruder.",
+            "YOU AGAIN. The crown is cold. My patience is colder.",
+            "Take the hall. The throne was always too big — and the heating, the heating—",
+        ],
+        mechanic_pool=("rimebound_harvest", "rimebound_raise"),
+        stinger_id="rimebound_soulchill",
+        prestige_required=4,
+        trophy_relic_id="runebitten_shard",
+        victory_lines=(
+            "{boss} sinks onto a throne of ice that finally accepts his weight.",
+            "The crown dims. {boss} stops being a king and starts being weather.",
+            "{boss} sets the runeblade down. The cold loses interest in you.",
+            "{boss} freezes mid-decree, regal to the last.",
+        ),
+        defeat_lines=(
+            "{boss} does not rise from the throne. He does not have to.",
+            "The runeblade drinks something warm out of you. {boss} looks briefly less hollow.",
+            "You retreat through your own breath-fog. {boss} resumes his long, cold sulk.",
+            "{boss} taps the armrest once. The cold walks you home.",
+        ),
+    ),
+    "spineback": BossDef(
+        depth=275,
+        boss_id="spineback",
+        name="The Spineback",
+        title="It Grows Back What You Break",
+        ascii_art=(
+            "    /\\____/\\\n"
+            "   /^^^^^^^^\\\n"
+            "  < O      O >\n"
+            "   \\   /\\   /\n"
+            "    \\^^^^^^/\n"
+            "   /||||||||\\\n"
+        ),
+        dialogue=[
+            "The walls here are scored with claw-marks at every height.",
+            "A shed spine the length of your arm lies across the path. It twitches in your light.",
+            "The dark ahead breathes. Each breath shakes a little more black stone loose.",
+            "It has noticed you now. The marks on the walls were only practice.",
+            "The spines it sheds are already growing back. It is not worried about the fight.",
+        ],
+        mechanic_pool=("spineback_regrowth", "spineback_divebomb"),
+        stinger_id="spineback_rend",
+        prestige_required=4,
+        trophy_relic_id="aching_spine",
+        victory_lines=(
+            "{boss} folds down around its own spines and stops. The dark keeps breathing a while longer.",
+            "Something vast settles. {boss} sheds one last spine; it does not grow back.",
+            "{boss} goes still. The claw-marks on the walls are suddenly only marks.",
+            "You climb over {boss}. It is warm, enormous, and finally quiet.",
+        ),
+        defeat_lines=(
+            "{boss} does not roar. It simply removes you from its tunnel.",
+            "A spine you were sure you'd broken catches you on the way down.",
+            "You wake far up the shaft. {boss} is already growing back what you took.",
+            "{boss} sheds, and the shed thing is faster than you are.",
+        ),
+    ),
+}
+
+
 # BOSSES_BY_TIER: new canonical per-tier grouping. The first entry per tier
 # is the grandfathered fantasy boss (preserved from ``BOSSES``); the remaining
 # entries are the Dota-themed additions. All gameplay code that selects
@@ -737,9 +860,9 @@ BOSSES_BY_TIER: dict[int, list[BossDef]] = {
     50:  [BOSSES[50],  _DOTA_BOSSES["crystal_maiden"],   _DOTA_BOSSES["tusk"]],
     75:  [BOSSES[75],  _DOTA_BOSSES["lina"],             _DOTA_BOSSES["doom"]],
     100: [BOSSES[100], _DOTA_BOSSES["spectre"],          _DOTA_BOSSES["void_spirit"]],
-    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _DOTA_BOSSES["xalatath"]],
-    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _DOTA_BOSSES["lilith"]],
-    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _DOTA_BOSSES["underlord"]],
+    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _DOTA_BOSSES["xalatath"],  _PRESTIGE4_BOSSES["blightcoil"]],
+    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _DOTA_BOSSES["lilith"],    _PRESTIGE4_BOSSES["rimebound_king"]],
+    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _DOTA_BOSSES["underlord"], _PRESTIGE4_BOSSES["spineback"]],
 }
 
 
@@ -865,6 +988,10 @@ BOSS_ARCHETYPE_BY_ID: dict[str, str] = {
     "oracle":              "glass_cannon",
     "terrorblade":         "glass_cannon",
     "underlord":           "tank",
+    # Prestige-4 additions
+    "blightcoil":          "bruiser",
+    "rimebound_king":      "tank",
+    "spineback":           "bruiser",
 }
 
 # Payouts: depth -> (cautious_multiplier, bold_multiplier, reckless_multiplier).
@@ -1061,6 +1188,136 @@ BOSS_PHASE3: dict[int, BossPhase3Def] = {
         win_odds_penalty=-0.20,
     ),
 }
+
+
+# Per-boss phase overrides — bespoke escalation for the prestige-4 bosses and the
+# two reskins so they don't borrow another boss's phase dialogue. Any boss without
+# an entry here falls back to the depth-keyed dicts above, via the resolvers.
+BOSS_PHASE2_BY_ID: dict[str, BossPhase2Def] = {
+    "blightcoil": BossPhase2Def(
+        depth=150,
+        name="The Blightcoil, Unbudding",
+        title="It Was Only Half a Plant",
+        dialogue=[
+            "You cut the stalk. Good. Now you meet the root.",
+            "The garden was the polite part. This is the compost.",
+            "Photosynthesis was never the plan. Decomposition is.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "rimebound_king": BossPhase2Def(
+        depth=200,
+        name="The Rimebound King, Unthroned",
+        title="The Crown Comes Off Hard",
+        dialogue=[
+            "Fine. No more decorum, no more throne. Just the cold and the blade.",
+            "A king is a costume. Underneath, I am only winter.",
+            "You wanted the man without the crown. Here he is. He is worse.",
+        ],
+        win_odds_penalty=-0.13,
+    ),
+    "spineback": BossPhase2Def(
+        depth=275,
+        name="The Spineback, Shedding",
+        title="It Is Not Done Growing",
+        dialogue=[
+            "It sheds its whole hide at once. What's underneath is darker, and ready.",
+            "Every spine you broke is back, longer. It seems pleased with the trade.",
+            "The tunnel narrows around it. Or it is simply getting bigger.",
+        ],
+        win_odds_penalty=-0.13,
+    ),
+    "xalatath": BossPhase2Def(
+        depth=150,
+        name="The Whispering Edge, Unsheathed",
+        title="Now Read It Backwards",
+        dialogue=[
+            "You closed the book. I'll recite from memory. I have all of them.",
+            "The whisper was the cover. This is the text.",
+            "I have read your ending twice now. It improves on the reread.",
+        ],
+        win_odds_penalty=-0.13,
+    ),
+    "lilith": BossPhase2Def(
+        depth=200,
+        name="The Red Mother, Unveiled",
+        title="Hatred Wears No Mask Here",
+        dialogue=[
+            "You wanted to see me without the kindness. Look closely.",
+            "A mother's love and a mother's hate share a face. Meet the other one.",
+            "I bled for all my children. Now you bleed for me.",
+        ],
+        win_odds_penalty=-0.13,
+    ),
+}
+
+BOSS_PHASE3_BY_ID: dict[str, BossPhase3Def] = {
+    "blightcoil": BossPhase3Def(
+        depth=150,
+        name="The Whole Garden",
+        title="Every Spore Was Listening",
+        dialogue=[
+            "You are standing in me. You have been, for a while now.",
+            "The wards were seeds. The seeds were patient. You were soil.",
+            "Bloom or rot. The garden accepts both equally.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    "rimebound_king": BossPhase3Def(
+        depth=200,
+        name="The Long Winter",
+        title="Nothing Was Ever Warm Here",
+        dialogue=[
+            "There is no spring at this depth. There is only my season.",
+            "Kneel or freeze. Most do both, eventually.",
+            "The runeblade is hungry. I have stopped telling it no.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "spineback": BossPhase3Def(
+        depth=275,
+        name="The Spineback, Endless",
+        title="It Grows Faster Than You Cut",
+        dialogue=[
+            "There is no exposed flesh left — only spine, and the dark behind it.",
+            "It has stopped shedding. There is nothing left to shed but you.",
+            "The claw-marks on the walls reach the ceiling now. They are fresh.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "xalatath": BossPhase3Def(
+        depth=150,
+        name="The Last Page",
+        title="It Was Always About You",
+        dialogue=[
+            "Every story I told was this one. You just now noticed.",
+            "Set me down. You can't. I've read that part. You don't.",
+            "The dark finishes the sentence. You were the punctuation.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "lilith": BossPhase3Def(
+        depth=200,
+        name="The First Hatred",
+        title="She Was Here Before the Dark",
+        dialogue=[
+            "Before the deep, before the stone, there was the grudge. I am its mother.",
+            "Everything down here is mine. You are a late and noisy arrival.",
+            "Return to hatred. You were only ever borrowed from it.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+}
+
+
+def get_phase2_for(boss_id: str, depth: int) -> BossPhase2Def | None:
+    """Phase-2 def for a boss: bespoke per-id override, else the depth default."""
+    return BOSS_PHASE2_BY_ID.get(boss_id) or BOSS_PHASE2.get(depth)
+
+
+def get_phase3_for(boss_id: str, depth: int) -> BossPhase3Def | None:
+    """Phase-3 def for a boss: bespoke per-id override, else the depth default."""
+    return BOSS_PHASE3_BY_ID.get(boss_id) or BOSS_PHASE3.get(depth)
 
 
 # ---------------------------------------------------------------------------

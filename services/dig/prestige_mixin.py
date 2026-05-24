@@ -185,11 +185,20 @@ class PrestigeMixin:
             mutation_info = {"forced": forced, "chosen": active_mutations[-1] if len(active_mutations) > 1 else None}
 
         # Flat prestige grant: 1000 JC + one rare-or-better relic.
-        from services.dig_constants import RELICS
+        from services.dig_constants import RELICS, TROPHY_RELIC_IDS
 
         prestige_jc_grant = 1000
+        # Relics are unique and signature trophies are carve-only — exclude
+        # owned relics and trophies from the grant pool.
+        owned = {
+            dict(a).get("artifact_id")
+            for a in (self.dig_repo.get_artifacts(discord_id, guild_id) or [])
+        }
         eligible_relic_ids = [
-            r.id for r in RELICS if r.rarity in ("Rare", "Legendary")
+            r.id for r in RELICS
+            if r.rarity in ("Rare", "Legendary")
+            and r.id not in TROPHY_RELIC_IDS
+            and r.id not in owned
         ]
         granted_relic = None
         if eligible_relic_ids:

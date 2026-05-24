@@ -71,6 +71,7 @@ ARTIFACT_POOL: list[dict] = [
     {
         "id": a.id, "name": a.name, "layer": a.layer, "rarity": a.rarity,
         "lore_text": a.lore_text, "is_relic": a.is_relic, "effect": a.effect,
+        "min_prestige": a.min_prestige,
     }
     for a in ALL_ARTIFACTS
 ]

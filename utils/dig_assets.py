@@ -68,6 +68,10 @@ BOSS_SLUGS: dict[str, str] = {
     "xalatath": "xalatath",
     "lilith": "lilith",
     "underlord": "underlord",
+    # Prestige-4 twisted-homage roster — slug == boss_id.
+    "blightcoil": "blightcoil",
+    "rimebound_king": "rimebound_king",
+    "spineback": "spineback",
     # Pinnacle (depth 300) — slug == boss_id.
     "forgotten_king": "forgotten_king",
     "hollowforged": "hollowforged",
