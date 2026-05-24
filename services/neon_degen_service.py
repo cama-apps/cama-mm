@@ -1156,6 +1156,10 @@ class NeonDegenService:
             if not self._roll(0.50):
                 return None
 
+            logger.info(
+                "Bomb pot neon firing for guild %s (pool=%s, contributors=%s)",
+                guild_id, pool_amount, contributor_count,
+            )
             # Layer 3: Bomb pot GIF
             try:
                 from utils.neon_drawing import create_bomb_pot_gif
@@ -1163,7 +1167,7 @@ class NeonDegenService:
                 text = render_bomb_pot(pool_amount, contributor_count)
                 return NeonResult(layer=3, text_block=text, gif_file=gif)
             except Exception as e:
-                logger.debug(f"Bomb pot GIF failed: {e}")
+                logger.warning(f"Bomb pot GIF render failed, falling back to text: {e}")
                 # Fall back to text only
                 text = render_bomb_pot(pool_amount, contributor_count)
                 return NeonResult(layer=2, text_block=text)

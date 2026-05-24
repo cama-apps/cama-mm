@@ -2630,7 +2630,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT match_id, winning_team, match_date,
+                SELECT match_id, guild_id, winning_team, match_date,
                        team1_players, team2_players
                 FROM matches
                 WHERE guild_id = ? AND winning_team IN (1, 2)
@@ -2642,6 +2642,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return [
                 {
                     "match_id": row["match_id"],
+                    "guild_id": row["guild_id"],
                     "winning_team": row["winning_team"],
                     "match_date": row["match_date"],
                     "team1_players": json.loads(row["team1_players"]),
