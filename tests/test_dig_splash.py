@@ -301,3 +301,44 @@ class TestSplashGrantMode:
         )
         assert result.victims == [(10002, 10)]
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == -15
+
+
+class TestResolveSplashDeepest:
+    """The deepest_n strategy targets the deepest tunnels and never the digger."""
+
+    def test_deepest_n_targets_deepest_excluding_digger(self, dig_repo, player_repository):
+        # Digger plus three potential victims, all starting at balance 100.
+        _register(player_repository, 10001, balance=100)  # digger — DEEPEST, must be excluded
+        _register(player_repository, 10002, balance=100)
+        _register(player_repository, 10003, balance=100)
+        _register(player_repository, 10004, balance=100)
+
+        # Give each a tunnel and set depths. The digger is the single deepest
+        # tunnel, so if the selector ignored the digger exclusion it would be
+        # picked first.
+        for did, depth in ((10001, 500), (10002, 200), (10003, 150), (10004, 50)):
+            dig_repo.create_tunnel(did, TEST_GUILD_ID, "T")
+            dig_repo.update_tunnel(did, TEST_GUILD_ID, depth=depth)
+
+        result = resolve_splash(
+            player_repo=player_repository,
+            dig_repo=dig_repo,
+            guild_id=TEST_GUILD_ID,
+            digger_id=10001,
+            event_name="The Deep Hunter",
+            strategy="deepest_n",
+            victim_count=2,
+            penalty_jc=10,
+        )
+
+        victim_ids = [vid for vid, _ in result.victims]
+        # Digger is deepest but excluded; the two deepest non-diggers are hit.
+        assert victim_ids == [10002, 10003]
+        assert 10001 not in victim_ids
+        # Each victim burned exactly the penalty; shallower 10004 untouched.
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 90
+        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 90
+        assert player_repository.get_balance(10004, TEST_GUILD_ID) == 100
+        # Digger's own balance is not touched by the splash.
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100
+        assert result.total_burned == 20

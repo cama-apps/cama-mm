@@ -1470,22 +1470,27 @@ def test_mario_kart_wedges_on_all_wheels():
             assert mechanic in values, f"{mechanic} missing from {wheel_name} wheel"
 
 
-def test_wheels_sorted_by_color_code():
-    """Each wheel's wedges are ordered by ascending hex color string."""
+def test_wheels_in_rainbow_order():
+    """Each wheel's wedges form a rainbow: hue bands ascending, brightness ascending within a band."""
     from utils.wheel_drawing import (
         BANKRUPT_WHEEL_WEDGES,
         GOLDEN_WHEEL_WEDGES,
         WHEEL_WEDGES,
+        _hue_sort_key,
     )
     for wheel_name, wheel in (
         ("regular", WHEEL_WEDGES),
         ("bankrupt", BANKRUPT_WHEEL_WEDGES),
         ("golden", GOLDEN_WHEEL_WEDGES),
     ):
-        colors = [w[2].lower() for w in wheel]
-        assert colors == sorted(colors), (
-            f"{wheel_name} wheel wedges out of color order:\n{colors}"
+        keys = [_hue_sort_key(w[2]) for w in wheel]
+        assert keys == sorted(keys), (
+            f"{wheel_name} wheel not in rainbow order:\n{keys}"
         )
+
+    # Concrete rainbow semantics: red precedes green precedes blue on the regular wheel.
+    colors = [w[2].lower() for w in WHEEL_WEDGES]
+    assert colors.index("#e74c3c") < colors.index("#228b22") < colors.index("#3498db")
 
 
 def test_bankrupt_wheel_jackpot_is_gold():

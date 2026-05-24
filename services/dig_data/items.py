@@ -50,11 +50,13 @@ PICKAXE_TIERS: list[dict] = [
 # ---------------------------------------------------------------------------
 # Boss-combat Gear
 # ---------------------------------------------------------------------------
-# Three persistent slots (Weapon, Armor, Boots) modify boss-fight stats.
-# Each slot has 7 tiers reusing the existing pickaxe names (Wooden →
-# Void-Touched). Shop sells Wooden–Diamond; Obsidian–Void-Touched are
-# boss-drop-only. Durability ticks once per boss fight; at zero the
-# piece auto-unequips and must be repaired before re-equipping.
+# Four persistent slots (Weapon, Armor, Boots, Amulet) modify boss-fight
+# stats. Weapon/Armor/Boots reuse the existing pickaxe names (Wooden →
+# Void-Touched); Amulet uses a hybrid material+suffix scheme (Stone
+# Pendant, Iron Talisman, Diamond Charm, ...). Shop sells Wooden–Diamond;
+# Obsidian–Void-Touched are boss-drop-only. Durability ticks once per
+# boss fight; at zero the piece auto-unequips and must be repaired
+# before re-equipping.
 
 from domain.models.dig_gear import GearSlot, GearTierDef  # noqa: E402
 
@@ -156,10 +158,33 @@ BOOTS_TIERS: list[GearTierDef] = [
                 boss_hit_reduction=0.13, shop_price=1500, depth_required=275, prestige_required=5),
 ]
 
+# Amulet adds crit_chance and crit_bonus. Pure boss-combat stat; no
+# milestone grants, no dig-flow effects. Crit values stack additively
+# with the risk-tier (Bold/Reckless) values inside _apply_gear_to_combat.
+AMULET_TIERS: list[GearTierDef] = [
+    GearTierDef("Twine Cord",            tier=0, slot=GearSlot.AMULET,
+                crit_chance=0.00, crit_bonus=0, shop_price=0),
+    GearTierDef("Stone Pendant",         tier=1, slot=GearSlot.AMULET,
+                crit_chance=0.02, crit_bonus=0, shop_price=25,   depth_required=25),
+    GearTierDef("Iron Talisman",         tier=2, slot=GearSlot.AMULET,
+                crit_chance=0.04, crit_bonus=0, shop_price=70,   depth_required=50),
+    GearTierDef("Diamond Charm",         tier=3, slot=GearSlot.AMULET,
+                crit_chance=0.06, crit_bonus=0, shop_price=200,  depth_required=75),
+    GearTierDef("Obsidian Amulet",       tier=4, slot=GearSlot.AMULET,
+                crit_chance=0.07, crit_bonus=1, shop_price=400,  depth_required=100, prestige_required=1),
+    GearTierDef("Stormrend Necklace",    tier=5, slot=GearSlot.AMULET,
+                crit_chance=0.08, crit_bonus=1, shop_price=600,  depth_required=150, prestige_required=2),
+    GearTierDef("Frostforged Pendant",   tier=6, slot=GearSlot.AMULET,
+                crit_chance=0.09, crit_bonus=1, shop_price=800,  depth_required=200, prestige_required=3),
+    GearTierDef("Void-Touched Talisman", tier=7, slot=GearSlot.AMULET,
+                crit_chance=0.10, crit_bonus=1, shop_price=1500, depth_required=275, prestige_required=5),
+]
+
 GEAR_TIER_TABLES: dict[GearSlot, list[GearTierDef]] = {
     GearSlot.WEAPON: WEAPON_TIERS,
     GearSlot.ARMOR:  ARMOR_TIERS,
     GearSlot.BOOTS:  BOOTS_TIERS,
+    GearSlot.AMULET: AMULET_TIERS,
 }
 
 
@@ -251,7 +276,13 @@ CONSUMABLES: dict[str, Consumable] = {
             "legendary_weight_mult": 1.5,
         },
     ),
+    "streak_charm": Consumable(
+        id="streak_charm",
+        name="Streak Charm",
+        cost=15,
+        description="Passively saves one daily dig streak after exactly one missed day.",
+        params={"missed_day_saves": 1},
+    ),
 }
 
 HARD_HAT_USES: int = 3
-
