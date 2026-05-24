@@ -141,8 +141,11 @@ class GearMixin:
             credit = min(int(elapsed_min // 2), cap_remaining)  # 0.5/min ≈ 1 per 2 min
             if credit <= 0:
                 return 0
-            self.player_repo.add_balance(discord_id, guild_id, credit)
+            # Record the claim before crediting: if the credit write fails, the
+            # daily cap is already consumed (player just misses out) rather than
+            # leaving the claim unrecorded and re-claimable.
             self.slow_drip_repo.add_claim(discord_id, guild_id, today, credit)
+            self.player_repo.add_balance(discord_id, guild_id, credit)
             return credit
         except Exception:
             logger.debug("Slow Drip claim failed", exc_info=True)

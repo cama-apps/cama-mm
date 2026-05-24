@@ -761,13 +761,13 @@ class TestRelicLabelFormatter:
 
     def test_pinnacle_without_stats(self):
         pid = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1"
-        assert format_relic_label(pid) == "Pickaxe of Patience"
+        assert format_relic_label(pid) == "Pickaxe of Feints and Scales"
 
     def test_pinnacle_with_stats(self):
         pid = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1"
         assert (
             format_relic_label(pid, with_stats=True)
-            == "Pickaxe of Patience (Bosses miss more often, Tougher skin)"
+            == "Pickaxe of Feints and Scales (Bosses miss more often, Tougher skin)"
         )
 
     def test_unknown_plain_id_returns_raw(self):
@@ -777,5 +777,62 @@ class TestRelicLabelFormatter:
         pid = "pinnacle:Pickaxe:Patience:bogus_stat:hp_plus_1"
         assert (
             format_relic_label(pid, with_stats=True)
-            == "Pickaxe of Patience (Tougher skin)"
+            == "Pickaxe of Scales (Tougher skin)"
         )
+
+    def test_pinnacle_legacy_suffix_rederived_from_stats(self):
+        # Two legacy relics that randomly rolled the SAME pool suffix but
+        # different stats must no longer collide -- the name is re-derived.
+        a = "pinnacle:Pickaxe:Patience:scout_free:durability_minus"
+        b = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1"
+        assert format_relic_label(a) == "Pickaxe of Patience and Scouting"
+        assert format_relic_label(b) == "Pickaxe of Feints and Scales"
+        assert format_relic_label(a) != format_relic_label(b)
+
+    def test_pinnacle_name_is_order_independent(self):
+        # Same stat set, opposite roll order -> identical name.
+        a = "pinnacle:Heart:Echoes:boss_payout_5:boss_hp_minus_10"
+        b = "pinnacle:Heart:Ruin:boss_hp_minus_10:boss_payout_5"
+        assert (
+            format_relic_label(a)
+            == format_relic_label(b)
+            == "Heart of Tribute and Withering"
+        )
+
+    def test_pinnacle_quest_suffix_preserved(self):
+        # Quest relics carry a bespoke suffix (not in the random pool) and keep
+        # it rather than being re-derived from the stats.
+        pid = "pinnacle:Cloak of the Necropolis:Long Silence:boss_payout_5:jc_plus_5"
+        assert format_relic_label(pid) == "Cloak of the Necropolis of Long Silence"
+
+    def test_pinnacle_stat_titles_cover_pool(self):
+        # Every rollable stat needs a DISTINCT title word, or relic names could
+        # collide or render blank.
+        from services.dig_data.bosses import (
+            _PINNACLE_STAT_TITLE_BY_ID,
+            PINNACLE_RELIC_STAT_POOL,
+        )
+
+        titles = [
+            _PINNACLE_STAT_TITLE_BY_ID.get(s.id) for s in PINNACLE_RELIC_STAT_POOL
+        ]
+        assert all(titles), "every pinnacle stat must map to a title word"
+        assert len(set(titles)) == len(titles), "title words must be distinct"
+
+    def test_quest_relic_suffixes_avoid_legacy_pool(self):
+        # format_relic_label only re-derives a stored suffix when it's empty or a
+        # legacy random-pool word. A quest relic whose bespoke suffix collided
+        # with PINNACLE_RELIC_SUFFIX_POOL would be misread as legacy and silently
+        # re-derived from its stats, dropping the hand-authored name. Guard it.
+        from services.dig_data.bosses import PINNACLE_RELIC_SUFFIX_POOL
+        from services.dig_data.quests import QUESTS
+
+        pool = set(PINNACLE_RELIC_SUFFIX_POOL)
+        for q in QUESTS:
+            suffix = q.finale_payload.get("relic_suffix")
+            if suffix is not None:
+                assert suffix not in pool, (
+                    f"Quest {q.quest_id!r} relic_suffix {suffix!r} collides with "
+                    "the legacy pinnacle suffix pool; format_relic_label would "
+                    "re-derive it and drop the bespoke name"
+                )

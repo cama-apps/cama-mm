@@ -1086,9 +1086,14 @@ class TestPinnacleRelicDrop:
         artifacts = dig_repo.get_artifacts(10001, TEST_GUILD_ID)
         assert any(a["artifact_id"].startswith("pinnacle:") for a in artifacts)
 
-    def test_drop_name_uses_pool_suffix(
+    def test_drop_name_derives_suffix_from_stats(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
+        # A dropped relic's suffix is derived from its two rolled stats (not a
+        # random pool word), so two drops with different stats never share a
+        # name. See services.dig_data.bosses.pinnacle_suffix_from_stats.
+        from services.dig_data.bosses import pinnacle_suffix_from_stats
+
         _register(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1100,7 +1105,8 @@ class TestPinnacleRelicDrop:
             )
             base = PINNACLE_RELIC_BASE_NAME[pid]
             suffix = relic["name"][len(base) + 4:]  # strip "<base> of "
-            assert suffix in PINNACLE_RELIC_SUFFIX_POOL
+            assert suffix == pinnacle_suffix_from_stats(relic["stat_ids"])
+            assert suffix  # non-empty
 
 
 # --- Build-info -------------------------------------------------------

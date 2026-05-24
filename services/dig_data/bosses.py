@@ -1659,6 +1659,50 @@ _PINNACLE_STAT_LABEL_BY_ID: dict[str, str] = {
     s.id: s.label for s in PINNACLE_RELIC_STAT_POOL
 }
 
+# One evocative title word per rolled stat. A pinnacle relic's suffix is built
+# from its two stats' titles (canonically ordered) so the display name is a pure
+# function of the rolled effects -- two relics with different rolls can no longer
+# share a name. Every stat in PINNACLE_RELIC_STAT_POOL must map to a DISTINCT
+# word (guarded by test_pinnacle_stat_titles_cover_pool).
+_PINNACLE_STAT_TITLE_BY_ID: dict[str, str] = {
+    "hp_plus_1": "Scales",
+    "hit_plus_002": "Precision",
+    "dmg_plus_per_100": "Depths",
+    "boss_hit_minus": "Feints",
+    "boss_hp_minus_10": "Withering",
+    "boss_payout_5": "Tribute",
+    "jc_plus_5": "Riches",
+    "cave_in_minus_5": "Bedrock",
+    "lum_refill_2": "Dawn",
+    "durability_minus": "Patience",
+    "inventory_plus_1": "Satchels",
+    "streak_immunity": "Persistence",
+    "extra_relic_slot": "Communion",
+    "scout_free": "Scouting",
+    "cheer_buff": "Acclaim",
+}
+
+# Legacy boss-drop relics stored a random suffix from this pool that ignored the
+# rolled stats, so names collided. format_relic_label re-derives their suffix
+# from the stats. Quest relics carry a bespoke suffix (absent here) and keep it.
+_PINNACLE_SUFFIX_POOL_SET: frozenset[str] = frozenset(PINNACLE_RELIC_SUFFIX_POOL)
+
+
+def pinnacle_suffix_from_stats(stat_ids: list[str]) -> str:
+    """Build a relic suffix from its rolled stat ids.
+
+    Each recognized stat contributes one title word; words are de-duplicated and
+    ordered canonically, so the same stat set always yields the same suffix
+    regardless of the order the stats were rolled in. Returns "" when no stats
+    are recognized.
+    """
+    titles = {
+        _PINNACLE_STAT_TITLE_BY_ID[sid]
+        for sid in stat_ids
+        if sid in _PINNACLE_STAT_TITLE_BY_ID
+    }
+    return " and ".join(sorted(titles, key=str.lower))
+
 
 def format_relic_label(artifact_id: str, *, with_stats: bool = False) -> str:
     """Render a relic's display name from its stored artifact_id.
@@ -1675,15 +1719,16 @@ def format_relic_label(artifact_id: str, *, with_stats: bool = False) -> str:
         if len(parts) >= 3:
             base = parts[1]
             suffix = parts[2]
-            label = f"{base} of {suffix}"
-            if with_stats:
-                stat_labels = [
-                    _PINNACLE_STAT_LABEL_BY_ID[sid]
-                    for sid in parts[3:]
-                    if sid in _PINNACLE_STAT_LABEL_BY_ID
-                ]
-                if stat_labels:
-                    label += f" ({', '.join(stat_labels)})"
+            stat_ids = [sid for sid in parts[3:] if sid in _PINNACLE_STAT_LABEL_BY_ID]
+            # Boss-drop relics store a legacy random-pool suffix (old) or none
+            # (defensive); both get a name derived from the stats so distinct
+            # relics never collide. Quest relics keep their bespoke suffix.
+            if stat_ids and (not suffix or suffix in _PINNACLE_SUFFIX_POOL_SET):
+                suffix = pinnacle_suffix_from_stats(stat_ids)
+            label = f"{base} of {suffix}" if suffix else base
+            if with_stats and stat_ids:
+                stat_labels = [_PINNACLE_STAT_LABEL_BY_ID[sid] for sid in stat_ids]
+                label += f" ({', '.join(stat_labels)})"
             return label
         return artifact_id
     return _RELIC_NAME_BY_ID.get(artifact_id, artifact_id)
