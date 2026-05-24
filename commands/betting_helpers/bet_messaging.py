@@ -185,7 +185,16 @@ async def send_betting_reminder(
                 content += f"\n\n💬 {flavor}"
             if ping_ids:
                 content += "\n" + " ".join(f"<@{pid}>" for pid in ping_ids)
-                allowed_mentions = discord.AllowedMentions(users=True)
+                # Scope strictly to the underdog players. The content carries an
+                # LLM-generated flavor line, and a bare ``users=True`` leaves the
+                # everyone/roles fields at a truthy default — so the model could
+                # broadcast an @everyone/@here. A users-list disables that.
+                allowed_mentions = discord.AllowedMentions(
+                    everyone=False,
+                    roles=False,
+                    replied_user=False,
+                    users=[discord.Object(id=pid) for pid in ping_ids],
+                )
     elif reminder_type == "last_call":
         if not lock_until:
             return
