@@ -46,6 +46,14 @@ def _make_cog():
     return cog, channel
 
 
+def _scoped_user_ids(send_mock):
+    """Ids the send was allowed to mention, asserting it's a scoped user list and
+    NOT a broad parse (everyone/roles off) — the content carries LLM output."""
+    am = send_mock.call_args.kwargs["allowed_mentions"]
+    assert am.everyone is False and am.roles is False
+    return {obj.id for obj in am.users}
+
+
 @pytest.mark.asyncio
 async def test_warning_reminder_is_terse_and_skips_flavor():
     cog, channel = _make_cog()
@@ -137,7 +145,7 @@ async def test_final_warning_lopsided_pings_underdog_team():
     for pid in (1001, 1002, 1003, 1004, 1005):
         assert f"<@{pid}>" in content
     assert "<@2001>" not in content
-    assert channel.send.call_args.kwargs["allowed_mentions"].users is True
+    assert _scoped_user_ids(channel.send) == {1001, 1002, 1003, 1004, 1005}
 
 
 @pytest.mark.asyncio
@@ -167,7 +175,7 @@ async def test_final_warning_exactly_at_threshold_pings():
     )
 
     assert cog.flavor_text_service.generate_betting_warning.call_args.kwargs["underdog_side"] == "radiant"
-    assert channel.send.call_args.kwargs["allowed_mentions"].users is True
+    assert _scoped_user_ids(channel.send) == {1001, 1002, 1003, 1004, 1005}
 
 
 @pytest.mark.asyncio
@@ -183,7 +191,7 @@ async def test_final_warning_one_sided_pool_pings_empty_side():
     assert cog.flavor_text_service.generate_betting_warning.call_args.kwargs["underdog_side"] == "radiant"
     content = channel.send.call_args.args[0]
     assert "<@1001>" in content
-    assert channel.send.call_args.kwargs["allowed_mentions"].users is True
+    assert _scoped_user_ids(channel.send) == {1001, 1002, 1003, 1004, 1005}
 
 
 @pytest.mark.asyncio
@@ -221,6 +229,8 @@ async def test_final_warning_filters_non_real_player_ids():
     assert "<@3002>" in content
     assert "<@0>" not in content
     assert "<@-5>" not in content
+    # The allowed-mentions list itself must exclude the non-real ids, not just the text.
+    assert _scoped_user_ids(channel.send) == {3001, 3002}
 
 
 @pytest.mark.asyncio
@@ -241,3 +251,74 @@ async def test_last_call_unchanged_even_when_lopsided():
     assert "ANNOUNCER LINE" in content
     assert "<@" not in content
     assert channel.send.call_args.kwargs["allowed_mentions"].users is False
+
+
+@pytest.mark.asyncio
+async def test_final_warning_ping_cannot_mass_mention():
+    """The ping carries an LLM-generated flavor line. Even if the model emits
+    '@everyone', allowed_mentions must scope to the underdog ids only — a bare
+    users=True would leave everyone/roles parseable and broadcast it."""
+    cog, channel = _make_cog()
+    cog.betting_service.get_pot_odds = MagicMock(return_value={"radiant": 100, "dire": 500})
+    cog.flavor_text_service.generate_betting_warning = AsyncMock(
+        return_value="@everyone @here the longshots need backers!"
+    )
+
+    await send_betting_reminder(
+        cog, 1, reminder_type="warning", lock_until=LOCK_TS,
+        pending_match_id=1, is_final_warning=True,
+    )
+
+    am = channel.send.call_args.kwargs["allowed_mentions"]
+    assert am.everyone is False
+    assert am.roles is False
+    assert {obj.id for obj in am.users} == {1001, 1002, 1003, 1004, 1005}
+    # The serialized payload parses nothing broad regardless of the text.
+    assert am.to_dict().get("parse") == []
+
+
+@pytest.mark.asyncio
+async def test_final_warning_thread_reply_also_pings_scoped():
+    """Reminders reply to the shuffle embed in its thread — the thread .reply
+    must carry the same scoped ping, not fall back to a broad/none mention."""
+    cog, channel = _make_cog()
+    cog.betting_service.get_pot_odds = MagicMock(return_value={"radiant": 100, "dire": 500})
+    cog.match_service.get_shuffle_message_info.return_value = {
+        "channel_id": 111,
+        "thread_message_id": 222,
+        "thread_id": 333,
+        "origin_channel_id": 111,
+    }
+    thread_message = MagicMock()
+    thread_message.reply = AsyncMock()
+    thread = MagicMock()
+    thread.fetch_message = AsyncMock(return_value=thread_message)
+    cog.bot.get_channel = MagicMock(side_effect=lambda cid: thread if cid == 333 else channel)
+
+    await send_betting_reminder(
+        cog, 1, reminder_type="warning", lock_until=LOCK_TS,
+        pending_match_id=1, is_final_warning=True,
+    )
+
+    thread_message.reply.assert_awaited_once()
+    assert _scoped_user_ids(thread_message.reply) == {1001, 1002, 1003, 1004, 1005}
+    assert "<@1001>" in thread_message.reply.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_final_warning_pings_even_without_flavor_service():
+    """Ping and flavor are independent: a missing flavor service drops the flavor
+    line but must NOT suppress the underdog ping."""
+    cog, channel = _make_cog()
+    cog.betting_service.get_pot_odds = MagicMock(return_value={"radiant": 100, "dire": 500})
+    cog.flavor_text_service = None
+
+    await send_betting_reminder(
+        cog, 1, reminder_type="warning", lock_until=LOCK_TS,
+        pending_match_id=1, is_final_warning=True,
+    )
+
+    content = channel.send.call_args.args[0]
+    assert "WARNING LINE" not in content  # no flavor line
+    assert "<@1001>" in content  # ping still fires
+    assert _scoped_user_ids(channel.send) == {1001, 1002, 1003, 1004, 1005}
