@@ -2,7 +2,6 @@
 Tests for DisburseService - nonprofit fund distribution voting and distribution.
 """
 
-import time
 from datetime import UTC
 
 import pytest
@@ -1261,24 +1260,35 @@ class TestGetIndividualVotes:
         assert votes == []
 
     def test_get_individual_votes_chronological(
-        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
+        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund, monkeypatch
     ):
-        """Test votes are returned in chronological order."""
+        """Test votes are returned in chronological order (ORDER BY voted_at ASC).
+
+        voted_at is recorded as ``int(time.time())`` in the repository, so a
+        real-time delay of 0.01s almost never changes the integer second and the
+        ordering would be decided by insertion order, not the timestamp. Inject
+        explicit, strictly-increasing voted_at values so the ORDER BY is exercised
+        deterministically and out-of-order insertion would still surface.
+        """
         disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
-        # Add votes with slight delays to ensure different timestamps
+        # Stamp distinct, increasing timestamps onto each successive vote.
+        import repositories.disburse_repository as disburse_repo_module
+
+        clock = iter([1_700_000_010, 1_700_000_020, 1_700_000_030])
+        monkeypatch.setattr(disburse_repo_module.time, "time", lambda: next(clock))
+
         disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
-        time.sleep(0.01)
         disburse_service.add_vote(TEST_GUILD_ID, 1004, "proportional")
-        time.sleep(0.01)
         disburse_service.add_vote(TEST_GUILD_ID, 1005, "neediest")
 
         votes = disburse_repo.get_individual_votes(TEST_GUILD_ID)
 
-        # Should be chronological
+        # Should be chronological by voted_at.
         assert votes[0]["discord_id"] == 1003
         assert votes[1]["discord_id"] == 1004
         assert votes[2]["discord_id"] == 1005
+        assert [v["voted_at"] for v in votes] == [1_700_000_010, 1_700_000_020, 1_700_000_030]
 
     def test_get_individual_votes_vote_change(
         self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund

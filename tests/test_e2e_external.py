@@ -51,22 +51,26 @@ class TestE2EOpenDotaIntegration:
         player = test_db.get_player(99999)  # Use non-existent ID
         assert player is None
 
-    @patch("opendota_integration.OpenDotaAPI.get_player_data")
-    @patch("opendota_integration.OpenDotaAPI.get_player_mmr")
-    def test_register_with_invalid_steam_id(self, mock_get_mmr, mock_get_data, test_db):
-        """Test registration with invalid Steam ID."""
-        # Mock OpenDota API to return None for invalid Steam ID
-        mock_get_data.return_value = None
-        mock_get_mmr.return_value = None
+    def test_register_with_invalid_steam_id(self, test_db):
+        """Invalid Steam IDs are rejected by the production validator.
 
-        invalid_steam_id = -1  # Invalid Steam ID
+        Exercises ``PlayerService._validate_steam_id`` directly (the same guard
+        commands/registration.py and commands/admin.py rely on) rather than
+        re-implementing the bounds check in the test. Negative, zero, and
+        out-of-Steam32-range IDs must raise; a valid Steam32 ID must not.
+        """
+        import pytest
 
-        # Validate Steam ID (what bot does)
-        if invalid_steam_id <= 0 or invalid_steam_id > 2147483647:
-            # Should reject invalid Steam ID
-            assert True, "Invalid Steam ID should be rejected"
+        from services.player_service import PlayerService
 
-        # Verify player was not added
+        for invalid in (-1, 0, 2147483648):
+            with pytest.raises(ValueError, match="Invalid Steam ID"):
+                PlayerService._validate_steam_id(invalid)
+
+        # Control: a legitimate Steam32 ID passes the guard without raising.
+        PlayerService._validate_steam_id(123456789)
+
+        # And no player was added as a side effect of the rejected attempts.
         player = test_db.get_player(99999)
         assert player is None
 

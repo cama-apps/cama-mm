@@ -39,10 +39,12 @@ class TestLobbyJoinTimestamps:
         """Switching from conditional to regular should keep the original timestamp."""
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         lobby.add_conditional_player(100)
-        original_time = lobby.player_join_times[100]
 
-        # Small delay to ensure times differ
-        time.sleep(0.01)
+        # Pin an explicit, deterministic original timestamp that is nowhere near
+        # "now". If the switch wrongly re-stamps the join time with the current
+        # clock, this sentinel value would be overwritten and the assertion fails.
+        original_time = 1_000_000.0
+        lobby.player_join_times[100] = original_time
 
         lobby.add_player(100)
         assert lobby.player_join_times[100] == original_time
@@ -52,9 +54,10 @@ class TestLobbyJoinTimestamps:
     def test_switch_regular_to_conditional_preserves_join_time(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         lobby.add_player(100)
-        original_time = lobby.player_join_times[100]
 
-        time.sleep(0.01)
+        # Explicit sentinel timestamp (see above): the switch must preserve it.
+        original_time = 1_000_000.0
+        lobby.player_join_times[100] = original_time
 
         lobby.add_conditional_player(100)
         assert lobby.player_join_times[100] == original_time
