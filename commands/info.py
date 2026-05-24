@@ -18,7 +18,6 @@ from config import LEVERAGE_TIERS
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
-from utils.debug_logging import debug_log as _dbg_log
 from utils.drawing import draw_rating_distribution
 from utils.embed_safety import truncate_field
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
@@ -1016,13 +1015,6 @@ class InfoCommands(commands.Cog):
                 ephemeral=True,
             )
             return
-        _dbg_log(
-            "H1",
-            "commands/info.py:leaderboard:start",
-            "leaderboard invoked",
-            {"user_id": interaction.user.id, "user": str(interaction.user)},
-            run_id="run1",
-        )
         # Defer response immediately to prevent interaction timeout
         if not await safe_defer(interaction, ephemeral=False):
             logger.warning("Leaderboard: defer failed, proceeding to send fallback response")

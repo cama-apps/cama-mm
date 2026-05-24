@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from services.betting_personas import pick_betting_persona
 from services.flavor_personas import pick_persona
 
 if TYPE_CHECKING:
@@ -48,6 +49,7 @@ class FlavorEvent(Enum):
     DOUBLE_OR_NOTHING_LOSE = "double_or_nothing_lose"  # Lost everything
     DOUBLE_OR_NOTHING_ZERO = "double_or_nothing_zero"  # Had exactly 25 JC, doubled nothing
     MVP_CALLOUT = "mvp_callout"  # Post-enrichment backhanded compliment for a winner
+    BET_LAST_CALL = "bet_last_call"  # Final-minute hype to drive last-second bets
 
 
 # Example messages for each event type (used as few-shot examples and fallbacks)
@@ -185,6 +187,13 @@ EVENT_EXAMPLES: dict[FlavorEvent, list[str]] = {
         "Performance review complete. Verdict: could have been worse. Barely.",
         "NINETY THOUSAND HERO DAMAGE. SOMEBODY CHECK ON THE OPPONENT.",
         "your mother and i didn't understand what you did but it sounded loud.",
+    ],
+    FlavorEvent.BET_LAST_CALL: [
+        "Last call — the pool's bleeding out and half of you are just watching. Bet.",
+        "Sixty seconds. The odds won't wait, and neither will the winners.",
+        "Window's closing. Fortune favors the bold and forgets the hesitant.",
+        "Final call to get your jopacoin down. Don't say the bookie didn't warn you.",
+        "One minute left. Bet now or spectate the payouts you could've had.",
     ],
 }
 
@@ -421,6 +430,75 @@ class FlavorTextService:
         except Exception as e:
             logger.error(f"Failed to generate flavor text: {e}, using fallback")
             return self._get_fallback_flavor(event)
+
+    async def generate_betting_last_call(
+        self,
+        guild_id: int | None,
+        event_details: dict[str, Any],
+        leader_discord_id: int | None = None,
+    ) -> str | None:
+        """Generate the 1-minute "last call" betting hype line.
+
+        Picks a random betting-announcer persona and a random angle. When a
+        ``leader_discord_id`` is given (the biggest voluntary bettor), the roast
+        and hype angles use that player's gambling history; otherwise the line
+        taunts the empty pool. Falls back to a static example when AI is disabled
+        or the call fails.
+        """
+        ai_enabled = True
+        if guild_id is not None and self.guild_config_repo:
+            ai_enabled = await asyncio.to_thread(self.guild_config_repo.get_ai_enabled, guild_id)
+        if not ai_enabled:
+            return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
+
+        persona = pick_betting_persona()
+        has_bettor = leader_discord_id is not None
+        angle = (
+            random.choice(["taunt_crowd", "roast_leader", "hype_leader"])
+            if has_bettor
+            else "taunt_crowd"
+        )
+
+        player_context_dict: dict[str, Any] = {}
+        details = {**event_details, "angle": angle, "has_bettor": has_bettor}
+        if has_bettor:
+            context = await asyncio.to_thread(
+                PlayerContext.from_services,
+                leader_discord_id,
+                self.player_repo,
+                self.bankruptcy_service,
+                self.loan_service,
+                self.gambling_stats_service,
+                guild_id=guild_id,
+            )
+            if context:
+                player_context_dict = {
+                    "username": context.username,
+                    "balance": context.balance,
+                    "bet_win_rate": (
+                        f"{context.bet_win_rate:.0f}%"
+                        if context.bet_win_rate is not None
+                        else None
+                    ),
+                    "degen_score": context.degen_score,
+                    "bankruptcy_count": context.bankruptcy_count,
+                }
+                details.setdefault("leader_name", context.username)
+
+        try:
+            result = await self.ai_service.generate_flavor(
+                event_type="bet_last_call",
+                player_context=player_context_dict,
+                event_details=details,
+                examples=persona.examples,
+                persona=persona,
+            )
+            if result is None:
+                return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
+            return result
+        except Exception as e:
+            logger.error(f"Failed to generate betting last call: {e}, using fallback")
+            return self._get_fallback_flavor(FlavorEvent.BET_LAST_CALL)
 
     async def generate_data_insight(
         self,

@@ -7,8 +7,6 @@ import logging
 import os
 import time
 
-from utils.debug_logging import debug_log as _debug_log
-
 # Configure logging BEFORE importing discord to prevent duplicate handlers
 logging.basicConfig(
     level=logging.INFO,
@@ -285,15 +283,6 @@ def _init_services():
     """Initialize all services via ServiceContainer (lazy, idempotent)."""
     global _container
 
-    # region agent log
-    _debug_log(
-        "H2",
-        "bot.py:_init_services",
-        "entering _init_services",
-        {"initialized": _container is not None},
-    )
-    # endregion agent log
-
     if _container is not None:
         return
 
@@ -350,12 +339,6 @@ async def _load_extensions():
     # Ensure services are initialized before loading extensions
     _init_services()
 
-    # region agent log
-    _debug_log(
-        "H1", "bot.py:_load_extensions", "starting extension load loop", {"extensions": EXTENSIONS}
-    )
-    # endregion agent log
-
     loaded_extensions = []
     skipped_extensions = []
     failed_extensions = []
@@ -401,14 +384,6 @@ def _ensure_extensions_loaded_for_import():
     When the module is imported in tests (without running the bot),
     load extensions so command definitions exist on the command tree.
     """
-    # region agent log
-    _debug_log(
-        "H1",
-        "bot.py:_ensure_extensions_loaded_for_import",
-        "called to ensure extensions loaded",
-        {},
-    )
-    # endregion agent log
     # asyncio.get_event_loop() emits a DeprecationWarning in 3.10+ and raises
     # RuntimeError in 3.12+ when there is no running loop. Use the modern
     # path: get_running_loop() to detect "already inside an event loop", and
@@ -422,9 +397,6 @@ def _ensure_extensions_loaded_for_import():
 
 def get_existing_command_names():
     """Return the set of command names currently registered on the bot."""
-    # region agent log
-    _debug_log("H3", "bot.py:get_existing_command_names", "function invoked", {})
-    # endregion agent log
     return {command.name for command in bot.tree.walk_commands()}
 
 

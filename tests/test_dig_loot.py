@@ -3,6 +3,7 @@
 import json
 import random
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -468,11 +469,12 @@ class TestExpandedEvents:
 class TestNewItemsAndArtifacts:
     """Verify new consumables and artifacts."""
 
-    def test_nine_consumables(self):
+    def test_ten_consumables(self):
         from services.dig_constants import CONSUMABLES
-        assert len(CONSUMABLES) == 9
+        assert len(CONSUMABLES) == 10
         assert "torch" in CONSUMABLES
         assert "void_bait" in CONSUMABLES
+        assert "streak_charm" in CONSUMABLES
 
     def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
@@ -597,6 +599,47 @@ class TestNewEventMechanics:
         num_boons = len(event["boon_options"])
         result = dig_service.resolve_event(10001, guild_id, event["id"], f"boon_{num_boons + 10}")
         assert not result["success"]
+
+
+class TestDigEmbed:
+    """Normal dig embed presentation."""
+
+    def test_streak_charm_save_is_visible(self):
+        from commands.dig import _build_dig_embed
+
+        result = SimpleNamespace(
+            depth=10,
+            depth_after=10,
+            tunnel_name="T",
+            pickaxe_tier=0,
+            cave_in=False,
+            advance=1,
+            jc_earned=1,
+            milestone_bonus=0,
+            streak_bonus=0,
+            artifact=None,
+            event=None,
+            sonar_skipped=False,
+            event_preview=None,
+            boss_scout=None,
+            items_used=None,
+            luminosity_info=None,
+            corruption=None,
+            mutations=None,
+            tip="tip",
+            streak_charm_used=True,
+        )
+        user = SimpleNamespace(
+            display_name="Tester",
+            display_avatar=SimpleNamespace(url=""),
+        )
+
+        embed, _, _, _ = _build_dig_embed(result, user)
+
+        assert any(
+            field.name == "Streak Charm" and "Saved your daily streak" in field.value
+            for field in embed.fields
+        )
 
 
 class TestEventPoolInvariants:

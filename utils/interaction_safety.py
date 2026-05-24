@@ -8,8 +8,6 @@ import discord
 
 logger = logging.getLogger("cama_bot.utils.interaction_safety")
 
-from utils.debug_logging import debug_log as _dbg
-
 
 async def safe_defer(interaction: discord.Interaction, *, ephemeral: bool = False) -> bool:
     """
@@ -38,112 +36,116 @@ async def safe_followup(
     allowed_mentions: discord.AllowedMentions | None = None,
 ) -> discord.Message | None:
     """
-    Send a followup via the interaction if possible; otherwise post directly in the channel.
+    Send a followup via the interaction; on failure, recover instead of failing silently.
 
-    Returns None if the interaction was already responded to (to prevent duplicate messages).
+    A non-ephemeral message that can't be sent as a followup falls back to a direct
+    channel send, so a deferred interaction is never left on a perpetual "thinking…"
+    spinner. An ephemeral message re-raises on failure rather than leaking private
+    content into the public channel. If no recovery is possible the error propagates
+    so the caller / global error handler can surface and log it.
+
     Supports either file (single) or files (multiple) - not both.
     """
-    # region agent log
-    _dbg(
-        "H7",
-        "utils/interaction_safety.py:safe_followup:enter",
-        "safe_followup called",
-        {
-            "has_content": content is not None,
-            "has_embed": embed is not None,
-            "has_file": file is not None,
-            "has_files": files is not None and len(files) > 0,
-            "ephemeral": ephemeral,
-            "interaction_id": getattr(interaction, "id", None),
-        },
-        run_id="run3",
-    )
-    # endregion agent log
+    # Build kwargs, only including file/files/view when provided (Discord errors on None).
+    send_kwargs: dict = {
+        "content": content,
+        "embed": embed,
+        "ephemeral": ephemeral,
+        "allowed_mentions": allowed_mentions,
+    }
+    if files is not None and len(files) > 0:
+        send_kwargs["files"] = files
+    elif file is not None:
+        send_kwargs["file"] = file
+    if view is not None:
+        send_kwargs["view"] = view
+
     try:
-        # Build kwargs, only including file/files/view if provided (Discord errors on None)
-        send_kwargs = {
-            "content": content,
-            "embed": embed,
-            "ephemeral": ephemeral,
-            "allowed_mentions": allowed_mentions,
-        }
-        # Support either file (single) or files (multiple)
-        if files is not None and len(files) > 0:
-            send_kwargs["files"] = files
-        elif file is not None:
-            send_kwargs["file"] = file
-        if view is not None:
-            send_kwargs["view"] = view
-
-        msg = await interaction.followup.send(**send_kwargs)
-        # region agent log
-        _dbg(
-            "H7",
-            "utils/interaction_safety.py:safe_followup:sent",
-            "followup sent",
-            {
-                "has_content": content is not None,
-                "has_embed": embed is not None,
-                "ephemeral": ephemeral,
-                "interaction_id": getattr(interaction, "id", None),
-            },
-            run_id="run3",
-        )
-        # endregion agent log
-        return msg
+        return await interaction.followup.send(**send_kwargs)
     except (discord.NotFound, discord.InteractionResponded, discord.HTTPException) as exc:
-        # Check if interaction was already responded to - if so, don't send fallback
-        # This prevents duplicate non-ephemeral messages when multiple handlers process the same interaction
-        if interaction.response.is_done():
-            # region agent log
-            _dbg(
-                "H7",
-                "utils/interaction_safety.py:safe_followup:already_responded",
-                "followup failed; already responded",
-                {
-                    "interaction_id": getattr(interaction, "id", None),
-                    "ephemeral": ephemeral,
-                    "exc_type": type(exc).__name__,
-                    "exc": str(exc),
-                },
-                run_id="run3",
-            )
-            # endregion agent log
-            logger.warning(
-                f"Followup failed and interaction already responded to (likely duplicate handler). "
-                f"Not sending fallback message to prevent duplicates. Error: {exc}"
-            )
-            return None
-
-        # Only send fallback if interaction wasn't already responded to
-        logger.warning("Followup failed, sending to channel instead: %s", exc)
-        channel = interaction.channel
-        if not channel:
+        # Ephemeral content must not spill into the public channel: surface the
+        # failure to the caller / global handler instead of falling back publicly.
+        if ephemeral:
+            logger.warning("Ephemeral followup failed: %s", exc)
             raise
-        # Build kwargs for fallback send
-        fallback_kwargs = {"content": content, "embed": embed, "allowed_mentions": allowed_mentions}
+
+        channel = interaction.channel
+        if channel is None:
+            logger.warning("Followup failed and no channel to fall back to: %s", exc)
+            raise
+
+        # Fall back to a direct channel send so the user isn't left hanging. A bare
+        # defer always makes interaction.response.is_done() True, so we deliberately
+        # do NOT gate on it here — that check used to swallow every deferred-command
+        # followup failure as a "duplicate handler" and leave a perpetual spinner.
+        logger.warning("Followup failed, sending to channel instead: %s", exc)
+        fallback_kwargs: dict = {"content": content, "embed": embed, "allowed_mentions": allowed_mentions}
         if files is not None and len(files) > 0:
             fallback_kwargs["files"] = files
         elif file is not None:
             fallback_kwargs["file"] = file
         if view is not None:
             fallback_kwargs["view"] = view
-        msg = await channel.send(**fallback_kwargs)
-        # region agent log
-        _dbg(
-            "H7",
-            "utils/interaction_safety.py:safe_followup:fallback_sent",
-            "fallback sent to channel",
-            {
-                "has_content": content is not None,
-                "has_embed": embed is not None,
-                "ephemeral": ephemeral,
-                "interaction_id": getattr(interaction, "id", None),
-            },
-            run_id="run3",
+        # The failed followup may have partially consumed the attachment(s); rewind
+        # so the channel send re-reads them from the start.
+        attachments = list(files) if files else ([file] if file is not None else [])
+        for attachment in attachments:
+            try:
+                attachment.reset()
+            except Exception as reset_exc:
+                logger.debug("Could not rewind attachment for channel fallback: %s", reset_exc)
+        return await channel.send(**fallback_kwargs)
+
+
+async def send_public_or_ephemeral(
+    interaction: discord.Interaction,
+    *,
+    content: str | None = None,
+    embed: discord.Embed | None = None,
+    file: discord.File | None = None,
+    files: list[discord.File] | None = None,
+    view: discord.ui.View | None = None,
+    allowed_mentions: discord.AllowedMentions | None = None,
+) -> discord.Message | None:
+    """Send a public result, guaranteeing the user sees it.
+
+    Tries a public followup first. If that fails (e.g. the channel rejects the
+    embed/attachment), retries privately as an ephemeral message *without the
+    attachment* — attachments are decorative and the likeliest rejection cause,
+    and an ephemeral retry avoids re-using an already-consumed file. As a last
+    resort, sends an ephemeral note naming the failure so it is diagnosable
+    without server logs.
+    """
+    try:
+        return await safe_followup(
+            interaction,
+            content=content,
+            embed=embed,
+            file=file,
+            files=files,
+            view=view,
+            allowed_mentions=allowed_mentions,
         )
-        # endregion agent log
-        return msg
+    except Exception as exc:
+        logger.warning("Public send failed (%s); retrying ephemerally without attachments", exc)
+        try:
+            return await safe_followup(
+                interaction,
+                content=content,
+                embed=embed,
+                view=view,
+                allowed_mentions=allowed_mentions,
+                ephemeral=True,
+            )
+        except Exception:
+            logger.exception("Ephemeral fallback also failed")
+            try:
+                return await interaction.followup.send(
+                    content=f"⚠️ Couldn't display this here ({type(exc).__name__}: {exc}).",
+                    ephemeral=True,
+                )
+            except Exception:
+                return None
 
 
 async def update_lobby_message_closed(

@@ -15,6 +15,7 @@ from domain.models.dig_gear import GearLoadout, GearPiece, GearSlot
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.dig_constants import (
+    AMULET_TIERS,
     ARMOR_TIERS,
     BOOTS_TIERS,
     BOSS_DUEL_STATS,
@@ -91,7 +92,7 @@ class TestDigGearDropTierMatchesDepth:
             drop = svc._maybe_drop_gear(111, 0, boundary)
             assert drop is not None
             assert drop["tier"] == expected_tier
-            assert drop["slot"] in {"weapon", "armor", "boots"}
+            assert drop["slot"] in {"weapon", "armor", "boots", "amulet"}
             # Resolve the slot/tier through the GEAR_TIER_TABLES map and
             # confirm the returned name matches the canonical entry.
             slot_enum = GearSlot(drop["slot"])
@@ -578,6 +579,76 @@ class TestDigGearServiceApplyGearToCombat:
         )
         out = svc._apply_gear_to_combat(base, GearLoadout(boots=boots))
         assert out["boss_hit"] >= 0.05
+
+
+def _amulet_piece(tier: int) -> GearPiece:
+    return GearPiece(
+        id=4, slot=GearSlot.AMULET, tier=tier, durability=20,
+        equipped=True, acquired_at=0, source="shop",
+        tier_def=AMULET_TIERS[tier],
+    )
+
+
+class TestDigAmuletTiers:
+    def test_table_has_eight_tiers_and_is_wired(self):
+        assert len(AMULET_TIERS) == 8
+        assert GEAR_TIER_TABLES[GearSlot.AMULET] is AMULET_TIERS
+
+    def test_crit_values_match_spec(self):
+        chances = [round(t.crit_chance, 4) for t in AMULET_TIERS]
+        bonuses = [t.crit_bonus for t in AMULET_TIERS]
+        assert chances == [0.00, 0.02, 0.04, 0.06, 0.07, 0.08, 0.09, 0.10]
+        # Crit bonus only unlocks on the prestige-gated tiers (4+).
+        assert bonuses == [0, 0, 0, 0, 1, 1, 1, 1]
+
+    def test_shop_prices_are_monotonic(self):
+        prices = [t.shop_price for t in AMULET_TIERS]
+        assert prices == sorted(prices)
+        assert prices[0] == 0  # Twine Cord is the free placeholder tier
+
+    def test_high_tiers_are_prestige_gated(self):
+        # Obsidian+ require prestige, matching the other gear ladders.
+        assert AMULET_TIERS[4].prestige_required == 1
+        assert AMULET_TIERS[7].prestige_required == 5
+
+
+class TestDigAmuletCombat:
+    def test_amulet_adds_crit_to_cautious_base(self, svc):
+        # Cautious has zero crit; the amulet supplies all of it.
+        base = dict(BOSS_DUEL_STATS["cautious"])
+        assert base.get("crit_chance", 0) == 0
+        out = svc._apply_gear_to_combat(base, GearLoadout(amulet=_amulet_piece(7)))
+        assert abs(out["crit_chance"] - 0.10) < 1e-9
+        assert out["crit_bonus"] == 1
+
+    def test_amulet_crit_stacks_additively_with_bold(self, svc):
+        # Bold already grants 0.15 / +1; the amulet stacks on top.
+        base = dict(BOSS_DUEL_STATS["bold"])
+        out = svc._apply_gear_to_combat(base, GearLoadout(amulet=_amulet_piece(7)))
+        assert abs(out["crit_chance"] - (base["crit_chance"] + 0.10)) < 1e-9
+        assert out["crit_bonus"] == base["crit_bonus"] + 1
+
+    def test_no_amulet_leaves_risk_tier_crit_untouched(self, svc):
+        base = dict(BOSS_DUEL_STATS["reckless"])
+        out = svc._apply_gear_to_combat(base, GearLoadout())
+        assert abs(out["crit_chance"] - base["crit_chance"]) < 1e-9
+        assert out["crit_bonus"] == base["crit_bonus"]
+
+
+class TestDigAmuletBuyAndEquip:
+    def test_buy_low_tier_amulet_succeeds(self, svc, player):
+        # Canonical svc player is at depth 100, prestige 1, funded.
+        r = svc.buy_gear(player, 0, "amulet", 1)
+        assert r["success"] is True
+        owned = svc.dig_repo.get_gear(player, 0)
+        assert any(g["slot"] == "amulet" and g["tier"] == 1 for g in owned)
+
+    def test_equip_amulet_shows_in_loadout(self, svc, player):
+        gid = svc.buy_gear(player, 0, "amulet", 1)["gear_id"]
+        svc.equip_gear(player, 0, gid)
+        loadout = svc.get_loadout(player, 0)
+        assert loadout["amulet"] is not None
+        assert loadout["amulet"]["slot"] == "amulet"
 
 
 class TestDigGearServiceActivePickaxeTier:

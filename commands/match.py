@@ -13,6 +13,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import (
+    BET_LAST_CALL_OFFSET,
+    BET_REMINDER_OFFSETS,
     BOMB_POT_CHANCE,
     ENRICHMENT_RETRY_DELAYS,
     FIRST_GAME_BONUS,
@@ -1898,24 +1900,31 @@ class MatchCommands(commands.Cog):
         if seconds_until_close <= 0:
             return
 
-        tasks = []
+        # Build the escalating reminder schedule: plain "warning" reminders at
+        # each configured offset before lock, the AI "last call" at its offset,
+        # and the "closed" notice at lock. De-dupe offsets (last call wins) and
+        # skip any offset that is already past for this window.
+        offset_types: dict[int, str] = {}
+        for off in BET_REMINDER_OFFSETS:
+            if 0 < off < seconds_until_close:
+                offset_types.setdefault(off, "warning")
+        if 0 < BET_LAST_CALL_OFFSET < seconds_until_close:
+            offset_types[BET_LAST_CALL_OFFSET] = "last_call"
 
-        # 5-minute warning (only if more than 5 minutes remain)
-        warn_delay = seconds_until_close - 300
-        if warn_delay > 0:
-            tasks.append(
-                asyncio.create_task(
-                    self._run_bet_reminder_after_delay(
-                        delay_seconds=warn_delay,
-                        guild_id=guild_id,
-                        reminder_type="warning",
-                        lock_until=bet_lock_until,
-                        pending_match_id=pending_match_id,
-                    )
+        tasks = [
+            asyncio.create_task(
+                self._run_bet_reminder_after_delay(
+                    delay_seconds=seconds_until_close - off,
+                    guild_id=guild_id,
+                    reminder_type=rtype,
+                    lock_until=bet_lock_until,
+                    pending_match_id=pending_match_id,
                 )
             )
+            for off, rtype in sorted(offset_types.items(), reverse=True)
+        ]
 
-        # Close reminder
+        # Close reminder at lock (also flips the embed to a closed state).
         tasks.append(
             asyncio.create_task(
                 self._run_bet_reminder_after_delay(

@@ -135,6 +135,29 @@ class TestGoldenWheelWedges:
             assert label != "OVEREXTENDED", "live wheel still shows the static placeholder label"
             assert label == str(value), f"label {label!r} should be the computed value {value}"
 
+    def test_live_golden_wheel_in_rainbow_order(self):
+        """The live golden wheel (compute_live_golden_wedges, the real spin path)
+        must be hue-sorted like the static GOLDEN_WHEEL_WEDGES constant, so the
+        rainbow ordering actually reaches players instead of only the fallback."""
+        from utils.wheel_drawing import (
+            GOLDEN_WHEEL_WEDGES,
+            _hue_sort_key,
+            compute_live_golden_wedges,
+        )
+
+        wedges = compute_live_golden_wedges(
+            spinner_balance=2500,
+            other_top_balances=[2000, 1800],
+            rank_next_balance=1200,
+            total_positive_balance=25000,
+            bottom_player_balances=[10] * 30,
+        )
+
+        keys = [_hue_sort_key(w[2]) for w in wedges]
+        assert keys == sorted(keys), f"live golden wheel not in rainbow order:\n{keys}"
+        # Live spin path and the static fallback must share the same rainbow color order.
+        assert [w[2] for w in wedges] == [w[2] for w in GOLDEN_WHEEL_WEDGES]
+
     def test_get_wheel_wedges_returns_golden_when_flag_set(self):
         from utils.wheel_drawing import (
             BANKRUPT_WHEEL_WEDGES,

@@ -71,7 +71,7 @@ from services.dig_constants import (
 from services.dig_constants import get_layer as get_layer_def
 from services.permissions import has_admin_permission
 from utils.formatting import JOPACOIN_EMOTE
-from utils.interaction_safety import safe_defer, safe_followup
+from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -1361,7 +1361,12 @@ class DigCommands(commands.Cog):
 
         # Inventory count
         inv_count = getattr(shop, "inventory_count", 0)
-        embed.set_footer(text=f"Your inventory: {inv_count}/{MAX_INVENTORY_SLOTS} items | Use /dig buy <item> to purchase, /dig use <item> to queue")
+        embed.set_footer(
+            text=(
+                f"Your inventory: {inv_count}/{MAX_INVENTORY_SLOTS} items | "
+                "Use /dig buy <item> to purchase, /dig use <item> to queue active items"
+            )
+        )
 
         shop_file = None
         try:
@@ -1371,7 +1376,7 @@ class DigCommands(commands.Cog):
                 embed.set_image(url=f"attachment://{shop_file.filename}")
         except Exception:
             pass
-        await safe_followup(interaction, embed=embed, file=shop_file)
+        await send_public_or_ephemeral(interaction, embed=embed, file=shop_file)
 
     # ------------------------------------------------------------------
     # 8b. /dig buy — Buy an item from the shop
@@ -1389,12 +1394,16 @@ class DigCommands(commands.Cog):
         app_commands.Choice(name="Sonar Pulse (8 JC)", value="sonar_pulse"),
         app_commands.Choice(name="Depth Charge (15 JC)", value="depth_charge"),
         app_commands.Choice(name="Void Bait (20 JC)", value="void_bait"),
+        app_commands.Choice(name="Streak Charm (15 JC)", value="streak_charm"),
         app_commands.Choice(name="Stone Plate (20 JC)",   value="armor:1"),
         app_commands.Choice(name="Iron Plate (60 JC)",    value="armor:2"),
         app_commands.Choice(name="Diamond Plate (180 JC)", value="armor:3"),
         app_commands.Choice(name="Stone Boots (25 JC)",   value="boots:1"),
         app_commands.Choice(name="Iron Boots (70 JC)",    value="boots:2"),
         app_commands.Choice(name="Diamond Boots (200 JC)", value="boots:3"),
+        app_commands.Choice(name="Stone Pendant (25 JC)",   value="amulet:1"),
+        app_commands.Choice(name="Iron Talisman (70 JC)",   value="amulet:2"),
+        app_commands.Choice(name="Diamond Charm (200 JC)",  value="amulet:3"),
         app_commands.Choice(name="Stone Pickaxe (Tier 1) — 15 JC",   value="weapon:1"),
         app_commands.Choice(name="Iron Pickaxe (Tier 2) — 50 JC",    value="weapon:2"),
         app_commands.Choice(name="Diamond Pickaxe (Tier 3) — 150 JC", value="weapon:3"),
@@ -1479,7 +1488,11 @@ class DigCommands(commands.Cog):
             description=(
                 f"Cost: **{cost}** {JOPACOIN_EMOTE}\n"
                 f"Balance: **{balance_after}** {JOPACOIN_EMOTE}\n\n"
-                f"Use `/dig use {item}` to queue it."
+                + (
+                    "This charm is passive and triggers automatically."
+                    if item == "streak_charm"
+                    else f"Use `/dig use {item}` to queue it."
+                )
             ),
             color=0xD4AF37,
         )
@@ -1929,7 +1942,7 @@ class DigCommands(commands.Cog):
             embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
             embed.set_footer(text=f"0/{MAX_INVENTORY_SLOTS} slots used")
 
-        await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
+        await send_public_or_ephemeral(interaction, embed=embed, file=inv_pickaxe_file)
 
     # ------------------------------------------------------------------
     # 16a. /dig gear — Manage boss-combat gear loadout
@@ -2313,6 +2326,13 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
             name="Streak Bonus",
             value=f"+{streak_bonus} {JOPACOIN_EMOTE}",
             inline=True,
+        )
+
+    if getattr(result, "streak_charm_used", False):
+        embed.add_field(
+            name="Streak Charm",
+            value="Saved your daily streak after the missed day.",
+            inline=False,
         )
 
     # Artifact found

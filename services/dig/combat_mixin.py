@@ -809,7 +809,7 @@ class BossCombatMixin:
         gear_broken_names: list[str] = []
         if broken_ids:
             name_by_id: dict[int, str] = {}
-            for piece in (loadout.weapon, loadout.armor, loadout.boots):
+            for piece in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet):
                 if piece is not None:
                     name_by_id[piece.id] = piece.tier_def.name
             gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
@@ -1334,7 +1334,7 @@ class BossCombatMixin:
                         # if the player swapped gear during the pause.
                         "gear_snapshot_ids": [
                             int(p.id)
-                            for p in (loadout.weapon, loadout.armor, loadout.boots)
+                            for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                             if p is not None
                         ],
                     }),
@@ -1347,6 +1347,8 @@ class BossCombatMixin:
                     "player_dmg": player_dmg,
                     "boss_hit": boss_hit_chance,
                     "boss_dmg": boss_dmg,
+                    "crit_chance": crit_chance,
+                    "crit_bonus": crit_bonus,
                 }
                 self.dig_repo.save_active_duel(discord_id, guild_id, state)
                 return self._ok(
@@ -1498,9 +1500,12 @@ class BossCombatMixin:
         player_dmg = int(state_row["player_dmg"])
         boss_hit = float(state_row["boss_hit"])
         boss_dmg = int(state_row["boss_dmg"])
-        _crit_stats = BOSS_DUEL_STATS.get(state_row["risk_tier"], {})
-        crit_chance = float(_crit_stats.get("crit_chance", 0) or 0)
-        crit_bonus = int(_crit_stats.get("crit_bonus", 0) or 0)
+        # Crit was persisted (gear-adjusted, already includes amulet + the
+        # risk-tier baseline) when the fight started, so the stored value is
+        # authoritative. A zero here means zero — no risk-tier recompute,
+        # which would resurrect crit on a fight where it was deliberately 0.
+        crit_chance = float(state_row["crit_chance"] or 0.0)
+        crit_bonus = int(state_row["crit_bonus"] or 0)
 
         at_boss = int(state_row["tier"])
 
@@ -1848,7 +1853,8 @@ class BossCombatMixin:
             name_by_id = {}
             for piece in (pre_tick_loadout.weapon,
                           pre_tick_loadout.armor,
-                          pre_tick_loadout.boots):
+                          pre_tick_loadout.boots,
+                          pre_tick_loadout.amulet):
                 if piece is not None:
                     name_by_id[piece.id] = piece.tier_def.name
             broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)

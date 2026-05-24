@@ -1477,6 +1477,7 @@ class DigRepository(BaseRepository, IDigRepository):
         "player_hp", "boss_hp", "round_num", "round_log", "pending_prompt",
         "rng_state", "status_effects", "echo_applied", "echo_killer_id",
         "player_hit", "player_dmg", "boss_hit", "boss_dmg",
+        "crit_chance", "crit_bonus",
         "created_at", "last_interaction_at",
     )
 
@@ -1536,6 +1537,8 @@ class DigRepository(BaseRepository, IDigRepository):
                 values.setdefault("status_effects", "{}")
                 values.setdefault("echo_applied", 0)
                 values.setdefault("echo_killer_id", None)
+                values.setdefault("crit_chance", 0.0)
+                values.setdefault("crit_bonus", 0)
                 cols = ["discord_id", "guild_id", *self._DUEL_COLUMNS]
                 placeholders = ",".join("?" for _ in cols)
                 cursor.execute(
