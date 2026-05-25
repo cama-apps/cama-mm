@@ -2115,3 +2115,73 @@ def test_comeback_sets_and_consumes_pardon(repo_db_path):
     # Simulate rolling BANKRUPT: consume pardon
     player_repo.set_wheel_pardon(8010, 0, 0)
     assert player_repo.get_wheel_pardon(8010, 0) is False, "Pardon should be consumed after BANKRUPT"
+
+
+@pytest.mark.asyncio
+async def test_wheel_penalized_winner_is_debuffed(repo_db_path):
+    """A bankruptcy-penalized spinner keeps only the configured fraction of a
+    wheel win. Guards the live gamba chokepoint and its bankruptcy_service-gated
+    balance anchor — the path that caused the -n4 CI hang and which every other
+    wheel test skips by setting bankruptcy_service=None.
+    """
+    from config import BANKRUPTCY_PENALTY_RATE
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from repositories.player_repository import PlayerRepository
+    from services.bankruptcy_service import BankruptcyService
+
+    guild_id, uid = 123, 7777
+    player_repo = PlayerRepository(repo_db_path)
+    bk_service = BankruptcyService(BankruptcyRepository(repo_db_path), player_repo)
+    player_repo.add(discord_id=uid, discord_username="P", guild_id=guild_id,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    # Drive into debt, then declare bankruptcy -> penalized, balance reset >= 0
+    # so the regular wheel is used (not the bankrupt wheel).
+    player_repo.update_balance(uid, guild_id, -50)
+    assert bk_service.execute_bankruptcy(uid, guild_id).success
+    start_balance = player_repo.get_balance(uid, guild_id)
+    assert start_balance >= 0
+
+    bot = MagicMock()
+    bot.bankruptcy_service = bk_service
+    bot.garnishment_service = None
+    player_service = MagicMock()
+    player_service.get_player.return_value = MagicMock(name="P")
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.get_leaderboard = MagicMock(return_value=[])
+    # Callable side effects backed by the real repo — NOT an exhaustible list,
+    # which is exactly the StopIteration trap the anchor gate fixed.
+    player_service.get_balance.side_effect = lambda *a, **k: player_repo.get_balance(uid, guild_id)
+    player_service.adjust_balance.side_effect = lambda u, g, amt: player_repo.add_balance(u, g, amt)
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = guild_id
+    interaction.user.id = uid
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    # Largest positive-int wedge -> a clear, non-zero penalty.
+    win_idx = max(
+        (i for i, w in enumerate(WHEEL_WEDGES) if isinstance(w[1], int) and w[1] > 0),
+        key=lambda i: WHEEL_WEDGES[i][1],
+    )
+    win_val = WHEEL_WEDGES[win_idx][1]
+    expected_kept = int(win_val * BANKRUPTCY_PENALTY_RATE)
+    assert win_val - expected_kept > 0  # sanity: the debuff actually bites
+
+    commands = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
+    with patch("commands.betting.random.randint", return_value=win_idx):
+        with patch("commands.betting.random.random", return_value=1.0):  # no explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
+
+    # Won win_val, but kept only the configured fraction; the rest was sunk.
+    net_gain = player_repo.get_balance(uid, guild_id) - start_balance
+    assert net_gain == expected_kept
