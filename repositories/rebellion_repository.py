@@ -378,14 +378,18 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                 (inciter_flat_reward, inciter_id, normalized_guild),
             )
 
-            if attacker_ids:
+            # Exclude the inciter: they already received inciter_flat_reward above.
+            # attacker_ids includes the inciter (added at war creation), so we
+            # must filter them out to avoid double-paying.
+            non_inciter_attackers = [did for did in attacker_ids if did != inciter_id]
+            if non_inciter_attackers:
                 cursor.executemany(
                     """
                     UPDATE players
                     SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                     """,
-                    [(per_attacker_credit, did, normalized_guild) for did in attacker_ids],
+                    [(per_attacker_credit, did, normalized_guild) for did in non_inciter_attackers],
                 )
 
             cursor.execute(

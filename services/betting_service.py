@@ -284,7 +284,7 @@ class BettingService:
                         results[pid]["net"] = int(results[pid].get("net", 0)) + bonus
                         results[pid]["manashop_bonus"] = bonus
                     except Exception:
-                        pass
+                        logger.exception("Failed to credit manashop win bonus %d to player %d", bonus, pid)
 
         return results
 

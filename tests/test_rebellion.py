@@ -450,6 +450,55 @@ class TestWarFlow:
             expected_gain = REBELLION_ATTACKER_FLAT_REWARD + stake_share
             assert bal_after == bal_before[voter["discord_id"]] + expected_gain
 
+    def test_attacker_win_inciter_not_double_paid(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """Inciter receives exactly REBELLION_INCITER_FLAT_REWARD on attacker win.
+
+        The inciter is added to attack_voter_ids at war creation, so
+        attacker_ids contains the inciter. The repo must exclude them from the
+        per-attacker credit loop to avoid double-paying (flat reward + per-attacker credit).
+        """
+        from config import (
+            REBELLION_ATTACKER_FLAT_REWARD,
+            REBELLION_DEFENDER_STAKE,
+            REBELLION_INCITER_FLAT_REWARD,
+        )
+        guild_id = TEST_GUILD_ID
+        inciter_id = 5901
+        war_id = self._setup_war_with_votes(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service,
+            inciter_id=inciter_id, n_attackers=3, n_defenders=2, guild_id=guild_id
+        )
+        war = rebellion_repo.get_war(war_id)
+        attack_voters = json.loads(war["attack_voter_ids"])
+        # Verify inciter is present in attack_voter_ids (precondition of the bug)
+        assert any(v["discord_id"] == inciter_id for v in attack_voters), (
+            "Inciter must be in attack_voter_ids for this test to be meaningful"
+        )
+
+        inciter_bal_before = player_repo.get_balance(inciter_id, guild_id)
+        result = rebellion_service.resolve_battle(
+            war_id, guild_id, battle_roll=1, victory_threshold=50
+        )
+        assert result["outcome"] == "attackers_win"
+        inciter_bal_after = player_repo.get_balance(inciter_id, guild_id)
+
+        n_defenders = 2
+        n_attackers = len(attack_voters)
+        stake_pool = n_defenders * REBELLION_DEFENDER_STAKE
+        stake_share = stake_pool // n_attackers
+
+        # Inciter gets only their flat reward — NOT flat + per_attacker_credit.
+        # If double-paid, inciter_bal_after would equal
+        # inciter_bal_before + REBELLION_INCITER_FLAT_REWARD
+        #                      + REBELLION_ATTACKER_FLAT_REWARD + stake_share.
+        assert inciter_bal_after == inciter_bal_before + REBELLION_INCITER_FLAT_REWARD, (
+            f"Inciter gained {inciter_bal_after - inciter_bal_before} but expected "
+            f"exactly {REBELLION_INCITER_FLAT_REWARD} (flat only). "
+            f"Double-pay would be {REBELLION_INCITER_FLAT_REWARD + REBELLION_ATTACKER_FLAT_REWARD + stake_share}."
+        )
+
     def test_attacker_win_wheel_effects(self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo):
         """Attacker win sets WAR_SCAR and BANKRUPT_WEAKEN effects."""
         guild_id = TEST_GUILD_ID
@@ -510,6 +559,38 @@ class TestWarFlow:
 
         new_penalty = bankruptcy_repo.get_penalty_games(inciter_id, guild_id)
         assert new_penalty == initial_penalty + 1
+
+    def test_inciter_not_double_paid_on_attacker_win(self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo):
+        """Inciter receives exactly the flat inciter reward, not double (inciter + per-attacker)."""
+        guild_id = TEST_GUILD_ID
+        inciter_id = 8501
+        war_id = self._setup_war_with_votes(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service,
+            inciter_id=inciter_id, n_attackers=3, n_defenders=2, guild_id=guild_id,
+        )
+        inciter_bal_before = player_repo.get_balance(inciter_id, guild_id)
+
+        result = rebellion_service.resolve_battle(war_id, guild_id, battle_roll=5, victory_threshold=50)
+        assert result["outcome"] == "attackers_win"
+
+        from config import (
+            REBELLION_ATTACKER_FLAT_REWARD,
+            REBELLION_DEFENDER_STAKE,
+            REBELLION_INCITER_FLAT_REWARD,
+        )
+        war = rebellion_repo.get_war(war_id)
+        attack_voters = json.loads(war["attack_voter_ids"])
+        n_attackers = len(attack_voters)
+        stake_per = (2 * REBELLION_DEFENDER_STAKE) // n_attackers
+        per_attacker = REBELLION_ATTACKER_FLAT_REWARD + stake_per
+
+        inciter_bal_after = player_repo.get_balance(inciter_id, guild_id)
+        # Inciter gets flat reward only — NOT flat reward + per_attacker credit
+        expected = inciter_bal_before + REBELLION_INCITER_FLAT_REWARD
+        assert inciter_bal_after == expected, (
+            f"Inciter balance {inciter_bal_after} != expected {expected}; "
+            f"double-pay would be {inciter_bal_before + REBELLION_INCITER_FLAT_REWARD + per_attacker}"
+        )
 
 
 # ---------------------------------------------------------------------------

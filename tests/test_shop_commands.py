@@ -609,6 +609,31 @@ async def test_item_autocomplete_includes_curse_and_jopa_coin():
 
 
 @pytest.mark.asyncio
+async def test_double_or_nothing_rejects_balance_equal_to_cost():
+    """DoN must reject when balance == cost: nothing left to double, spin would pay nothing."""
+    from commands.shop import SHOP_DOUBLE_OR_NOTHING_COST
+
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = object()
+    player_service.get_balance.return_value = SHOP_DOUBLE_OR_NOTHING_COST
+    player_service.get_last_double_or_nothing.return_value = None  # no cooldown
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9001)
+
+    await commands._handle_double_or_nothing(interaction)
+
+    # Should send an ephemeral rejection; must NOT deduct balance or call adjust_balance
+    interaction.response.send_message.assert_awaited_once()
+    message_kwargs = interaction.response.send_message.call_args.kwargs
+    assert message_kwargs.get("ephemeral") is True
+    body = interaction.response.send_message.call_args.args[0]
+    assert "double" in body.lower() or "nothing" in body.lower() or "earn" in body.lower()
+    player_service.adjust_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_item_autocomplete_excludes_dig_items():
     """Dig items have been deduped — they live only in /dig buy now."""
     bot = MagicMock()

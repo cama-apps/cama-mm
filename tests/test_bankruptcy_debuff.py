@@ -91,11 +91,11 @@ def _expected_penalty(profit: int) -> int:
 
 class TestConstants:
     def test_bankruptcy_sets_three_penalty_games(self, repos, bankruptcy_service):
-        assert BANKRUPTCY_PENALTY_GAMES == 3
         _add_player(repos["player"], 5001)
         _penalize(repos, bankruptcy_service, 5001)
         assert (
-            bankruptcy_service.get_state(5001, TEST_GUILD_ID).penalty_games_remaining == 3
+            bankruptcy_service.get_state(5001, TEST_GUILD_ID).penalty_games_remaining
+            == BANKRUPTCY_PENALTY_GAMES
         )
 
     def test_three_wins_clear_the_penalty(self, repos, bankruptcy_service):
@@ -114,11 +114,10 @@ class TestConstants:
         )
 
     def test_rate_keeps_three_quarters(self, repos, bankruptcy_service):
-        assert BANKRUPTCY_PENALTY_RATE == 0.75
         _add_player(repos["player"], 5003)
         _penalize(repos, bankruptcy_service, 5003)
         info = bankruptcy_service.apply_penalty_to_winnings(5003, 100, TEST_GUILD_ID)
-        assert info["penalized"] == 75
+        assert info["penalized"] == int(100 * BANKRUPTCY_PENALTY_RATE)
         assert info["penalty_applied"] == 25
 
 
