@@ -277,7 +277,7 @@ class RecordingMixin:
             for pid in all_player_ids:
                 won = (pid in radiant_team_ids and winning_team == "radiant") or \
                       (pid in dire_team_ids and winning_team == "dire")
-                recent_outcomes = self.match_repo.get_player_recent_outcomes(pid, guild_id, limit=20)
+                recent_outcomes = self.match_repo.get_player_recent_outcomes(pid, normalized_gid, limit=20)
                 streak_length, multiplier = self.rating_system.calculate_streak_multiplier(
                     recent_outcomes, won=won
                 )
