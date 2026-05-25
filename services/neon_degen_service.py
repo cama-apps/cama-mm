@@ -487,7 +487,7 @@ class NeonDegenService:
             if filing_number >= 3:
                 try:
                     from utils.neon_drawing import create_terminal_crash_gif
-                    gif = create_terminal_crash_gif(name, filing_number)
+                    gif = await asyncio.to_thread(create_terminal_crash_gif, name, filing_number)
                     text = render_bankruptcy_filing(name, debt_cleared, filing_number)
                     text = await self._generate_text(event_desc, ctx, text)
                     self._set_cooldown(discord_id, guild_id)
@@ -500,7 +500,7 @@ class NeonDegenService:
             if filing_number == 1:
                 try:
                     from utils.neon_drawing import create_void_welcome_gif
-                    gif = create_void_welcome_gif(name)
+                    gif = await asyncio.to_thread(create_void_welcome_gif, name)
                     text = render_bankruptcy_filing(name, debt_cleared, filing_number)
                     text = await self._generate_text(event_desc, ctx, text)
                     self._set_cooldown(discord_id, guild_id)
@@ -597,7 +597,7 @@ class NeonDegenService:
                 if prior_balance >= 100 and self._roll(0.50):
                     try:
                         from utils.neon_drawing import create_freefall_gif
-                        gif = create_freefall_gif(name, prior_balance, new_balance)
+                        gif = await asyncio.to_thread(create_freefall_gif, name, prior_balance, new_balance)
                         self._set_cooldown(discord_id, guild_id)
                         return NeonResult(layer=3, gif_file=gif)
                     except Exception as e:
@@ -741,7 +741,7 @@ class NeonDegenService:
             if leverage >= 5 and new_balance <= -MAX_DEBT:
                 try:
                     from utils.neon_drawing import create_debt_collector_gif
-                    gif = create_debt_collector_gif(name, debt)
+                    gif = await asyncio.to_thread(create_debt_collector_gif, name, debt)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
                 except Exception as e:
                     logger.debug(f"Debt collector GIF failed: {e}")
@@ -768,7 +768,7 @@ class NeonDegenService:
 
             try:
                 from utils.neon_drawing import create_degen_certificate_gif
-                gif = create_degen_certificate_gif(name, degen_score)
+                gif = await asyncio.to_thread(create_degen_certificate_gif, name, degen_score)
                 from utils.neon_terminal import DIM, RED, RESET, YELLOW, ansi_block
                 text = ansi_block(
                     f"{RED} ACHIEVEMENT UNLOCKED{RESET}\n"
@@ -891,7 +891,7 @@ class NeonDegenService:
             if balance_at_risk > 100:
                 try:
                     from utils.neon_drawing import create_don_coin_flip_gif
-                    gif = create_don_coin_flip_gif(name, balance_at_risk)
+                    gif = await asyncio.to_thread(create_don_coin_flip_gif, name, balance_at_risk)
                     text = render_don_loss_box(name, balance_at_risk)
                     text = await self._generate_text(
                         f"Client lost {balance_at_risk} JC in Double or Nothing. Balance: 0",
@@ -1004,7 +1004,7 @@ class NeonDegenService:
             if total_pool >= 500:
                 try:
                     from utils.neon_drawing import create_market_crash_gif
-                    gif = create_market_crash_gif(total_pool, outcome, winner_count, loser_count)
+                    gif = await asyncio.to_thread(create_market_crash_gif, total_pool, outcome, winner_count, loser_count)
                     text = render_prediction_market_crash(
                         question, total_pool, outcome, winner_count, loser_count
                     )
@@ -1163,7 +1163,7 @@ class NeonDegenService:
             # Layer 3: Bomb pot GIF
             try:
                 from utils.neon_drawing import create_bomb_pot_gif
-                gif = create_bomb_pot_gif(pool_amount, contributor_count)
+                gif = await asyncio.to_thread(create_bomb_pot_gif, pool_amount, contributor_count)
                 text = render_bomb_pot(pool_amount, contributor_count)
                 return NeonResult(layer=3, text_block=text, gif_file=gif)
             except Exception as e:
@@ -1256,7 +1256,7 @@ class NeonDegenService:
                 try:
                     from utils.neon_drawing import create_degen_certificate_gif
                     # Use degen certificate style but for games milestone
-                    gif = create_degen_certificate_gif(name, total_games)
+                    gif = await asyncio.to_thread(create_degen_certificate_gif, name, total_games)
                     text = render_games_milestone(name, total_games)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
@@ -1302,7 +1302,7 @@ class NeonDegenService:
             if current_streak >= 8:
                 try:
                     from utils.neon_drawing import create_streak_record_gif
-                    gif = create_streak_record_gif(name, current_streak)
+                    gif = await asyncio.to_thread(create_streak_record_gif, name, current_streak)
                     text = render_win_streak_record(name, current_streak)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
@@ -1449,7 +1449,7 @@ class NeonDegenService:
             # Layer 3: Market crash GIF
             try:
                 from utils.neon_drawing import create_unanimous_wrong_gif
-                gif = create_unanimous_wrong_gif(consensus_percentage, winning_side, loser_count)
+                gif = await asyncio.to_thread(create_unanimous_wrong_gif, consensus_percentage, winning_side, loser_count)
                 text = render_unanimous_wrong(consensus_percentage, winning_side, loser_count)
                 return NeonResult(layer=3, text_block=text, gif_file=gif)
             except Exception as e:
