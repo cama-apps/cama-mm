@@ -207,6 +207,56 @@ class TestMatchEnrichmentService:
         assert result["players_updated"] == 1
         assert 101 in result["players_failed"]
 
+    def test_enrich_match_forwards_guild_id_to_openskill_update(self, mock_repos, mock_opendota_api):
+        """enrich_match must pass guild_id to update_openskill_ratings_for_match.
+
+        Regression: the call previously omitted guild_id, causing the OpenSkill
+        update to silently default to guild 0 in multi-guild deployments.
+        """
+        match_repo, player_repo = mock_repos
+
+        target_guild = 9876543210
+
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+        mock_opendota_api.get_match_details.return_value = {
+            "match_id": 8181518332,
+            "duration": 2400,
+            "radiant_win": True,
+            "radiant_score": 35,
+            "dire_score": 22,
+            "game_mode": 2,
+            "players": [
+                {
+                    "account_id": 12345,
+                    "player_slot": 0,
+                    "hero_id": 1,
+                    "kills": 5, "deaths": 2, "assists": 8,
+                    "gold_per_min": 450, "xp_per_min": 500, "last_hits": 100,
+                    "denies": 5, "hero_damage": 10000, "tower_damage": 2000,
+                    "hero_healing": 0, "net_worth": 15000,
+                },
+            ],
+        }
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": 100, "side": "radiant"},
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {100: [12345]}
+
+        mock_match_service = Mock()
+        mock_match_service.update_openskill_ratings_for_match.return_value = {
+            "success": True, "players_updated": 1
+        }
+
+        service = MatchEnrichmentService(
+            match_repo, player_repo, mock_opendota_api,
+            match_service=mock_match_service
+        )
+        service.enrich_match(1, 8181518332, skip_validation=True, guild_id=target_guild)
+
+        mock_match_service.update_openskill_ratings_for_match.assert_called_once_with(
+            1, guild_id=target_guild
+        )
+
 
 class TestMatchRepositoryEnrichment:
     """Tests for MatchRepository enrichment methods."""

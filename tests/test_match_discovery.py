@@ -2,7 +2,7 @@
 Tests for MatchDiscoveryService and related functionality.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import pytest
@@ -48,7 +48,7 @@ class TestMatchDiscoveryService:
         }
 
         # OpenDota returns matches for all players within time window
-        match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
+        match_time = int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC).timestamp())
         mock_opendota_api.get_player_matches.return_value = [
             {"match_id": 99999, "start_time": match_time + 60},  # 1 min after
         ]
@@ -76,7 +76,7 @@ class TestMatchDiscoveryService:
             i: [i + 1000] for i in range(1, 11)
         }
 
-        match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
+        match_time = int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC).timestamp())
 
         # Only first 5 players have matches (50% confidence, below 80% threshold)
         def mock_get_matches(steam_id, limit=20):
@@ -131,7 +131,7 @@ class TestMatchDiscoveryService:
             i: [i + 1000] for i in range(1, 11)
         }
 
-        match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
+        match_time = int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC).timestamp())
 
         # Matches are 5 hours away (outside 3 hour window)
         mock_opendota_api.get_player_matches.return_value = [
@@ -158,7 +158,7 @@ class TestMatchDiscoveryService:
             i: [i + 1000] for i in range(1, 11)
         }
 
-        match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
+        match_time = int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC).timestamp())
         mock_opendota_api.get_player_matches.return_value = [
             {"match_id": 99999, "start_time": match_time},
         ]
@@ -239,6 +239,24 @@ class TestMatchDiscoveryService:
 
         assert service._parse_match_time(None) is None
         assert service._parse_match_time("invalid") is None
+
+    def test_parse_match_time_sqlite_utc_correct(self, mock_repos, mock_opendota_api):
+        """SQLite timestamps are stored in UTC; _parse_match_time must return the
+        correct UTC epoch regardless of the local timezone.
+
+        Regression: the naive strptime path previously interpreted the string in
+        the server's local timezone, shifting the result by the UTC offset.
+        """
+        match_repo, player_repo = mock_repos
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+
+        # 2024-01-15 12:00:00 UTC = 1705320000
+        expected_epoch = 1705320000
+        result = service._parse_match_time("2024-01-15 12:00:00")
+        assert result == expected_epoch, (
+            f"SQLite UTC timestamp parsed to wrong epoch: got {result}, expected {expected_epoch}. "
+            f"Likely a local-timezone offset was applied."
+        )
 
 
 class TestMatchRepositoryWipeMethods:

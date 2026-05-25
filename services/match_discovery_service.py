@@ -10,7 +10,7 @@ Uses OpenDota API to find matches by correlating:
 
 import logging
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 
 from config import ENRICHMENT_DISCOVERY_TIME_WINDOW, ENRICHMENT_MIN_PLAYER_MATCH
 from opendota_integration import OpenDotaAPI
@@ -295,15 +295,22 @@ class MatchDiscoveryService:
 
         if isinstance(match_date, str):
             try:
-                # Try ISO format
+                # Try ISO format; the database stores UTC strings, so attach UTC
+                # if fromisoformat returns a naive datetime (no tzinfo) to avoid
+                # interpreting the value in local time.
                 dt = datetime.fromisoformat(match_date.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=UTC)
                 return int(dt.timestamp())
             except ValueError:
                 pass
 
             try:
-                # Try common SQLite format
-                dt = datetime.strptime(match_date, "%Y-%m-%d %H:%M:%S")
+                # Try common SQLite format; stored in UTC, so attach UTC tzinfo
+                # before converting to avoid local-time shift on the timestamp.
+                dt = datetime.strptime(match_date, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=UTC
+                )
                 return int(dt.timestamp())
             except ValueError:
                 pass

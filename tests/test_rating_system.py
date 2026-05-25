@@ -1214,5 +1214,45 @@ class TestV3FixesOldBugs:
                 f"Calibrated player {i} should get moderate delta: got {cal_delta}"
 
 
+class TestGlicko2NumericRegression:
+    """Numeric regression against the canonical Glickman (2012) worked example.
+
+    Source: Glickman (2012), "Example of the Glicko-2 system"
+    https://www.glicko.net/glicko/glicko2.pdf  (Section 3)
+
+    Player:   rating=1500, RD=200, vol=0.06
+    Opponents (all in Glicko-2 scale):
+        - rating=1400, RD=30  → W
+        - rating=1550, RD=100 → L
+        - rating=1700, RD=300 → L
+    Expected outputs:
+        rating ≈ 1464.06, RD ≈ 151.52, vol ≈ 0.05999
+
+    This codebase operates on a 0–3000 rating scale (not the classic 1500 Glicko-2
+    scale), but the underlying glicko2 library uses standard Glicko-2 arithmetic.
+    The test drives the library directly to pin the numerical contract — if τ, ε,
+    or scale constants drift, this test will catch it.
+    """
+
+    def test_glickman_paper_worked_example(self):
+        """Pin the glicko2 library output against the canonical Glickman example."""
+        p = Player(rating=1500, rd=200, vol=0.06)
+        p.update_player(
+            [1400, 1550, 1700],  # opponent ratings
+            [30, 100, 300],      # opponent RDs
+            [1, 0, 0],           # results: W, L, L
+        )
+
+        assert abs(p.rating - 1464.06) < 0.5, (
+            f"Glicko-2 rating diverged from Glickman paper: {p.rating:.4f} (expected ~1464.06)"
+        )
+        assert abs(p.rd - 151.52) < 0.5, (
+            f"Glicko-2 RD diverged from Glickman paper: {p.rd:.4f} (expected ~151.52)"
+        )
+        assert abs(p.vol - 0.05999) < 0.0001, (
+            f"Glicko-2 volatility diverged from Glickman paper: {p.vol:.6f} (expected ~0.05999)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
