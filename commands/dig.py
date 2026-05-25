@@ -70,7 +70,7 @@ from services.dig_constants import (
 )
 from services.dig_constants import get_layer as get_layer_def
 from services.permissions import has_admin_permission
-from utils.embed_safety import add_lines_field
+from utils.embed_safety import add_lines_field, truncate_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -967,7 +967,7 @@ class DigCommands(commands.Cog):
                 if isinstance(r, dict) else str(r)
                 for r in relics
             )
-            embed.add_field(name="Relics", value=relic_text, inline=False)
+            embed.add_field(name="Relics", value=truncate_field(relic_text), inline=False)
 
         # Queued items
         queued = info.get("queued_items", []) if isinstance(info, dict) else []
@@ -1986,11 +1986,14 @@ class DigCommands(commands.Cog):
         if not await require_dig_channel(interaction):
             return
 
+        if not await safe_defer(interaction):
+            return
+
         guild_id = interaction.guild.id
         weather = await asyncio.to_thread(self.dig_service.get_weather, guild_id)
 
         if not weather:
-            await interaction.response.send_message("No weather today — skies are clear.", ephemeral=True)
+            await safe_followup(interaction, content="No weather today — skies are clear.", ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -2004,39 +2007,38 @@ class DigCommands(commands.Cog):
             desc = w.get("description", "")
             effects = w.get("effects", {})
 
-            # Build a short mechanical summary
-            fx_parts = []
+            fx_lines = []
             if effects.get("cave_in_bonus"):
                 val = effects["cave_in_bonus"]
-                fx_parts.append(f"{'+'if val > 0 else ''}{val:.0%} cave-in")
+                fx_lines.append("cave-in risk surges" if val > 0 else "cave-in risk eases")
             if effects.get("jc_multiplier"):
                 val = effects["jc_multiplier"]
-                fx_parts.append(f"{'+'if val > 0 else ''}{val:.0%} JC")
+                fx_lines.append("ore veins are rich" if val > 0 else "ore veins are thin")
             if effects.get("jc_bonus"):
                 val = effects["jc_bonus"]
-                fx_parts.append(f"{'+'if val > 0 else ''}{val} JC/dig")
+                fx_lines.append("seams glitter" if val > 0 else "seams run dry")
             if effects.get("advance_bonus"):
                 val = effects["advance_bonus"]
-                fx_parts.append(f"{'+'if val > 0 else ''}{val} advance")
+                fx_lines.append("ground is soft" if val > 0 else "ground is dense")
             if effects.get("event_chance_multiplier"):
                 val = effects["event_chance_multiplier"]
-                fx_parts.append(f"{'+'if val > 0 else ''}{val:.0%} events")
+                fx_lines.append("the deep stirs" if val > 0 else "the deep is quiet")
             if effects.get("artifact_multiplier") and effects["artifact_multiplier"] != 1.0:
-                fx_parts.append(f"{effects['artifact_multiplier']:.1f}x artifacts")
+                val = effects["artifact_multiplier"]
+                fx_lines.append("relics surface more often" if val > 1.0 else "relics are scarce")
             if effects.get("luminosity_drain_multiplier"):
-                val = effects["luminosity_drain_multiplier"]
-                fx_parts.append(f"+{val:.0%} lum drain")
+                fx_lines.append("darkness drains lanterns quickly")
 
-            fx_str = " | ".join(fx_parts) if fx_parts else "No mechanical effect"
+            fx_str = ", ".join(fx_lines) if fx_lines else "no notable effect"
 
             embed.add_field(
                 name=f"{layer} — {name}",
-                value=f"*{desc}*\n`{fx_str}`",
+                value=f"*{desc}*\n*{fx_str}*",
                 inline=False,
             )
 
         embed.set_footer(text="Weather affects all diggers in that layer today.")
-        await interaction.response.send_message(embed=embed)
+        await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
     # 17. /dig resetcooldown — Admin: reset a player's free dig
@@ -2050,14 +2052,17 @@ class DigCommands(commands.Cog):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
         guild_id = interaction.guild.id
         result = await asyncio.to_thread(self.dig_service.reset_dig_cooldown, user.id, guild_id)
 
         if not result.get("success"):
-            await interaction.response.send_message(result.get("error", "Failed."), ephemeral=True)
+            await safe_followup(interaction, content=result.get("error", "Failed."), ephemeral=True)
             return
 
-        await interaction.response.send_message(f"Reset free dig cooldown for {user.mention}.", ephemeral=True)
+        await safe_followup(interaction, content=f"Reset free dig cooldown for {user.mention}.", ephemeral=True)
 
     @dig.command(name="forceevent", description="Force next dig to trigger an event (Admin only)")
     @app_commands.describe(user="The player whose next dig gets an event")
@@ -2081,17 +2086,22 @@ class DigCommands(commands.Cog):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
         guild_id = interaction.guild.id
         tunnel = await asyncio.to_thread(self.dig_service.dig_repo.get_tunnel, user.id, guild_id)
         if not tunnel:
-            await interaction.response.send_message("That player doesn't have a tunnel.", ephemeral=True)
+            await safe_followup(interaction, content="That player doesn't have a tunnel.", ephemeral=True)
             return
 
         depth = max(0, depth)
         await asyncio.to_thread(self.dig_service.dig_repo.update_tunnel, user.id, guild_id, depth=depth)
         await asyncio.to_thread(self.dig_service.dig_repo.update_tunnel, user.id, guild_id, last_dig_at=0)
-        await interaction.response.send_message(
-            f"Set {user.mention} to depth **{depth}** and reset cooldown.", ephemeral=True,
+        await safe_followup(
+            interaction,
+            content=f"Set {user.mention} to depth **{depth}** and reset cooldown.",
+            ephemeral=True,
         )
 
     # ------------------------------------------------------------------
@@ -2113,6 +2123,9 @@ class DigCommands(commands.Cog):
         if not player:
             return
 
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
         guild_id = interaction.guild.id
         result = await asyncio.to_thread(
             self.dig_service.get_miner_profile,
@@ -2120,7 +2133,7 @@ class DigCommands(commands.Cog):
             guild_id,
         )
         if not result.get("success"):
-            await interaction.response.send_message(result.get("error", "No profile."), ephemeral=True)
+            await safe_followup(interaction, content=result.get("error", "No profile."), ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -2134,7 +2147,7 @@ class DigCommands(commands.Cog):
             inline=False,
         )
         embed.set_footer(text="Backstory locks after you set it. Boss first clears grant one extra S point.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
     @miner.command(name="about", description="Set your miner backstory once")
     @app_commands.describe(
@@ -2174,9 +2187,9 @@ class DigCommands(commands.Cog):
 
     @miner.command(name="build", description="Spend unallocated points on Strength, Smarts, and Stamina")
     @app_commands.describe(
-        strength="Points to add. Every 2 total points raises max advance; every 5 raises min.",
-        smarts="Points to add. Each total point reduces cave-in chance by 2%.",
-        stamina="Points to add. Each total point reduces cooldowns and paid digs by 4%.",
+        strength="Points to add. Increases how far you dig each action.",
+        smarts="Points to add. Helps you read the stone and avoid collapses.",
+        stamina="Points to add. Keeps you digging longer between rests.",
     )
     @require_guild
     async def dig_build(
@@ -2193,6 +2206,9 @@ class DigCommands(commands.Cog):
         if not player:
             return
 
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
         guild_id = interaction.guild.id
         result = await asyncio.to_thread(
             self.dig_service.set_miner_stats,
@@ -2203,7 +2219,7 @@ class DigCommands(commands.Cog):
             stamina=stamina,
         )
         if not result.get("success"):
-            await interaction.response.send_message(result.get("error", "Build update failed."), ephemeral=True)
+            await safe_followup(interaction, content=result.get("error", "Build update failed."), ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -2211,7 +2227,7 @@ class DigCommands(commands.Cog):
             description=_format_s_stats(result.get("stats", {}), result.get("effects", {})),
             color=0x5865F2,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
     # 19. /dig guide — Paginated help
@@ -2528,41 +2544,6 @@ async def _attach_items_strip(embed: discord.Embed, items_ids: list[str]) -> dis
     except Exception:
         pass
     return None
-
-
-async def _build_items_used_embed(result: object) -> tuple[discord.Embed, discord.File] | None:
-    """Build a tiny embed showing consumed item icons, or None if no items used."""
-    items_used_ids = getattr(result, "items_used_ids", None)
-    items_used = getattr(result, "items_used", None)
-    if not items_used_ids:
-        return None
-    try:
-        from services.dig_constants import CONSUMABLE_ITEMS
-        from utils.dig_assets import compose_items_used
-        items_file = await asyncio.to_thread(compose_items_used, list(items_used_ids))
-        if not items_file:
-            # No art files — fall back to text-only if we have display names
-            if not items_used:
-                return None
-            label = ", ".join(str(i) for i in items_used)
-            embed = discord.Embed(description=f"**Items Used:** {label}", color=0x2F3136)
-            return embed, None  # type: ignore[return-value]
-        # Derive label from display names or constants
-        if items_used:
-            label = ", ".join(str(i) for i in items_used)
-        else:
-            label = ", ".join(
-                CONSUMABLE_ITEMS.get(iid, {}).get("name", iid) for iid in items_used_ids
-            )
-        embed = discord.Embed(
-            description=f"**Items Used:** {label}",
-            color=0x2F3136,
-        )
-        embed.set_thumbnail(url=f"attachment://{items_file.filename}")
-        return embed, items_file
-    except Exception:
-        logger.debug("Items used embed failed")
-        return None
 
 
 # ---------------------------------------------------------------------------

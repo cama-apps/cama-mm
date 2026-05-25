@@ -90,7 +90,7 @@ GUIDE_PAGES = [
             "You can hold up to 8 items at a time. Queued items are used on "
             "your next dig.\n\n"
             "**Pickaxes**\n"
-            "Upgrade your pickaxe with `/dig upgrade`. Higher tiers require depth "
+            "Upgrade your pickaxe from `/dig shop` using `/dig buy`. Higher tiers require depth "
             "milestones, JC, and prestige levels. Better pickaxes dig more blocks "
             "per action.\n\n"
             "**Relics**\n"

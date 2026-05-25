@@ -48,7 +48,7 @@ class TestLobbyServicePendingMatchCheck:
 
         lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
         lobby_manager.get_or_create_lobby.return_value = lobby
-        lobby_manager.join_lobby.return_value = True
+        lobby_manager.join_lobby.return_value = "ok"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -94,7 +94,7 @@ class TestLobbyServicePendingMatchCheck:
 
         lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
         lobby_manager.get_or_create_lobby.return_value = lobby
-        lobby_manager.join_lobby.return_value = True
+        lobby_manager.join_lobby.return_value = "ok"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -108,19 +108,17 @@ class TestLobbyServicePendingMatchCheck:
         assert pending_info is None
 
     def test_join_lobby_returns_lobby_full_reason(self):
-        """Test that lobby full returns correct reason code."""
+        """Test that lobby full returns correct reason code.
+
+        The capacity check lives inside the manager (under the state lock).
+        LobbyService just maps the "full" reason string through.
+        """
         lobby_manager = MagicMock(spec=LobbyManagerService)
         player_repo = MagicMock()
         match_state_service = MagicMock()
 
         match_state_service.get_pending_match_for_player.return_value = None
-
-        lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
-        # Add 12 players to make it full
-        for i in range(12):
-            lobby.players.add(1000 + i)
-
-        lobby_manager.get_or_create_lobby.return_value = lobby
+        lobby_manager.join_lobby.return_value = "full"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -142,10 +140,7 @@ class TestLobbyServicePendingMatchCheck:
         match_state_service = MagicMock()
 
         match_state_service.get_pending_match_for_player.return_value = None
-
-        lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
-        lobby_manager.get_or_create_lobby.return_value = lobby
-        lobby_manager.join_lobby.return_value = False  # Already in lobby
+        lobby_manager.join_lobby.return_value = "already_joined"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -166,10 +161,7 @@ class TestLobbyServicePendingMatchCheck:
         match_state_service = MagicMock()
 
         match_state_service.get_pending_match_for_player.return_value = None
-
-        lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
-        lobby_manager.get_or_create_lobby.return_value = lobby
-        lobby_manager.join_lobby_conditional.return_value = False  # Already in lobby
+        lobby_manager.join_lobby_conditional.return_value = "already_joined"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -190,10 +182,7 @@ class TestLobbyServicePendingMatchCheck:
         match_state_service = MagicMock()
 
         match_state_service.get_pending_match_for_player.return_value = None
-
-        lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
-        lobby_manager.get_or_create_lobby.return_value = lobby
-        lobby_manager.join_lobby_conditional.return_value = True
+        lobby_manager.join_lobby_conditional.return_value = "ok"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -209,19 +198,16 @@ class TestLobbyServicePendingMatchCheck:
         lobby_manager.join_lobby_conditional.assert_called_once()
 
     def test_join_lobby_conditional_returns_lobby_full_reason(self):
-        """Test that lobby full returns correct reason code for conditional join."""
+        """Test that lobby full returns correct reason code for conditional join.
+
+        The capacity check lives inside the manager (under the state lock).
+        """
         lobby_manager = MagicMock(spec=LobbyManagerService)
         player_repo = MagicMock()
         match_state_service = MagicMock()
 
         match_state_service.get_pending_match_for_player.return_value = None
-
-        lobby = Lobby(lobby_id=1, created_by=None, created_at=datetime.now())
-        # Add 12 players to make it full
-        for i in range(12):
-            lobby.players.add(1000 + i)
-
-        lobby_manager.get_or_create_lobby.return_value = lobby
+        lobby_manager.join_lobby_conditional.return_value = "full"
 
         service = LobbyService(
             lobby_manager=lobby_manager,

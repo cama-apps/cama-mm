@@ -147,6 +147,16 @@ class PrestigePerksView(discord.ui.View):
 
         return callback
 
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            if hasattr(self, "message") and self.message is not None:
+                await self.message.edit(content="*The moment passed.*", view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
     async def _announce_ascension_publicly(
         self, interaction: discord.Interaction,
     ) -> None:
@@ -229,6 +239,16 @@ class MutationSelectionView(discord.ui.View):
             await interaction.followup.send(embed=self.perks_embed, view=self.perks_view)
             self.stop()
         return callback
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            if hasattr(self, "message") and self.message is not None:
+                await self.message.edit(content="*The moment passed.*", view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
 
 class DigGuideView(discord.ui.View):

@@ -70,6 +70,16 @@ class EventEncounterView(discord.ui.View):
         self.safe_btn.label = safe_label[:80]
         self.risky_btn.label = risky_label[:80]
 
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            if hasattr(self, "message") and self.message is not None:
+                await self.message.edit(content="*The moment passed.*", view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
     async def _send_result(self, interaction: discord.Interaction, embed: discord.Embed) -> None:
         if self.target_channel is not None:
             try:
@@ -314,3 +324,13 @@ class BoonSelectionView(discord.ui.View):
                 await interaction.followup.send("Boon selection failed.", ephemeral=True)
             self.stop()
         return callback
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            if hasattr(self, "message") and self.message is not None:
+                await self.message.edit(content="*The moment passed.*", view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass

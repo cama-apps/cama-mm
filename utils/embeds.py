@@ -5,6 +5,7 @@ Reusable Discord embed builders.
 import discord
 
 from rating_system import CamaRatingSystem
+from utils.embed_safety import truncate_field
 from utils.formatting import FROGLING_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 
@@ -433,7 +434,7 @@ def create_enriched_match_embed(
     radiant_label = "🟢 RADIANT" + (" (Winner)" if winning_team == 1 else "")
     embed.add_field(
         name=radiant_label,
-        value=format_team_field(radiant_participants, "radiant", winning_team == 1),
+        value=truncate_field(format_team_field(radiant_participants, "radiant", winning_team == 1)),
         inline=False,
     )
 
@@ -441,7 +442,7 @@ def create_enriched_match_embed(
     dire_label = "🔴 DIRE" + (" (Winner)" if winning_team == 2 else "")
     embed.add_field(
         name=dire_label,
-        value=format_team_field(dire_participants, "dire", winning_team == 2),
+        value=truncate_field(format_team_field(dire_participants, "dire", winning_team == 2)),
         inline=False,
     )
 

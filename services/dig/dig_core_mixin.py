@@ -701,16 +701,28 @@ class DigCoreMixin:
             + p["weather_fx"].get("jc_multiplier", 0)
         )
         jc_mult = max(0.0, jc_mult - p["ascension"].get("jc_layer_penalty", 0))
+        weather_code_now = self._get_weather_code(guild_id, layer_name)
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id,
-            weather_code=self._get_weather_code(guild_id, layer_name),
+            weather_code=weather_code_now,
             luminosity=luminosity,
         )
+        # Mana × weather combo: Sunny + White boosts yield.
+        weather_combo_yield = 1.0
+        if self.mana_effects_service is not None:
+            try:
+                _wc = self.mana_effects_service.get_weather_combo_modifiers(
+                    discord_id, guild_id, weather_code_now,
+                )
+                weather_combo_yield = _wc["yield_mult"]
+            except Exception:
+                weather_combo_yield = 1.0
         jc_earned = (
             int(
                 jc_earned
                 * jc_mult
                 * relic_yield_mult
+                * weather_combo_yield
                 * self._luminosity_jc_multiplier(luminosity)
                 * self._post_pinnacle_decay_factor(new_depth, discord_id, guild_id)
             )
@@ -764,6 +776,10 @@ class DigCoreMixin:
 
         # Plains tithe / Blue tax apply to the full payout.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
+        # Helltide bell: flat per-dig tax while the guild modifier is active.
+        helltide_tax = self._helltide_tax(guild_id)
+        if helltide_tax > 0:
+            jc_earned = max(0, jc_earned - helltide_tax)
 
         # Artifact
         artifact = None
@@ -1069,11 +1085,14 @@ class DigCoreMixin:
 
             jc_earned = outcome.get("jc_earned", 0)
 
-            # Milestones (deterministic bookkeeping)
+            # Milestones (anti-farm: only award on depths that extend all-time high,
+            # same as main dig() / _execute_deterministic_outcome).
             milestone_bonus = 0
             milestone_mult = 1.0 + p["ascension"].get("milestone_multiplier", 0)
+            prev_max_depth = tunnel.get("max_depth", 0) or 0
+            milestone_floor = max(depth_before, prev_max_depth)
             for m_depth, m_reward in MILESTONES.items():
-                if depth_before < m_depth <= new_depth:
+                if milestone_floor < m_depth <= new_depth:
                     milestone_bonus += int(m_reward * milestone_mult)
             jc_earned += milestone_bonus
 
@@ -1165,6 +1184,29 @@ class DigCoreMixin:
 
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
+            # Mana × weather combo (Sunny + White) boosts yield. The DM range
+            # (jc_min/jc_max) is computed without this combo, so apply it here to
+            # match dig() / _execute_deterministic_outcome before taxes.
+            weather_combo_yield = 1.0
+            if self.mana_effects_service is not None:
+                try:
+                    _wc = self.mana_effects_service.get_weather_combo_modifiers(
+                        discord_id, guild_id,
+                        self._get_weather_code(guild_id, p["layer_name"]),
+                    )
+                    weather_combo_yield = _wc["yield_mult"]
+                except Exception:
+                    weather_combo_yield = 1.0
+            if weather_combo_yield != 1.0:
+                jc_earned = int(jc_earned * weather_combo_yield)
+
+            # Plains tithe / Blue tax apply to the full payout.
+            jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
+            # Helltide bell: flat per-dig tax while the guild modifier is active.
+            helltide_tax = self._helltide_tax(guild_id)
+            if helltide_tax > 0:
+                jc_earned = max(0, jc_earned - helltide_tax)
+
             # Bankruptcy debuff: keep only the configured fraction of yield while
             # penalized (applied last, before the credit; withheld share is a sink).
             jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
@@ -1180,6 +1222,7 @@ class DigCoreMixin:
                 balance_delta=jc_earned,
                 tunnel_updates={
                     "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
+                    "max_depth": max(prev_max_depth, new_depth),
                     "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
                     "streak_days": streak, "streak_last_date": today,
                     "current_run_jc": run_jc,

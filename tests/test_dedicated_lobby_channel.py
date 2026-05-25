@@ -6,6 +6,7 @@ tracking the origin channel (where /lobby was run) for rally notifications.
 """
 
 import os
+import sys
 import tempfile
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,7 +33,8 @@ def _cleanup_db_file(db_path: str) -> None:
         return
     except PermissionError:
         # Windows can hold the file briefly after the connection closes.
-        time.sleep(0.2)
+        if sys.platform == "win32":
+            time.sleep(0.2)
         try:
             os.unlink(db_path)
         except Exception:

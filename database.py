@@ -485,12 +485,13 @@ class Database:
 
             return match_id
 
-    def get_exclusion_counts(self, discord_ids: list[int]) -> dict[int, int]:
+    def get_exclusion_counts(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, int]:
         """
         Get exclusion counts for multiple players.
 
         Args:
             discord_ids: List of Discord user IDs
+            guild_id: Guild ID for multi-guild isolation (None normalizes to 0)
 
         Returns:
             Dict mapping discord_id to exclusion_count
@@ -498,14 +499,15 @@ class Database:
         if not discord_ids:
             return {}
 
+        normalized = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
             placeholders = ",".join("?" * len(discord_ids))
             cursor.execute(
                 f"SELECT discord_id, COALESCE(exclusion_count, 0) as exclusion_count "
-                f"FROM players WHERE discord_id IN ({placeholders})",
-                discord_ids,
+                f"FROM players WHERE discord_id IN ({placeholders}) AND guild_id = ?",
+                (*discord_ids, normalized),
             )
             rows = cursor.fetchall()
 
@@ -574,32 +576,41 @@ class Database:
                 (discord_id, guild_id),
             )
 
-    def delete_player(self, discord_id: int) -> bool:
+    def delete_player(self, discord_id: int, guild_id: int | None = None) -> bool:
         """
         Delete a player from the database (removes all their data).
 
         Args:
             discord_id: Discord user ID
+            guild_id: Guild ID for multi-guild isolation (None normalizes to 0)
 
         Returns:
             True if player was deleted, False if player didn't exist
         """
+        normalized = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            # Check if player exists
-            cursor.execute("SELECT discord_id FROM players WHERE discord_id = ?", (discord_id,))
+            # Check if player exists in this guild
+            cursor.execute(
+                "SELECT discord_id FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized),
+            )
             if not cursor.fetchone():
                 return False
 
-            # Delete player (cascade will handle related records if foreign keys are set up)
-            cursor.execute("DELETE FROM players WHERE discord_id = ?", (discord_id,))
-
-            # Also delete from match_participants (if foreign key cascade isn't set up)
-            cursor.execute("DELETE FROM match_participants WHERE discord_id = ?", (discord_id,))
-
-            # Delete rating history
-            cursor.execute("DELETE FROM rating_history WHERE discord_id = ?", (discord_id,))
+            cursor.execute(
+                "DELETE FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized),
+            )
+            cursor.execute(
+                "DELETE FROM match_participants WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized),
+            )
+            cursor.execute(
+                "DELETE FROM rating_history WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized),
+            )
 
             return True
 
@@ -730,8 +741,8 @@ class Database:
             cursor = conn.cursor()
             if pending_match_id is not None:
                 cursor.execute(
-                    "SELECT pending_match_id, payload FROM pending_matches WHERE pending_match_id = ?",
-                    (pending_match_id,),
+                    "SELECT pending_match_id, payload FROM pending_matches WHERE pending_match_id = ? AND guild_id = ?",
+                    (pending_match_id, normalized),
                 )
             else:
                 cursor.execute(

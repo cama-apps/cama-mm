@@ -872,6 +872,24 @@ class ProgressionMixin:
         victim_block_tip = max(25, cost // 2)
         if self.buff_service is not None:
             try:
+                # White mana passive: lazily grant the first-sabotage-today aegis
+                # if the target has the effect active and the buff hasn't been
+                # issued yet today (idempotent — grant is a no-op when a live row
+                # already exists).
+                if self.mana_effects_service is not None:
+                    try:
+                        _target_effects = self.mana_effects_service.get_effects(
+                            target_id, guild_id
+                        )
+                        if _target_effects.sabotage_first_aegis_today:
+                            from services.buff_service import BUFF_FIRST_AEGIS_TODAY
+                            if not self.buff_service.buff_repo.has_active(
+                                target_id, guild_id, BUFF_FIRST_AEGIS_TODAY
+                            ):
+                                self.buff_service.grant_first_aegis_today(target_id, guild_id)
+                    except Exception:
+                        logger.debug("White mana aegis grant failed", exc_info=True)
+
                 if self.buff_service.has_pvp_immunity(target_id, guild_id):
                     self.player_repo.add_balance(
                         target_id, guild_id, victim_block_tip,

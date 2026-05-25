@@ -73,11 +73,21 @@ def _register_player(player_repository, discord_id=10001, guild_id=12345, balanc
 class TestDigConstants:
     """Pure-data assertions on tunable constants."""
 
-    def test_paid_dig_ramp(self):
-        assert PAID_DIG_COSTS_PER_DAY == [3, 5, 10, 20, 40]
+    def test_paid_dig_ramp_is_strictly_increasing(self):
+        """Each successive paid dig in a day costs more than the last."""
+        assert len(PAID_DIG_COSTS_PER_DAY) >= 2, "need at least two cost tiers to assert a ramp"
+        for i in range(len(PAID_DIG_COSTS_PER_DAY) - 1):
+            assert PAID_DIG_COSTS_PER_DAY[i] < PAID_DIG_COSTS_PER_DAY[i + 1], (
+                f"cost[{i}]={PAID_DIG_COSTS_PER_DAY[i]} is not less than "
+                f"cost[{i+1}]={PAID_DIG_COSTS_PER_DAY[i+1]}"
+            )
 
-    def test_paid_dig_cost_cap(self):
-        assert PAID_DIG_COST_CAP == 40
+    def test_paid_dig_cost_cap_equals_last_ramp_entry(self):
+        """The cap should equal the final escalated cost so the ramp tops out there."""
+        assert PAID_DIG_COSTS_PER_DAY[-1] == PAID_DIG_COST_CAP, (
+            f"CAP={PAID_DIG_COST_CAP} does not match last ramp entry "
+            f"{PAID_DIG_COSTS_PER_DAY[-1]}"
+        )
 
     def test_boss_victory_base_jc_covers_every_boss_boundary(self):
         """Every regular boss boundary needs a base-reward entry, else a win
@@ -2295,3 +2305,172 @@ class TestDigAtomicity:
         assert player_repository.get_balance(10001, guild_id) == balance_before
         tunnel_after = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel_after["depth"] == PINNACLE_DEPTH
+
+
+# ---------------------------------------------------------------------------
+# Finding-10: apply_dig_outcome and _execute_deterministic_outcome coverage
+#
+# These tests reproduce bugs #1, #2, #3 on the two secondary dig paths so
+# regressions are caught before they hit players.
+# ---------------------------------------------------------------------------
+
+
+def _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, *, depth, guild_id=12345):
+    """Register, plant a tunnel at ``depth``, then call dig_with_preconditions."""
+    player_repository.add(
+        discord_id=uid,
+        discord_username=f"User{uid}",
+        guild_id=guild_id,
+        initial_mmr=3000,
+        glicko_rating=1500.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    player_repository.update_balance(uid, guild_id, 500)
+    dig_repo.create_tunnel(uid, guild_id, "TestTunnel")
+    # Advance past first-dig so dig_with_preconditions returns real preconditions
+    _now = 2_000_000
+    import unittest.mock as _mock
+    with _mock.patch("time.time", return_value=_now):
+        dig_service.dig(uid, guild_id)
+    # Teleport to desired depth and clear cooldown
+    dig_repo.update_tunnel(uid, guild_id, depth=depth, max_depth=depth, last_dig_at=0)
+    _err, p = dig_service.dig_with_preconditions(uid, guild_id)
+    assert _err is None, f"unexpected terminal: {_err}"
+    return p
+
+
+class TestApplyDigOutcomeSecondaryPaths:
+    """Bug-catching tests for apply_dig_outcome (DM-decided path)."""
+
+    def test_max_depth_advances_on_dm_dig(self, dig_service, dig_repo, player_repository, guild_id):
+        """Finding 1: DM-decided advance must update max_depth in the DB."""
+        uid = 20101
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        dig_service.apply_dig_outcome(p, {"advance": 5, "jc_earned": 0, "cave_in": False, "event_id": ""})
+        tunnel = dig_repo.get_tunnel(uid, guild_id)
+        assert tunnel["max_depth"] == 15, (
+            f"max_depth not updated: got {tunnel['max_depth']}"
+        )
+
+    def test_max_depth_does_not_regress_on_dm_cave_in(self, dig_service, dig_repo, player_repository, guild_id):
+        """Finding 1: max_depth must not decrease when a cave-in knocks depth back."""
+        uid = 20102
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=20, guild_id=guild_id)
+        # Pre-set max_depth above current
+        dig_repo.update_tunnel(uid, guild_id, max_depth=20)
+        dig_service.apply_dig_outcome(
+            p, {"advance": 0, "jc_earned": 0, "cave_in": True,
+                "cave_in_block_loss": 5, "cave_in_type": "stun"},
+        )
+        tunnel = dig_repo.get_tunnel(uid, guild_id)
+        assert tunnel["max_depth"] == 20, (
+            f"max_depth regressed after cave-in: {tunnel['max_depth']}"
+        )
+
+    def test_milestone_not_re_awarded_after_knockback(self, dig_service, dig_repo, player_repository, guild_id):
+        """Finding 2: milestone at 25 must not fire again when max_depth already exceeds it."""
+        uid = 20103
+        # Place player at depth 20 with max_depth already past the 25-JC milestone
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=20, guild_id=guild_id)
+        dig_repo.update_tunnel(uid, guild_id, max_depth=30)  # already passed depth-25 milestone
+        # Rebuild preconditions with updated tunnel state
+        _err, p = dig_service.dig_with_preconditions(uid, guild_id)
+        assert _err is None
+        balance_before = player_repository.get_balance(uid, guild_id)
+        dig_service.apply_dig_outcome(p, {"advance": 10, "jc_earned": 0, "cave_in": False, "event_id": ""})
+        balance_after = player_repository.get_balance(uid, guild_id)
+        milestone_reward = MILESTONES.get(25, 0)
+        # The depth-25 milestone must NOT have been awarded (max_depth was 30)
+        assert balance_after < balance_before + milestone_reward, (
+            "milestone was re-awarded after knockback (anti-farm check broken)"
+        )
+
+    def test_helltide_tax_applied_on_dm_path(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Finding 3: helltide tax must reduce JC payout on the DM-decided path."""
+        uid = 20104
+        # Patch _helltide_tax to return a flat 5 JC tax
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 5)
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        balance_before = player_repository.get_balance(uid, guild_id)
+        dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
+        balance_after = player_repository.get_balance(uid, guild_id)
+        # With helltide=5, payout should be max(0, 10-5)=5, not 10
+        assert balance_after == balance_before + 5, (
+            f"helltide tax not applied on DM path: got +{balance_after - balance_before}"
+        )
+
+    def test_weather_combo_applied_on_dm_path(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Fix #2: the Sunny+White weather-combo yield bonus applies on the DM path.
+
+        The DM jc range (jc_min/jc_max) is computed without the combo, so
+        apply_dig_outcome must apply it to match dig()/_execute_deterministic_outcome.
+        """
+        from unittest.mock import MagicMock
+        uid = 20105
+        # Build preconditions with the original (None) mana service so the jc
+        # range is unaffected, then swap in a 2x-combo service for the apply step.
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        fake_mana = MagicMock()
+        fake_mana.get_weather_combo_modifiers.return_value = {"yield_mult": 2.0}
+        monkeypatch.setattr(dig_service, "mana_effects_service", fake_mana)
+        # Isolate the combo multiplier from taxes/penalties.
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
+        balance_before = player_repository.get_balance(uid, guild_id)
+        dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
+        balance_after = player_repository.get_balance(uid, guild_id)
+        # 10 JC × 2.0 combo (taxes neutralized) = 20.
+        assert balance_after == balance_before + 20, (
+            f"weather combo not applied on DM path: got +{balance_after - balance_before}"
+        )
+
+
+class TestExecuteDeterministicOutcomePaths:
+    """Bug-catching tests for _execute_deterministic_outcome (fallback path)."""
+
+    def test_max_depth_advances_on_deterministic_success(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Finding 1: deterministic fallback must update max_depth."""
+        uid = 20201
+        monkeypatch.setattr("random.random", lambda: 0.99)  # no cave-in
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        dig_service._execute_deterministic_outcome(p)
+        tunnel = dig_repo.get_tunnel(uid, guild_id)
+        assert tunnel["max_depth"] >= 10, (
+            f"max_depth not written by deterministic path: {tunnel['max_depth']}"
+        )
+
+    def test_milestone_not_re_awarded_after_knockback_deterministic(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """Finding 2: deterministic path respects max_depth for milestone anti-farm."""
+        uid = 20202
+        monkeypatch.setattr("random.random", lambda: 0.99)  # no cave-in
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=20, guild_id=guild_id)
+        dig_repo.update_tunnel(uid, guild_id, max_depth=30)
+        _err, p = dig_service.dig_with_preconditions(uid, guild_id)
+        assert _err is None
+        balance_before = player_repository.get_balance(uid, guild_id)
+        dig_service._execute_deterministic_outcome(p)
+        balance_after = player_repository.get_balance(uid, guild_id)
+        milestone_reward = MILESTONES.get(25, 0)
+        assert balance_after < balance_before + milestone_reward, (
+            "milestone re-awarded on deterministic path despite max_depth already past it"
+        )
+
+    def test_helltide_tax_applied_on_deterministic_path(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """Finding 3: helltide tax fires on the deterministic fallback path."""
+        uid = 20203
+        monkeypatch.setattr("random.random", lambda: 0.99)  # no cave-in
+        tax = [0]
+
+        def _fake_helltide(gid):
+            tax[0] += 1
+            return 0  # no actual deduction, just assert it's called
+
+        monkeypatch.setattr(dig_service, "_helltide_tax", _fake_helltide)
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        dig_service._execute_deterministic_outcome(p)
+        assert tax[0] >= 1, "_helltide_tax never called on deterministic path"

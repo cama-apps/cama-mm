@@ -36,6 +36,8 @@ class NotificationRepository(BaseRepository, IReminderRepository):
     ) -> None:
         if reminder_type not in _VALID_TYPES:
             raise ValueError(f"Invalid reminder_type: {reminder_type!r}")
+        # Coupling: each _VALID_TYPES entry must have a matching <type>_enabled
+        # column in reminder_preferences (the column name is derived below).
         col = f"{reminder_type}_enabled"
         normalized = self.normalize_guild_id(guild_id)
         now = int(time.time())
@@ -52,6 +54,7 @@ class NotificationRepository(BaseRepository, IReminderRepository):
     def get_enabled_users_for_type(self, guild_id: int, reminder_type: str) -> list[int]:
         if reminder_type not in _VALID_TYPES:
             return []
+        # Coupling: see set_preference — col name derived from validated _VALID_TYPES entry.
         col = f"{reminder_type}_enabled"
         normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:

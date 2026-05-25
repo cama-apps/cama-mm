@@ -372,7 +372,7 @@ class MatchEnrichmentService:
         if self.match_service and players_enriched > 0:
             try:
                 openskill_result = self.match_service.update_openskill_ratings_for_match(
-                    internal_match_id
+                    internal_match_id, guild_id=guild_id
                 )
                 if openskill_result.get("success"):
                     logger.info(

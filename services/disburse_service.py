@@ -135,9 +135,17 @@ class DisburseService:
         """
         Create a new disbursement proposal.
 
+        Serialized per-guild so two concurrent callers cannot both pass the
+        can_propose check and race into get_and_deduct_nonprofit_fund_atomic.
+
         Raises:
             ValueError if proposal cannot be created
         """
+        with self._get_guild_lock(guild_id):
+            return self._create_proposal_locked(guild_id)
+
+    def _create_proposal_locked(self, guild_id: int | None) -> DisburseProposal:
+        """Inner create; must be called with the guild lock held."""
         can, reason = self.can_propose(guild_id)
         if not can:
             raise ValueError(f"Cannot create proposal: {reason}")

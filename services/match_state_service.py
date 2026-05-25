@@ -402,7 +402,7 @@ class MatchStateService:
 
         if pending_match_id is not None:
             # Update existing match
-            self.match_repo.update_pending_match(pending_match_id, payload)
+            self.match_repo.update_pending_match(pending_match_id, payload, guild_id)
         else:
             # Create new match
             pending_match_id = self.match_repo.save_pending_match(guild_id, payload)

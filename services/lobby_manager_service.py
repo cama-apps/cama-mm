@@ -132,30 +132,40 @@ class LobbyManagerService:
 
     def join_lobby(
         self, discord_id: int, max_players: int = 12, guild_id: int | None = None
-    ) -> bool:
+    ) -> str:
+        """Add a player to the lobby under the state lock.
+
+        Returns one of: "ok", "full", "already_joined".
+        """
         with self._state_lock:
             lobby = self.get_or_create_lobby(guild_id=guild_id)
-            # Check total count (regular + conditional) against max
+            # Capacity check is the authoritative check — happens inside the lock
+            # so two concurrent joins at the boundary cannot both slip through.
             if lobby.get_total_count() >= max_players:
-                return False
+                return "full"
             success = lobby.add_player(discord_id)
             if success:
                 self._persist_lobby(lobby.guild_id)
-            return success
+                return "ok"
+            return "already_joined"
 
     def join_lobby_conditional(
         self, discord_id: int, max_players: int = 12, guild_id: int | None = None
-    ) -> bool:
-        """Add player to conditional queue (frogling)."""
+    ) -> str:
+        """Add player to conditional queue (frogling).
+
+        Returns one of: "ok", "full", "already_joined".
+        """
         with self._state_lock:
             lobby = self.get_or_create_lobby(guild_id=guild_id)
-            # Check total count (regular + conditional) against max
+            # Capacity check inside the lock — authoritative, race-free.
             if lobby.get_total_count() >= max_players:
-                return False
+                return "full"
             success = lobby.add_conditional_player(discord_id)
             if success:
                 self._persist_lobby(lobby.guild_id)
-            return success
+                return "ok"
+            return "already_joined"
 
     def leave_lobby(self, discord_id: int, guild_id: int | None = None) -> bool:
         normalized = self._normalize_guild_id(guild_id)

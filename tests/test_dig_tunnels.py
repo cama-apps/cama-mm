@@ -650,9 +650,12 @@ class TestRunScoring:
 
         # Counters should be reset
         tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel.get("current_run_jc") == 0 or tunnel["current_run_jc"] == 0
-        assert tunnel.get("current_run_artifacts") == 0 or tunnel["current_run_artifacts"] == 0
-        assert tunnel.get("current_run_events") == 0 or tunnel["current_run_events"] == 0
+        assert "current_run_jc" in tunnel
+        assert tunnel["current_run_jc"] == 0
+        assert "current_run_artifacts" in tunnel
+        assert tunnel["current_run_artifacts"] == 0
+        assert "current_run_events" in tunnel
+        assert tunnel["current_run_events"] == 0
 
 
 class TestHallOfFame:

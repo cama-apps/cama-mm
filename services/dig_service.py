@@ -1253,11 +1253,15 @@ class DigService(
                     return self._error(
                         f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
                     ), None
-                self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
-                self.dig_repo.update_tunnel(
+                # Debit cost and flip paid_digs_today atomically so a crash
+                # between the two writes can't charge JC without counting the dig.
+                self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
-                    paid_dig_date=today,
-                    paid_digs_today=paid_count + 1,
+                    balance_delta=-paid_dig_cost,
+                    tunnel_updates={
+                        "paid_dig_date": today,
+                        "paid_digs_today": paid_count + 1,
+                    },
                 )
 
         if is_first_dig:

@@ -290,11 +290,19 @@ class DraftingView(discord.ui.View):
         current_captain_id: int,
         guild: discord.Guild | None = None,
         timeout: float = DRAFTING_TIMEOUT,
+        captain_ids: set[int] | None = None,
+        player_pool_ids: list[int] | None = None,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.current_captain_id = current_captain_id
+        # All participants: captains + draftable pool. Used in interaction_check
+        # to silently ignore button presses from non-participants (saves a DB
+        # round-trip compared to letting the handlers field the invalid press).
+        _captains = captain_ids or set()
+        _pool = set(player_pool_ids or [])
+        self._participant_ids: frozenset[int] = frozenset(_captains | _pool)
 
         # Add player pick buttons (up to 8 players, across rows 0-1)
         for i, player in enumerate(available_players[:8]):
@@ -315,6 +323,18 @@ class DraftingView(discord.ui.View):
         self.add_item(SidePreferenceButton("radiant", row=4))
         self.add_item(SidePreferenceButton("dire", row=4))
         self.add_item(ClearPreferenceButton(row=4))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Reject button presses from players outside this draft without a DB round-trip."""
+        if not self._participant_ids:
+            # Defensive: no ids stored (e.g. preview mode) — let handlers validate.
+            return True
+        if interaction.user.id in self._participant_ids:
+            return True
+        await interaction.response.send_message(
+            "❌ You are not part of this draft.", ephemeral=True
+        )
+        return False
 
     async def on_timeout(self):
         await self.cog._handle_draft_timeout(self.guild_id)
@@ -1550,6 +1570,8 @@ class DraftCommands(commands.Cog):
             available_players=available_players,
             current_captain_id=state.current_captain_id,
             guild=interaction.guild,
+            captain_ids={state.radiant_captain_id, state.dire_captain_id} - {None},
+            player_pool_ids=state.player_pool_ids,
         )
 
         if is_edit:
@@ -1724,7 +1746,7 @@ class DraftCommands(commands.Cog):
         )
 
         embed.set_footer(
-            text=f"Pick #{state.current_pick_index + 1}/{DRAFT_TOTAL_PICKS} | Click a player name to pick"
+            text=f"Pick #{min(state.current_pick_index + 1, DRAFT_TOTAL_PICKS)}/{DRAFT_TOTAL_PICKS} | Click a player name to pick"
         )
 
         return embed
@@ -1763,6 +1785,8 @@ class DraftCommands(commands.Cog):
                     available_players=available_players,
                     current_captain_id=state.current_captain_id,
                     guild=guild,
+                    captain_ids={state.radiant_captain_id, state.dire_captain_id} - {None},
+                    player_pool_ids=state.player_pool_ids,
                 )
                 await message.edit(embed=embed, view=view)
 

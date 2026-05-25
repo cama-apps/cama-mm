@@ -563,23 +563,27 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.lastrowid
 
-    def update_pending_match(self, pending_match_id: int, payload: dict) -> None:
+    def update_pending_match(self, pending_match_id: int, payload: dict, guild_id: int | None = None) -> None:
         """
         Update an existing pending match's payload.
 
         Args:
             pending_match_id: The ID of the pending match to update
             payload: The updated payload dictionary
+            guild_id: Guild ID guard — update is a no-op if the match belongs to
+                a different guild. Prevents cross-guild overwrites when the caller
+                holds an ID but not the same guild context.
         """
+        normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE pending_matches
                 SET payload = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE pending_match_id = ?
+                WHERE pending_match_id = ? AND guild_id = ?
                 """,
-                (json.dumps(payload), pending_match_id),
+                (json.dumps(payload), pending_match_id, normalized),
             )
 
     def get_pending_match(self, guild_id: int | None) -> dict | None:

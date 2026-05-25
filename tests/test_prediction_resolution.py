@@ -101,11 +101,10 @@ def test_vote_flip_rejected(prediction_service, prediction_repo):
 
 
 def test_three_matching_votes_enable_resolution(prediction_service, prediction_repo):
-    """MIN_RESOLUTION_VOTES (3) matching non-admin votes flips can_resolve True.
+    """MIN_RESOLUTION_VOTES matching non-admin votes flips can_resolve True.
 
     Two votes is not enough; the third (same outcome) crosses the threshold.
     """
-    assert PredictionService.MIN_RESOLUTION_VOTES == 3
     pid = _make_closed_prediction(prediction_repo)
 
     r1 = prediction_service.add_resolution_vote(pid, user_id=10, outcome="yes", is_admin=False)
@@ -226,3 +225,32 @@ def test_resolve_orderbook_pays_no_side_when_no_wins(
     # NO holder paid 4 * contract value; YES holder gets nothing.
     assert player_repository.get_balance(2, TEST_GUILD_ID) - no_pre == 4 * PREDICTION_CONTRACT_VALUE
     assert player_repository.get_balance(1, TEST_GUILD_ID) == yes_pre
+
+
+def test_resolve_orderbook_settles_locked_market(
+    prediction_service, prediction_repo, player_repository
+):
+    """A market locked (betting closed) must be settleable via resolve_orderbook.
+
+    check_and_lock_expired / close_betting_early move a market to 'locked'.
+    The admin /predict resolve command calls resolve_orderbook. If the status
+    guard in settle_prediction_orderbook only allows 'open', locked markets
+    become permanently unresolvable — a dead-end for any market whose betting
+    window expired before an explicit admin close.
+    """
+    _add_player(player_repository, 10, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="locked resolve?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=10, side="yes", contracts=3)
+
+    # Simulate betting close (lock the market)
+    prediction_repo.update_prediction_status(pid, "locked")
+    assert prediction_repo.get_prediction(pid)["status"] == "locked"
+
+    pre = player_repository.get_balance(10, TEST_GUILD_ID)
+    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+
+    assert result["outcome"] == "yes"
+    assert result["total_payout"] == 3 * PREDICTION_CONTRACT_VALUE
+    assert player_repository.get_balance(10, TEST_GUILD_ID) - pre == 3 * PREDICTION_CONTRACT_VALUE

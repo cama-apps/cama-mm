@@ -146,6 +146,7 @@ class SchemaManager:
     # --- Migration helpers ---
 
     def _add_column_if_not_exists(self, cursor, table: str, column: str, column_type: str) -> None:
+        # table/column/column_type are internal migration strings only — not for external input.
         cursor.execute(f"PRAGMA table_info({table})")
         existing = {row["name"] for row in cursor.fetchall()}
         if column in existing:

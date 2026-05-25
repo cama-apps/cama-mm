@@ -197,6 +197,22 @@ class ManaRepository(BaseRepository, IManaRepository):
             )
             return cursor.rowcount > 0
 
+    def unmark_item_used(
+        self, discord_id: int, guild_id: int | None, item_id: str, used_date: str
+    ) -> None:
+        """Delete the daily-use row so the slot is released on failure.
+
+        Called from _refund paths that fire after mark_item_used_atomic succeeded
+        but before the item effect ran. Idempotent: no-op if the row is absent.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM manashop_daily_uses "
+                "WHERE discord_id = ? AND guild_id = ? AND item_id = ? AND used_date = ?",
+                (discord_id, gid, item_id, used_date),
+            )
+
     def get_all_mana(self, guild_id: int | None) -> list[dict]:
         """Return all mana rows for the guild, ordered by current_land then discord_id."""
         gid = self.normalize_guild_id(guild_id)

@@ -11,6 +11,7 @@ from discord.ext import commands
 from dotabase import Ability, Hero, dotabase_session
 from sqlalchemy.orm import joinedload
 
+from utils.embed_safety import truncate_field
 from utils.hero_lookup import get_hero_image_url
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -296,7 +297,7 @@ class DotaInfoCommands(commands.Cog):
         # Build embed
         embed = discord.Embed(
             title=ability.localized_name,
-            description=ability.description or "No description available.",
+            description=truncate_field(ability.description or "No description available.", 4096),
             color=0x7289DA,
         )
 
