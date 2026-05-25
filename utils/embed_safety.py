@@ -34,6 +34,49 @@ def truncate_field(text: str, max_len: int = 1024) -> str:
     return text[: max_len - 3] + "..."
 
 
+def add_lines_field(
+    embed: discord.Embed,
+    name: str,
+    lines: list[str],
+    *,
+    inline: bool = False,
+    max_len: int = EMBED_LIMITS["field_value"],
+) -> None:
+    """Add a field whose value is newline-joined ``lines``, splitting into
+    multiple fields when the joined text would exceed Discord's field-value
+    limit, so the list isn't dropped wholesale.
+
+    A single line longer than ``max_len`` can't be split further and is
+    truncated (with an ellipsis) rather than emitted as an over-limit field.
+    Assumes the resulting field count stays within Discord's 25-field cap;
+    for lists large enough to exceed that, paginate instead. Continuation
+    fields use a blank (zero-width) name so the section still reads as one
+    block. No-op when ``lines`` is empty.
+    """
+    if not lines:
+        return
+
+    chunks: list[str] = []
+    current: list[str] = []
+    length = 0
+    for line in lines:
+        extra = len(line) + (1 if current else 0)  # +1 for the joining newline
+        if current and length + extra > max_len:
+            chunks.append("\n".join(current))
+            current, length = [line], len(line)
+        else:
+            current.append(line)
+            length += extra
+    chunks.append("\n".join(current))
+
+    for i, chunk in enumerate(chunks):
+        embed.add_field(
+            name=name if i == 0 else "​",
+            value=truncate_field(chunk, max_len),  # guard a single over-long line
+            inline=inline,
+        )
+
+
 def validate_embed(embed: discord.Embed) -> list[str]:
     """Return list of validation errors, empty if valid.
 
