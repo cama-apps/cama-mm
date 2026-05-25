@@ -77,18 +77,16 @@ class LobbyService:
             if pending_match:
                 return False, "in_pending_match", pending_match
 
-        lobby = self.get_or_create_lobby(guild_id=guild_id)
-
-        if lobby.get_total_count() >= self.max_players:
-            return False, "lobby_full", None
-
-        # Use manager's join_lobby which persists to database
-        if not self.lobby_manager.join_lobby(
+        # Delegate entirely to manager — capacity check is inside the lock,
+        # which is the only place it can be race-free.
+        reason = self.lobby_manager.join_lobby(
             discord_id, self.max_players, guild_id=guild_id
-        ):
-            return False, "already_joined", None
-
-        return True, "", None
+        )
+        if reason == "ok":
+            return True, "", None
+        if reason == "full":
+            return False, "lobby_full", None
+        return False, "already_joined", None
 
     def join_lobby_conditional(
         self, discord_id: int, guild_id: int | None = 0
@@ -104,18 +102,15 @@ class LobbyService:
             if pending_match:
                 return False, "in_pending_match", pending_match
 
-        lobby = self.get_or_create_lobby(guild_id=guild_id)
-
-        if lobby.get_total_count() >= self.max_players:
-            return False, "lobby_full", None
-
-        # Use manager's join_lobby_conditional which persists to database
-        if not self.lobby_manager.join_lobby_conditional(
+        # Delegate entirely to manager — capacity check is inside the lock.
+        reason = self.lobby_manager.join_lobby_conditional(
             discord_id, self.max_players, guild_id=guild_id
-        ):
-            return False, "already_joined", None
-
-        return True, "", None
+        )
+        if reason == "ok":
+            return True, "", None
+        if reason == "full":
+            return False, "lobby_full", None
+        return False, "already_joined", None
 
     def leave_lobby(self, discord_id: int, guild_id: int | None = None) -> bool:
         return self.lobby_manager.leave_lobby(discord_id, guild_id=guild_id)

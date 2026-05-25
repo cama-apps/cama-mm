@@ -20,34 +20,41 @@ def lobby_manager():
 
 @pytest.mark.asyncio
 async def test_creation_lock_prevents_race_condition(lobby_manager):
-    """Verify the lock prevents concurrent lobby creation."""
+    """Verify the lock prevents concurrent lobby creation.
+
+    Uses an asyncio.Event gate instead of real sleeps so ordering is deterministic
+    and the test does not flake under -n 4 parallel workers.
+    """
     results = []
     creation_count = 0
+    # Gate: first task holds the lock here until the second task is waiting on it.
+    inside_gate = asyncio.Event()
+    proceed_gate = asyncio.Event()
 
     async def simulate_lobby_creation(user_id: int):
         nonlocal creation_count
         async with lobby_manager.get_creation_lock():
-            # Simulate checking if lobby exists
             existing = lobby_manager.get_lobby()
             if existing:
                 results.append(("existing", user_id))
                 return
 
-            # Simulate delay during Discord message creation
-            await asyncio.sleep(0.1)
+            # Signal that we are inside the lock, then wait for the test harness.
+            inside_gate.set()
+            await proceed_gate.wait()
 
-            # Create lobby
             lobby_manager.get_or_create_lobby(creator_id=user_id)
             creation_count += 1
             results.append(("created", user_id))
 
-    # Run two concurrent lobby creations
-    await asyncio.gather(
-        simulate_lobby_creation(1),
-        simulate_lobby_creation(2),
-    )
+    task1 = asyncio.create_task(simulate_lobby_creation(1))
+    # Wait until task1 is inside the lock before launching task2.
+    await inside_gate.wait()
+    task2 = asyncio.create_task(simulate_lobby_creation(2))
+    # Let both tasks proceed now.
+    proceed_gate.set()
+    await asyncio.gather(task1, task2)
 
-    # Only one should create, the other should see existing
     assert creation_count == 1
     assert len(results) == 2
     created_count = sum(1 for r in results if r[0] == "created")
@@ -58,23 +65,37 @@ async def test_creation_lock_prevents_race_condition(lobby_manager):
 
 @pytest.mark.asyncio
 async def test_lock_serializes_access(lobby_manager):
-    """Verify that the lock serializes access properly."""
+    """Verify that the lock serializes access properly.
+
+    Uses asyncio.Event gates instead of wall-clock sleeps so the test is
+    deterministic under parallel pytest workers (-n 4).
+    """
     order = []
+    task1_inside = asyncio.Event()
+    task1_may_finish = asyncio.Event()
 
-    async def access_with_lock(name: str, delay: float):
+    async def task1_work():
         async with lobby_manager.get_creation_lock():
-            order.append(f"{name}_start")
-            await asyncio.sleep(delay)
-            order.append(f"{name}_end")
+            order.append("task1_start")
+            task1_inside.set()       # tell the harness we are inside
+            await task1_may_finish.wait()  # hold the lock until released
+            order.append("task1_end")
 
-    # Start task1 first, then task2 while task1 is still running
-    task1 = asyncio.create_task(access_with_lock("task1", 0.2))
-    await asyncio.sleep(0.05)  # Let task1 acquire lock
-    task2 = asyncio.create_task(access_with_lock("task2", 0.1))
+    async def task2_work():
+        async with lobby_manager.get_creation_lock():
+            order.append("task2_start")
+            order.append("task2_end")
 
-    await asyncio.gather(task1, task2)
+    t1 = asyncio.create_task(task1_work())
+    # Wait until task1 holds the lock, *then* enqueue task2.
+    await task1_inside.wait()
+    t2 = asyncio.create_task(task2_work())
+    # Give t2 a chance to queue up before releasing t1.
+    await asyncio.sleep(0)
+    task1_may_finish.set()
+    await asyncio.gather(t1, t2)
 
-    # task1 should complete before task2 starts
+    # task1 must complete before task2 starts (lock is exclusive).
     assert order == ["task1_start", "task1_end", "task2_start", "task2_end"]
 
 
@@ -101,7 +122,10 @@ async def test_creation_locks_are_per_guild(lobby_manager):
 
 @pytest.mark.asyncio
 async def test_multiple_concurrent_calls_only_one_creates(lobby_manager):
-    """Test with more concurrent calls to stress the lock."""
+    """Five concurrent /lobby calls under the creation lock: exactly one creates.
+
+    No sleeps — the lock itself provides the serialization guarantee.
+    """
     creation_count = 0
 
     async def simulate_lobby_creation(user_id: int):
@@ -110,16 +134,15 @@ async def test_multiple_concurrent_calls_only_one_creates(lobby_manager):
             existing = lobby_manager.get_lobby()
             if existing:
                 return "existing"
-
-            await asyncio.sleep(0.05)  # Simulate Discord API latency
+            # Yield to the event loop so other tasks can attempt to acquire
+            # the lock (they will block, proving exclusivity).
+            await asyncio.sleep(0)
             lobby_manager.get_or_create_lobby(creator_id=user_id)
             creation_count += 1
             return "created"
 
-    # Run 5 concurrent lobby creations
     results = await asyncio.gather(*[simulate_lobby_creation(i) for i in range(5)])
 
-    # Only one should create
     assert creation_count == 1
     assert results.count("created") == 1
     assert results.count("existing") == 4

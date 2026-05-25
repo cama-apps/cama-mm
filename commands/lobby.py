@@ -53,7 +53,9 @@ class LobbyCommands(commands.Cog):
         if not player_data:
             return None
         reacted = self.lobby_service.get_readycheck_reacted(guild_id=guild_id)
-        embed, _ = build_readycheck_embed(player_data, reacted)
+        embed, _ = build_readycheck_embed(
+            player_data, reacted, ready_threshold=self.lobby_service.ready_threshold
+        )
         return embed
 
     async def _get_lobby_target_channel(
@@ -559,6 +561,9 @@ class LobbyCommands(commands.Cog):
                 interaction, content=f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
             )
 
+            # Re-fetch lobby after removal so the embed reflects the current state.
+            lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
+
             # Update both channel message and thread embed
             await self._sync_lobby_displays(lobby, guild_id)
 
@@ -729,6 +734,9 @@ class LobbyCommands(commands.Cog):
             await asyncio.to_thread(
                 self.lobby_service.leave_lobby_conditional, interaction.user.id, guild_id
             )
+
+        # Re-fetch lobby after removal so the embed reflects the current state.
+        lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
 
         # Update displays
         await self._sync_lobby_displays(lobby, guild_id)
@@ -1031,6 +1039,13 @@ class LobbyCommands(commands.Cog):
                     and pid not in old_reacted
                     and pid != invoker_id
                 ]
+                if pruned_ids:
+                    logger.info(
+                        "Stale readycheck prune: removing %d AFK player(s) %s from guild %s",
+                        len(pruned_ids),
+                        pruned_ids,
+                        guild_id,
+                    )
                 for pid in pruned_ids:
                     if pid in lobby.conditional_players:
                         await asyncio.to_thread(
@@ -1080,7 +1095,9 @@ class LobbyCommands(commands.Cog):
             reacted[invoker_id] = f"<@{invoker_id}>"
 
         # Build embed from stored data (excludes reacted from Active/AFK)
-        embed, mention_ids = build_readycheck_embed(player_data, reacted)
+        embed, mention_ids = build_readycheck_embed(
+            player_data, reacted, ready_threshold=self.lobby_service.ready_threshold
+        )
 
         # Resolve target channel - lobby thread only
         target_channel = None
@@ -1176,6 +1193,7 @@ class LobbyCommands(commands.Cog):
 def build_readycheck_embed(
     player_data: dict[int, dict],
     reacted: dict[int, str],
+    ready_threshold: int = 10,
 ) -> tuple[discord.Embed, list[int]]:
     """Build the readycheck embed from stored classification data.
 
@@ -1184,8 +1202,8 @@ def build_readycheck_embed(
     now = time.time()
     count = len(player_data)
     description = f"**{count}** players in lobby"
-    if count < 10:
-        description += f" · need {10 - count} more for a full game"
+    if count < ready_threshold:
+        description += f" · need {ready_threshold - count} more for a full game"
     embed = discord.Embed(
         title="Ready Check",
         description=description,
