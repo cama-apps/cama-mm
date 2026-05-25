@@ -1646,6 +1646,7 @@ class BossCombatMixin:
                 player_hp = 1
                 status_effects["relic_deaths_door"] = False
                 entry["deaths_door"] = True
+                entry["player_hp"] = 1
             else:
                 entry["player_hp"] = 0
                 entry["boss_hp"] = max(0, boss_hp)

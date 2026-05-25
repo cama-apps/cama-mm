@@ -317,3 +317,49 @@ def test_relic_cap_migration_trims_to_six_newest(repo_db_path):
     under_equipped = [a for a in repo.get_artifacts(2, 0) if int(a["equipped"]) == 1]
     assert len(under_equipped) == 3                                # untouched
     assert int(repo.get_tunnel(2, 0)["relic_trim_notice"]) == 0
+
+
+def test_relic_cap_migration_leaves_exactly_six_untouched(repo_db_path):
+    """Boundary: a player at exactly 6 equipped is not trimmed (> 6, not >= 6)."""
+    from infrastructure.schema_manager import SchemaManager
+    from repositories.dig_repository import DigRepository
+
+    repo = DigRepository(repo_db_path)
+    repo.create_tunnel(5, 0, "Exactly6")
+    repo.update_tunnel(5, 0, prestige_level=5)
+    for rid in ("mole_claws", "magma_heart", "crystal_compass",
+                "echo_stone", "spore_cloak", "frozen_clock"):
+        repo.equip_relic(int(repo.add_artifact(5, 0, rid, is_relic=True)), True)
+
+    sm = SchemaManager(repo_db_path)
+    conn = sm._connect()
+    try:
+        sm._migration_relic_loadout_cap_and_streak(conn.cursor())
+    finally:
+        conn.close()
+
+    equipped = sum(1 for a in repo.get_artifacts(5, 0) if int(a["equipped"]) == 1)
+    assert equipped == 6
+    assert int(repo.get_tunnel(5, 0)["relic_trim_notice"]) == 0
+
+
+def test_deaths_door_saves_from_a_dot_death(monkeypatch):
+    """Death's Door also saves at the start-of-round DOT lethal check (distinct
+    from the boss-swing save), and records player_hp=1 in the round entry."""
+    svc = _relic_stub(["deaths_door"])
+    se = svc._trophy_status_seed(1, 0, player_start_hp=5)
+    se["bleed_rounds_remaining"] = 1  # ticks the player to 0 entering the round
+    monkeypatch.setattr("services.dig.combat_mixin.random.random", lambda: 0.0)
+    entry, php, _b, term = _one_round(svc, se, player_hp=1, boss_hit=0.0)
+    assert term is None and php == 1
+    assert entry.get("deaths_door") and entry.get("player_hp") == 1
+    assert se["relic_deaths_door"] is False
+
+
+def test_gamblers_edge_does_not_double_when_roll_misses(monkeypatch):
+    """The ~10% double only fires on a successful roll, not unconditionally."""
+    svc = _relic_stub(["gamblers_edge"])
+    se = svc._trophy_status_seed(1, 0, player_start_hp=10)
+    monkeypatch.setattr("services.dig.combat_mixin.random.random", lambda: 0.99)
+    entry, _php, boss_hp, _t = _one_round(svc, se, boss_hit=0.0)
+    assert boss_hp == 98 and not entry.get("double_hit")  # base 2, no double

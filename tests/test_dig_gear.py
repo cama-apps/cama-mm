@@ -538,6 +538,35 @@ class TestDigRelicCapRollout:
         assert res["success"] and res["cave_in"]
         assert int(svc.dig_repo.get_tunnel(player, 0)["cavein_free_streak"]) == 0
 
+    def test_dig_core_apply_outcome_increments_streak_on_safe_dig(self, svc, player):
+        # The dig_core "DM-decided" engine is a maintained parallel path; it must
+        # keep cavein_free_streak in sync like legacy dig().
+        svc.dig_repo.update_tunnel(player, 0, depth=10, last_dig_at=0, cavein_free_streak=4)
+        _terminal, p = svc.dig_with_preconditions(player, 0)
+        assert isinstance(p, dict), p
+        svc.apply_dig_outcome(p, {"advance": 3, "jc_earned": 5, "cave_in": False, "event_id": ""})
+        assert int(svc.dig_repo.get_tunnel(player, 0)["cavein_free_streak"]) == 5
+
+    def test_dig_core_apply_outcome_resets_streak_on_cave_in(self, svc, player):
+        svc.dig_repo.update_tunnel(player, 0, depth=10, last_dig_at=0, cavein_free_streak=7)
+        _terminal, p = svc.dig_with_preconditions(player, 0)
+        assert isinstance(p, dict), p
+        svc.apply_dig_outcome(p, {"advance": 0, "jc_earned": 0, "cave_in": True, "event_id": ""})
+        assert int(svc.dig_repo.get_tunnel(player, 0)["cavein_free_streak"]) == 0
+
+
+class TestDigRelicCapEmbed:
+    def test_over_cap_warning_renders(self):
+        from commands.dig_helpers.gear_views import _build_gear_embed
+        loadout = {
+            "weapon": None, "armor": None, "boots": None, "amulet": None,
+            "relics": [{"artifact_id": "mole_claws"}] * 8, "relic_cap": 6,
+        }
+        embed = _build_gear_embed(loadout, [], [])
+        field = next(f for f in embed.fields if f.name.startswith("Relics"))
+        assert "8/6" in field.name
+        assert "Over cap" in field.value and "unequip 2" in field.value
+
 
 class TestDigGearServiceApplyGearToCombat:
     def test_empty_loadout_returns_unchanged_stats(self, svc):
