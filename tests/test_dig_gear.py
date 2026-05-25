@@ -378,7 +378,7 @@ class TestDigGearServiceEquipUnequip:
 
 class TestDigGearServiceRepair:
     def test_repair_charges_15pct_of_tier_price(self, svc, player):
-        # Diamond Plate: tier 3, shop_price 180 -> repair = 27 (180 * 0.15)
+        # Diamond Breastplate: tier 3, shop_price 180 -> repair = 27 (180 * 0.15)
         r = svc.buy_gear(player, 0, "armor", 3)
         gid = r["gear_id"]
         # Drop durability to 5 manually
@@ -777,7 +777,7 @@ class TestDigGearServiceAtomicDebit:
     def test_repair_succeeds_when_just_funded(self, svc, player):
         """``try_debit`` is a single conditional UPDATE — if it succeeds the
         balance is debited atomically by exactly ``cost`` JC."""
-        # Buy Diamond Plate (180 JC) while flush, then drain balance to 28
+        # Buy Diamond Breastplate (180 JC) while flush, then drain balance to 28
         # and damage the piece. Diamond repair = 27 JC (15%), so 28 is enough.
         gid = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
         svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 28))

@@ -51,9 +51,9 @@ PICKAXE_TIERS: list[dict] = [
 # Boss-combat Gear
 # ---------------------------------------------------------------------------
 # Four persistent slots (Weapon, Armor, Boots, Amulet) modify boss-fight
-# stats. Weapon/Armor/Boots reuse the existing pickaxe names (Wooden →
-# Void-Touched); Amulet uses a hybrid material+suffix scheme (Stone
-# Pendant, Iron Talisman, Diamond Charm, ...). Shop sells Wooden–Diamond;
+# stats. Weapon reuses the pickaxe names (Wooden → Void-Touched); Armor,
+# Boots, and Amulet each vary their suffix per tier (Iron Hauberk, Iron
+# Sabatons, Iron Talisman, ...). Shop sells Wooden–Diamond;
 # Obsidian–Void-Touched are boss-drop-only. Durability ticks once per
 # boss fight; at zero the piece auto-unequips and must be repaired
 # before re-equipping.
@@ -71,9 +71,9 @@ GEAR_DROP_DEPTH_TIER_MAP: dict[int, int] = {100: 4, 150: 5, 200: 6, 275: 7}
 # tier). Implementation reads this lazily in dig advance flow; the user
 # only ever sees one of each.
 GEAR_MILESTONE_GRANTS: dict[int, tuple[str, int]] = {
-    50: ("armor", 1),    # Stone Plate at depth 50
-    100: ("boots", 2),   # Iron Boots at depth 100
-    200: ("armor", 3),   # Diamond Plate at depth 200
+    50: ("armor", 1),    # Stone Cuirass at depth 50
+    100: ("boots", 2),   # Iron Sabatons at depth 100
+    200: ("armor", 3),   # Diamond Breastplate at depth 200
 }
 
 # Weapon = pickaxe. Tier-by-tier the dig stats here mirror PICKAXE_TIERS
@@ -115,24 +115,24 @@ WEAPON_TIERS: list[GearTierDef] = [
 ]
 
 # Armor adds player_hp (so the piece "soaks" boss hits). Base player_hp
-# is 2–5 depending on risk_tier, so a full Void Plate roughly doubles
+# is 2–5 depending on risk_tier, so a full Void Bulwark roughly doubles
 # survivability — the dominant survivability lever.
 ARMOR_TIERS: list[GearTierDef] = [
-    GearTierDef("Wooden Plate",       tier=0, slot=GearSlot.ARMOR,
+    GearTierDef("Wooden Chestguard",    tier=0, slot=GearSlot.ARMOR,
                 player_hp_bonus=0, shop_price=0),
-    GearTierDef("Stone Plate",        tier=1, slot=GearSlot.ARMOR,
+    GearTierDef("Stone Cuirass",        tier=1, slot=GearSlot.ARMOR,
                 player_hp_bonus=0, shop_price=20,   depth_required=25),
-    GearTierDef("Iron Plate",         tier=2, slot=GearSlot.ARMOR,
+    GearTierDef("Iron Hauberk",         tier=2, slot=GearSlot.ARMOR,
                 player_hp_bonus=1, shop_price=60,   depth_required=50),
-    GearTierDef("Diamond Plate",      tier=3, slot=GearSlot.ARMOR,
+    GearTierDef("Diamond Breastplate",  tier=3, slot=GearSlot.ARMOR,
                 player_hp_bonus=2, shop_price=180,  depth_required=75),
-    GearTierDef("Obsidian Plate",     tier=4, slot=GearSlot.ARMOR,
+    GearTierDef("Obsidian Brigandine",  tier=4, slot=GearSlot.ARMOR,
                 player_hp_bonus=3, shop_price=350,  depth_required=100, prestige_required=1),
-    GearTierDef("Stormrend Plate",    tier=5, slot=GearSlot.ARMOR,
+    GearTierDef("Stormrend Lamellar",   tier=5, slot=GearSlot.ARMOR,
                 player_hp_bonus=3, shop_price=525,  depth_required=150, prestige_required=2),
-    GearTierDef("Frostforged Plate",  tier=6, slot=GearSlot.ARMOR,
+    GearTierDef("Frostforged Carapace", tier=6, slot=GearSlot.ARMOR,
                 player_hp_bonus=3, shop_price=700,  depth_required=200, prestige_required=3),
-    GearTierDef("Void-Touched Plate", tier=7, slot=GearSlot.ARMOR,
+    GearTierDef("Void-Touched Bulwark", tier=7, slot=GearSlot.ARMOR,
                 player_hp_bonus=4, shop_price=1400, depth_required=275, prestige_required=5),
 ]
 
@@ -140,21 +140,21 @@ ARMOR_TIERS: list[GearTierDef] = [
 # bounded to a sane range so even Void boots don't make the player
 # untouchable on their own.
 BOOTS_TIERS: list[GearTierDef] = [
-    GearTierDef("Wooden Boots",       tier=0, slot=GearSlot.BOOTS,
+    GearTierDef("Wooden Clogs",           tier=0, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.00, shop_price=0),
-    GearTierDef("Stone Boots",        tier=1, slot=GearSlot.BOOTS,
+    GearTierDef("Stone Galoshes",         tier=1, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.02, shop_price=25,   depth_required=25),
-    GearTierDef("Iron Boots",         tier=2, slot=GearSlot.BOOTS,
+    GearTierDef("Iron Sabatons",          tier=2, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.04, shop_price=70,   depth_required=50),
-    GearTierDef("Diamond Boots",      tier=3, slot=GearSlot.BOOTS,
+    GearTierDef("Diamond Greaves",        tier=3, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.06, shop_price=200,  depth_required=75),
-    GearTierDef("Obsidian Boots",     tier=4, slot=GearSlot.BOOTS,
+    GearTierDef("Obsidian Stompers",      tier=4, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.08, shop_price=400,  depth_required=100, prestige_required=1),
-    GearTierDef("Stormrend Boots",    tier=5, slot=GearSlot.BOOTS,
+    GearTierDef("Stormrend Striders",     tier=5, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.09, shop_price=600,  depth_required=150, prestige_required=2),
-    GearTierDef("Frostforged Boots",  tier=6, slot=GearSlot.BOOTS,
+    GearTierDef("Frostforged Treads",     tier=6, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.10, shop_price=800,  depth_required=200, prestige_required=3),
-    GearTierDef("Void-Touched Boots", tier=7, slot=GearSlot.BOOTS,
+    GearTierDef("Void-Touched Sollerets", tier=7, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.13, shop_price=1500, depth_required=275, prestige_required=5),
 ]
 
