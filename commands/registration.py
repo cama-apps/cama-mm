@@ -70,7 +70,8 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send(
                 f"✅ Registered {interaction.user.mention}!\n"
                 f"Cama Rating: {result['cama_rating']} ({result['uncertainty']:.0f}% uncertainty)\n"
-                f"Use `/player roles` to set your preferred roles."
+                f"Use `/player roles` to set your preferred roles.\n"
+                f"Use `/player region` to set your server (US East / US West)."
             )
 
             # Neon Degen Terminal hook (registration)
@@ -463,6 +464,63 @@ class RegistrationCommands(commands.Cog):
             await safe_followup(
                 interaction,
                 content="❌ Unexpected error setting roles. Try again later.",
+                ephemeral=True,
+            )
+
+    @player.command(name="region", description="Set your preferred Dota server (US East / US West)")
+    @app_commands.describe(region="Your preferred server — leave blank to see your current setting")
+    @app_commands.choices(
+        region=[
+            app_commands.Choice(name="US East", value="USE"),
+            app_commands.Choice(name="US West", value="USW"),
+        ]
+    )
+    @require_guild
+    async def set_region(
+        self, interaction: discord.Interaction, region: app_commands.Choice[str] | None = None
+    ):
+        """Set or view the player's preferred server region."""
+        logger.info(
+            f"SetRegion command: User {interaction.user.id} ({interaction.user}) "
+            f"region={region.value if region else None}"
+        )
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            if region is None:
+                info = await asyncio.to_thread(
+                    self.player_service.get_region_info, interaction.user.id, guild_id
+                )
+                if info["source"] == "set":
+                    msg = f"Your server is set to **{info['name']}**. Pick again to change it."
+                elif info["source"] == "inferred":
+                    msg = (
+                        f"Your server is **{info['name']}** (inferred from your Dota history). "
+                        "Use `/player region` and pick one to lock it in."
+                    )
+                else:
+                    msg = (
+                        "You haven't set a server yet. "
+                        "Use `/player region` and pick US East or US West."
+                    )
+                await interaction.followup.send(msg, ephemeral=True)
+                return
+
+            await asyncio.to_thread(
+                self.player_service.set_region, interaction.user.id, guild_id, region.value
+            )
+            await interaction.followup.send(
+                f"✅ Set your server to **{region.name}**.", ephemeral=True
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error setting region for {interaction.user.id}: {e}", exc_info=True)
+            await safe_followup(
+                interaction,
+                content="❌ Unexpected error setting your server. Try again later.",
                 ephemeral=True,
             )
 

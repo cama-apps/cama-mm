@@ -412,6 +412,9 @@ class SchemaManager:
                 "add_amulet_crit_to_dig_active_duels",
                 self._migration_add_amulet_crit_to_dig_active_duels,
             ),
+            # Preferred Dota server region (explicit pick) + inferred fallback
+            # from OpenDota play counts. See utils/region.
+            ("add_region_columns_to_players", self._migration_add_region_columns),
         ]
 
     # --- Migrations ---
@@ -420,6 +423,10 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "players", "glicko_rating", "REAL")
         self._add_column_if_not_exists(cursor, "players", "glicko_rd", "REAL")
         self._add_column_if_not_exists(cursor, "players", "glicko_volatility", "REAL")
+
+    def _migration_add_region_columns(self, cursor) -> None:
+        self._add_column_if_not_exists(cursor, "players", "preferred_region", "TEXT")
+        self._add_column_if_not_exists(cursor, "players", "inferred_region", "TEXT")
 
     def _migration_add_exclusion_count(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "exclusion_count", "INTEGER DEFAULT 0")

@@ -26,3 +26,17 @@ def test_schema_manager_initializes_tables(tmp_path):
         "schema_migrations",
     }
     assert required.issubset(tables)
+
+
+def test_schema_manager_adds_region_columns(tmp_path):
+    """The region migration adds preferred_region and inferred_region to players."""
+    db_path = str(tmp_path / "test.db")
+    mgr = SchemaManager(db_path)
+    mgr.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(players)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+    assert {"preferred_region", "inferred_region"}.issubset(columns)

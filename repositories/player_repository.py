@@ -408,6 +408,34 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (json.dumps(roles), discord_id, guild_id),
             )
 
+    def update_preferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None:
+        """Update the player's explicitly chosen server region ("USE"/"USW")."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET preferred_region = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+            """,
+                (region, discord_id, guild_id),
+            )
+
+    def update_inferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None:
+        """Cache the region inferred from OpenDota play ("USE"/"USW"/"NONE" sentinel)."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET inferred_region = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+            """,
+                (region, discord_id, guild_id),
+            )
+
     def update_glicko_rating(
         self, discord_id: int, guild_id: int, rating: float, rd: float, volatility: float
     ) -> None:
@@ -1741,6 +1769,37 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
+    def get_players_needing_region_backfill(self) -> list[dict]:
+        """Players whose inferred_region isn't computed yet but who have a Steam ID.
+
+        Returns one entry per ``(discord_id, guild_id)`` with a usable steam_id
+        (primary from the junction table, falling back to the legacy
+        ``players.steam_id``). Fake users (``discord_id < 0``) are skipped. Used by
+        the startup backfill task; only ``NULL`` rows are returned so it converges.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT p.discord_id, p.guild_id,
+                       COALESCE(psi.steam_id, p.steam_id) AS steam_id
+                FROM players p
+                LEFT JOIN player_steam_ids psi
+                       ON psi.discord_id = p.discord_id AND psi.is_primary = 1
+                WHERE p.inferred_region IS NULL
+                  AND p.discord_id > 0
+                  AND COALESCE(psi.steam_id, p.steam_id) IS NOT NULL
+                """
+            )
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "guild_id": row["guild_id"],
+                    "steam_id": row["steam_id"],
+                }
+                for row in cursor.fetchall()
+            ]
+
     def delete_fake_users(self, guild_id: int) -> int:
         """
         Delete all fake users (discord_id < 0) and their related data in a guild.
@@ -2896,6 +2955,10 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         is_solo_grinder = bool(row["is_solo_grinder"]) if "is_solo_grinder" in keys else False
         solo_grinder_checked_at = row["solo_grinder_checked_at"] if "solo_grinder_checked_at" in keys else None
 
+        # Server-region preference fields (may not exist in older schemas)
+        preferred_region = row["preferred_region"] if "preferred_region" in keys else None
+        inferred_region = row["inferred_region"] if "inferred_region" in keys else None
+
         return Player(
             name=row["discord_username"],
             mmr=int(row["current_mmr"]) if row["current_mmr"] else None,
@@ -2918,6 +2981,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             first_leverage_used=first_leverage_used,
             is_solo_grinder=is_solo_grinder,
             solo_grinder_checked_at=solo_grinder_checked_at,
+            preferred_region=preferred_region,
+            inferred_region=inferred_region,
         )
 
     # --- Trivia cooldown ---

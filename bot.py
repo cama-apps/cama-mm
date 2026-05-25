@@ -613,6 +613,24 @@ async def on_ready():
     except Exception as exc:
         logger.debug(f"Trivia image cache warm failed to schedule: {exc}")
 
+    # Backfill inferred server regions for players not yet checked. One-shot, off
+    # the event loop, and rate-limiter-bounded; only NULL rows are processed so it
+    # converges to a no-op and self-heals future gaps (e.g. manual-MMR signups).
+    region_service = getattr(bot, "player_service", None)
+    if region_service:
+        def _log_region_backfill(t: asyncio.Task) -> None:
+            try:
+                count = t.result()
+                if count:
+                    logger.info("Inferred-region backfill updated %d player(s)", count)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Inferred-region backfill failed: %s", exc, exc_info=True)
+
+        region_task = bot.loop.create_task(
+            asyncio.to_thread(region_service.backfill_inferred_regions)
+        )
+        region_task.add_done_callback(_log_region_backfill)
+
     # Start prediction-market background tasks (refresh worker + daily digest).
     # Both are wrapped in a supervisor that auto-restarts the body on a
     # crash, and a done-callback that surfaces an unexpected exit to the log

@@ -43,6 +43,7 @@ from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.region import summarize_region
 from utils.streaming import get_streaming_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
@@ -714,6 +715,12 @@ class MatchCommands(commands.Cog):
             name=f"🟢 Radiant ({radiant_sum:.0f})  |  🔴 Dire ({dire_sum:.0f})",
             value=f"{first_pick_emoji} **First Pick: {first_pick_team}**\n\n"
             + "\n".join(head_to_head),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🌎 Recommended Server",
+            value=summarize_region(radiant_team.players + dire_team.players),
             inline=False,
         )
 
