@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 import discord
 
 from domain.models.lobby import Lobby
+from services.lobby_manager_service import LobbyManagerService
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 # ---------------------------------------------------------------------------
 # Lobby model: join timestamp tracking
@@ -242,14 +244,14 @@ class TestIsPlayingDota:
 
 class TestReadycheckPreconditions:
     def test_lobby_not_ready_under_10(self):
-        """Lobby with < 10 players should not allow readycheck."""
+        """get_total_count is below 10 for a partial roster (full-game threshold)."""
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         for i in range(9):
             lobby.add_player(i)
         assert lobby.get_total_count() < 10
 
     def test_lobby_ready_at_10(self):
-        """Lobby with 10 players should allow readycheck."""
+        """get_total_count reaches the 10-player full-game threshold."""
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         for i in range(10):
             lobby.add_player(i)
@@ -263,3 +265,39 @@ class TestReadycheckPreconditions:
         for i in range(7, 10):
             lobby.add_conditional_player(i)
         assert lobby.get_total_count() == 10
+
+
+# ---------------------------------------------------------------------------
+# Readycheck message post-time (drives the 30-min staleness check)
+# ---------------------------------------------------------------------------
+
+
+class TestReadycheckCreatedAt:
+    """set_readycheck_state records when the message was posted; the next
+    /readycheck compares against it to decide whether to repost fresh."""
+
+    def test_set_readycheck_state_records_created_at(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.get_or_create_lobby(creator_id=1)
+        mgr.set_readycheck_state(111, 222, {1, 2}, {}, created_at=1000.0)
+        assert mgr.get_readycheck_created_at(guild_id=0) == 1000.0
+
+    def test_set_readycheck_state_defaults_created_at_to_now(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.get_or_create_lobby(creator_id=1)
+        before = time.time()
+        mgr.set_readycheck_state(111, 222, {1}, {})
+        after = time.time()
+        ts = mgr.get_readycheck_created_at(guild_id=0)
+        assert ts is not None and before <= ts <= after
+
+    def test_get_readycheck_created_at_defaults_none(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        assert mgr.get_readycheck_created_at(guild_id=0) is None
+
+    def test_reset_lobby_clears_created_at(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.get_or_create_lobby(creator_id=1)
+        mgr.set_readycheck_state(111, 222, {1}, {}, created_at=1000.0)
+        mgr.reset_lobby()
+        assert mgr.get_readycheck_created_at(guild_id=0) is None

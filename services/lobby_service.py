@@ -175,6 +175,7 @@ class LobbyService:
         lobby_ids: set[int],
         player_data: dict[int, dict],
         guild_id: int | None = None,
+        created_at: float | None = None,
     ) -> None:
         """Store readycheck message info and classification data. Resets reacted set."""
         self.lobby_manager.set_readycheck_state(
@@ -183,6 +184,7 @@ class LobbyService:
             lobby_ids,
             player_data,
             guild_id=guild_id,
+            created_at=created_at,
         )
 
     def update_readycheck_data(
@@ -198,6 +200,9 @@ class LobbyService:
 
     def get_readycheck_message_id(self, guild_id: int | None = None) -> int | None:
         return self.lobby_manager.get_readycheck_message_id(guild_id=guild_id)
+
+    def get_readycheck_created_at(self, guild_id: int | None = None) -> float | None:
+        return self.lobby_manager.get_readycheck_created_at(guild_id=guild_id)
 
     def get_readycheck_channel_id(self, guild_id: int | None = None) -> int | None:
         return self.lobby_manager.get_readycheck_channel_id(guild_id=guild_id)

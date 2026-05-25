@@ -33,6 +33,11 @@ logger = logging.getLogger("cama_bot.commands.lobby")
 # Players who joined within this window are considered active regardless of status
 RECENT_JOIN_THRESHOLD = 5 * 60  # 5 minutes
 
+# A ready check older than this is stale: the next /readycheck deletes the
+# buried original and posts a fresh one (resetting ✅ confirmations and pruning
+# AFK no-shows) instead of editing it in place.
+READYCHECK_STALE_THRESHOLD = 30 * 60  # 30 minutes
+
 
 class LobbyCommands(commands.Cog):
     """Slash commands for lobby management."""
@@ -844,16 +849,10 @@ class LobbyCommands(commands.Cog):
 
         guild = interaction.guild
         guild_id = guild.id
-        status, info = await self._execute_readycheck(guild, guild_id)
+        status, info = await self._execute_readycheck(guild, guild_id, interaction.user.id)
 
         if status == "no_lobby":
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
-        elif status == "not_enough_players":
-            await safe_followup(
-                interaction,
-                content=f"⚠️ Need at least 10 players for a ready check ({info['count']}/10).",
-                ephemeral=True,
-            )
         elif status == "no_guild":
             await safe_followup(interaction, content="❌ This command must be used in a server.", ephemeral=True)
         elif status == "cooldown":
@@ -885,6 +884,7 @@ class LobbyCommands(commands.Cog):
         self,
         guild: discord.Guild | None,
         guild_id: int | None,
+        invoker_id: int,
     ) -> tuple[str, dict]:
         """Run the readycheck flow. Returns (status, info).
 
@@ -892,22 +892,20 @@ class LobbyCommands(commands.Cog):
         cooldown is genuinely a single per-guild bucket. Does not touch any
         Discord interaction object — callers translate the status into the
         appropriate user-facing feedback (ephemeral followup or reaction
-        removal).
+        removal). ``invoker_id`` is the user who triggered the check; they are
+        never pruned and are auto-counted as ready.
 
-        status: one of "ok" | "no_lobby" | "not_enough_players" | "no_thread"
-                | "cooldown" | "no_guild" | "error"
+        status: one of "ok" | "no_lobby" | "no_thread" | "cooldown"
+                | "no_guild" | "error"
         info contents:
-            ok                  -> {"message_jump_url": str, "is_refresh": bool}
-            not_enough_players  -> {"count": int}
-            cooldown            -> {"retry_after_seconds": int}
-            (others)            -> {}
+            ok        -> {"message_jump_url": str, "is_refresh": bool,
+                          "pruned_count": int}
+            cooldown  -> {"retry_after_seconds": int}
+            (others)  -> {}
         """
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
         if not lobby:
             return "no_lobby", {}
-
-        if lobby.get_total_count() < 10:
-            return "not_enough_players", {"count": lobby.get_total_count()}
 
         if not guild:
             return "no_guild", {}
@@ -1013,6 +1011,52 @@ class LobbyCommands(commands.Cog):
             except (discord.NotFound, discord.HTTPException):
                 msg = None
 
+        # If the existing check is stale (30+ min old), delete the buried message
+        # and start fresh: prune the players flagged AFK who never confirmed on
+        # the previous check (keep the trigger-er and anyone who reacted), then
+        # fall through to posting a new message with confirmations reset.
+        pruned_ids: list[int] = []
+        if is_refresh and msg is not None:
+            created_at = await asyncio.to_thread(
+                self.lobby_service.get_readycheck_created_at, guild_id=guild_id
+            )
+            if created_at is not None and (now - created_at) > READYCHECK_STALE_THRESHOLD:
+                old_reacted = await asyncio.to_thread(
+                    self.lobby_service.get_readycheck_reacted, guild_id=guild_id
+                )
+                pruned_ids = [
+                    pid
+                    for pid in list(current_lobby_set)
+                    if player_data.get(pid, {}).get("group") == "afk"
+                    and pid not in old_reacted
+                    and pid != invoker_id
+                ]
+                for pid in pruned_ids:
+                    if pid in lobby.conditional_players:
+                        await asyncio.to_thread(
+                            self.lobby_service.leave_lobby_conditional, pid, guild_id
+                        )
+                    else:
+                        await asyncio.to_thread(
+                            self.lobby_service.leave_lobby, pid, guild_id
+                        )
+                    player_data.pop(pid, None)
+                    current_lobby_set.discard(pid)
+                    await self._remove_user_lobby_reactions(
+                        discord.Object(id=pid), guild_id=guild_id
+                    )
+                if pruned_ids:
+                    lobby = await asyncio.to_thread(
+                        self.lobby_service.get_lobby, guild_id=guild_id
+                    )
+                    await self._sync_lobby_displays(lobby, guild_id)
+                try:
+                    await msg.delete()
+                except (discord.NotFound, discord.HTTPException) as e:
+                    logger.debug("Failed to delete stale readycheck message: %s", e)
+                msg = None
+                is_refresh = False
+
         # On refresh: update data + prune reacted. On new: store fresh.
         if is_refresh:
             await asyncio.to_thread(
@@ -1028,6 +1072,12 @@ class LobbyCommands(commands.Cog):
             if is_refresh
             else {}
         )
+        # Running the check counts the trigger-er as ready (if they're in the
+        # lobby). Reflected in the embed now; persisted to the stored reacted
+        # set after the message is saved below.
+        if invoker_id in current_lobby_set:
+            reacted = dict(reacted)
+            reacted[invoker_id] = f"<@{invoker_id}>"
 
         # Build embed from stored data (excludes reacted from Active/AFK)
         embed, mention_ids = build_readycheck_embed(player_data, reacted)
@@ -1065,9 +1115,20 @@ class LobbyCommands(commands.Cog):
                 player_data,
                 guild_id=guild_id,
             )
+            if invoker_id in current_lobby_set:
+                await asyncio.to_thread(
+                    self.lobby_service.add_readycheck_reaction,
+                    invoker_id,
+                    f"<@{invoker_id}>",
+                    guild_id=guild_id,
+                )
             if ping_content:
                 await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
-            return "ok", {"message_jump_url": msg.jump_url, "is_refresh": True}
+            return "ok", {
+                "message_jump_url": msg.jump_url,
+                "is_refresh": True,
+                "pruned_count": 0,
+            }
 
         # Post to lobby thread (target_channel is guaranteed to exist here)
         msg = await target_channel.send(embed=embed)
@@ -1086,7 +1147,30 @@ class LobbyCommands(commands.Cog):
             player_data,
             guild_id=guild_id,
         )
-        return "ok", {"message_jump_url": msg.jump_url, "is_refresh": False}
+        if invoker_id in current_lobby_set:
+            await asyncio.to_thread(
+                self.lobby_service.add_readycheck_reaction,
+                invoker_id,
+                f"<@{invoker_id}>",
+                guild_id=guild_id,
+            )
+        if pruned_ids:
+            note = (
+                "🧹 Removed (away during ready check): "
+                + " ".join(f"<@{pid}>" for pid in pruned_ids)
+                + " — re-join with /join if you're back."
+            )
+            await target_channel.send(
+                note,
+                allowed_mentions=discord.AllowedMentions(
+                    users=[discord.Object(id=pid) for pid in pruned_ids]
+                ),
+            )
+        return "ok", {
+            "message_jump_url": msg.jump_url,
+            "is_refresh": False,
+            "pruned_count": len(pruned_ids),
+        }
 
 
 def build_readycheck_embed(
@@ -1098,9 +1182,13 @@ def build_readycheck_embed(
     Returns (embed, mention_ids) where mention_ids are all lobby members to ping.
     """
     now = time.time()
+    count = len(player_data)
+    description = f"**{count}** players in lobby"
+    if count < 10:
+        description += f" · need {10 - count} more for a full game"
     embed = discord.Embed(
         title="Ready Check",
-        description=f"**{len(player_data)}** players in lobby",
+        description=description,
         color=discord.Color.blue(),
     )
 
