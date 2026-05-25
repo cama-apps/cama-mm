@@ -1184,6 +1184,22 @@ class DigCoreMixin:
 
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
+            # Mana × weather combo (Sunny + White) boosts yield. The DM range
+            # (jc_min/jc_max) is computed without this combo, so apply it here to
+            # match dig() / _execute_deterministic_outcome before taxes.
+            weather_combo_yield = 1.0
+            if self.mana_effects_service is not None:
+                try:
+                    _wc = self.mana_effects_service.get_weather_combo_modifiers(
+                        discord_id, guild_id,
+                        self._get_weather_code(guild_id, p["layer_name"]),
+                    )
+                    weather_combo_yield = _wc["yield_mult"]
+                except Exception:
+                    weather_combo_yield = 1.0
+            if weather_combo_yield != 1.0:
+                jc_earned = int(jc_earned * weather_combo_yield)
+
             # Plains tithe / Blue tax apply to the full payout.
             jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
             # Helltide bell: flat per-dig tax while the guild modifier is active.

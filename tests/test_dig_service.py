@@ -2400,6 +2400,31 @@ class TestApplyDigOutcomeSecondaryPaths:
             f"helltide tax not applied on DM path: got +{balance_after - balance_before}"
         )
 
+    def test_weather_combo_applied_on_dm_path(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Fix #2: the Sunny+White weather-combo yield bonus applies on the DM path.
+
+        The DM jc range (jc_min/jc_max) is computed without the combo, so
+        apply_dig_outcome must apply it to match dig()/_execute_deterministic_outcome.
+        """
+        from unittest.mock import MagicMock
+        uid = 20105
+        # Build preconditions with the original (None) mana service so the jc
+        # range is unaffected, then swap in a 2x-combo service for the apply step.
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        fake_mana = MagicMock()
+        fake_mana.get_weather_combo_modifiers.return_value = {"yield_mult": 2.0}
+        monkeypatch.setattr(dig_service, "mana_effects_service", fake_mana)
+        # Isolate the combo multiplier from taxes/penalties.
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
+        balance_before = player_repository.get_balance(uid, guild_id)
+        dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
+        balance_after = player_repository.get_balance(uid, guild_id)
+        # 10 JC × 2.0 combo (taxes neutralized) = 20.
+        assert balance_after == balance_before + 20, (
+            f"weather combo not applied on DM path: got +{balance_after - balance_before}"
+        )
+
 
 class TestExecuteDeterministicOutcomePaths:
     """Bug-catching tests for _execute_deterministic_outcome (fallback path)."""

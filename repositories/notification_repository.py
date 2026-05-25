@@ -36,10 +36,8 @@ class NotificationRepository(BaseRepository, IReminderRepository):
     ) -> None:
         if reminder_type not in _VALID_TYPES:
             raise ValueError(f"Invalid reminder_type: {reminder_type!r}")
-        # Coupling: _VALID_TYPES entries must each have a matching <type>_enabled column in
-        # reminder_preferences. Any new _VALID_TYPES entry without a column will produce a
-        # SQL error at runtime; this assertion surfaces that linkage explicitly.
-        assert reminder_type in _VALID_TYPES, f"reminder_type {reminder_type!r} not in allowlist"
+        # Coupling: each _VALID_TYPES entry must have a matching <type>_enabled
+        # column in reminder_preferences (the column name is derived below).
         col = f"{reminder_type}_enabled"
         normalized = self.normalize_guild_id(guild_id)
         now = int(time.time())
