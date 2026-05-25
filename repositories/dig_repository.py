@@ -27,6 +27,8 @@ class DigRepository(BaseRepository, IDigRepository):
         # boss revamp
         "last_lum_update_at", "pinnacle_phase", "pinnacle_hp_remaining",
         "pinnacle_last_engaged_at",
+        # relic_loadout_cap_and_streak migration
+        "cavein_free_streak", "relic_trim_notice",
     })
 
     @staticmethod
@@ -120,6 +122,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "grappling_hook_charges", "sonar_skip_pending",
         # add_temp_curses_to_tunnels migration (event "curse" threat)
         "temp_curses",
+        # relic_loadout_cap_and_streak migration
+        "cavein_free_streak", "relic_trim_notice",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:

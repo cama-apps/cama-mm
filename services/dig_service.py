@@ -720,6 +720,7 @@ class DigService(
                 "depth": new_depth,
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
+                "cavein_free_streak": 0,  # Prospector's Streak resets on collapse
             }
             cave_in_balance_delta = blue_refund
 
@@ -887,6 +888,7 @@ class DigService(
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id, weather_code=weather_code_now,
             luminosity=luminosity,
+            is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), today),
         )
         # Mana × weather combo: Sunny + White boosts yield.
         weather_combo_yield = 1.0
@@ -961,6 +963,13 @@ class DigService(
         streak_bonus = int(streak_bonus * (1.0 + perk_fx.get("streak_bonus_multiplier", 0.0)))
 
         jc_earned += streak_bonus
+
+        # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
+        # (capped). The counter is bumped here and persisted below; the cave-in
+        # branch resets it to 0.
+        cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
+        if self._has_relic(discord_id, guild_id, "prospectors_streak"):
+            jc_earned += min(cavein_free_streak, 20)
 
         # Plains tithe / Blue tax apply to the full payout (base + milestone +
         # streak) so the deflationary pressure matches /roll and /betting.
@@ -1097,6 +1106,7 @@ class DigService(
             "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
             "streak_days": streak,
             "streak_last_date": today,
+            "cavein_free_streak": cavein_free_streak,
             "current_run_jc": run_jc,
             "current_run_artifacts": run_artifacts,
             "current_run_events": run_events_count,

@@ -323,6 +323,76 @@ RELICS: list[ArtifactDef] = [
         is_relic=True,
         effect="Revives from next cave-in (consumed on use)",
     ),
+    # ── "Buff fun" batch: proc/jackpot, streak, and boss-combat relics ──
+    # Hybrid effect text (flavor + a light hint, no hard numbers); the actual
+    # conservative values live in the effect code, not in these strings.
+    ArtifactDef(
+        id="midas_splinter",
+        name="Midas Splinter",
+        layer="Dirt",
+        rarity="Rare",
+        lore_text="A fleck of something that was never quite ore. It warms when the digging is good.",
+        is_relic=True,
+        effect="Sometimes the rock just *gives* (chance to double a dig's coin)",
+    ),
+    ArtifactDef(
+        id="lucky_seam",
+        name="Lucky Seam",
+        layer="Stone",
+        rarity="Rare",
+        lore_text="Old hands swear the mountain keeps one good secret for every thousand it buries.",
+        is_relic=True,
+        effect="Most veins are ore; one in a great many is a fortune (rare jackpot strike)",
+    ),
+    ArtifactDef(
+        id="prospectors_streak",
+        name="Prospector's Streak",
+        layer="Stone",
+        rarity="Rare",
+        lore_text="A tally-stone worn smooth by a thumb that counted every safe step — until it didn't.",
+        is_relic=True,
+        effect="Confidence compounds down here (more coin the longer you avoid a collapse; lose it all if one hits)",
+    ),
+    ArtifactDef(
+        id="first_light",
+        name="First Light",
+        layer="Dirt",
+        rarity="Rare",
+        lore_text="It holds a sliver of dawn that never fully goes out — brightest before anyone else has stirred.",
+        is_relic=True,
+        effect="The first swing of the day rings truest (your first dig each day pays more)",
+        min_prestige=2,
+    ),
+    ArtifactDef(
+        id="berserkers_mark",
+        name="Berserker's Mark",
+        layer="Magma",
+        rarity="Rare",
+        lore_text="A brand that drinks pain and asks for more. It was cut into someone once, against their will.",
+        is_relic=True,
+        effect="It drinks your bruises and hits back (more damage to bosses the more you've been hit)",
+        min_prestige=3,
+    ),
+    ArtifactDef(
+        id="gamblers_edge",
+        name="Gambler's Edge",
+        layer="The Hollow",
+        rarity="Rare",
+        lore_text="A coin filed to a blade on one edge. It has never once landed the way you feared.",
+        is_relic=True,
+        effect="The dice like you in the dark (your hits sometimes land double against a boss)",
+        min_prestige=4,
+    ),
+    ArtifactDef(
+        id="deaths_door",
+        name="Death's Door",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="You have died here before. You got up. The Nameless Depth remembers, and resents it.",
+        is_relic=True,
+        effect="You got up last time (a chance to survive a killing blow)",
+        min_prestige=5,
+    ),
 ]
 
 # Signature trophy relics carve-drop from a specific boss (see BossDef.trophy_relic_id)
@@ -330,7 +400,7 @@ RELICS: list[ArtifactDef] = [
 # only way to get one is to beat the boss it belongs to.
 TROPHY_RELIC_IDS: frozenset[str] = frozenset({
     "weeping_fang", "runebitten_shard", "aching_spine",
-    "listening_shard", "hateborn_ember",
+    "listening_shard", "hateborn_ember", "deaths_door",
 })
 
 # Per-kill chance a boss's signature trophy carves, rolled until the player owns it.

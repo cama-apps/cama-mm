@@ -146,7 +146,8 @@ def test_new_relics_in_catalog_with_lore_and_effect():
         assert relic.is_relic is True
         assert relic.effect, f"{rid} missing effect text"
         assert relic.lore_text, f"{rid} missing lore"
-    assert set(TROPHY_RELIC_IDS) == set(TROPHY_RELICS)
+    # The prestige-4 trophies are a subset; later trophies (Death's Door) also exist.
+    assert set(TROPHY_RELICS).issubset(set(TROPHY_RELIC_IDS))
     # Trophies gate to their boss's prestige; generals are P4.
     assert ARTIFACT_BY_ID["weeping_fang"].min_prestige == 4
     assert ARTIFACT_BY_ID["listening_shard"].min_prestige == 3
@@ -154,8 +155,8 @@ def test_new_relics_in_catalog_with_lore_and_effect():
 
 
 def test_total_artifact_count():
-    # 30 relics (collectibles cut); ALL_ARTIFACTS is now relics-only.
-    assert len(ALL_ARTIFACTS) == 30
+    # 30 originals + 7 "buff fun" relics; ALL_ARTIFACTS is relics-only.
+    assert len(ALL_ARTIFACTS) == 37
     assert all(a.is_relic for a in ALL_ARTIFACTS)
 
 

@@ -24,6 +24,7 @@ from services.dig_constants import (
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     RELIC_SLOTS_BASE,
+    RELIC_SLOTS_MAX,
     TROPHY_CARVE_RATE,
     TROPHY_RELIC_IDS,
     format_relic_label,
@@ -43,6 +44,7 @@ class GearMixin:
         *,
         weather_code: str | None = None,
         luminosity: int | None = None,
+        is_first_dig_today: bool = False,
         include_random: bool = True,
     ) -> float:
         """Combined JC-yield multiplier from yield-affecting relics.
@@ -52,6 +54,9 @@ class GearMixin:
           — preview paths pass False so the range stays representative)
         - Stormcaller: storm weather ×1.5, sunny ×1.10, else ×1.0
         - Deepveined Coal: ×1.20 while in the dark (Dark / Pitch-Black luminosity)
+        - Midas Splinter: ~4% chance ×2 (random proc, gated by ``include_random``)
+        - Lucky Seam: ~0.5% chance ×10 (rare jackpot, gated by ``include_random``)
+        - First Light: ×2 on the day's first dig (``is_first_dig_today``)
         """
         mult = 1.0
         if self._has_relic(discord_id, guild_id, "echo_lantern"):
@@ -70,7 +75,37 @@ class GearMixin:
             and self._has_relic(discord_id, guild_id, "deepveined_coal")
         ):
             mult *= 1.20
+        if (
+            include_random
+            and self._has_relic(discord_id, guild_id, "midas_splinter")
+            and random.random() < 0.04
+        ):
+            mult *= 2.0
+        if (
+            include_random
+            and self._has_relic(discord_id, guild_id, "lucky_seam")
+            and random.random() < 0.005
+        ):
+            mult *= 10.0
+        if is_first_dig_today and self._has_relic(discord_id, guild_id, "first_light"):
+            mult *= 2.0
         return mult
+
+    def _is_first_dig_of_day(self, last_dig_at, today: str) -> bool:
+        """True if the player's previous dig was on an earlier game-day.
+
+        Drives the First Light relic (first-dig-of-day ×2 yield). A tunnel with
+        no prior dig counts as the first dig of the day.
+        """
+        if not last_dig_at:
+            return True
+        import datetime
+
+        from utils.game_date import game_date_for
+        prev = game_date_for(
+            datetime.datetime.fromtimestamp(int(last_dig_at), tz=datetime.UTC)
+        )
+        return prev != today
 
     def _relic_storm_negates_hazard(
         self, discord_id: int, guild_id, weather_code: str | None
@@ -275,13 +310,25 @@ class GearMixin:
                 "max_durability": GEAR_MAX_DURABILITY,
                 "equipped": p.equipped,
             }
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        prestige = int(tunnel.get("prestige_level", 0) or 0) if tunnel else 0
         return {
             "weapon": serialize(loadout.weapon),
             "armor":  serialize(loadout.armor),
             "boots":  serialize(loadout.boots),
             "amulet": serialize(loadout.amulet),
             "relics": list(loadout.relics),
+            "relic_cap": self._relic_slot_cap(prestige),
         }
+
+    def pop_relic_trim_notice(self, discord_id: int, guild_id) -> bool:
+        """One-shot: return True (and clear the flag) if this player's relic
+        loadout was trimmed by the cap rollout and they haven't been told yet."""
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if not tunnel or int(tunnel.get("relic_trim_notice", 0) or 0) != 1:
+            return False
+        self.dig_repo.update_tunnel(discord_id, guild_id, relic_trim_notice=0)
+        return True
 
     def get_inventory_gear(self, discord_id: int, guild_id) -> list[dict]:
         """All gear pieces a player owns (any slot, equipped or not)."""
@@ -440,12 +487,16 @@ class GearMixin:
         )
         return self._ok(gear_id=gear_id, name=td.name, cost=td.shop_price)
 
+    def _relic_slot_cap(self, prestige: int) -> int:
+        """Equippable relic slots for a prestige level, bounded by the ceiling."""
+        return min(int(prestige) + RELIC_SLOTS_BASE, RELIC_SLOTS_MAX)
+
     def equip_relic_for_player(self, discord_id: int, guild_id, artifact_db_id: int) -> dict:
         """Equip a relic, enforcing the prestige-scaled cap.
 
-        The cap is ``prestige_level + RELIC_SLOTS_BASE``. Equipping over the
-        cap is rejected — caller (the panel) is expected to ask the user to
-        unequip something first.
+        The cap is ``min(prestige_level + RELIC_SLOTS_BASE, RELIC_SLOTS_MAX)``.
+        Equipping over the cap is rejected — caller (the panel) is expected to
+        ask the user to unequip something first.
         """
         artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
         target = next((a for a in artifacts if int(a["id"]) == int(artifact_db_id)), None)
@@ -465,7 +516,7 @@ class GearMixin:
             return self._error("You already have that relic equipped.")
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         prestige = int(tunnel.get("prestige_level", 0) or 0) if tunnel else 0
-        cap = prestige + RELIC_SLOTS_BASE
+        cap = self._relic_slot_cap(prestige)
         equipped_count = self.dig_repo.count_equipped_relics(discord_id, guild_id)
         if equipped_count >= cap:
             return self._error(

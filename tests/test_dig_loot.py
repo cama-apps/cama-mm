@@ -478,8 +478,8 @@ class TestNewItemsAndArtifacts:
 
     def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
-        # Relics-only catalog after the non-functional collectibles were cut.
-        assert len(ALL_ARTIFACTS) == 30
+        # 30 originals + 7 "buff fun" relics; relics-only catalog.
+        assert len(ALL_ARTIFACTS) == 37
 
     def test_fungal_artifacts_exist(self):
         from services.dig_constants import ALL_ARTIFACTS
@@ -753,8 +753,12 @@ class TestPrestigeRelicPool:
     """P5-gated relic drops on boss kills."""
 
     def test_three_p5_relics_defined(self):
-        from services.dig_constants import RELICS
-        p5_relics = [r for r in RELICS if r.min_prestige >= 5]
+        from services.dig_constants import RELICS, TROPHY_RELIC_IDS
+        # The P5 *drop-pool* relics; trophies (e.g. Death's Door) gate separately.
+        p5_relics = [
+            r for r in RELICS
+            if r.min_prestige >= 5 and r.id not in TROPHY_RELIC_IDS
+        ]
         assert len(p5_relics) == 3
         ids = {r.id for r in p5_relics}
         assert ids == {"hollow_fang", "echo_lantern", "patient_stone"}
@@ -770,10 +774,10 @@ class TestPrestigeRelicPool:
     def test_drop_returns_none_for_low_prestige(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """A P3 player can never roll the new pool, even on lucky rolls."""
+        """A P1 player can't roll the prestige pool (lowest gated relic is P2)."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(random, "random", lambda: 0.0)  # always succeed
-        result = dig_service._maybe_drop_prestige_relic(10001, 12345, prestige_level=3)
+        result = dig_service._maybe_drop_prestige_relic(10001, 12345, prestige_level=1)
         assert result is None
 
     def test_drop_can_return_relic_at_p5(

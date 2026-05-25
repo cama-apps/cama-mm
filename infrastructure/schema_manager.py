@@ -416,6 +416,10 @@ class SchemaManager:
             # Preferred Dota server region (explicit pick) + inferred fallback
             # from OpenDota play counts. See utils/region.
             ("add_region_columns_to_players", self._migration_add_region_columns),
+            # Cap equipped relics at the new ceiling: add the cave-in-free streak
+            # counter + a one-time trim-notice flag, then unequip each player's
+            # over-cap relics (keeping their 6 newest) and flag them for the notice.
+            ("relic_loadout_cap_and_streak", self._migration_relic_loadout_cap_and_streak),
         ]
 
     # --- Migrations ---
@@ -3220,6 +3224,52 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "tunnels", "sonar_skip_pending", "INTEGER NOT NULL DEFAULT 0",
+        )
+
+    def _migration_relic_loadout_cap_and_streak(self, cursor) -> None:
+        """Bound equipped relics at the new ceiling + add Prospector's Streak state.
+
+        ``cavein_free_streak`` tracks consecutive cave-in-free digs (the
+        Prospector's Streak relic reads it). ``relic_trim_notice`` is a one-shot
+        bool: set for any player trimmed below, cleared after their next /dig
+        surfaces the notice.
+
+        Before relics were capped, equippable slots were ``prestige_level + 1``
+        with no ceiling, so high-prestige players could equip more than the new
+        max of 6. Flag those players (count computed on the pre-trim state), then
+        unequip everything but their 6 most recently acquired relics (highest row
+        id). Trimmed relics stay owned in inventory, just unequipped. The 6 here
+        matches ``RELIC_SLOTS_MAX`` at the time of this one-time correction.
+        """
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "cavein_free_streak", "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "relic_trim_notice", "INTEGER NOT NULL DEFAULT 0",
+        )
+        cursor.execute(
+            """
+            UPDATE tunnels SET relic_trim_notice = 1
+            WHERE (
+                SELECT COUNT(*) FROM dig_artifacts d
+                WHERE d.is_relic = 1 AND d.equipped = 1
+                  AND d.discord_id = tunnels.discord_id
+                  AND d.guild_id = tunnels.guild_id
+            ) > 6
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE dig_artifacts SET equipped = 0
+            WHERE is_relic = 1 AND equipped = 1
+              AND id NOT IN (
+                SELECT a.id FROM dig_artifacts a
+                WHERE a.is_relic = 1 AND a.equipped = 1
+                  AND a.discord_id = dig_artifacts.discord_id
+                  AND a.guild_id = dig_artifacts.guild_id
+                ORDER BY a.id DESC LIMIT 6
+              )
+            """
         )
 
     def _migration_create_protected_hero_purchases_table(self, cursor) -> None:

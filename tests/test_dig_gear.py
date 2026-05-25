@@ -490,6 +490,54 @@ class TestDigGearServiceRelicCap:
         r = svc.equip_relic_for_player(player, 0, b)
         assert r["success"]
 
+    def test_cap_ceiling_holds_at_six_for_high_prestige(self, svc, player):
+        # Uncapped this prestige would grant 11 slots; the ceiling holds it at 6.
+        svc.dig_repo.update_tunnel(player, 0, prestige_level=10)
+        ids = [
+            svc.dig_repo.add_artifact(player, 0, x, is_relic=True)
+            for x in ("mole_claws", "magma_heart", "crystal_compass", "echo_stone",
+                      "spore_cloak", "frozen_clock", "root_network")
+        ]
+        for i in range(6):
+            assert svc.equip_relic_for_player(player, 0, ids[i])["success"]
+        r = svc.equip_relic_for_player(player, 0, ids[6])
+        assert not r["success"]
+        assert "cap (6)" in r["error"]
+
+
+class TestDigRelicCapRollout:
+    def test_get_loadout_exposes_relic_cap(self, svc, player):
+        svc.dig_repo.update_tunnel(player, 0, prestige_level=2)
+        assert svc.get_loadout(player, 0)["relic_cap"] == 3
+        svc.dig_repo.update_tunnel(player, 0, prestige_level=20)
+        assert svc.get_loadout(player, 0)["relic_cap"] == 6
+
+    def test_pop_relic_trim_notice_is_one_shot(self, svc, player):
+        svc.dig_repo.update_tunnel(player, 0, relic_trim_notice=1)
+        assert svc.pop_relic_trim_notice(player, 0) is True
+        assert svc.pop_relic_trim_notice(player, 0) is False
+        assert int(svc.dig_repo.get_tunnel(player, 0)["relic_trim_notice"]) == 0
+
+    def test_prospectors_streak_increments_on_safe_dig(self, svc, player):
+        # A hard-hat charge guarantees a no-cave-in dig (no RNG dependence).
+        db = svc.dig_repo.add_artifact(player, 0, "prospectors_streak", is_relic=True)
+        svc.equip_relic_for_player(player, 0, db)
+        svc.dig_repo.update_tunnel(
+            player, 0, depth=10, cavein_free_streak=4, last_dig_at=0, hard_hat_charges=3,
+        )
+        res = svc.dig(player, 0)
+        assert res["success"] and not res["cave_in"]
+        assert int(svc.dig_repo.get_tunnel(player, 0)["cavein_free_streak"]) == 5
+
+    def test_prospectors_streak_resets_on_cave_in(self, svc, player, monkeypatch):
+        svc.dig_repo.update_tunnel(player, 0, depth=10, cavein_free_streak=7, last_dig_at=0)
+        # Force the cave-in roll. The dig path has no while-loops, so a constant
+        # RNG terminates deterministically (no -n4 hang risk).
+        monkeypatch.setattr("services.dig_service.random.random", lambda: 0.0)
+        res = svc.dig(player, 0)
+        assert res["success"] and res["cave_in"]
+        assert int(svc.dig_repo.get_tunnel(player, 0)["cavein_free_streak"]) == 0
+
 
 class TestDigGearServiceApplyGearToCombat:
     def test_empty_loadout_returns_unchanged_stats(self, svc):

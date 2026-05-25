@@ -280,6 +280,7 @@ BOSSES: dict[int, BossDef] = {
         boss_id="nameless_depth",
         mechanic_pool=("nameless_whisper", "nameless_silence"),
         stinger_id="nameless_erase",
+        trophy_relic_id="deaths_door",
         victory_lines=(
             "{boss} steps aside. The hollow that's left has the shape of a person.",
             "{boss} dissolves without complaint. You don't ask whose name was on it.",
