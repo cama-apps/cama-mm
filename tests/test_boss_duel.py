@@ -852,3 +852,107 @@ class TestWagerTaper:
         # change — not an inflated gross figure.
         assert balance_after >= balance_before
         assert result["payout"] == balance_after - balance_before
+
+
+# ---------------------------------------------------------------------------
+# Finding-11: live boss-duel path (start_boss_duel → _resolve_duel_outcome)
+# win and loss — wager atomicity + balance assertions
+# ---------------------------------------------------------------------------
+
+
+def _at_boss_for_duel(
+    dig_service, dig_repo, player_repository, monkeypatch, *,
+    uid=30001, depth=24, balance=300,
+):
+    """Register a fresh player one block before the depth-25 boss and disable mechanics."""
+    player_repository.add(
+        discord_id=uid,
+        discord_username=f"DuelUser{uid}",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=3000,
+        glicko_rating=1500.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    player_repository.update_balance(uid, TEST_GUILD_ID, balance)
+    monkeypatch.setattr(time, "time", lambda: 2_000_000)
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+    dig_service.dig(uid, TEST_GUILD_ID)
+    dig_repo.update_tunnel(
+        uid, TEST_GUILD_ID,
+        depth=depth,
+        boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+    )
+    monkeypatch.setattr(time, "time", lambda: 2_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+    # Disable mechanics so start_boss_duel auto-resolves without mid-fight pause
+    monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+    return uid
+
+
+class TestLiveDuelPathWagerAtomicity:
+    """Finding-11: start_boss_duel → _resolve_duel_outcome must commit balance
+    and tunnel changes atomically, and wager payouts must match reality."""
+
+    def test_win_pays_wager_and_boss_jc(self, dig_service, dig_repo, player_repository, monkeypatch):
+        """A win via start_boss_duel must credit wager*multiplier + base JC."""
+        uid = _at_boss_for_duel(dig_service, dig_repo, player_repository, monkeypatch, uid=30001)
+        balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
+        # Force a guaranteed win (all random rolls succeed)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", lambda **kw: 0.50)
+
+        result = dig_service.start_boss_duel(uid, TEST_GUILD_ID, "cautious", wager=20)
+        assert result["success"]
+        assert result["won"] is True
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        real_delta = balance_after - balance_before
+        # Win must credit the player (net positive)
+        assert real_delta > 0, f"win paid nothing: balance_after={balance_after}, before={balance_before}"
+        # Reported payout must exactly match the real balance change
+        assert result["payout"] == real_delta, (
+            f"reported payout {result['payout']} != real balance change {real_delta}"
+        )
+
+    def test_loss_debits_wager_atomically(self, dig_service, dig_repo, player_repository, monkeypatch):
+        """A loss via start_boss_duel must debit wager; depth + balance change
+        are committed in one atomic_tunnel_balance_update, not two separate writes."""
+        uid = _at_boss_for_duel(dig_service, dig_repo, player_repository, monkeypatch, uid=30002, balance=500)
+        balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
+        depth_before = dig_repo.get_tunnel(uid, TEST_GUILD_ID)["depth"]
+        # Force a guaranteed loss (no rolls succeed)
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", lambda **kw: 0.50)
+
+        result = dig_service.start_boss_duel(uid, TEST_GUILD_ID, "cautious", wager=30)
+        assert result["success"]
+        assert result["won"] is False
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        tunnel_after = dig_repo.get_tunnel(uid, TEST_GUILD_ID)
+        # Wager must be debited
+        assert balance_after == balance_before - 30, (
+            f"wager not fully debited: before={balance_before}, after={balance_after}"
+        )
+        # Knockback must have reduced depth
+        assert tunnel_after["depth"] < depth_before, (
+            "no knockback on duel loss"
+        )
+
+    def test_loss_with_no_wager_does_not_change_balance(
+        self, dig_service, dig_repo, player_repository, monkeypatch
+    ):
+        """A wager-free loss must not alter the player's balance."""
+        uid = _at_boss_for_duel(dig_service, dig_repo, player_repository, monkeypatch, uid=30003, balance=200)
+        balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", lambda **kw: 0.50)
+
+        result = dig_service.start_boss_duel(uid, TEST_GUILD_ID, "cautious", wager=0)
+        assert result["success"]
+        assert result["won"] is False
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        assert balance_after == balance_before, (
+            "zero-wager loss changed balance"
+        )

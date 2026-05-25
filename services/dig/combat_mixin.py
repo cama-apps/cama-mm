@@ -2104,16 +2104,19 @@ class BossCombatMixin:
             )
         # Loss forfeits the carried wager; drop the markers.
         self._clear_carried_wager(bp_for_persist, at_boss)
-        self.dig_repo.update_tunnel(
+        # Debit wager and write tunnel state atomically so a crash can't
+        # leave depth knocked back without the matching balance change.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=new_depth,
-            boss_progress=json.dumps(bp_for_persist),
-            boss_attempts=attempts,
-            cheer_data=None,
-            last_dig_at=last_dig_effective,
+            balance_delta=-wager if wager > 0 else 0,
+            tunnel_updates={
+                "depth": new_depth,
+                "boss_progress": json.dumps(bp_for_persist),
+                "boss_attempts": attempts,
+                "cheer_data": None,
+                "last_dig_at": last_dig_effective,
+            },
         )
-        if wager > 0:
-            self.player_repo.add_balance(discord_id, guild_id, -wager)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="boss_fight",
