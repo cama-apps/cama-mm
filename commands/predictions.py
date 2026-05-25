@@ -983,6 +983,9 @@ class PredictionCommands(commands.Cog):
             f"📈 Market #{prediction_id} resolved **{outcome.value.upper()}** — "
             f"{len(winners)} winners, {biggest_str}."
         )
+        bankruptcy_total = sum(w.get("bankruptcy_penalty", 0) for w in winners)
+        if bankruptcy_total > 0:
+            announce += f" ({bankruptcy_total} JC withheld from bankrupt winners.)"
         await safe_followup(interaction, content=announce)
 
         # Update market embed + archive thread

@@ -225,6 +225,7 @@ class ServiceContainer:
             prediction_repo=c["prediction_repo"],
             player_repo=c["player_repo"],
             admin_user_ids=self.admin_user_ids,
+            bankruptcy_service=c["bankruptcy_service"],
         )
         c["balance_history_service"] = BalanceHistoryService(
             bet_repo=c["bet_repo"],
