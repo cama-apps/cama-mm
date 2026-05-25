@@ -834,10 +834,6 @@ class DigCoreMixin:
 
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
-        # Bankruptcy debuff: keep only the configured fraction of yield while
-        # penalized (applied last, before the credit; withheld share is a sink).
-        jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
-
         # DB writes
         run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
         run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
@@ -873,7 +869,6 @@ class DigCoreMixin:
             tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
             depth_before=depth_before, depth_after=new_depth,
             advance=advance, jc_earned=jc_earned,
-            bankruptcy_penalty=dig_bankruptcy_penalty,
             milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
             cave_in=False, cave_in_detail=None,
             boss_encounter=boss_encounter, boss_info=boss_info,
@@ -1165,10 +1160,6 @@ class DigCoreMixin:
 
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
-            # Bankruptcy debuff: keep only the configured fraction of yield while
-            # penalized (applied last, before the credit; withheld share is a sink).
-            jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
-
             # DB writes
             run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
             run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
@@ -1204,7 +1195,6 @@ class DigCoreMixin:
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
                 advance=advance, jc_earned=jc_earned,
-                bankruptcy_penalty=dig_bankruptcy_penalty,
                 milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
                 cave_in=False, cave_in_detail=None,
                 boss_encounter=boss_encounter, boss_info=boss_info,
