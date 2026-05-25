@@ -1,5 +1,4 @@
 """Tests for the Wheel of Fortune /gamba command."""
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -62,8 +61,9 @@ async def test_wheel_cooldown_expired_allows_spin():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
+    _FROZEN_NOW = 1_700_000_000  # fixed epoch; avoids sub-second boundary flakiness
     # Mock service methods - cooldown expired
-    player_service.get_last_wheel_spin = MagicMock(return_value=int(time.time()) - WHEEL_COOLDOWN_SECONDS - 1)
+    player_service.get_last_wheel_spin = MagicMock(return_value=_FROZEN_NOW - WHEEL_COOLDOWN_SECONDS - 1)
     player_service.adjust_balance = MagicMock()
     player_service.set_last_wheel_spin = MagicMock()
     player_service.try_claim_wheel_spin = MagicMock(return_value=True)
@@ -85,11 +85,12 @@ async def test_wheel_cooldown_expired_allows_spin():
     # Pick a simple positive-int wedge so the spin path is straightforward.
     five_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=five_idx):
-        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
-                    await commands.gamba.callback(commands, interaction)
+    with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
+        with patch("commands.betting.random.randint", return_value=five_idx):
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                        await commands.gamba.callback(commands, interaction)
 
     # Should defer then send via followup
     interaction.response.defer.assert_awaited_once()
@@ -607,6 +608,13 @@ def test_wheel_expected_value_matches_config():
 
     # EV should be close to the configured target (within 1 due to integer rounding)
     assert abs(expected_value - WHEEL_TARGET_EV) <= 1, f"Expected EV ~{WHEEL_TARGET_EV}, got {expected_value}"
+    # Independent hardcoded sanity bound: the wheel is intentionally a coin sink
+    # (WHEEL_TARGET_EV ≈ -25). Guard against runaway misconfiguration: must
+    # never be a net positive (infinite money) or absurdly worse than designed.
+    assert -50 <= expected_value <= 5, (
+        f"Wheel EV {expected_value:.2f} outside sane [-50, 5] range — "
+        "wedge table may be misconfigured"
+    )
 
 
 def test_wheel_bankrupt_always_negative():
@@ -713,25 +721,24 @@ async def test_wheel_updates_cooldown_in_database():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    before_time = int(time.time())
+    _FROZEN_NOW = 1_700_000_000  # fixed epoch; avoids sub-second boundary flakiness
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
     target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
-    with patch("commands.betting.random.randint", return_value=target_idx):
-        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
-                    await commands.gamba.callback(commands, interaction)
-
-    after_time = int(time.time())
+    with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
+        with patch("commands.betting.random.randint", return_value=target_idx):
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                        await commands.gamba.callback(commands, interaction)
 
     # Should have called set_last_wheel_spin with (user_id, guild_id, timestamp)
     player_service.set_last_wheel_spin.assert_called_once()
     call_args = player_service.set_last_wheel_spin.call_args[0]
     assert call_args[0] == 1009  # user_id
     assert call_args[1] == 123  # guild_id
-    assert before_time <= call_args[2] <= after_time  # timestamp
+    assert call_args[2] == _FROZEN_NOW  # exact frozen timestamp
 
 
 @pytest.mark.asyncio
@@ -747,8 +754,9 @@ async def test_wheel_admin_bypasses_cooldown():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock service methods - cooldown was just set
-    player_service.get_last_wheel_spin = MagicMock(return_value=int(time.time()))
+    _FROZEN_NOW = 1_700_000_000  # fixed epoch; avoids sub-second boundary flakiness
+    # Mock service methods - cooldown was just set (simulated as exactly now)
+    player_service.get_last_wheel_spin = MagicMock(return_value=_FROZEN_NOW)
     player_service.set_last_wheel_spin = MagicMock()
     player_service.try_claim_wheel_spin = MagicMock(return_value=True)
     player_service.log_wheel_spin = MagicMock(return_value=1)
@@ -770,12 +778,13 @@ async def test_wheel_admin_bypasses_cooldown():
     # Pick a simple positive-int wedge so the spin path is straightforward.
     target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock admin check to return True
-    with patch("commands.betting.has_admin_permission", return_value=True):
-        with patch("commands.betting.random.randint", return_value=target_idx):
-            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
-                        await commands.gamba.callback(commands, interaction)
+    with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
+        with patch("commands.betting.has_admin_permission", return_value=True):
+            with patch("commands.betting.random.randint", return_value=target_idx):
+                with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                            await commands.gamba.callback(commands, interaction)
 
     # Admin should be able to spin despite cooldown - file attachment means spin happened
     call_kwargs = interaction.followup.send.call_args.kwargs

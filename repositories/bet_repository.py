@@ -1524,9 +1524,10 @@ class BetRepository(BaseRepository, IBetRepository):
                         allocated += bet_payout
                     payout_updates.append((bet_payout, bet["bet_id"]))
         else:
-            # House mode: 2x effective bet
+            # House mode: stake + (stake * multiplier), mirroring _calculate_house_payouts
+            from config import HOUSE_PAYOUT_MULTIPLIER
             for bet in new_winners:
-                payout = bet["effective_bet"] * 2
+                payout = int(bet["effective_bet"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
                 discord_id = bet["discord_id"]
                 balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + payout
                 payout_updates.append((payout, bet["bet_id"]))

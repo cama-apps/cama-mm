@@ -1156,6 +1156,14 @@ class ShopCommands(commands.Cog):
             )
             return
 
+        if balance == cost:
+            await interaction.response.send_message(
+                f"You only have {balance} {JOPACOIN_EMOTE} — exactly the ante cost. "
+                "Nothing left to double! Earn more first.",
+                ephemeral=True,
+            )
+            return
+
         # Defer - we'll send the result publicly
         if not await safe_defer(interaction, ephemeral=False):
             return
@@ -1167,19 +1175,7 @@ class ShopCommands(commands.Cog):
         # 50/50 flip
         won = random.random() < 0.5
 
-        if balance_after_cost == 0:
-            # Special case: paid exactly the cost, balance is 0
-            # Both win and lose result in 0
-            final_balance = 0
-            if won:
-                result_title = "DOUBLE... NOTHING!"
-                result_color = 0xFFFF00  # Yellow for irony
-                flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_ZERO
-            else:
-                result_title = "NOTHING!"
-                result_color = 0xFF0000  # Red
-                flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_LOSE
-        elif won:
+        if won:
             # WIN: Double the remaining balance
             winnings = balance_after_cost
             await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, winnings)
@@ -1791,6 +1787,14 @@ class ShopCommands(commands.Cog):
 
         async def _refund(reason: str) -> None:
             await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+            # Release the daily-use slot so the player can retry after the failure.
+            if tier == "mid":
+                try:
+                    await asyncio.to_thread(
+                        mana_repo.unmark_item_used, user_id, guild_id, item_key, today,
+                    )
+                except Exception:
+                    logger.exception("Failed to release daily-use slot for %s", item_key)
             await interaction.followup.send(reason, ephemeral=True)
 
         # Mana Conduit relic: refund 25% of tap-mana ultimate cost.
