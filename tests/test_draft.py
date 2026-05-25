@@ -519,6 +519,92 @@ class TestSnakeDraftOrder:
         assert SNAKE_DRAFT_ORDER[7] == 0  # First captain
 
 
+class TestSnakeDraftPickOrder:
+    """Integration test: drive a complete draft and assert pick sequence and guild isolation."""
+
+    def _make_state(self, guild_id: int) -> DraftState:
+        """Return a DRAFTING-phase state with two captains and 8 draftable players."""
+        state = DraftState(guild_id=guild_id)
+        state.radiant_captain_id = 1
+        state.dire_captain_id = 2
+        state.captain1_id = 1
+        state.captain2_id = 2
+        # player_draft_first_captain_id = 1 means captain 1 (index 0) picks first
+        state.player_draft_first_captain_id = 1
+        state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # includes captains
+        state.phase = DraftPhase.DRAFTING
+        return state
+
+    def test_full_snake_draft_assigns_correct_sides(self):
+        """Complete 8-pick snake draft: verify pick order matches SNAKE_DRAFT_ORDER
+        and both teams end up with 4 players each plus their captain.
+
+        SNAKE_DRAFT_ORDER = [0,1,1,0,0,1,1,0]  (0=captain1/Radiant, 1=captain2/Dire)
+        Expected radiant picks: indices 0,3,4,7 → players 11,14,15,18 (sequential)
+        Expected dire picks:    indices 1,2,5,6 → players 12,13,16,17
+        """
+        state = self._make_state(guild_id=1001)
+        # Draftable players: 11-18 (captains 1 and 2 are pre-assigned, not in pool)
+        state.player_pool_ids = [11, 12, 13, 14, 15, 16, 17, 18]
+
+        expected_radiant_picks = []
+        expected_dire_picks = []
+        pick_log = []
+
+        for pick_num, picker_index in enumerate(SNAKE_DRAFT_ORDER):
+            expected_captain = state.current_captain_id
+            # picker_index 0 → captain1 (radiant), 1 → captain2 (dire)
+            if picker_index == 0:
+                assert expected_captain == 1, f"Pick {pick_num}: expected captain1"
+            else:
+                assert expected_captain == 2, f"Pick {pick_num}: expected captain2"
+
+            player_to_pick = state.available_player_ids[0]
+            success = state.pick_player(player_to_pick)
+            assert success, f"pick_player failed at pick {pick_num}"
+            pick_log.append((picker_index, player_to_pick))
+
+            if picker_index == 0:
+                expected_radiant_picks.append(player_to_pick)
+            else:
+                expected_dire_picks.append(player_to_pick)
+
+        assert state.phase == DraftPhase.COMPLETE
+        assert state.current_pick_index == 8
+        assert set(state.radiant_player_ids) == set(expected_radiant_picks)
+        assert set(state.dire_player_ids) == set(expected_dire_picks)
+        assert len(state.radiant_player_ids) == 4
+        assert len(state.dire_player_ids) == 4
+        assert not state.available_player_ids
+
+    def test_guild_isolation_draft_states(self):
+        """Two guilds can run independent drafts; picks in one do not affect the other."""
+        state_a = self._make_state(guild_id=2001)
+        state_b = self._make_state(guild_id=2002)
+        state_a.player_pool_ids = [11, 12, 13, 14, 15, 16, 17, 18]
+        state_b.player_pool_ids = [21, 22, 23, 24, 25, 26, 27, 28]
+
+        # Pick all 8 players in guild A
+        for _ in SNAKE_DRAFT_ORDER:
+            player = state_a.available_player_ids[0]
+            state_a.pick_player(player)
+
+        # Guild B should still be at pick 0 with all 8 players available
+        assert state_b.current_pick_index == 0
+        assert len(state_b.available_player_ids) == 8
+        assert state_b.phase == DraftPhase.DRAFTING
+
+        # Pick all 8 players in guild B
+        for _ in SNAKE_DRAFT_ORDER:
+            player = state_b.available_player_ids[0]
+            state_b.pick_player(player)
+
+        assert state_a.phase == DraftPhase.COMPLETE
+        assert state_b.phase == DraftPhase.COMPLETE
+        # No overlap between teams across guilds
+        assert not (set(state_a.radiant_player_ids) & set(state_b.radiant_player_ids))
+
+
 class TestForceRandomCaptains:
     """Tests for force_random_captains functionality used in shuffle auto-redirect.
 
@@ -546,27 +632,39 @@ class TestForceRandomCaptains:
         assert result.captain1_id == 1
         assert result.captain2_id == 2
 
-    def test_force_random_captains_different_players(self):
-        """Random selection always picks two different players."""
-        import random
+    def test_production_captain_selection_never_duplicates(self):
+        """Production captain selection (DraftService.select_captains) never returns the same player twice."""
+        service = DraftService()
+        player_ids = list(range(1, 17))
+        ratings = {pid: 1500.0 + pid * 10 for pid in player_ids}
 
-        player_ids = list(range(1, 17))  # 16 players (>=15 threshold)
-
-        # Verify random.sample always gives different players
-        for _ in range(100):
-            selected = random.sample(player_ids, 2)
-            assert len(selected) == 2
-            assert selected[0] != selected[1]
+        for _ in range(50):
+            result = service.select_captains(
+                eligible_ids=player_ids,
+                player_ratings=ratings,
+            )
+            assert result.captain1_id != result.captain2_id
+            assert result.captain1_id in player_ids
+            assert result.captain2_id in player_ids
 
     def test_shuffle_redirect_threshold(self):
-        """Verify the >=15 player threshold constant."""
-        # This documents the threshold behavior
-        # 10-14 players: normal shuffle
-        # >=15 players (15+): redirect to draft
-        SHUFFLE_MAX_FOR_NORMAL = 14
-        DRAFT_REDIRECT_MIN = 15
+        """The Immortal Draft auto-redirect fires at regular_count >= 15.
 
-        assert DRAFT_REDIRECT_MIN > SHUFFLE_MAX_FOR_NORMAL
+        Uses the production Lobby domain model to confirm the boundary:
+        14 regular players does NOT meet the >= 15 threshold;
+        15 regular players DOES.
+        """
+        from datetime import datetime
+
+        lobby_below = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        for i in range(1, 15):  # 14 regular players
+            lobby_below.add_player(i)
+        assert lobby_below.get_player_count() < 15, "14 players should be below threshold"
+
+        lobby_at = Lobby(lobby_id=2, created_by=999, created_at=datetime.now())
+        for i in range(1, 16):  # 15 regular players
+            lobby_at.add_player(i)
+        assert lobby_at.get_player_count() >= 15, "15 players should meet threshold"
 
     def test_lobby_player_count_includes_conditional(self):
         """Verify total count includes both regular and conditional players.
@@ -1575,3 +1673,86 @@ class TestShuffleDraftRedirect:
         # ...and match.py posted nothing of its own (the old code added a
         # misleading "check captain eligibility" message here)
         assert interaction.followup.messages == []
+
+
+class TestDraftingViewInteractionCheck:
+    """Regression tests for DraftingView.interaction_check (finding 4).
+
+    Non-participants clicking pick or side-preference buttons must be rejected
+    without hitting any downstream handler.
+    """
+
+    def _make_view(self, captain1=1, captain2=2, pool=(1, 2, 3, 4, 5, 6, 7, 8)):
+        """Build a minimal DraftingView with no real DraftCommands cog."""
+        from commands.draft import DraftingView
+
+        cog = MagicMock()
+        return DraftingView(
+            cog=cog,
+            guild_id=99,
+            available_players=[],
+            current_captain_id=captain1,
+            captain_ids={captain1, captain2},
+            player_pool_ids=list(pool),
+        )
+
+    @pytest.mark.asyncio
+    async def test_participant_allowed(self):
+        """A player in the pool passes interaction_check."""
+        view = self._make_view()
+        interaction = MagicMock()
+        interaction.user.id = 5  # in pool
+        interaction.response = AsyncMock()
+
+        result = await view.interaction_check(interaction)
+
+        assert result is True
+        interaction.response.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_captain_allowed(self):
+        """A captain passes interaction_check."""
+        view = self._make_view()
+        interaction = MagicMock()
+        interaction.user.id = 1  # captain1
+        interaction.response = AsyncMock()
+
+        result = await view.interaction_check(interaction)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_non_participant_rejected(self):
+        """A user outside the draft is rejected and gets an ephemeral error."""
+        view = self._make_view()
+        interaction = MagicMock()
+        interaction.user.id = 999  # not in pool or captains
+        interaction.response = AsyncMock()
+
+        result = await view.interaction_check(interaction)
+
+        assert result is False
+        interaction.response.send_message.assert_awaited_once()
+        call_kwargs = interaction.response.send_message.call_args
+        assert call_kwargs.kwargs.get("ephemeral") is True
+
+    @pytest.mark.asyncio
+    async def test_empty_participant_ids_allows_all(self):
+        """When no participant IDs are provided (preview mode), everyone passes."""
+        from commands.draft import DraftingView
+
+        cog = MagicMock()
+        view = DraftingView(
+            cog=cog,
+            guild_id=99,
+            available_players=[],
+            current_captain_id=None,
+            # no captain_ids / player_pool_ids → preview mode
+        )
+        interaction = MagicMock()
+        interaction.user.id = 42
+        interaction.response = AsyncMock()
+
+        result = await view.interaction_check(interaction)
+
+        assert result is True

@@ -3,6 +3,7 @@ Unit tests for lobby management.
 """
 
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -29,7 +30,8 @@ def _cleanup_db_file(db_path: str) -> None:
         return
     except PermissionError:
         # Windows can hold the file briefly after the connection closes.
-        time.sleep(0.2)
+        if sys.platform == "win32":
+            time.sleep(0.2)
         try:
             os.unlink(db_path)
         except Exception:
@@ -155,7 +157,7 @@ class TestLobbyManager:
         """Test joining a lobby."""
         manager = LobbyManager(FakeLobbyRepo())
         result = manager.join_lobby(1001)
-        assert result is True
+        assert result == "ok"
         lobby = manager.get_lobby()
         assert 1001 in lobby.players
 
@@ -168,7 +170,7 @@ class TestLobbyManager:
 
         # Try to join when full
         result = manager.join_lobby(9999)
-        assert result is False
+        assert result == "full"
         lobby = manager.get_lobby()
         assert 9999 not in lobby.players
         assert lobby.get_player_count() == 12
@@ -282,7 +284,7 @@ class TestLobbyPersistence:
 
             # New player joins after restart
             result = manager2.join_lobby(1002)
-            assert result is True
+            assert result == "ok"
 
             lobby = manager2.get_lobby()
             assert 1001 in lobby.players
@@ -586,10 +588,10 @@ class TestLobbyMultiGuildIsolation:
         assert lobby_a.guild_id == TEST_GUILD_ID
         assert lobby_b.guild_id == TEST_GUILD_ID_SECONDARY
 
-        assert manager.join_lobby(111, guild_id=TEST_GUILD_ID) is True
-        assert manager.join_lobby(222, guild_id=TEST_GUILD_ID) is True
-        assert manager.join_lobby(333, guild_id=TEST_GUILD_ID_SECONDARY) is True
-        assert manager.join_lobby(444, guild_id=TEST_GUILD_ID_SECONDARY) is True
+        assert manager.join_lobby(111, guild_id=TEST_GUILD_ID) == "ok"
+        assert manager.join_lobby(222, guild_id=TEST_GUILD_ID) == "ok"
+        assert manager.join_lobby(333, guild_id=TEST_GUILD_ID_SECONDARY) == "ok"
+        assert manager.join_lobby(444, guild_id=TEST_GUILD_ID_SECONDARY) == "ok"
 
         a = manager.get_lobby(guild_id=TEST_GUILD_ID)
         b = manager.get_lobby(guild_id=TEST_GUILD_ID_SECONDARY)
@@ -672,6 +674,70 @@ class TestLobbyMultiGuildIsolation:
         b = manager.get_lobby(guild_id=TEST_GUILD_ID_SECONDARY)
         assert a is not None and 555 not in a.players
         assert b is not None and 555 in b.players
+
+
+class TestStaleReadycheckPrune:
+    """Verify that stale readycheck pruning removes players from LobbyManagerService state."""
+
+    def test_leave_lobby_removes_player_from_in_memory_state(self):
+        """Calling leave_lobby removes the player from the in-memory lobby.
+
+        This is the primitive relied on by the prune path; confirming it works
+        end-to-end through the manager catches regressions before they hit the
+        command layer.
+        """
+        manager = LobbyManager(FakeLobbyRepo())
+        guild_id = 0
+
+        # Seed a lobby with 4 players
+        for pid in [101, 102, 103, 104]:
+            manager.join_lobby(pid, guild_id=guild_id)
+
+        lobby = manager.get_lobby(guild_id=guild_id)
+        assert lobby is not None
+        assert {101, 102, 103, 104} == lobby.players
+
+        # Prune two of them (simulating the stale readycheck removal loop)
+        pruned = [102, 104]
+        for pid in pruned:
+            manager.leave_lobby(pid, guild_id=guild_id)
+
+        lobby_after = manager.get_lobby(guild_id=guild_id)
+        assert lobby_after is not None
+        assert lobby_after.players == {101, 103}, "pruned players must be absent"
+        assert 102 not in lobby_after.players
+        assert 104 not in lobby_after.players
+
+    def test_prune_conditional_players_removes_from_conditional_queue(self):
+        """Stale-prune of conditional (frogling) players uses leave_lobby_conditional."""
+        manager = LobbyManager(FakeLobbyRepo())
+        guild_id = 0
+
+        manager.join_lobby(1, guild_id=guild_id)         # regular
+        manager.join_lobby_conditional(2, guild_id=guild_id)  # frogling
+
+        lobby = manager.get_lobby(guild_id=guild_id)
+        assert 2 in lobby.conditional_players
+
+        manager.leave_lobby_conditional(2, guild_id=guild_id)
+
+        lobby_after = manager.get_lobby(guild_id=guild_id)
+        assert 2 not in lobby_after.conditional_players
+        assert 1 in lobby_after.players  # regular player is untouched
+
+    def test_prune_does_not_affect_other_guild(self):
+        """Removing a player from guild A does not touch guild B's lobby."""
+        manager = LobbyManager(FakeLobbyRepo())
+
+        manager.join_lobby(10, guild_id=100)
+        manager.join_lobby(10, guild_id=200)
+
+        manager.leave_lobby(10, guild_id=100)
+
+        lobby_a = manager.get_lobby(guild_id=100)
+        lobby_b = manager.get_lobby(guild_id=200)
+        assert lobby_a is None or 10 not in lobby_a.players
+        assert lobby_b is not None and 10 in lobby_b.players
 
 
 if __name__ == "__main__":
