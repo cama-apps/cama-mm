@@ -138,8 +138,8 @@ GARNISHMENT_PERCENTAGE = _parse_float("GARNISHMENT_PERCENTAGE", 1.0)  # 100% of 
 
 # Bankruptcy configuration
 BANKRUPTCY_COOLDOWN_SECONDS = _parse_int("BANKRUPTCY_COOLDOWN_SECONDS", 604800)  # 1 week
-BANKRUPTCY_PENALTY_GAMES = _parse_int("BANKRUPTCY_PENALTY_GAMES", 5)  # 5 games with reduced rewards
-BANKRUPTCY_PENALTY_RATE = _parse_float("BANKRUPTCY_PENALTY_RATE", 0.5)  # 50% of win rewards
+BANKRUPTCY_PENALTY_GAMES = _parse_int("BANKRUPTCY_PENALTY_GAMES", 3)  # wins needed to clear the penalty
+BANKRUPTCY_PENALTY_RATE = _parse_float("BANKRUPTCY_PENALTY_RATE", 0.75)  # fraction of winnings KEPT (0.75 => lose 25%)
 BANKRUPTCY_FRESH_START_BALANCE = _parse_int("BANKRUPTCY_FRESH_START_BALANCE", 3)  # Balance after bankruptcy
 
 # Loan configuration
