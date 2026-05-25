@@ -199,7 +199,7 @@ class BettingService:
         pending_match_id = pending_state.pending_match_id
 
         # Atomic settlement (payouts + bet tagging in one DB transaction)
-        return self.bet_repo.settle_pending_bets_atomic(
+        distributions = self.bet_repo.settle_pending_bets_atomic(
             match_id=match_id,
             guild_id=guild_id,
             since_ts=int(since_ts),
@@ -208,6 +208,27 @@ class BettingService:
             betting_mode=betting_mode,
             pending_match_id=pending_match_id,
         )
+
+        # Bankruptcy debuff: a penalized winner keeps only the configured
+        # fraction of their *profit* (payout above their at-risk stake), so a
+        # win never nets a loss. The gross payout was already credited inside the
+        # atomic settlement; here we dock the penalty share as a follow-up coin
+        # sink. Stake basis is ``effective_bet`` (amount * leverage) — the coins
+        # actually debited at placement.
+        if self.bankruptcy_service:
+            agg: dict[int, dict[str, int]] = {}
+            for w in distributions.get("winners", []):
+                a = agg.setdefault(w["discord_id"], {"payout": 0, "stake": 0})
+                a["payout"] += int(w.get("payout", 0))
+                a["stake"] += int(w.get("effective_bet", w.get("amount", 0)))
+            penalties = self.bankruptcy_service.debit_bankruptcy_penalty(
+                [(pid, a["payout"] - a["stake"]) for pid, a in agg.items()],
+                guild_id,
+            )
+            if penalties:
+                distributions["bankruptcy_penalties"] = penalties
+
+        return distributions
 
     def award_win_bonus(
         self, winning_ids: list[int], guild_id: int | None = None
