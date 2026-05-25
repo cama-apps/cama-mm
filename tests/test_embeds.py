@@ -5,6 +5,7 @@ Tests for embed utilities.
 from datetime import datetime
 from unittest.mock import MagicMock
 
+from utils.embed_safety import validate_embed
 from utils.embeds import (
     _format_duration,
     _format_number,
@@ -143,6 +144,8 @@ class TestEnrichedMatchEmbed:
         # Check links
         assert "opendota.com/matches/7500000000" in embed.description
         assert "dotabuff.com/matches/7500000000" in embed.description
+        # Regression guard: embed must stay within Discord limits
+        assert validate_embed(embed) == []
 
     def test_creates_embed_with_dire_victory(self):
         """Embed should show Dire victory correctly."""
@@ -359,6 +362,42 @@ class TestLaneOutcomeDisplay:
         assert "Off" in radiant_field.value
         assert "Off W" not in radiant_field.value
         assert "Off L" not in radiant_field.value
+
+
+class TestTeamFieldOverflow:
+    """Regression guard: format_team_field must not exceed Discord's 1024-char field limit."""
+
+    def test_five_player_team_field_stays_within_limit(self):
+        """A full 5-player team with long display names must not overflow the field limit."""
+        # Build 5 players with intentionally long hero display data and high discord IDs.
+        # hero_id=0 maps to "Unknown" so we rely on the stats to pad length.
+        players = [
+            {
+                "discord_id": 100000000000000000 + i,
+                "hero_id": 0,
+                "kills": 99,
+                "deaths": 99,
+                "assists": 99,
+                "hero_damage": 999999,
+                "net_worth": 999999,
+                "lane_role": i % 4 + 1,
+            }
+            for i in range(5)
+        ]
+
+        embed = create_enriched_match_embed(
+            match_id=1,
+            valve_match_id=None,
+            duration_seconds=3600,
+            radiant_score=50,
+            dire_score=50,
+            winning_team=1,
+            radiant_participants=players,
+            dire_participants=players,
+        )
+
+        errors = validate_embed(embed)
+        assert errors == [], f"Embed has limit violations: {errors}"
 
 
 class TestMatchSummaryEmbed:

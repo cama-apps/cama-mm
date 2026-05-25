@@ -46,7 +46,7 @@ class ProfileView(discord.ui.View):
     """View with tab buttons for navigating profile sections."""
 
     # Tabs that require expensive operations (OpenDota API, chart generation)
-    EXPENSIVE_TABS = {"dota", "gambling", "heroes", "economy"}
+    EXPENSIVE_TABS = {"dota", "gambling", "heroes", "economy", "rating", "teammates"}
 
     def __init__(
         self,
