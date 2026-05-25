@@ -120,7 +120,6 @@ class DigService(
         player_repo: PlayerRepository,
         mana_effects_service=None,
         bankruptcy_repo=None,
-        bankruptcy_service=None,
         dig_guild_modifier_repo=None,
         buff_service=None,
         slow_drip_repo=None,
@@ -134,7 +133,6 @@ class DigService(
         self.player_repo = player_repo
         self.mana_effects_service = mana_effects_service
         self.bankruptcy_repo = bankruptcy_repo
-        self.bankruptcy_service = bankruptcy_service
         self.dig_guild_modifier_repo = dig_guild_modifier_repo
         self.buff_service = buff_service
         self.slow_drip_repo = slow_drip_repo
@@ -165,21 +163,6 @@ class DigService(
         # cache each call would round-trip to ``dig_repo.get_equipped_relics``.
         # Invalidated on equip/unequip below.
         self._relic_cache: dict[tuple[int, int], frozenset[str]] = {}
-
-    def _penalize_jc(self, discord_id: int, guild_id, amount: int) -> tuple[int, int]:
-        """Apply the bankruptcy debuff to earned dig JC.
-
-        Returns ``(net, penalty)``. When no bankruptcy_service is wired or the
-        player is not under penalty, returns the amount unchanged with 0 penalty.
-        Only positive winnings are reduced; the penalty is a coin sink. Applies
-        regardless of debt (dig income is not garnished).
-        """
-        if self.bankruptcy_service is None or amount <= 0:
-            return amount, 0
-        info = self.bankruptcy_service.apply_penalty_to_winnings(
-            discord_id, amount, guild_id
-        )
-        return info["penalized"], info["penalty_applied"]
 
     def _mana_effects_or_none(self, discord_id: int, guild_id):
         """Resolve the player's active mana effects, swallowing lookup errors.
@@ -972,11 +955,6 @@ class DigService(
         if helltide_tax > 0:
             jc_earned = max(0, jc_earned - helltide_tax)
 
-        # Bankruptcy debuff: a penalized digger keeps only the configured
-        # fraction of their yield. Applied last (after all yield modifiers) and
-        # before the credit; the withheld share is a coin sink.
-        jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
-
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
         if not (corruption and corruption["effects"].get("skip_artifact")):
@@ -1131,7 +1109,6 @@ class DigService(
             depth_after=new_depth,
             advance=advance,
             jc_earned=jc_earned,
-            bankruptcy_penalty=dig_bankruptcy_penalty,
             milestone_bonus=milestone_bonus,
             streak_bonus=streak_bonus,
             cave_in=False,

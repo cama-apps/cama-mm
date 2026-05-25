@@ -68,7 +68,6 @@ def build_wheel_result_embed(
     bomb_omb_victims: list | None = None,
     bomb_omb_burn_total: int = 0,
     bomb_omb_missed: bool = False,
-    bankruptcy_penalty: int = 0,
 ) -> discord.Embed:
     """Build the final result embed after the wheel stops."""
     label, value = result[0], result[1]  # (label, value, color)
@@ -498,13 +497,6 @@ def build_wheel_result_embed(
         color=color,
     )
 
-    if bankruptcy_penalty > 0:
-        embed.add_field(
-            name="Bankruptcy Penalty",
-            value=f"−{bankruptcy_penalty} {JOPACOIN_EMOTE} withheld while bankrupt",
-            inline=False,
-        )
-
     embed.add_field(
         name="New Balance",
         value=f"**{new_balance}** {JOPACOIN_EMOTE}",
@@ -521,8 +513,7 @@ def build_wheel_result_embed(
 
 
 def build_wheel_explosion_embed(
-    new_balance: int, garnished: int, next_spin_time: int,
-    reward: int = WHEEL_EXPLOSION_REWARD, bankruptcy_penalty: int = 0,
+    new_balance: int, garnished: int, next_spin_time: int
 ) -> discord.Embed:
     """Build the result embed when the wheel explodes."""
     title = "💥 THE WHEEL EXPLODED! 💥"
@@ -532,7 +523,7 @@ def build_wheel_explosion_embed(
         f"**KABOOM!**\n\n"
         f"The wheel has exploded! Fortunately, no one was hurt.\n\n"
         f"We sincerely apologize for the inconvenience. "
-        f"As compensation, you've been awarded **{reward}** {JOPACOIN_EMOTE}."
+        f"As compensation, you've been awarded **{WHEEL_EXPLOSION_REWARD}** {JOPACOIN_EMOTE}."
     )
 
     if garnished > 0:
@@ -543,13 +534,6 @@ def build_wheel_explosion_embed(
         description=description,
         color=color,
     )
-
-    if bankruptcy_penalty > 0:
-        embed.add_field(
-            name="Bankruptcy Penalty",
-            value=f"−{bankruptcy_penalty} {JOPACOIN_EMOTE} withheld while bankrupt",
-            inline=False,
-        )
 
     embed.add_field(
         name="New Balance",

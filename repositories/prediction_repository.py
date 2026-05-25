@@ -1208,7 +1208,6 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             return {
                 "prediction_id": prediction_id,
                 "outcome": outcome,
-                "guild_id": guild_id,
                 "winners": winners,
                 "losers": losers,
                 "total_payout": total_payout,
