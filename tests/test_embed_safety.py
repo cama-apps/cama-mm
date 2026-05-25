@@ -1,7 +1,13 @@
 """Tests for Discord embed safety utilities."""
 
+import discord
 
-from utils.embed_safety import EMBED_LIMITS, truncate_field, validate_embed
+from utils.embed_safety import (
+    EMBED_LIMITS,
+    add_lines_field,
+    truncate_field,
+    validate_embed,
+)
 
 
 class TestTruncateField:
@@ -143,3 +149,50 @@ class TestValidateEmbed:
         embed.add_field("Test", "x" * (EMBED_LIMITS["field_value"] + 1))
         errors = validate_embed(embed)
         assert len(errors) == 2
+
+
+class TestAddLinesField:
+    """Tests for add_lines_field — packs lines into one or more valid fields."""
+
+    def test_empty_lines_adds_no_field(self):
+        """Empty input is a no-op: no field is added."""
+        embed = discord.Embed()
+        add_lines_field(embed, "Empty", [])
+        assert len(embed.fields) == 0
+
+    def test_short_list_single_field(self):
+        """A list that fits stays a single field with the given name."""
+        embed = discord.Embed()
+        add_lines_field(embed, "Greek", ["alpha", "beta", "gamma"])
+        assert len(embed.fields) == 1
+        assert embed.fields[0].name == "Greek"
+        assert embed.fields[0].value == "alpha\nbeta\ngamma"
+
+    def test_long_list_splits_without_dropping_lines(self):
+        """A list whose joined text exceeds the limit splits across fields, with
+        every line preserved in order — the whole point is to never hide items."""
+        lines = [f"item-{i:03d}-" + "x" * 50 for i in range(40)]  # ~2.3k chars
+        assert len("\n".join(lines)) > EMBED_LIMITS["field_value"]
+
+        embed = discord.Embed()
+        add_lines_field(embed, "Stuff", lines)
+
+        assert len(embed.fields) >= 2  # had to split
+        for field in embed.fields:
+            assert len(field.value) <= EMBED_LIMITS["field_value"]
+        # First field keeps the name; continuations use a zero-width blank.
+        assert embed.fields[0].name == "Stuff"
+        for field in embed.fields[1:]:
+            assert len(field.name) == 1 and ord(field.name) == 0x200B
+        # No line lost or reordered across the split.
+        recovered = [ln for field in embed.fields for ln in field.value.split("\n")]
+        assert recovered == lines
+
+    def test_single_overlong_line_is_truncated(self):
+        """A single line longer than the limit can't be split, so it's truncated
+        rather than emitted as an invalid (over-1024) field."""
+        embed = discord.Embed()
+        add_lines_field(embed, "Big", ["y" * 2000])
+        assert len(embed.fields) == 1
+        assert len(embed.fields[0].value) <= EMBED_LIMITS["field_value"]
+        assert embed.fields[0].value.endswith("...")

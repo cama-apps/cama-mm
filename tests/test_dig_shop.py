@@ -15,7 +15,10 @@ import pytest
 
 from commands.dig import DigCommands
 from repositories.dig_repository import DigRepository
+from services.dig_data.aliases import CONSUMABLE_ITEMS
 from services.dig_service import DigService
+from utils.embed_safety import add_lines_field, validate_embed
+from utils.formatting import JOPACOIN_EMOTE
 
 
 def _http_error(status: int = 403, reason: str = "Forbidden", message: str = "Missing Permissions"):
@@ -155,3 +158,43 @@ async def test_dig_shop_handler_falls_back_to_ephemeral_when_public_send_fails(m
     assert followup.calls[0].get("ephemeral") in (False, None)
     # ...and the user still received the shop, privately.
     assert any(c.get("ephemeral") for c in followup.calls)
+
+
+# ---------------------------------------------------------------------------
+# Embed limit: the Consumables list must not blow Discord's 1024-char field cap
+# ---------------------------------------------------------------------------
+
+def test_shop_consumables_field_fits_discord_limit():
+    """The Consumables list, rendered as the handler renders it, exceeds a single
+    1024-char field — which 400'd `/dig shop` in prod (error 50035). It must split
+    across fields with every consumable still shown.
+
+    Reconstructs the handler's input faithfully: get_shop remaps each item's
+    `cost` to `price` (progression_mixin.get_shop), so we build the same shape
+    here — reading CONSUMABLE_ITEMS directly would leave every price as the '?'
+    fallback and silently render a different string than prod.
+    """
+    consumables = [
+        {"name": v["name"], "price": v["cost"], "description": v["description"]}
+        for v in CONSUMABLE_ITEMS.values()
+    ]
+    lines = [
+        f"**{c.get('name', '?')}** — {c.get('price', '?')} {JOPACOIN_EMOTE}: {c.get('description', '')}"
+        for c in consumables
+    ]
+    # Every line shows its real price, not the '?' fallback (guards the cost->price
+    # item shape the handler depends on).
+    for c, line in zip(consumables, lines):
+        assert f"— {c['price']} " in line
+    # The bug condition: as one field this overflows Discord's limit.
+    assert len("\n".join(lines)) > 1024
+
+    embed = discord.Embed(title="Mining Shop")
+    add_lines_field(embed, "Consumables", lines)
+
+    # After splitting, the embed is valid to send...
+    assert validate_embed(embed) == []
+    # ...and no consumable was silently dropped.
+    rendered = "\n".join(f.value for f in embed.fields)
+    for c in consumables:
+        assert c["name"] in rendered

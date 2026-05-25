@@ -70,6 +70,7 @@ from services.dig_constants import (
 )
 from services.dig_constants import get_layer as get_layer_def
 from services.permissions import has_admin_permission
+from utils.embed_safety import add_lines_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -1328,36 +1329,31 @@ class DigCommands(commands.Cog):
 
         embed = discord.Embed(title="Mining Shop", color=0xD4AF37)
 
-        # Consumables
+        # Consumables — split across fields so the list never exceeds Discord's
+        # 1024-char field-value limit (it grows past it on its own).
         consumables = getattr(shop, "consumables", [])
-        if consumables:
-            cons_text = "\n".join(
-                f"**{c.get('name', '?')}** — {c.get('price', '?')} {JOPACOIN_EMOTE}: {c.get('description', '')}"
-                for c in consumables
-            )
-            embed.add_field(name="Consumables", value=cons_text, inline=False)
+        add_lines_field(embed, "Consumables", [
+            f"**{c.get('name', '?')}** — {c.get('price', '?')} {JOPACOIN_EMOTE}: {c.get('description', '')}"
+            for c in consumables
+        ])
 
         # Pickaxe upgrades
         upgrades = getattr(shop, "pickaxe_upgrades", [])
-        if upgrades:
-            upg_text = "\n".join(
-                f"**{u.get('name', '?')}** — {u.get('price', '?')} {JOPACOIN_EMOTE} "
-                f"(Depth {u.get('depth_req', '?')}, Prestige {u.get('prestige_req', 0)})"
-                for u in upgrades
-            )
-            embed.add_field(name="Pickaxe Upgrades", value=upg_text, inline=False)
+        add_lines_field(embed, "Pickaxe Upgrades", [
+            f"**{u.get('name', '?')}** — {u.get('price', '?')} {JOPACOIN_EMOTE} "
+            f"(Depth {u.get('depth_req', '?')}, Prestige {u.get('prestige_req', 0)})"
+            for u in upgrades
+        ])
 
         # Boss-combat gear (Armor / Boots; weapons are the pickaxe row above)
         gear_for_sale = getattr(shop, "gear_for_sale", [])
-        if gear_for_sale:
-            gear_text = "\n".join(
-                f"**{g.get('name', '?')}** — {g.get('price', '?')} {JOPACOIN_EMOTE} "
-                f"(Depth {g.get('depth_req', '?')}"
-                + (f", Prestige {g.get('prestige_req', 0)}" if g.get('prestige_req', 0) else "")
-                + ")"
-                for g in gear_for_sale
-            )
-            embed.add_field(name="Boss Gear", value=gear_text, inline=False)
+        add_lines_field(embed, "Boss Gear", [
+            f"**{g.get('name', '?')}** — {g.get('price', '?')} {JOPACOIN_EMOTE} "
+            f"(Depth {g.get('depth_req', '?')}"
+            + (f", Prestige {g.get('prestige_req', 0)}" if g.get('prestige_req', 0) else "")
+            + ")"
+            for g in gear_for_sale
+        ])
 
         # Inventory count
         inv_count = getattr(shop, "inventory_count", 0)
