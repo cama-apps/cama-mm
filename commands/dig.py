@@ -2268,10 +2268,14 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     cave_in = getattr(result, "cave_in", False)
     blocks = getattr(result, "advance", 0)
     jc = getattr(result, "jc_earned", 0)
+    bankruptcy_penalty = getattr(result, "bankruptcy_penalty", 0) or 0
     if not cave_in or blocks > 0 or jc > 0:
+        progress_value = f"+{blocks} blocks | +{jc} {JOPACOIN_EMOTE}"
+        if bankruptcy_penalty > 0:
+            progress_value += f"\n−{bankruptcy_penalty} {JOPACOIN_EMOTE} withheld while bankrupt"
         embed.add_field(
             name="Progress",
-            value=f"+{blocks} blocks | +{jc} {JOPACOIN_EMOTE}",
+            value=progress_value,
             inline=False,
         )
 
