@@ -403,6 +403,30 @@ class OpenDotaAPI:
             logger.error(f"Error fetching matches: {e}")
             return None
 
+    def get_player_counts(self, steam_id: int) -> dict | None:
+        """
+        Get a player's aggregate game counts grouped by category.
+
+        Used for server-region inference: the returned dict's ``region`` key maps
+        OpenDota region numbers (1 = US West, 2 = US East) to ``{games, win}``.
+
+        Args:
+            steam_id: Steam ID (32-bit)
+
+        Returns:
+            Counts dict, or None if not found / rate-limited.
+        """
+        try:
+            response = self.make_request(f"{self.BASE_URL}/players/{steam_id}/counts")
+            if response is None:
+                logger.warning(f"Rate limit prevented fetching counts for Steam ID {steam_id}")
+                return None
+            response.raise_for_status()
+            return self._parse_json_or_none(response, f"player {steam_id} counts")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching counts for Steam ID {steam_id}: {e}")
+            return None
+
     def get_match_details(self, match_id: int) -> dict | None:
         """
         Get detailed match data from OpenDota.

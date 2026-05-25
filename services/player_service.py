@@ -2,6 +2,7 @@
 Player-facing business logic (registration, roles, stats).
 """
 
+import logging
 import time
 
 from domain.models.player import Player
@@ -9,6 +10,9 @@ from opendota_integration import OpenDotaAPI
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from repositories.interfaces import IPlayerRepository
+from utils.region import REGION_NAMES, infer_region_from_counts, resolve_region
+
+logger = logging.getLogger("cama_bot.player_service")
 
 STEAM_ID64_OFFSET = 76561197960265728
 
@@ -97,6 +101,22 @@ class PlayerService:
             os_sigma=os_sigma,
         )
 
+        # Best-effort: cache the player's server region from OpenDota play so the
+        # shuffle/draft embeds can recommend a server. Only on the non-override path
+        # (where `api` exists); registration must never fail on this.
+        if mmr_override is None:
+            try:
+                region = infer_region_from_counts(api.get_player_counts(steam_id))
+                # None = the API gave no answer (failed/rate-limited); leave the row
+                # NULL so the startup backfill retries it later.
+                if region is not None:
+                    self.player_repo.update_inferred_region(discord_id, guild_id, region)
+            except Exception as e:
+                logger.warning(
+                    "Region inference failed for %s at registration: %s",
+                    discord_id, e, exc_info=True,
+                )
+
         cama_rating = self.rating_system.rating_to_display(glicko_player.rating)
         uncertainty = self.rating_system.get_rating_uncertainty_percentage(glicko_player.rd)
 
@@ -113,6 +133,59 @@ class PlayerService:
         if not player:
             raise ValueError("Player not registered.")
         self.player_repo.update_roles(discord_id, guild_id, roles)
+
+    def set_region(self, discord_id: int, guild_id: int, region: str):
+        """Persist a player's explicit server-region pick ("USE"/"USW")."""
+        if region not in REGION_NAMES:
+            raise ValueError("Invalid region.")
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        self.player_repo.update_preferred_region(discord_id, guild_id, region)
+
+    def get_region_info(self, discord_id: int, guild_id: int) -> dict:
+        """Return the player's region for display: code, name, and source.
+
+        ``source`` is "set" for an explicit pick, "inferred" for the OpenDota
+        fallback, or "none" when there's nothing to show yet.
+        """
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            raise ValueError("Player not registered.")
+        code = resolve_region(player)
+        is_explicit = player.preferred_region in REGION_NAMES
+        return {
+            "code": code,
+            "name": REGION_NAMES.get(code),
+            "source": "set" if is_explicit else ("inferred" if code else "none"),
+        }
+
+    def backfill_inferred_regions(self, api=None) -> int:
+        """Fill inferred_region for registered players not yet checked.
+
+        Reads each player's OpenDota /counts once (deduped by steam_id within the
+        run) and writes the inferred code or the "NONE" sentinel. A player whose
+        /counts call fails (rate-limited / not found) is left NULL and retried on a
+        later run rather than stamped permanently. Only rows with a NULL
+        inferred_region are processed, so this converges to a no-op and is safe to
+        run on every startup. Returns the number of rows updated.
+        """
+        api = api or OpenDotaAPI()
+        region_by_steam: dict[int, str | None] = {}
+        updated = 0
+        for row in self.player_repo.get_players_needing_region_backfill():
+            steam_id = row["steam_id"]
+            if steam_id in region_by_steam:
+                region = region_by_steam[steam_id]
+            else:
+                region = infer_region_from_counts(api.get_player_counts(steam_id))
+                region_by_steam[steam_id] = region
+            # None = no answer from OpenDota; leave the row NULL to retry next run.
+            if region is None:
+                continue
+            self.player_repo.update_inferred_region(row["discord_id"], row["guild_id"], region)
+            updated += 1
+        return updated
 
     def get_player(self, discord_id: int, guild_id: int) -> Player | None:
         """Fetch a Player model by Discord ID and Guild ID."""

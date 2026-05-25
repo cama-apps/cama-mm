@@ -41,6 +41,10 @@ class Player:
     # Solo grinder detection (deprecated — columns kept for schema compat)
     is_solo_grinder: bool = False
     solo_grinder_checked_at: str | None = None
+    # Preferred Dota server region ("USE"/"USW"). inferred_region also uses the
+    # "NONE" sentinel (checked, no US play) and NULL (not yet checked). See utils/region.
+    preferred_region: str | None = None
+    inferred_region: str | None = None
 
     def get_value(self, use_glicko: bool = True, use_openskill: bool = False, use_jopacoin: bool = False) -> float:
         """

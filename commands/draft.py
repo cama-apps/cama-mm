@@ -26,6 +26,7 @@ from utils.draft_embeds import format_player_row, format_roles
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
 from utils.interaction_safety import safe_defer
 from utils.neon_helpers import get_neon_service, send_neon_result
+from utils.region import summarize_region
 
 if TYPE_CHECKING:
     from repositories.player_repository import PlayerRepository
@@ -2206,6 +2207,12 @@ class DraftCommands(commands.Cog):
             name="\u200b",
             value="\u200b",
             inline=True,
+        )
+
+        embed.add_field(
+            name="\ud83c\udf0e Recommended Server",
+            value=summarize_region(all_players_list),
+            inline=False,
         )
 
         # Excluded players section

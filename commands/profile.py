@@ -38,6 +38,7 @@ from utils.rating_insights import (
     get_rd_tier_name,
     rd_to_certainty,
 )
+from utils.region import REGION_NAMES, resolve_region
 
 logger = logging.getLogger("cama_bot.commands.profile")
 
@@ -405,6 +406,14 @@ class ProfileCommands(commands.Cog):
         # Main role if different
         if player.main_role:
             embed.add_field(name="Main", value=format_role_display(player.main_role), inline=True)
+
+        # Server region (explicit pick, or inferred from OpenDota history)
+        region_code = resolve_region(player)
+        if region_code:
+            suffix = "" if player.preferred_region in REGION_NAMES else " (inferred)"
+            embed.add_field(name="Server", value=f"{REGION_NAMES[region_code]}{suffix}", inline=True)
+        else:
+            embed.add_field(name="Server", value="Not set", inline=True)
 
         # Hero stats from enriched matches
         match_repo = self._get_match_repo()
