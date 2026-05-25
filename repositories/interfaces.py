@@ -556,8 +556,8 @@ class IMatchRepository(ABC):
         ...
 
     @abstractmethod
-    def update_pending_match(self, pending_match_id: int, payload: dict) -> None:
-        """Update an existing pending match's payload."""
+    def update_pending_match(self, pending_match_id: int, payload: dict, guild_id: int | None = None) -> None:
+        """Update an existing pending match's payload, scoped to the given guild."""
         ...
 
     @abstractmethod

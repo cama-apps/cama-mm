@@ -100,6 +100,7 @@ class TestRecordMatchServiceGuards:
         match_service.match_repo.update_pending_match(
             state.pending_match_id,
             match_service._build_pending_match_payload(state),
+            guild_id=TEST_GUILD_ID,
         )
 
         with pytest.raises(ValueError, match="Excluded players detected"):
