@@ -260,10 +260,14 @@ class BettingCommands(commands.Cog):
         return build_wheel_result_embed(*args, **kwargs)
 
     def _wheel_explosion_embed(
-        self, new_balance: int, garnished: int, next_spin_time: int
+        self, new_balance: int, garnished: int, next_spin_time: int,
+        reward: int = WHEEL_EXPLOSION_REWARD, bankruptcy_penalty: int = 0,
     ) -> discord.Embed:
         """Thin wrapper around build_wheel_explosion_embed."""
-        return build_wheel_explosion_embed(new_balance, garnished, next_spin_time)
+        return build_wheel_explosion_embed(
+            new_balance, garnished, next_spin_time,
+            reward=reward, bankruptcy_penalty=bankruptcy_penalty,
+        )
 
     @app_commands.command(
         name="bet",
@@ -400,20 +404,30 @@ class BettingCommands(commands.Cog):
             # 20 spin frames * 50ms + 15 shake frames * ~100ms + 25 explosion * 70ms + 20 aftermath * 100ms
             await asyncio.sleep(8.0)
 
-            # Apply explosion reward (67 JC)
+            # Apply explosion reward (debuffed if under bankruptcy penalty)
             garnished_amount = 0
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+            explosion_reward = WHEEL_EXPLOSION_REWARD
+            explosion_penalty = 0
+            bankruptcy_service = getattr(self.bot, "bankruptcy_service", None)
+            if bankruptcy_service:
+                info = await asyncio.to_thread(
+                    bankruptcy_service.apply_penalty_to_winnings,
+                    user_id, explosion_reward, guild_id,
+                )
+                explosion_reward, explosion_penalty = info["penalized"], info["penalty_applied"]
 
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 result = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, WHEEL_EXPLOSION_REWARD, guild_id
+                    garnishment_service.add_income, user_id, explosion_reward, guild_id
                 )
                 garnished_amount = result.get("garnished", 0)
-                new_balance = result.get("new_balance", new_balance + WHEEL_EXPLOSION_REWARD)
+                new_balance = result.get("new_balance", new_balance + explosion_reward)
             else:
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, WHEEL_EXPLOSION_REWARD
+                    self.player_service.adjust_balance, user_id, guild_id, explosion_reward
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
@@ -428,13 +442,19 @@ class BettingCommands(commands.Cog):
                     self.player_service.log_wheel_spin,
                     discord_id=user_id,
                     guild_id=guild_id,
+                    # Log the nominal wheel outcome (gross), consistent with the
+                    # main-path spin log and bets.payout; the bankruptcy debuff
+                    # is a separate balance event surfaced in the embed.
                     result=WHEEL_EXPLOSION_REWARD,
                     spin_time=int(now),
                 )
             )
 
             await asyncio.sleep(0.5)
-            result_embed = self._wheel_explosion_embed(new_balance, garnished_amount, next_spin_time)
+            result_embed = self._wheel_explosion_embed(
+                new_balance, garnished_amount, next_spin_time,
+                reward=explosion_reward, bankruptcy_penalty=explosion_penalty,
+            )
             await message.edit(embed=result_embed)
             return
 
@@ -856,6 +876,20 @@ class BettingCommands(commands.Cog):
                 )
                 await discover_msg.edit(embed=timeout_embed, view=None)
             result_value = result_wedge[1]
+
+        # Anchor for the bankruptcy debuff, captured AFTER any interactive
+        # TOWN_TRIAL/DISCOVER wait so a concurrent balance change during that
+        # window (a steal/tip/settlement landing on the spinner) isn't
+        # misattributed as wheel winnings. The net positive gain over this
+        # anchor is the spin's winnings (the wheel has no stake), debuffed once
+        # at the end. Only fetched when a penalty could apply — an unconditional
+        # extra get_balance call would change mock call counts in tests (and an
+        # exhausted mock raising StopIteration deadlocks asyncio.to_thread).
+        balance_before_outcome = None
+        if bankruptcy_service is not None:
+            balance_before_outcome = await asyncio.to_thread(
+                self.player_service.get_balance, user_id, guild_id
+            )
 
         # Shell outcome tracking for embed
         shell_victim: discord.Member | None = None
@@ -1691,6 +1725,28 @@ class BettingCommands(commands.Cog):
             )
         )
 
+        # Bankruptcy debuff: dock the configured share of the spinner's net wheel
+        # winnings (any positive balance gain this spin). The wheel has no stake,
+        # so the whole positive delta is winnings; it applies regardless of debt
+        # and the penalty is a coin sink. Losses (gain <= 0) are untouched.
+        wheel_bankruptcy_penalty = 0
+        if bankruptcy_service:
+            current_balance = await asyncio.to_thread(
+                self.player_service.get_balance, user_id, guild_id
+            )
+            gain = current_balance - balance_before_outcome
+            if gain > 0:
+                _pen_info = await asyncio.to_thread(
+                    bankruptcy_service.apply_penalty_to_winnings, user_id, gain, guild_id
+                )
+                wheel_bankruptcy_penalty = _pen_info["penalty_applied"]
+                if wheel_bankruptcy_penalty > 0:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance,
+                        user_id, guild_id, -wheel_bankruptcy_penalty,
+                    )
+                    new_balance = current_balance - wheel_bankruptcy_penalty
+
         # Send final result embed
         await asyncio.sleep(0.5)  # Brief pause before result reveal
         # For extension slices, pass the new penalty total
@@ -1702,6 +1758,7 @@ class BettingCommands(commands.Cog):
 
         result_embed = self._wheel_result_embed(
             result_wedge, new_balance, garnished_amount, next_spin_time,
+            bankruptcy_penalty=wheel_bankruptcy_penalty,
             shell_victim=shell_victim,
             shell_victim_new_balance=shell_victim_new_balance,
             shell_amount=shell_amount,
