@@ -289,7 +289,7 @@ class DigCommands(commands.Cog):
                 ):
                     raw["relic_trim_notice"] = True
             except Exception:
-                logger.debug("relic trim notice check failed", exc_info=True)
+                logger.warning("relic trim notice check failed", exc_info=True)
         if (
             self.dig_flavor_service is not None
             and isinstance(raw, dict)

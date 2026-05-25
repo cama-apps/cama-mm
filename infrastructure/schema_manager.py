@@ -3261,14 +3261,14 @@ class SchemaManager:
         cursor.execute(
             """
             UPDATE dig_artifacts SET equipped = 0
-            WHERE is_relic = 1 AND equipped = 1
-              AND id NOT IN (
-                SELECT a.id FROM dig_artifacts a
-                WHERE a.is_relic = 1 AND a.equipped = 1
-                  AND a.discord_id = dig_artifacts.discord_id
-                  AND a.guild_id = dig_artifacts.guild_id
-                ORDER BY a.id DESC LIMIT 6
-              )
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY discord_id, guild_id ORDER BY id DESC
+                    ) AS rn
+                    FROM dig_artifacts WHERE is_relic = 1 AND equipped = 1
+                ) WHERE rn > 6
+            )
             """
         )
 

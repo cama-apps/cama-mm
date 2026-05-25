@@ -1534,6 +1534,7 @@ class DigService(
             discord_id, guild_id,
             weather_code=self._get_weather_code(guild_id, layer_name),
             luminosity=luminosity,
+            is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), today),
             include_random=False,
         )
         if depth_before >= 276:

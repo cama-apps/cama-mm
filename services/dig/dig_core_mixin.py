@@ -1047,6 +1047,7 @@ class DigCoreMixin:
                 "depth": new_depth,
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
+                "cavein_free_streak": 0,  # Prospector's Streak resets on collapse
             })
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
@@ -1116,6 +1117,13 @@ class DigCoreMixin:
                     streak_bonus = STREAKS[threshold]
                     break
             jc_earned += streak_bonus
+
+            # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
+            # (capped). The counter is bumped here and persisted below; the cave-in
+            # branch resets it to 0.
+            cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
+            if self._has_relic(discord_id, guild_id, "prospectors_streak"):
+                jc_earned += min(cavein_free_streak, 20)
 
             # Artifact (deterministic)
             artifact = None
@@ -1235,6 +1243,7 @@ class DigCoreMixin:
                     "max_depth": max(prev_max_depth, new_depth),
                     "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
                     "streak_days": streak, "streak_last_date": today,
+                    "cavein_free_streak": cavein_free_streak,
                     "current_run_jc": run_jc,
                     "current_run_artifacts": run_artifacts,
                     "current_run_events": run_events_count,
