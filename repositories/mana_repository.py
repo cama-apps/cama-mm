@@ -197,39 +197,6 @@ class ManaRepository(BaseRepository, IManaRepository):
             )
             return cursor.rowcount > 0
 
-    def atomic_stipend_transfer(
-        self,
-        discord_id: int,
-        guild_id: int | None,
-        amount: int,
-    ) -> int:
-        """Atomically deduct `amount` from the nonprofit fund and credit the player.
-
-        Returns the amount transferred on success, or 0 if the fund has less than
-        `amount` (both writes skipped atomically — no partial state).
-        """
-        gid = self.normalize_guild_id(guild_id)
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
-                (gid,),
-            )
-            row = cursor.fetchone()
-            available = row["total_collected"] if row else 0
-            if available < amount:
-                return 0
-            cursor.execute(
-                "UPDATE nonprofit_fund SET total_collected = total_collected - ? WHERE guild_id = ?",
-                (amount, gid),
-            )
-            cursor.execute(
-                "UPDATE players SET jopacoin_balance = jopacoin_balance + ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE discord_id = ? AND guild_id = ?",
-                (amount, discord_id, gid),
-            )
-            return amount
-
     def unmark_item_used(
         self, discord_id: int, guild_id: int | None, item_id: str, used_date: str
     ) -> None:

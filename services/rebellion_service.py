@@ -461,7 +461,11 @@ class RebellionService:
         cooldown all in one BEGIN IMMEDIATE).
         """
         defender_stake_pool = len(defend_discord_ids) * REBELLION_DEFENDER_STAKE
-        stake_share = defender_stake_pool // len(attack_discord_ids) if attack_discord_ids else 0
+        # The inciter is paid inciter_flat_reward (not a per-attacker share), so
+        # the defender pool is split only among the non-inciter attackers — divide
+        # by that count so the full pool is distributed (no orphaned share).
+        stake_recipients = [did for did in attack_discord_ids if did != inciter_id]
+        stake_share = defender_stake_pool // len(stake_recipients) if stake_recipients else 0
         war_scar_label = self._pick_war_scar_wedge()
         celebration_expires = now + REBELLION_CELEBRATION_SPIN_WINDOW
 

@@ -441,7 +441,7 @@ class TestWarFlow:
         # Non-inciter attackers get flat + stake share
         n_defenders = len(defend_voters)
         stake_pool = n_defenders * REBELLION_DEFENDER_STAKE
-        stake_share = stake_pool // len(attack_voters)
+        stake_share = stake_pool // (len(attack_voters) - 1)  # inciter excluded from the pool share
 
         for voter in attack_voters:
             if voter["discord_id"] == inciter_id:
@@ -487,7 +487,7 @@ class TestWarFlow:
         n_defenders = 2
         n_attackers = len(attack_voters)
         stake_pool = n_defenders * REBELLION_DEFENDER_STAKE
-        stake_share = stake_pool // n_attackers
+        stake_share = stake_pool // (n_attackers - 1)
 
         # Inciter gets only their flat reward — NOT flat + per_attacker_credit.
         # If double-paid, inciter_bal_after would equal
@@ -497,6 +497,47 @@ class TestWarFlow:
             f"Inciter gained {inciter_bal_after - inciter_bal_before} but expected "
             f"exactly {REBELLION_INCITER_FLAT_REWARD} (flat only). "
             f"Double-pay would be {REBELLION_INCITER_FLAT_REWARD + REBELLION_ATTACKER_FLAT_REWARD + stake_share}."
+        )
+
+    def test_attacker_win_distributes_full_defender_pool(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """The full defender stake pool is distributed among the non-inciter
+        attackers (no coins orphaned). With N attackers incl. the inciter, the
+        pool is split among the N-1 non-inciter recipients — not divided by N
+        and paid to N-1 (which would leave one share undistributed).
+        """
+        from config import REBELLION_ATTACKER_FLAT_REWARD, REBELLION_DEFENDER_STAKE
+        guild_id = TEST_GUILD_ID
+        inciter_id = 5950
+        # 3 attackers (incl. inciter) + 2 defenders → pool 20, split among 2 → 10 each.
+        war_id = self._setup_war_with_votes(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service,
+            inciter_id=inciter_id, n_attackers=3, n_defenders=2, guild_id=guild_id,
+        )
+        war = rebellion_repo.get_war(war_id)
+        attack_voters = json.loads(war["attack_voter_ids"])
+        defend_voters = json.loads(war["defend_voter_ids"])
+        non_inciter = [
+            v["discord_id"] for v in attack_voters if v["discord_id"] != inciter_id
+        ]
+        bal_before = {did: player_repo.get_balance(did, guild_id) for did in non_inciter}
+
+        result = rebellion_service.resolve_battle(
+            war_id, guild_id, battle_roll=1, victory_threshold=50
+        )
+        assert result["outcome"] == "attackers_win"
+
+        defender_stake_pool = len(defend_voters) * REBELLION_DEFENDER_STAKE
+        # Stake portion each non-inciter attacker received (gain minus flat reward).
+        distributed = sum(
+            (player_repo.get_balance(did, guild_id) - bal_before[did])
+            - REBELLION_ATTACKER_FLAT_REWARD
+            for did in non_inciter
+        )
+        assert distributed == defender_stake_pool, (
+            f"Distributed {distributed} of the {defender_stake_pool} defender pool; "
+            f"{defender_stake_pool - distributed} coins were orphaned."
         )
 
     def test_attacker_win_wheel_effects(self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo):
@@ -581,7 +622,7 @@ class TestWarFlow:
         war = rebellion_repo.get_war(war_id)
         attack_voters = json.loads(war["attack_voter_ids"])
         n_attackers = len(attack_voters)
-        stake_per = (2 * REBELLION_DEFENDER_STAKE) // n_attackers
+        stake_per = (2 * REBELLION_DEFENDER_STAKE) // (n_attackers - 1)
         per_attacker = REBELLION_ATTACKER_FLAT_REWARD + stake_per
 
         inciter_bal_after = player_repo.get_balance(inciter_id, guild_id)
