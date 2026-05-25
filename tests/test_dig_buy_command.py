@@ -7,9 +7,13 @@ buy command's choices, proving the user-facing contract that anything shown in
 the shop is selectable in buy.
 """
 
+import re
+
 import commands.dig as m
+from domain.models.dig_gear import GearSlot
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
+from services.dig_constants import GEAR_TIER_TABLES
 from services.dig_service import DigService
 
 
@@ -80,3 +84,40 @@ def test_shop_amulets_are_buyable(repo_db_path):
     buy_values = _buy_choice_values()
     for tier in amulet_tiers:
         assert f"amulet:{tier}" in buy_values
+
+
+def test_buy_labels_match_gear_data():
+    """Every gear buy choice's label must match its source-of-truth tier_def.
+
+    The `/dig buy` choice labels in commands/dig.py are hand-written strings
+    that duplicate the name and shop_price from GEAR_TIER_TABLES. This couples
+    the two so a rename or price retune in items.py that forgets the buy label
+    (or vice-versa) fails loudly instead of silently showing players the wrong
+    name or price. Covers all four gear slots, not just amulets.
+    """
+    item_param = _buy_item_param()
+    gear_slots = {s.value for s in GearSlot}
+    gear_choices = [
+        ch for ch in item_param.choices
+        if ":" in ch.value and ch.value.split(":", 1)[0] in gear_slots
+    ]
+
+    # All four gear slots must be represented — also guards the original bug
+    # (a slot's tiers silently missing from the buy command).
+    slots_seen = {ch.value.split(":", 1)[0] for ch in gear_choices}
+    assert slots_seen == {"weapon", "armor", "boots", "amulet"}
+
+    for ch in gear_choices:
+        slot, tier = ch.value.split(":", 1)
+        td = GEAR_TIER_TABLES[GearSlot(slot)][int(tier)]
+        assert ch.name.startswith(td.name), (
+            f"buy label {ch.name!r} (value {ch.value}) must start with the "
+            f"canonical name {td.name!r} from GEAR_TIER_TABLES"
+        )
+        # Match the price as a delimited token so e.g. shop_price 50 does not
+        # spuriously match "150 JC". Handles both label formats: "(20 JC)"
+        # for armor/boots/amulet and "— 15 JC" for weapons.
+        assert re.search(rf"\b{td.shop_price} JC", ch.name), (
+            f"buy label {ch.name!r} (value {ch.value}) must advertise "
+            f"shop_price={td.shop_price} JC from GEAR_TIER_TABLES"
+        )
