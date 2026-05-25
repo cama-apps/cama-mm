@@ -56,12 +56,14 @@ class BaseRepository(ABC):
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
-        cls = type(self)
-        if db_path not in cls._schema_initialized_paths:
-            with cls._schema_init_lock:
-                if db_path not in cls._schema_initialized_paths:
+        # _schema_initialized_paths is shared across ALL subclasses via the class variable
+        # on BaseRepository — not per-subclass. Use BaseRepository explicitly to make that
+        # sharing visible; using type(self) would imply per-subclass tracking, which is wrong.
+        if db_path not in BaseRepository._schema_initialized_paths:
+            with BaseRepository._schema_init_lock:
+                if db_path not in BaseRepository._schema_initialized_paths:
                     Database(db_path)
-                    cls._schema_initialized_paths.add(db_path)
+                    BaseRepository._schema_initialized_paths.add(db_path)
 
     @staticmethod
     def normalize_guild_id(guild_id: int | None) -> int:

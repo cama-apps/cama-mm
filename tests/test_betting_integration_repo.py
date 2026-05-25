@@ -165,7 +165,7 @@ def test_place_bet_against_pending_match_enforces_team_and_lock(repo_db_path):
     state.bet_lock_until = now_ts + 600
     pending_match_id = state.pending_match_id
     assert pending_match_id is not None, "Shuffle should set pending_match_id"
-    match_repo.update_pending_match(pending_match_id, match_service._build_pending_match_payload(state))  # type: ignore[attr-defined]
+    match_repo.update_pending_match(pending_match_id, match_service._build_pending_match_payload(state), guild_id=guild_id)  # type: ignore[attr-defined]
 
     radiant_pid = state.radiant_team_ids[0]
     # Radiant participant betting on Dire must be rejected (enforced via DB payload).
@@ -183,7 +183,7 @@ def test_place_bet_against_pending_match_enforces_team_and_lock(repo_db_path):
 
     # Lock enforcement via DB payload (without relying on in-memory pending_state)
     state.bet_lock_until = now_ts - 1
-    match_repo.update_pending_match(pending_match_id, match_service._build_pending_match_payload(state))  # type: ignore[attr-defined]
+    match_repo.update_pending_match(pending_match_id, match_service._build_pending_match_payload(state), guild_id=guild_id)  # type: ignore[attr-defined]
     try:
         bet_repo.place_bet_against_pending_match_atomic(
             guild_id=guild_id,

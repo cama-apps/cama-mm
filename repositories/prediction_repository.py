@@ -1118,7 +1118,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             pred = cursor.fetchone()
             if not pred:
                 raise ValueError("Prediction not found.")
-            if pred["status"] != "open":
+            if pred["status"] not in ("open", "locked"):
                 raise ValueError(
                     f"Cannot settle market in status '{pred['status']}'."
                 )
