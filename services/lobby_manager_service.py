@@ -51,6 +51,7 @@ class LobbyManagerService:
         self.readycheck_lobby_ids: dict[int, set[int]] = {}
         self.readycheck_reacted: dict[int, dict[int, str]] = {}
         self.readycheck_player_data: dict[int, dict[int, dict]] = {}
+        self.readycheck_created_ats: dict[int, float] = {}  # When the message was posted
         # Per-guild shuffle/draft locks to prevent race conditions
         self._shuffle_locks: dict[int, asyncio.Lock] = {}
         self._shuffle_lock_times: dict[int, float] = {}  # Track when lock acquired
@@ -246,6 +247,7 @@ class LobbyManagerService:
             self.readycheck_lobby_ids.pop(normalized, None)
             self.readycheck_reacted.pop(normalized, None)
             self.readycheck_player_data.pop(normalized, None)
+            self.readycheck_created_ats.pop(normalized, None)
             self._clear_persistent_lobby(normalized)
             logger.info(
                 f"reset_lobby completed for guild_id={normalized} - cleared persistent lobby"
@@ -268,6 +270,9 @@ class LobbyManagerService:
     def get_readycheck_player_data(self, guild_id: int | None = None) -> dict[int, dict]:
         return self.readycheck_player_data.get(self._normalize_guild_id(guild_id), {})
 
+    def get_readycheck_created_at(self, guild_id: int | None = None) -> float | None:
+        return self.readycheck_created_ats.get(self._normalize_guild_id(guild_id))
+
     def set_readycheck_state(
         self,
         message_id: int,
@@ -275,6 +280,7 @@ class LobbyManagerService:
         lobby_ids: set[int],
         player_data: dict[int, dict],
         guild_id: int | None = None,
+        created_at: float | None = None,
     ) -> None:
         normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
@@ -283,6 +289,9 @@ class LobbyManagerService:
             self.readycheck_lobby_ids[normalized] = lobby_ids
             self.readycheck_player_data[normalized] = player_data
             self.readycheck_reacted[normalized] = {}
+            self.readycheck_created_ats[normalized] = (
+                created_at if created_at is not None else time.time()
+            )
 
     def update_readycheck_data(
         self,

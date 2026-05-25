@@ -732,7 +732,7 @@ async def on_raw_reaction_add(payload):
         if not guild:
             return
         try:
-            status, _info = await cog._execute_readycheck(guild, payload.guild_id)
+            status, _info = await cog._execute_readycheck(guild, payload.guild_id, payload.user_id)
         except Exception as exc:
             logger.error(f"Error running 🔔 readycheck shortcut: {exc}", exc_info=True)
             status = "error"
