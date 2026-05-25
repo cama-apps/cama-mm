@@ -155,6 +155,11 @@ class BossWagerModal(discord.ui.Modal):
                     f"Victory! You defeated **{boss_name}** and won "
                     f"**{payout:+d}** {JOPACOIN_EMOTE} profit!"
                 )
+                penalty = getattr(self.result, "bankruptcy_penalty", 0) or 0
+                if penalty > 0:
+                    embed.description += (
+                        f"\n−{penalty} {JOPACOIN_EMOTE} withheld while bankrupt."
+                    )
                 if boss_narrative:
                     embed.add_field(name="​", value=f"*{boss_narrative}*", inline=False)
                 if getattr(self.result, "stat_point_awarded", False):
@@ -390,6 +395,11 @@ async def _resolve_carried_phase_fight(
             f"Victory! You defeated **{boss_name}** and won "
             f"**{payout:+d}** {JOPACOIN_EMOTE} profit!"
         )
+        penalty = getattr(result, "bankruptcy_penalty", 0) or 0
+        if penalty > 0:
+            embed.description += (
+                f"\n−{penalty} {JOPACOIN_EMOTE} withheld while bankrupt."
+            )
     else:
         loss = abs(getattr(result, "jc_delta", 0))
         knockback = getattr(result, "knockback", 0)
@@ -515,6 +525,11 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             f"Victory! You defeated **{boss_name}** and won "
             f"**{payout:+d}** {JOPACOIN_EMOTE} profit!"
         )
+        penalty = getattr(result, "bankruptcy_penalty", 0) or 0
+        if penalty > 0:
+            embed.description += (
+                f"\n−{penalty} {JOPACOIN_EMOTE} withheld while bankrupt."
+            )
         if getattr(result, "stat_point_awarded", False):
             embed.add_field(
                 name="S Point Earned",

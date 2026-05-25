@@ -2013,6 +2013,11 @@ class BossCombatMixin:
             else:
                 wager_profit = 0
             net_payout = base_reward + wager_profit
+            # Bankruptcy debuff: a penalized player keeps only the configured
+            # fraction of the boss-victory winnings; withheld share is a sink.
+            net_payout, boss_bankruptcy_penalty = self._penalize_jc(
+                discord_id, guild_id, net_payout
+            )
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
@@ -2057,6 +2062,7 @@ class BossCombatMixin:
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
                 jc_delta=net_payout, payout=net_payout,
+                bankruptcy_penalty=boss_bankruptcy_penalty,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 stat_point_awarded=stat_point_awarded,

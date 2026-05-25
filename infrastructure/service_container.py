@@ -415,6 +415,7 @@ class ServiceContainer:
             player_repo=c["player_repo"],
             mana_effects_service=c.get("mana_effects_service"),
             bankruptcy_repo=c.get("bankruptcy_repo"),
+            bankruptcy_service=c["bankruptcy_service"],
             dig_guild_modifier_repo=c.get("dig_guild_modifier_repo"),
             buff_service=c.get("buff_service"),
             slow_drip_repo=c.get("slow_drip_repo"),
