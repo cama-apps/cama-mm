@@ -282,6 +282,14 @@ class DigCommands(commands.Cog):
         raw = await asyncio.to_thread(
             self.dig_service.dig, user_id, guild_id, paid=paid,
         )
+        if isinstance(raw, dict) and raw.get("success", False):
+            try:
+                if await asyncio.to_thread(
+                    self.dig_service.pop_relic_trim_notice, user_id, guild_id,
+                ):
+                    raw["relic_trim_notice"] = True
+            except Exception:
+                logger.debug("relic trim notice check failed", exc_info=True)
         if (
             self.dig_flavor_service is not None
             and isinstance(raw, dict)
@@ -2288,6 +2296,16 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         embed.add_field(
             name="Progress",
             value=progress_value,
+            inline=False,
+        )
+
+    if getattr(result, "relic_trim_notice", False):
+        embed.add_field(
+            name="Relic slots capped",
+            value=(
+                "Relics are now capped at **6**. Your extra relics were unequipped "
+                "and are safe in your inventory — re-pick with `/dig gear`."
+            ),
             inline=False,
         )
 

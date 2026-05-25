@@ -90,7 +90,8 @@ PRESTIGE_CROWNS: dict[int, str] = {
     10: "\U0001f5a4",        # black heart
 }
 
-RELIC_SLOTS_BASE: int = 1  # relic_slots = prestige_level + RELIC_SLOTS_BASE
+RELIC_SLOTS_BASE: int = 1  # relic_slots = min(prestige_level + RELIC_SLOTS_BASE, RELIC_SLOTS_MAX)
+RELIC_SLOTS_MAX: int = 6   # hard ceiling so slots stop scaling with prestige forever
 
 PRESTIGE_PERKS: list[str] = [
     "advance_boost",

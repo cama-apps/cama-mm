@@ -52,14 +52,19 @@ def _build_gear_embed(
     embed.add_field(name="Amulet", value=_slot_value("amulet"), inline=False)
 
     relics = loadout.get("relics") or []
+    cap = loadout.get("relic_cap")
     if relics:
-        relic_field_name = f"Relics ({len(relics)} equipped)"
+        count = len(relics)
+        header = f"{count}/{cap}" if cap is not None else str(count)
+        relic_field_name = f"Relics ({header} equipped)"
         relic_value = "\n".join(
             f"• {format_relic_label(r.get('artifact_id', ''), with_stats=True)}"
             for r in relics
         )
+        if cap is not None and count > cap:
+            relic_value += f"\n⚠ Over cap — unequip {count - cap}."
     else:
-        relic_field_name = "Relics"
+        relic_field_name = f"Relics (0/{cap})" if cap is not None else "Relics"
         relic_value = "_None equipped_"
     embed.add_field(name=relic_field_name, value=relic_value, inline=False)
 

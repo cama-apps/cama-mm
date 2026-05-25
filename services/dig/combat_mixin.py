@@ -1642,9 +1642,14 @@ class BossCombatMixin:
             entry["player_hp"] = max(0, player_hp)
             return entry, player_hp, boss_hp, True
         if player_hp <= 0:
-            entry["player_hp"] = 0
-            entry["boss_hp"] = max(0, boss_hp)
-            return entry, player_hp, boss_hp, False
+            if status_effects.get("relic_deaths_door") and random.random() < 0.40:
+                player_hp = 1
+                status_effects["relic_deaths_door"] = False
+                entry["deaths_door"] = True
+            else:
+                entry["player_hp"] = 0
+                entry["boss_hp"] = max(0, boss_hp)
+                return entry, player_hp, boss_hp, False
 
         skip = status_effects.pop("skip_next_round_for", None)
         silenced = status_effects.pop("silenced_next_round", False)
@@ -1657,10 +1662,18 @@ class BossCombatMixin:
             crit_this_round = False
             if player_roll:
                 dmg_this_round = player_dmg
+                # Relic — Berserker's Mark: +1 dmg per prior round you took damage (cap +2).
+                berserk = status_effects.get("relic_berserk_rage")
+                if berserk:
+                    dmg_this_round += min(berserk, 2)
                 # Trophy — Hateborn Ember: last stand, +1 damage while at 1 HP.
                 if player_hp == 1 and status_effects.get("trophy_laststand"):
                     dmg_this_round += 1
                     entry["laststand"] = True
+                # Relic — Gambler's Edge: ~10% chance this hit lands double.
+                if status_effects.get("relic_double_hit") and random.random() < 0.10:
+                    dmg_this_round *= 2
+                    entry["double_hit"] = True
                 if crit_chance > 0 and random.random() < crit_chance:
                     dmg_this_round += crit_bonus
                     crit_this_round = True
@@ -1699,8 +1712,20 @@ class BossCombatMixin:
             entry["player_hp"] = max(0, player_hp)
             entry["skipped_boss"] = True
 
+        # Relic — Berserker's Mark: tally rounds where the player took damage (cap 2).
+        if "relic_berserk_rage" in status_effects and player_hp < hp_at_round_start:
+            status_effects["relic_berserk_rage"] = min(
+                status_effects["relic_berserk_rage"] + 1, 2
+            )
+
         if player_hp <= 0:
-            return entry, player_hp, boss_hp, False
+            if status_effects.get("relic_deaths_door") and random.random() < 0.40:
+                player_hp = 1
+                status_effects["relic_deaths_door"] = False
+                entry["deaths_door"] = True
+                entry["player_hp"] = 1
+            else:
+                return entry, player_hp, boss_hp, False
 
         # Trophy — Aching Spine: regrow 1 HP after a round you took no damage,
         # capped at your fight-start HP. Only on a non-terminal round.
@@ -1716,7 +1741,7 @@ class BossCombatMixin:
         return entry, player_hp, boss_hp, None
 
     def _trophy_status_seed(self, discord_id: int, guild_id, *, player_start_hp: int) -> dict:
-        """Build the initial ``status_effects`` carrying equipped trophy-relic flags.
+        """Build the initial ``status_effects`` carrying equipped trophy- and combat-relic flags.
 
         These flags persist across a mid-fight prompt pause (``status_effects``
         is serialized into the active-duel row and reloaded on resume) and are
@@ -1733,6 +1758,14 @@ class BossCombatMixin:
             se["trophy_forewarned"] = True
         if self._has_relic(discord_id, guild_id, "hateborn_ember"):
             se["trophy_laststand"] = True
+        # Boss-combat relics — not trophies, but seeded + persisted the same way
+        # (they survive a mid-fight pause via the serialized status_effects).
+        if self._has_relic(discord_id, guild_id, "berserkers_mark"):
+            se["relic_berserk_rage"] = 0  # rounds the player has taken damage
+        if self._has_relic(discord_id, guild_id, "gamblers_edge"):
+            se["relic_double_hit"] = True
+        if self._has_relic(discord_id, guild_id, "deaths_door"):
+            se["relic_deaths_door"] = True  # one-shot survive-a-killing-blow charge
         if se:
             se["trophy_start_hp"] = int(player_start_hp)
         return se
