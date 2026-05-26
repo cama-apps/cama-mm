@@ -615,6 +615,7 @@ class MatchCommands(commands.Cog):
 
         # Create auto-liquidity blind bets for pool mode
         blind_bets_result = None
+        spectator_bets_result = None
         if mode == "pool":
             betting_service = getattr(self.bot, "betting_service", None)
             if betting_service:
@@ -638,6 +639,16 @@ class MatchCommands(commands.Cog):
                             pending_match_id=pending_state.pending_match_id,
                         )
                     )
+                    spectator_bets_result = await asyncio.to_thread(
+                        functools.partial(
+                            betting_service.create_auto_spectator_bets,
+                            guild_id=guild_id,
+                            radiant_ids=pending_state.radiant_team_ids,
+                            dire_ids=pending_state.dire_team_ids,
+                            shuffle_timestamp=pending_state.shuffle_timestamp,
+                            pending_match_id=pending_state.pending_match_id,
+                        )
+                    )
                     if blind_bets_result["created"] > 0:
                         logger.info(
                             f"Created {blind_bets_result['created']} blind bets: "
@@ -658,8 +669,14 @@ class MatchCommands(commands.Cog):
                                         await send_neon_result(interaction, bomb_result)
                             except Exception as e:
                                 logger.debug(f"neon on_bomb_pot error: {e}")
+                    if spectator_bets_result["created"] > 0:
+                        logger.info(
+                            f"Created {spectator_bets_result['created']} spectator auto-wagers: "
+                            f"Radiant={spectator_bets_result['total_radiant']}, "
+                            f"Dire={spectator_bets_result['total_dire']}"
+                        )
                 except Exception as exc:
-                    logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
+                    logger.warning(f"Failed to create automatic bets: {exc}", exc_info=True)
 
         # Streaming bonus: award +1 JC to all lobby players (including excluded) who are Go Live
         # Awarded at both shuffle and record time (intentional: rewards continuous streaming)
@@ -811,8 +828,9 @@ class MatchCommands(commands.Cog):
         # Show blind bet summary if any were created
         if blind_bets_result and blind_bets_result["created"] > 0:
             if is_bomb_pot:
+                blind_pct = f"{blind_bets_result.get('percentage', 0) * 100:g}%"
                 blind_note = (
-                    f"💣 **BOMB POT:** All 10 players ante'd in! (10% + 10 {JOPACOIN_EMOTE} ante)\n"
+                    f"💣 **BOMB POT:** All 10 players ante'd in! ({blind_pct} + 10 {JOPACOIN_EMOTE} ante)\n"
                     f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
                     f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}\n"
                     f"_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
@@ -825,6 +843,15 @@ class MatchCommands(commands.Cog):
                     f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}"
                 )
                 embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
+
+        if spectator_bets_result and spectator_bets_result["created"] > 0:
+            spectator_pct = f"{spectator_bets_result.get('percentage', 0) * 100:g}%"
+            spectator_note = (
+                f"**Rich spectator auto-wagers:** {spectator_bets_result['created']} spectators wagered {spectator_pct} of net worth\n"
+                f"🟢 Radiant: {spectator_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
+                f"🔴 Dire: {spectator_bets_result['total_dire']} {JOPACOIN_EMOTE}"
+            )
+            embed.add_field(name="💸 Spectator Auto-Wagers", value=spectator_note, inline=False)
 
         # Current wagers display
         betting_service = getattr(self.bot, "betting_service", None)

@@ -905,7 +905,7 @@ class TestBombPotSettlement:
             current = player_repo.get_balance(pid, TEST_GUILD_ID)
             player_repo.add_balance(pid, TEST_GUILD_ID, 100 - current)
 
-        # Bomb pot mode: 10% of 100 = 10 JC + 10 JC ante = 20 JC per player
+        # Bomb pot mode: 15% of 100 = 15 JC + 10 JC ante = 25 JC per player
         bomb_pot_result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
             radiant_ids=radiant_ids,
@@ -913,8 +913,8 @@ class TestBombPotSettlement:
             shuffle_timestamp=now_ts + 1,  # Different timestamp
             is_bomb_pot=True,
         )
-        # 10 players * 20 JC = 200 total
-        assert bomb_pot_result["total_radiant"] + bomb_pot_result["total_dire"] == 200
+        # 10 players * 25 JC = 250 total
+        assert bomb_pot_result["total_radiant"] + bomb_pot_result["total_dire"] == 250
         assert bomb_pot_result["is_bomb_pot"] is True
 
     def test_bomb_pot_participation_bonus_losers(self, services):

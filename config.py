@@ -122,10 +122,13 @@ HOUSE_PAYOUT_MULTIPLIER = _parse_float("HOUSE_PAYOUT_MULTIPLIER", 1.0)
 AUTO_BLIND_ENABLED = _parse_bool("AUTO_BLIND_ENABLED", True)  # Enable auto-blind bets in pool mode
 AUTO_BLIND_THRESHOLD = _parse_int("AUTO_BLIND_THRESHOLD", 50)  # Min balance to trigger blind (inclusive)
 AUTO_BLIND_PERCENTAGE = _parse_float("AUTO_BLIND_PERCENTAGE", 0.10)  # 10% of balance
+AUTO_SPECTATOR_BET_ENABLED = _parse_bool("AUTO_SPECTATOR_BET_ENABLED", True)
+AUTO_SPECTATOR_BET_COUNT = _parse_int("AUTO_SPECTATOR_BET_COUNT", 5)
+AUTO_SPECTATOR_BET_PERCENTAGE = _parse_float("AUTO_SPECTATOR_BET_PERCENTAGE", 0.02)  # 2% of balance
 
 # Bomb Pot configuration (randomly triggered ~20% of matches)
 BOMB_POT_CHANCE = _parse_float("BOMB_POT_CHANCE", 0.20)  # 20% chance per match
-BOMB_POT_BLIND_PERCENTAGE = _parse_float("BOMB_POT_BLIND_PERCENTAGE", 0.10)  # 10% plus ante
+BOMB_POT_BLIND_PERCENTAGE = _parse_float("BOMB_POT_BLIND_PERCENTAGE", 0.15)  # 15% plus ante
 BOMB_POT_ANTE = _parse_int("BOMB_POT_ANTE", 10)  # Flat 10 JC ante (mandatory, can go negative)
 BOMB_POT_PARTICIPATION_BONUS = _parse_int("BOMB_POT_PARTICIPATION_BONUS", 1)  # Extra +1 JC for all players
 
