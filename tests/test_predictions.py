@@ -20,6 +20,7 @@ from config import (
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
     PREDICTION_REFRESH_SIZE_PER_LEVEL,
+    PREDICTION_REFRESH_SPREAD_TICKS,
     PREDICTION_SIZE_PER_LEVEL,
     PREDICTION_SPREAD_TICKS,
 )
@@ -341,40 +342,52 @@ def test_refresh_layers_size_onto_existing_levels(
     """Daily refresh tops up the existing ladder where it overlaps.
 
     Initial seed at fair=50 with spread=1: asks 51..53, bids 49..47, each at
-    PREDICTION_SIZE_PER_LEVEL. Refresh uses a wider spread (2) and smaller per-
-    level size, so it tops up at 52,53 / 48,47 — the seed top-of-book at 51/49
-    is left alone.
+    PREDICTION_SIZE_PER_LEVEL. Refresh uses a wider spread (3) and smaller
+    per-level size, so it overlaps the seed only at 53 / 47 and adds new outer
+    levels at 54,55 / 46,45; the nearer seed levels (52 / 48) are left alone.
     """
     _add_player(player_repository, 1, balance=1_000_000)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market m?", initial_fair=50,
     )["prediction_id"]
-    # Drain the top ask at 51 so we can confirm it doesn't get topped up by refresh.
+    # Drain the top ask at 51 so we can confirm a consumed top-of-book level is
+    # NOT resurrected by the refresh.
     prediction_service.buy_contracts(
         prediction_id=pid, discord_id=1, side="yes", contracts=PREDICTION_SIZE_PER_LEVEL,
     )
+    assert ("yes_ask", 51) not in dict(post_helper(prediction_repo.get_book(pid)))
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
-    prediction_service.refresh_market(pid)
+    summary = prediction_service.refresh_market(pid)
+    # Draining the top ask moves top-of-book to 52, so observed_mid = (52+49)/2
+    # = 50.5 and (zero drift) the refresh reposts around fair 50. Pin new_price
+    # so the asserted ladder can't silently drift if the rounding/fade rules change.
+    assert summary["new_price"] == 50
     post = dict(post_helper(prediction_repo.get_book(pid)))
 
-    # Refresh ladder positions are 52, 53 (asks) and 48, 47 (bids).
+    # Refresh ladder positions (spread 3) are 53, 54, 55 (asks) and 47, 46, 45 (bids).
     # 51 (consumed top seed) is NOT in the refresh ladder so stays absent.
-    # 52, 53 layered with +3 onto existing 5 → 8 each.
+    # 52 / 48 are seed-only (refresh no longer reaches them); 53 / 47 overlap and
+    # gain a refresh layer; 54,55 / 46,45 are new refresh-only levels.
     assert ("yes_ask", 51) not in post
-    assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL
     assert post[("yes_ask", 53)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
-    # Seed bid at 49 untouched (not in refresh ladder).
+    assert post[("yes_ask", 54)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_ask", 55)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    # Seed bids at 49, 48 untouched (not in refresh ladder).
     assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL
     assert post[("yes_bid", 47)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_bid", 46)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_bid", 45)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
 
 
 def test_refresh_quiet_market_accumulates_depth(
     prediction_service, prediction_repo, monkeypatch,
 ):
     """No trades + multiple refreshes at same fair = depth grows at the
-    refresh-ladder positions only. Initial-seed-only positions stay flat."""
+    refresh-ladder positions only (fair±3 overlap plus the fair±4/±5 outer
+    levels). Initial-seed-only positions (fair±1/±2) stay flat."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mm?", initial_fair=50,
     )["prediction_id"]
@@ -383,13 +396,21 @@ def test_refresh_quiet_market_accumulates_depth(
     for _ in range(refreshes):
         prediction_service.refresh_market(pid)
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
-    expected = PREDICTION_SIZE_PER_LEVEL + refreshes * PREDICTION_REFRESH_SIZE_PER_LEVEL
-    for price in (52, 53):
-        assert post[("yes_ask", price)] == expected
-    for price in (48, 47):
-        assert post[("yes_bid", price)] == expected
+    # Seed-only positions (no refresh overlap at spread 3) stay flat.
+    for price in (51, 52):
+        assert post[("yes_ask", price)] == PREDICTION_SIZE_PER_LEVEL
+    for price in (49, 48):
+        assert post[("yes_bid", price)] == PREDICTION_SIZE_PER_LEVEL
+    # Overlap at fair±3 accumulates seed + one refresh layer per pass.
+    overlap = PREDICTION_SIZE_PER_LEVEL + refreshes * PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_ask", 53)] == overlap
+    assert post[("yes_bid", 47)] == overlap
+    # Refresh-only outer levels accumulate one layer per pass.
+    outer = refreshes * PREDICTION_REFRESH_SIZE_PER_LEVEL
+    for price in (54, 55):
+        assert post[("yes_ask", price)] == outer
+    for price in (46, 45):
+        assert post[("yes_bid", price)] == outer
 
 
 def test_refresh_fades_up_when_asks_consumed(
@@ -524,8 +545,9 @@ def test_refresh_layers_with_refresh_params_not_initial(
     """Daily refresh uses thinner/wider params than the initial seed.
 
     Initial: PREDICTION_LEVELS_PER_SIDE × PREDICTION_SIZE_PER_LEVEL contracts at
-    spread 1. Refresh: PREDICTION_REFRESH_LEVELS_PER_SIDE × PREDICTION_REFRESH_SIZE_PER_LEVEL
-    at spread 2. After one refresh the layered positions gain refresh-size on top.
+    spread 1 (fair±1/±2/±3). Refresh: PREDICTION_REFRESH_LEVELS_PER_SIDE ×
+    PREDICTION_REFRESH_SIZE_PER_LEVEL at spread 3 (fair±3/±4/±5), so it overlaps
+    the seed only at fair±3 and adds new refresh-only levels at fair±4/±5.
     """
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market lr?", initial_fair=50,
@@ -539,17 +561,30 @@ def test_refresh_layers_with_refresh_params_not_initial(
 
     seed = PREDICTION_SIZE_PER_LEVEL
     layered = seed + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    refresh_only = PREDICTION_REFRESH_SIZE_PER_LEVEL
 
-    # Top initial-seed at 51 sits inside the refresh ladder gap (not at fair±2/±3).
+    # Refresh (spread 3) overlaps the seed only at fair±3; fair±1/±2 stay seed-only
+    # and fair±4/±5 are new refresh-only levels.
     assert asks_by_price[51] == seed
-    assert asks_by_price[52] == layered
+    assert asks_by_price[52] == seed
     assert asks_by_price[53] == layered
-    assert 54 not in asks_by_price           # refresh only goes 2 deep
+    assert asks_by_price[54] == refresh_only
+    assert asks_by_price[55] == refresh_only
+    assert 56 not in asks_by_price           # refresh goes 3 deep: 53, 54, 55
 
     assert bids_by_price[49] == seed
-    assert bids_by_price[48] == layered
+    assert bids_by_price[48] == seed
     assert bids_by_price[47] == layered
-    assert 46 not in bids_by_price
+    assert bids_by_price[46] == refresh_only
+    assert bids_by_price[45] == refresh_only
+    assert 44 not in bids_by_price
+
+    # Guard the "tops up the existing ladder" invariant: the refresh's innermost
+    # offset must stay within the seed's reach so the two ladders overlap on at
+    # least one price. Raising PREDICTION_REFRESH_SPREAD_TICKS past the seed's
+    # outer edge would silently stop the refresh reinforcing the seed.
+    seed_outer_offset = PREDICTION_SPREAD_TICKS + PREDICTION_LEVELS_PER_SIDE - 1
+    assert seed_outer_offset >= PREDICTION_REFRESH_SPREAD_TICKS
 
 
 def test_apply_refresh_stamps_prev_price(
