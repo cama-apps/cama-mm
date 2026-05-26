@@ -53,24 +53,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.commands.shop")
 
 
-def _today_4am_pst_unix() -> int:
-    """Return the unix timestamp of today's 4 AM PST reset boundary.
-
-    Derived from ``utils.game_date``, which fixes the reset to UTC-8 (no DST)
-    so the boundary is stable across the spring/fall transitions: the current
-    game-date string is parsed back as a 4 AM UTC-8 datetime. If the current
-    Pacific time is before 4 AM, the game date is still the prior day, so the
-    boundary is yesterday's 4 AM.
-    """
-    import datetime as _dt
-
-    from utils.game_date import _PST, get_game_date
-
-    boundary = _dt.datetime.strptime(get_game_date(), "%Y-%m-%d").replace(
-        hour=4, tzinfo=_PST,
-    )
-    return int(boundary.timestamp())
-
 # Bounty Hunter theme
 BOUNTY_HUNTER_ID = 62
 BOUNTY_HUNTER_COLOR = 0xD4AF37  # Gold fallback
@@ -1623,7 +1605,7 @@ class ShopCommands(commands.Cog):
         # Mid (1/day)
         app_commands.Choice(name="Mid • Dynamite Cache (Red, 150 JC, 1/day) — next 3 digs +30% yield", value="dynamite_cache"),
         app_commands.Choice(name="Mid • Mana Shield (Blue, 150 JC, 1/day) — refund 50% of largest 24h loss", value="mana_shield"),
-        app_commands.Choice(name="Mid • Regrowth (Green, 100 JC, 1/day) — recover 25% of today's losses", value="regrowth"),
+        app_commands.Choice(name="Mid • Regrowth (Green, 100 JC, 1/day) — recover 25% of last 24h losses", value="regrowth"),
         app_commands.Choice(name="Mid • Aegis (White, 150 JC, 1/day) — absorb the next PvP attack", value="aegis"),
         app_commands.Choice(name="Mid • Blood Pact (Black, 150 JC, 1/day) — skim 10% of target's earnings 24h", value="blood_pact"),
         # Ultimate (taps mana — consumes today's color)
@@ -1992,7 +1974,10 @@ class ShopCommands(commands.Cog):
             )
 
         elif item_key == "regrowth":
-            cutoff = _today_4am_pst_unix()
+            # Rolling 24h window (matching Mana Shield). A 4 AM-PST calendar
+            # bucket dropped late-night losses once a player crossed the reset,
+            # so anyone checking the morning after a losing session saw 0.
+            cutoff = int(time.time()) - 24 * 3600
             total_lost = await asyncio.to_thread(
                 self._compute_cumulative_recent_losses, user_id, guild_id, cutoff,
             )
@@ -2001,7 +1986,7 @@ class ShopCommands(commands.Cog):
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
             await interaction.followup.send(
                 f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
-                f"(25% of today's losses, capped at 200. "
+                f"(25% of your last 24h losses, capped at 200. "
                 f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + recovery})"
             )
 

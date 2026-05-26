@@ -15,32 +15,7 @@ from commands.shop import (
     SHOP_RECALIBRATE_COST,
     SHOP_WITCHS_CURSE_COST,
     ShopCommands,
-    _today_4am_pst_unix,
 )
-
-
-def test_today_4am_pst_unix_is_4am_utc_minus_8(monkeypatch):
-    """The reset boundary must be exactly 4 AM at the fixed UTC-8 offset of
-    the current game date — no DST distortion."""
-    import datetime as dt
-
-    from utils.game_date import _PST
-
-    monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-05-16")
-    boundary = _today_4am_pst_unix()
-    expected = dt.datetime(2026, 5, 16, 4, 0, 0, tzinfo=_PST).timestamp()
-    assert boundary == int(expected)
-
-
-def test_today_4am_pst_unix_dst_transition_is_exactly_24h(monkeypatch):
-    """Two consecutive game dates straddling the March DST transition must be
-    exactly 86400s apart. A wall-clock day subtraction in a DST-aware zone
-    would instead yield a 23-hour gap."""
-    monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-03-08")
-    before = _today_4am_pst_unix()
-    monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-03-09")
-    after = _today_4am_pst_unix()
-    assert after - before == 86400
 
 
 def _make_interaction(user_id: int = 1001, guild_id: int | None = None):
@@ -656,3 +631,79 @@ async def test_item_autocomplete_excludes_dig_items():
     choices = await cmds.item_autocomplete(interaction, "")
     values = {c.value for c in choices}
     assert not any(v.startswith("dig_") for v in values)
+
+
+@pytest.mark.asyncio
+async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeypatch, repo_db_path):
+    """Regrowth must recover losses from the last 24h, not only losses since
+    today's 4 AM PST reset.
+
+    Bug ("recovers 0"): the loss window was a 4 AM-PST calendar bucket, so a
+    player who lost JC last night and ran regrowth the next morning — after the
+    4 AM rollover — had every loss dropped. The fix uses a rolling 24h window
+    (matching the sibling Mana Shield item).
+
+    Scenario: it is 4:30 AM PST and the player lost 1000 JC twelve hours earlier
+    (≈4:30 PM PST yesterday) — within 24h but *before* today's 4 AM reset.
+    Regrowth should still credit 25%, capped at 200.
+    """
+    import datetime as dt
+    import sqlite3
+
+    from repositories.bet_repository import BetRepository
+    from repositories.player_repository import PlayerRepository
+    from tests.conftest import TEST_GUILD_ID
+    from utils.game_date import _PST
+
+    user_id = 4242
+    # Freeze "now" to 4:30 AM PST. The old 4 AM-PST bucket would exclude a loss
+    # from 12h ago; a rolling 24h window includes it.
+    frozen_now = int(dt.datetime(2026, 5, 20, 4, 30, tzinfo=_PST).timestamp())
+    monkeypatch.setattr("commands.shop.time", SimpleNamespace(time=lambda: frozen_now))
+
+    # A 200 JC bet at 5x on the losing side = -1000, placed 12h before "now"
+    # (yesterday afternoon, before today's 4 AM PST).
+    conn = sqlite3.connect(repo_db_path)
+    conn.execute(
+        "INSERT INTO matches (match_id, team1_players, team2_players, winning_team, guild_id)"
+        " VALUES (1,'[]','[]',2,?)",
+        (TEST_GUILD_ID,),
+    )
+    conn.execute(
+        "INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage)"
+        " VALUES (?,1,?,'radiant',200,?,5)",
+        (TEST_GUILD_ID, user_id, frozen_now - 12 * 3600),
+    )
+    conn.commit()
+    conn.close()
+
+    gambling = SimpleNamespace(
+        bet_repo=BetRepository(repo_db_path),
+        player_repo=PlayerRepository(repo_db_path),
+    )
+
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Green")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=user_id)
+    player_service.get_balance.return_value = 1000
+
+    shop = ShopCommands(bot, player_service, gambling_stats_service=gambling)
+    interaction = _make_interaction(user_id=user_id, guild_id=TEST_GUILD_ID)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="regrowth"), target=None,
+    )
+
+    # 25% of the 1000 loss, capped at 200, credited back via adjust_balance.
+    recovery_calls = [
+        c for c in player_service.adjust_balance.call_args_list
+        if c.args == (user_id, TEST_GUILD_ID, 200)
+    ]
+    assert recovery_calls, (
+        "Regrowth should credit 200 (25% of a 1000 loss from 12h ago); "
+        f"adjust_balance calls were {player_service.adjust_balance.call_args_list}"
+    )
