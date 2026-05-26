@@ -1883,6 +1883,18 @@ class DraftCommands(commands.Cog):
                                 pending_match_id=pending_state.pending_match_id,
                             )
                         )
+                        spectator_result = await asyncio.to_thread(
+                            functools.partial(
+                                betting_service.create_auto_spectator_bets,
+                                guild_id=guild_id,
+                                radiant_ids=state.radiant_player_ids,
+                                dire_ids=state.dire_player_ids,
+                                shuffle_timestamp=pending_state.shuffle_timestamp,
+                                pending_match_id=pending_state.pending_match_id,
+                            )
+                        )
+                        if spectator_result:
+                            blind_result["spectator_bets"] = spectator_result
                         if blind_result and blind_result.get("created", 0) > 0:
                             # Store blind bets result in pending state for embed display
                             pending_state.blind_bets_result = blind_result
@@ -1906,8 +1918,17 @@ class DraftCommands(commands.Cog):
                                             await send_neon_result(interaction, bomb_result)
                                 except Exception as e:
                                     logger.debug(f"neon on_bomb_pot error: {e}")
+                        if spectator_result and spectator_result.get("created", 0) > 0:
+                            if not pending_state.blind_bets_result:
+                                pending_state.blind_bets_result = blind_result
+                                await asyncio.to_thread(
+                                    self.match_service.set_last_shuffle, guild_id, pending_state
+                                )
+                            logger.info(
+                                f"Created {spectator_result['created']} spectator auto-wagers for draft"
+                            )
                     except Exception as exc:
-                        logger.warning(f"Failed to create blind bets for draft: {exc}")
+                        logger.warning(f"Failed to create automatic bets for draft: {exc}")
 
                 # Decay exclusion counts for included players (same as shuffle mode)
                 included_player_ids = state.radiant_player_ids + state.dire_player_ids
@@ -2259,8 +2280,9 @@ class DraftCommands(commands.Cog):
             blind_bets = pending_state.blind_bets_result
             if blind_bets and blind_bets.get("created", 0) > 0:
                 if is_bomb_pot:
+                    blind_pct = f"{blind_bets.get('percentage', 0) * 100:g}%"
                     blind_note = (
-                        f"💣 **BOMB POT:** All 10 players ante'd in! (10% + 10 {JOPACOIN_EMOTE} ante)\n"
+                        f"💣 **BOMB POT:** All 10 players ante'd in! ({blind_pct} + 10 {JOPACOIN_EMOTE} ante)\n"
                         f"🟢 Radiant: {blind_bets['total_radiant']} {JOPACOIN_EMOTE} | "
                         f"🔴 Dire: {blind_bets['total_dire']} {JOPACOIN_EMOTE}\n"
                         f"_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
@@ -2273,6 +2295,16 @@ class DraftCommands(commands.Cog):
                         f"🔴 Dire: {blind_bets['total_dire']} {JOPACOIN_EMOTE}"
                     )
                     embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
+
+            spectator_bets = blind_bets.get("spectator_bets") if blind_bets else None
+            if spectator_bets and spectator_bets.get("created", 0) > 0:
+                spectator_pct = f"{spectator_bets.get('percentage', 0) * 100:g}%"
+                spectator_note = (
+                    f"**Rich spectator auto-wagers:** {spectator_bets['created']} spectators wagered {spectator_pct} of net worth\n"
+                    f"🟢 Radiant: {spectator_bets['total_radiant']} {JOPACOIN_EMOTE} | "
+                    f"🔴 Dire: {spectator_bets['total_dire']} {JOPACOIN_EMOTE}"
+                )
+                embed.add_field(name="💸 Spectator Auto-Wagers", value=spectator_note, inline=False)
 
             # Current wagers (same display as shuffle mode)
             guild_id = state.guild_id

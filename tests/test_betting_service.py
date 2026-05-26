@@ -3,6 +3,7 @@ import time
 import pytest
 
 from config import JOPACOIN_EXCLUSION_REWARD
+from domain.models.pending_match_state import PendingMatchState
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -630,6 +631,69 @@ class TestBlindBetsCore:
         assert blind_bets_result["created"] == 10
         assert blind_bets_result["total_radiant"] == 50  # 5 players * 10 coins
         assert blind_bets_result["total_dire"] == 50
+
+
+class TestAutoSpectatorBets:
+    """Rich spectator auto-wagers."""
+
+    def test_create_auto_spectator_bets_uses_top_richest_spectators(self, services):
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        radiant_ids = list(range(15000, 15005))
+        dire_ids = list(range(15005, 15010))
+        for pid in radiant_ids + dire_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repo.update_balance(pid, TEST_GUILD_ID, 1000)
+
+        spectator_balances = {
+            15100: 500,
+            15101: 400,
+            15102: 300,
+            15103: 200,
+            15104: 100,
+            15105: 90,
+            15106: 80,
+        }
+        for pid, balance in spectator_balances.items():
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Spectator{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repo.update_balance(pid, TEST_GUILD_ID, balance)
+
+        now_ts = int(time.time())
+        result = betting_service.create_auto_spectator_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=now_ts,
+        )
+
+        assert result["created"] == 5
+        bet_ids = {bet["discord_id"] for bet in result["bets"]}
+        assert bet_ids == {15100, 15101, 15102, 15103, 15104}
+        assert bet_ids.isdisjoint(radiant_ids + dire_ids)
+        assert {bet["amount"] for bet in result["bets"]} == {10, 8, 6, 4, 2}
+        assert abs(result["total_radiant"] - result["total_dire"]) <= 2
+
+        for bet in result["bets"]:
+            pid = bet["discord_id"]
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == spectator_balances[pid] - bet["amount"]
+
+        pending = PendingMatchState(shuffle_timestamp=now_ts)
+        assert betting_service.get_top_voluntary_bettor(TEST_GUILD_ID, pending_state=pending) is None
+
+        placed_bets = betting_service.bet_repo.get_bets_for_pending_match(TEST_GUILD_ID, since_ts=now_ts)
+        assert len(placed_bets) == 5
+        assert all(bet["is_blind"] for bet in placed_bets)
 
 
 class TestPendingMatchPersistence:

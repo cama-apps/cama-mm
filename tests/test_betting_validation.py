@@ -533,9 +533,9 @@ class TestBombPotValidation:
         assert bomb_pot_result["created"] == 10
         assert len(bomb_pot_result["skipped"]) == 0
 
-        # Each player bets: 10% of 20 = 2 + 10 ante = 12 JC
-        # Total: 10 * 12 = 120
-        assert bomb_pot_result["total_radiant"] + bomb_pot_result["total_dire"] == 120
+        # Each player bets: 15% of 20 = 3 + 10 ante = 13 JC
+        # Total: 10 * 13 = 130
+        assert bomb_pot_result["total_radiant"] + bomb_pot_result["total_dire"] == 130
 
     def test_bomb_pot_zero_balance_still_antes(self, services):
         """Players with zero balance still ante in bomb pot (can go negative)."""
@@ -566,7 +566,7 @@ class TestBombPotValidation:
 
         # Should create bet even with 0 balance
         assert result["created"] == 1
-        # 10% of 0 = 0 + 10 ante = 10 JC
+        # 15% of 0 = 0 + 10 ante = 10 JC
         assert result["total_radiant"] == 10
         # Balance should be negative now (-10)
         assert player_repo.get_balance(player_id, TEST_GUILD_ID) == -10
@@ -600,7 +600,7 @@ class TestBombPotValidation:
 
         # Should create bet even with negative balance
         assert result["created"] == 1
-        # 10% of -100 = 0 (negative balance treated as 0) + 10 ante = 10 JC
+        # 15% of -100 = 0 (negative balance treated as 0) + 10 ante = 10 JC
         assert result["total_radiant"] == 10
         # Balance should be -110 now
         assert player_repo.get_balance(player_id, TEST_GUILD_ID) == -110
