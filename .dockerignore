@@ -6,6 +6,8 @@ __pycache__/
 .env
 *.db
 data/
+backups/
+backups_archive/
 tests/
 test_*.py
 .pytest_cache/
