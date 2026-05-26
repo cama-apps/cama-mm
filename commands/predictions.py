@@ -34,6 +34,7 @@ from services.prediction_service import PredictionService
 from utils.drawing.predictions import draw_market_fair_history
 from utils.formatting import JOPACOIN_EMOTE, format_duration_short
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
+from utils.neon_helpers import get_neon_service, send_neon_result
 
 logger = logging.getLogger("cama_bot.commands.predictions")
 
@@ -987,6 +988,23 @@ class PredictionCommands(commands.Cog):
         if bankruptcy_total > 0:
             announce += f" ({bankruptcy_total} JC withheld from bankrupt winners.)"
         await safe_followup(interaction, content=announce)
+
+        # Rare neon celebration for the biggest market winner (best-effort).
+        if biggest and biggest.get("payout"):
+            try:
+                neon = get_neon_service(self.bot)
+                if neon:
+                    g_id = interaction.guild.id if interaction.guild else None
+                    nr = await neon.on_big_win(
+                        biggest["discord_id"],
+                        g_id,
+                        source="prediction",
+                        payout=int(biggest["payout"]),
+                        flavor="top_dog",
+                    )
+                    await send_neon_result(interaction, nr)
+            except Exception:
+                logger.debug("prediction big-win neon failed", exc_info=True)
 
         # Update market embed + archive thread
         pred = await asyncio.to_thread(

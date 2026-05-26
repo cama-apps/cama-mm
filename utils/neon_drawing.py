@@ -1066,3 +1066,78 @@ def create_unanimous_wrong_gif(
         durations.append(60000 if is_last else 200)
 
     return _save_gif(frames, durations)
+
+
+def create_bigwin_gif(
+    name: str, payout: int, *, source: str = "match", flavor: str = "bigwin"
+) -> io.BytesIO:
+    """
+    Celebratory payout GIF — the win-side counterpart to the crash animations.
+
+    Used for big wins across betting surfaces.
+    source: "match" | "prediction" | "gamba"   (sets the context line)
+    flavor: "bigwin" | "top_dog" | "underdog"   (sets the banner)
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(22, bold=True)
+    font_md = _get_font(14, bold=True)
+    font_sm = _get_font(12)
+
+    source_line = {
+        "match": "MATCH SETTLED",
+        "prediction": "MARKET RESOLVED",
+        "gamba": "TABLE PAYS OUT",
+    }.get(source, "POSITION SETTLED")
+
+    banner, accent = {
+        "bigwin": ("PAYOUT CONFIRMED", NEON_GREEN),
+        "top_dog": ("TOP OF THE BOOK", NEON_CYAN),
+        "underdog": ("FADE THE PUBLIC", NEON_YELLOW),
+    }.get(flavor, ("PAYOUT CONFIRMED", NEON_GREEN))
+
+    # Phase 1: reconciling (8 frames)
+    for i in range(8):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+        _draw_text_centered(draw, "JOPA-T/v3.7 LEDGER", 24, NEON_GREEN, font_md)
+        _draw_text_left(draw, f"> {source_line.lower()}...", 24, 70, DIM_GREEN, font_sm)
+        _draw_text_left(draw, f"> client: {name}", 24, 92, DIM_GREEN, font_sm)
+        if i % 2 == 0:
+            _draw_text_left(draw, "> reconciling _", 24, 114, NEON_GREEN, font_sm)
+        frames.append(_make_frame(img))
+        durations.append(110)
+
+    # Phase 2: payout counts up (18 frames)
+    for i in range(18):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+        prog = (i + 1) / 18
+        shown = int(payout * prog)
+        _draw_text_centered(draw, source_line, 32, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, f"+{shown:,}", HEIGHT // 2 - 22, accent, font_lg)
+        _draw_text_centered(draw, "JOPACOIN", HEIGHT // 2 + 16, DIM_CYAN, font_sm)
+        frames.append(_make_frame(img))
+        durations.append(55 if prog < 0.9 else 95)
+
+    # Phase 3: banner flash + jackpot spray (14 frames)
+    for i in range(14):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+        flash = i % 2 == 0
+        _draw_text_centered(draw, "=" * 30, 40, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, banner, 68, accent if flash else NEON_YELLOW, font_lg)
+        _draw_text_centered(draw, "=" * 30, 104, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, f"+{payout:,} jc", 135, NEON_GREEN, font_md)
+        _draw_text_centered(draw, f"client {name}", 165, DIM_GREEN, font_sm)
+        if flash:
+            for _ in range(30):
+                sx = random.randint(20, WIDTH - 20)
+                sy = random.randint(20, HEIGHT - 20)
+                draw.point((sx, sy), fill=random.choice([NEON_GREEN, NEON_CYAN, NEON_YELLOW]))
+        _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 24, DIM_GREEN, font_sm)
+        is_last = i == 13
+        frames.append(_make_frame(img, glitch=(i == 0)))
+        durations.append(60000 if is_last else 110)
+
+    return _save_gif(frames, durations)

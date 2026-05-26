@@ -395,3 +395,7 @@ NEON_LAYER2_CHANCE = _parse_float("NEON_LAYER2_CHANCE", 0.70)  # Medium ASCII ar
 NEON_LLM_CHANCE = _parse_float("NEON_LLM_CHANCE", 0.60)  # Chance of LLM commentary on Layer 2+
 NEON_COOLDOWN_SECONDS = _parse_int("NEON_COOLDOWN_SECONDS", 60)  # Per-user cooldown
 NEON_MVP_CHANCE = _parse_float("NEON_MVP_CHANCE", 0.10)  # 10% per winning player after enrichment
+NEON_DIG_CHANCE = _parse_float("NEON_DIG_CHANCE", 0.12)  # Base roll for routine dig GIF events
+NEON_BIGWIN_FLOOR = _parse_float("NEON_BIGWIN_FLOOR", 0.05)  # Min big-win GIF roll at the payout floor
+NEON_BIGWIN_FULL_PAYOUT = _parse_int("NEON_BIGWIN_FULL_PAYOUT", 5000)  # Payout where big-win odds saturate
+NEON_BIGWIN_MIN_PAYOUT = _parse_int("NEON_BIGWIN_MIN_PAYOUT", 500)  # Min payout to qualify for a big-win GIF

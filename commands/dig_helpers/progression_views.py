@@ -13,6 +13,7 @@ from commands.dig_helpers._shared import GUIDE_PAGES, _wrap
 from config import DIG_CHANNEL_ID
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer
+from utils.neon_helpers import get_neon_service, send_neon_result
 
 if TYPE_CHECKING:
     from services.dig_service import DigService
@@ -138,6 +139,14 @@ class PrestigePerksView(discord.ui.View):
                 # Public ascension announcement: terse, atmospheric, no
                 # perk or score reveal. Routes to dig channel when set.
                 await self._announce_ascension_publicly(interaction)
+                # Rare neon ascension GIF (best-effort).
+                try:
+                    neon = get_neon_service(interaction.client)
+                    if neon:
+                        pr = await neon.on_dig_prestige(self.user_id, self.guild_id)
+                        await send_neon_result(interaction, pr)
+                except Exception:
+                    logger.debug("prestige neon failed", exc_info=True)
             except ValueError as e:
                 await interaction.followup.send(str(e), ephemeral=True)
             except Exception as e:
