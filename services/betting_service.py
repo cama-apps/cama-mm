@@ -500,7 +500,7 @@ class BettingService:
 
         Normal mode:
         - Eligible players are those with balance >= AUTO_BLIND_THRESHOLD
-        - Each eligible player bets 5% of their balance (rounded to nearest int)
+        - Each eligible player bets 10% of their balance (rounded to nearest int)
 
         Bomb pot mode (is_bomb_pot=True):
         - ALL players participate (mandatory, no threshold check)
