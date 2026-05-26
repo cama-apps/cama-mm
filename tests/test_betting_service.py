@@ -422,13 +422,13 @@ class TestBlindBetsCore:
         assert len(result["bets"]) == 10
         assert len(result["skipped"]) == 0
 
-        # Each bet should be 5% of 100 = 5 jopacoin
+        # Each bet should be 10% of 100 = 10 jopacoin
         for bet in result["bets"]:
-            assert bet["amount"] == 5
+            assert bet["amount"] == 10
 
-        # Totals should be even (5 players * 5 coins = 25 each side)
-        assert result["total_radiant"] == 25
-        assert result["total_dire"] == 25
+        # Totals should be even (5 players * 10 coins = 50 each side)
+        assert result["total_radiant"] == 50
+        assert result["total_dire"] == 50
 
     def test_blind_bet_is_blind_flag(self, services):
         """Blind bets have is_blind flag set."""
@@ -628,8 +628,8 @@ class TestBlindBetsCore:
 
         # Verify blind bets were created successfully
         assert blind_bets_result["created"] == 10
-        assert blind_bets_result["total_radiant"] == 25  # 5 players * 5 coins
-        assert blind_bets_result["total_dire"] == 25
+        assert blind_bets_result["total_radiant"] == 50  # 5 players * 10 coins
+        assert blind_bets_result["total_dire"] == 50
 
 
 class TestPendingMatchPersistence:

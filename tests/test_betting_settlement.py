@@ -635,7 +635,7 @@ class TestBlindBetsSettlement:
     """Blind-bet amount calculations, settlement, and refunds."""
 
     def test_create_auto_blind_bets_rounding(self, services):
-        """Verify round() behavior for 5% calculation."""
+        """Verify round() behavior for 10% calculation."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -653,15 +653,15 @@ class TestBlindBetsSettlement:
             guild_id=TEST_GUILD_ID,
         )
             # Test various balances
-            # 51: 5% = 2.55 -> rounds to 3
-            # 50: 5% = 2.5 -> rounds to 2 (banker's rounding)
-            # 54: 5% = 2.7 -> rounds to 3
+            # 54: 10% = 5.4 -> rounds to 5
+            # 55: 10% = 5.5 -> rounds to 6
+            # 85: 10% = 8.5 -> rounds to 8 (banker's rounding)
             if i < 3:
-                player_repo.add_balance(pid, TEST_GUILD_ID, 48)  # 51 total
-            elif i < 6:
-                player_repo.add_balance(pid, TEST_GUILD_ID, 47)  # 50 total
-            else:
                 player_repo.add_balance(pid, TEST_GUILD_ID, 51)  # 54 total
+            elif i < 6:
+                player_repo.add_balance(pid, TEST_GUILD_ID, 52)  # 55 total
+            else:
+                player_repo.add_balance(pid, TEST_GUILD_ID, 82)  # 85 total
 
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
@@ -678,11 +678,12 @@ class TestBlindBetsSettlement:
 
         # Verify amounts based on rounding
         amounts = [b["amount"] for b in result["bets"]]
-        # 51*0.05 = 2.55 -> 3 (3 players)
-        # 50*0.05 = 2.5 -> 2 (3 players)
-        # 54*0.05 = 2.7 -> 3 (4 players)
-        assert amounts.count(3) == 7  # 3 + 4 players
-        assert amounts.count(2) == 3  # 3 players with 50
+        # 54*0.10 = 5.4 -> 5 (3 players)
+        # 55*0.10 = 5.5 -> 6 (3 players)
+        # 85*0.10 = 8.5 -> 8 (4 players)
+        assert amounts.count(5) == 3
+        assert amounts.count(6) == 3
+        assert amounts.count(8) == 4
 
     def test_blind_bet_settlement(self, services):
         """Blind bets settle correctly with manual bets."""
@@ -711,27 +712,27 @@ class TestBlindBetsSettlement:
         # Record initial balances (after blind bets)
         radiant_player = pending.radiant_team_ids[0]
 
-        # Create blind bets (5 jopacoin each, 25 per team)
+        # Create blind bets (10 jopacoin each, 50 per team)
         blind_result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
             radiant_ids=pending.radiant_team_ids,
             dire_ids=pending.dire_team_ids,
             shuffle_timestamp=pending.shuffle_timestamp,
         )
-        assert blind_result["total_radiant"] == 25
-        assert blind_result["total_dire"] == 25
+        assert blind_result["total_radiant"] == 50
+        assert blind_result["total_dire"] == 50
 
-        # Check balance after blind bet (should be 95 = 100 - 5)
-        assert player_repo.get_balance(radiant_player, TEST_GUILD_ID) == 95
+        # Check balance after blind bet (should be 90 = 100 - 10)
+        assert player_repo.get_balance(radiant_player, TEST_GUILD_ID) == 90
 
         # Add a manual bet from radiant player (10 jopacoin)
         betting_service.place_bet(TEST_GUILD_ID, radiant_player, "radiant", 10, pending)
-        assert player_repo.get_balance(radiant_player, TEST_GUILD_ID) == 85
+        assert player_repo.get_balance(radiant_player, TEST_GUILD_ID) == 80
 
         # Settle - radiant wins
-        # Total pool = 25 + 25 + 10 = 60
-        # Radiant pool = 35 (25 blind + 10 manual)
-        # Multiplier = 60/35 = 1.71
+        # Total pool = 50 + 50 + 10 = 110
+        # Radiant pool = 60 (50 blind + 10 manual)
+        # Multiplier = 110/60 = 1.83
         distributions = betting_service.settle_bets(500, TEST_GUILD_ID, "radiant", pending_state=pending)
 
         # 5 radiant winners (blind) + 1 radiant winner (manual from same player who has 2 bets)
@@ -785,9 +786,9 @@ class TestBlindBetsSettlement:
         )
         assert blind_result["created"] == 10
 
-        # Verify balances decreased by 5% (5 jopacoin each)
+        # Verify balances decreased by 10% (10 jopacoin each)
         for pid in player_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) == 95, f"Player {pid} should have 95 after blind bet"
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == 90, f"Player {pid} should have 90 after blind bet"
 
         # Simulate abort: refund all pending bets
         refunded = betting_service.refund_pending_bets(TEST_GUILD_ID, pending_state)
@@ -868,7 +869,7 @@ class TestBombPotSettlement:
     """Bomb pot amount calculation and participation bonus payouts."""
 
     def test_bomb_pot_blind_bets_higher_percentage(self, services):
-        """Bomb pot uses 10% instead of 5% for blind bets."""
+        """Bomb pot adds a flat ante on top of the blind bet percentage."""
         player_repo = services["player_repo"]
         betting_service = services["betting_service"]
 
@@ -888,7 +889,7 @@ class TestBombPotSettlement:
 
         now_ts = int(time.time())
 
-        # Normal mode: 5% of 100 = 5 JC per player
+        # Normal mode: 10% of 100 = 10 JC per player
         normal_result = betting_service.create_auto_blind_bets(
             guild_id=TEST_GUILD_ID,
             radiant_ids=radiant_ids,
@@ -896,8 +897,8 @@ class TestBombPotSettlement:
             shuffle_timestamp=now_ts,
             is_bomb_pot=False,
         )
-        # 10 players * 5 JC = 50 total
-        assert normal_result["total_radiant"] + normal_result["total_dire"] == 50
+        # 10 players * 10 JC = 100 total
+        assert normal_result["total_radiant"] + normal_result["total_dire"] == 100
 
         # Reset balances for bomb pot test
         for pid in radiant_ids + dire_ids:
