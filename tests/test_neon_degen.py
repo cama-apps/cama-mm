@@ -332,6 +332,7 @@ GIF_CASES = [
     ("create_degen_certificate_gif", ("TestUser", 95)),
     ("create_don_coin_flip_gif", ("TestUser", 200)),
     ("create_market_crash_gif", (1000, "no", 5, 10)),
+    ("create_witch_curse_gif", ("TestUser",)),
 ]
 
 
@@ -348,6 +349,25 @@ def test_neon_gif_generates_under_4mb(fn_name, args):
     assert data[:3] == b"GIF"
     size_mb = len(data) / (1024 * 1024)
     assert size_mb < 4, f"{fn_name} GIF is {size_mb:.2f} MB, exceeds 4MB limit"
+
+
+@pytest.mark.parametrize(
+    "name,stacks",
+    [
+        ("TestUser", 1),  # single curse: plain "HEXED" banner
+        ("TestUser", 3),  # stacked: "HEXED x3" + extra flame columns
+        ("x" * 40, 2),  # over-long name exercises the [:22] truncation
+        ("", 1),  # empty name must not crash the draw calls
+    ],
+)
+def test_witch_curse_gif_handles_stacks(name, stacks):
+    """Stacked curses + edge-case names render valid GIFs under the 4MB limit."""
+    from utils.neon_drawing import create_witch_curse_gif
+
+    buf = create_witch_curse_gif(name, stack_count=stacks)
+    data = buf.getvalue()
+    assert data[:3] == b"GIF"
+    assert 0 < len(data) < 4 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
