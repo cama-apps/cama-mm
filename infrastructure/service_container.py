@@ -345,7 +345,6 @@ class ServiceContainer:
         c["curse_service"] = CurseService(
             curse_repo=c["curse_repo"],
             flavor_text_service=c.get("flavor_text_service"),
-            guild_config_repo=c.get("guild_config_repo"),
         )
 
     def _init_rebellion_service(self) -> None:
