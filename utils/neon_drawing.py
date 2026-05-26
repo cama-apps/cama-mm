@@ -30,6 +30,12 @@ CRT_DARK = (18, 18, 24)
 DIM_GREEN = (0, 120, 30)
 DIM_CYAN = (0, 100, 100)
 
+# Witch's Curse palette (toxic green + violet hellfire over a darker, purpler CRT)
+WITCH_GREEN = (57, 255, 20)
+WITCH_VIOLET = (170, 60, 255)
+WITCH_DIM_GREEN = (20, 90, 30)
+WITCH_BG = (8, 6, 12)
+
 # Standard size
 WIDTH = 400
 HEIGHT = 300
@@ -1138,6 +1144,80 @@ def create_bigwin_gif(
         _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 24, DIM_GREEN, font_sm)
         is_last = i == 13
         frames.append(_make_frame(img, glitch=(i == 0)))
+        durations.append(60000 if is_last else 110)
+
+    return _save_gif(frames, durations)
+
+
+def create_witch_curse_gif(target_name: str, *, stack_count: int = 1) -> io.BytesIO:
+    """
+    Witch's Curse hex GIF — green/violet hellfire erupting on a cursed client.
+
+    The visual counterpart to create_bigwin_gif, in the witch palette. Pure PIL
+    (no AI), fired only when a hexed target suffers a loss (see CurseService).
+    stack_count (number of active casters) drives the banner + flame intensity.
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(22, bold=True)
+    font_md = _get_font(14, bold=True)
+    font_sm = _get_font(12)
+
+    target_name = target_name[:22]
+    stacks = max(1, stack_count)
+    hexed_banner = f"HEXED x{stacks}" if stacks > 1 else "HEXED"
+    flame_cols = min(stacks, 3)  # extra violet flame columns when ganged up
+    particles = 24 + 12 * flame_cols  # denser ember spray with more casters
+    embers = (WITCH_GREEN, WITCH_VIOLET, NEON_GREEN)
+
+    # Phase 1: the hex manifests — glitchy corruption over the dark scrying glass (8 frames)
+    for i in range(8):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), WITCH_BG)
+        draw = ImageDraw.Draw(img)
+        _draw_text_centered(draw, "JOPA-T/v3.7 GRIMOIRE", 24, WITCH_GREEN, font_md)
+        _draw_text_left(draw, "> tracing the hex...", 24, 70, WITCH_DIM_GREEN, font_sm)
+        _draw_text_left(draw, f"> client: {target_name}", 24, 92, WITCH_DIM_GREEN, font_sm)
+        if i % 2 == 0:
+            _draw_text_centered(
+                draw, _corrupt_text("HEXED", 0.5), HEIGHT // 2, WITCH_VIOLET, font_lg
+            )
+        frames.append(_make_frame(img, glitch=(i % 2 == 0)))
+        durations.append(110)
+
+    # Phase 2: green witchfire rises with violet embers (18 frames)
+    for i in range(18):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), WITCH_BG)
+        draw = ImageDraw.Draw(img)
+        prog = (i + 1) / 18
+        _draw_text_centered(draw, "HEX PROPAGATING", 30, WITCH_DIM_GREEN, font_sm)
+        _draw_text_centered(draw, target_name, HEIGHT // 2 - 8, WITCH_GREEN, font_lg)
+        flame_h = max(1, int(prog * (HEIGHT // 2)))
+        for c in range(flame_cols):
+            base_x = WIDTH // 2 + (c - (flame_cols - 1) / 2) * 90
+            for _ in range(particles):
+                fx = int(base_x + random.randint(-30, 30))
+                fy = HEIGHT - random.randint(0, flame_h)
+                draw.point((fx, fy), fill=random.choice(embers))
+        frames.append(_make_frame(img))
+        durations.append(60 if prog < 0.9 else 95)
+
+    # Phase 3: HEXED banner flash + ember spray (14 frames)
+    for i in range(14):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), WITCH_BG)
+        draw = ImageDraw.Draw(img)
+        flash = i % 2 == 0
+        _draw_text_centered(draw, "~" * 28, 44, WITCH_DIM_GREEN, font_sm)
+        _draw_text_centered(draw, hexed_banner, 70, WITCH_VIOLET if flash else WITCH_GREEN, font_lg)
+        _draw_text_centered(draw, "~" * 28, 106, WITCH_DIM_GREEN, font_sm)
+        _draw_text_centered(draw, f"client {target_name}", 140, WITCH_GREEN, font_md)
+        if flash:
+            for _ in range(particles):
+                sx = random.randint(20, WIDTH - 20)
+                sy = random.randint(20, HEIGHT - 20)
+                draw.point((sx, sy), fill=random.choice((WITCH_GREEN, WITCH_VIOLET)))
+        _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 24, WITCH_DIM_GREEN, font_sm)
+        is_last = i == 13
+        frames.append(_make_frame(img, glitch=flash))
         durations.append(60000 if is_last else 110)
 
     return _save_gif(frames, durations)

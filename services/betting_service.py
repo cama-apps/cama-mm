@@ -2,6 +2,7 @@
 Handles betting-related business logic.
 """
 
+import hashlib
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -12,6 +13,9 @@ from config import (
     AUTO_BLIND_ENABLED,
     AUTO_BLIND_PERCENTAGE,
     AUTO_BLIND_THRESHOLD,
+    AUTO_SPECTATOR_BET_COUNT,
+    AUTO_SPECTATOR_BET_ENABLED,
+    AUTO_SPECTATOR_BET_PERCENTAGE,
     BOMB_POT_ANTE,
     BOMB_POT_BLIND_PERCENTAGE,
     BOMB_POT_PARTICIPATION_BONUS,
@@ -500,11 +504,11 @@ class BettingService:
 
         Normal mode:
         - Eligible players are those with balance >= AUTO_BLIND_THRESHOLD
-        - Each eligible player bets 5% of their balance (rounded to nearest int)
+        - Each eligible player bets 10% of their balance (rounded to nearest int)
 
         Bomb pot mode (is_bomb_pot=True):
         - ALL players participate (mandatory, no threshold check)
-        - Each player bets 10% of their balance + flat 10 JC ante
+        - Each player bets 15% of their balance + flat 10 JC ante
         - Players can go negative (up to max_debt) to meet the ante
 
         Args:
@@ -530,11 +534,13 @@ class BettingService:
             f"create_auto_blind_bets called: guild={guild_id}, "
             f"pending_match_id={pending_match_id}, radiant={len(radiant_ids)}, dire={len(dire_ids)}"
         )
+        blind_percentage = BOMB_POT_BLIND_PERCENTAGE if is_bomb_pot else AUTO_BLIND_PERCENTAGE
         if not AUTO_BLIND_ENABLED:
             return {
                 "created": 0,
                 "total_radiant": 0,
                 "total_dire": 0,
+                "percentage": blind_percentage,
                 "bets": [],
                 "skipped": [],
                 "is_bomb_pot": is_bomb_pot,
@@ -544,13 +550,11 @@ class BettingService:
             "created": 0,
             "total_radiant": 0,
             "total_dire": 0,
+            "percentage": blind_percentage,
             "bets": [],
             "skipped": [],
             "is_bomb_pot": is_bomb_pot,
         }
-
-        # Choose percentage based on mode
-        blind_percentage = BOMB_POT_BLIND_PERCENTAGE if is_bomb_pot else AUTO_BLIND_PERCENTAGE
 
         # Fetch bet totals once before the loop (avoid N+1 queries)
         cached_totals = self.bet_repo.get_total_bets_by_guild(
@@ -573,7 +577,7 @@ class BettingService:
                         # Bomb pot: mandatory ante for everyone, no threshold check
                         # Per-player ante (e.g. Red mana tripled)
                         player_ante = (ante_overrides or {}).get(discord_id, BOMB_POT_ANTE)
-                        # Calculate: 10% of balance + flat ante
+                        # Calculate: configured percentage of balance + flat ante
                         percentage_amount = round(balance * blind_percentage) if balance > 0 else 0
                         blind_amount = percentage_amount + player_ante
 
@@ -657,6 +661,140 @@ class BettingService:
                     })
 
         return result
+
+    def create_auto_spectator_bets(
+        self,
+        guild_id: int | None,
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        shuffle_timestamp: int,
+        pending_match_id: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Auto-wager for the richest spectators after shuffle.
+
+        Spectators are registered players who are not on either team. The top
+        configured positive-balance spectators wager the configured percentage
+        of their current balance. Team selection is deterministic pseudorandom
+        on ties, otherwise it chooses the side that leaves spectator auto-wager
+        totals closest to even.
+        """
+        result: dict[str, Any] = {
+            "created": 0,
+            "total_radiant": 0,
+            "total_dire": 0,
+            "percentage": AUTO_SPECTATOR_BET_PERCENTAGE,
+            "bets": [],
+            "skipped": [],
+        }
+        if (
+            not AUTO_SPECTATOR_BET_ENABLED
+            or AUTO_SPECTATOR_BET_COUNT <= 0
+            or AUTO_SPECTATOR_BET_PERCENTAGE <= 0
+        ):
+            return result
+
+        participant_ids = set(radiant_ids) | set(dire_ids)
+        candidates = self.player_repo.get_richest_players(
+            guild_id,
+            limit=AUTO_SPECTATOR_BET_COUNT + len(participant_ids),
+            min_balance=1,
+        )
+        spectators = [
+            row for row in candidates
+            if int(row["discord_id"]) not in participant_ids
+        ][:AUTO_SPECTATOR_BET_COUNT]
+        if not spectators:
+            return result
+
+        cached_totals = self.bet_repo.get_total_bets_by_guild(
+            guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
+        )
+        spectator_totals = {"radiant": 0, "dire": 0}
+
+        for index, spectator in enumerate(spectators):
+            discord_id = int(spectator["discord_id"])
+            balance = int(spectator.get("jopacoin_balance") or 0)
+            amount = round(balance * AUTO_SPECTATOR_BET_PERCENTAGE)
+            if amount < 1:
+                result["skipped"].append({
+                    "discord_id": discord_id,
+                    "reason": f"auto-wager amount {amount} < 1",
+                })
+                continue
+
+            team = self._choose_auto_spectator_team(
+                amount=amount,
+                spectator_totals=spectator_totals,
+                guild_id=guild_id,
+                discord_id=discord_id,
+                shuffle_timestamp=shuffle_timestamp,
+                pending_match_id=pending_match_id,
+                index=index,
+            )
+
+            total_pool = cached_totals["radiant"] + cached_totals["dire"]
+            team_total = cached_totals[team]
+            odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
+
+            try:
+                self.bet_repo.place_bet_atomic(
+                    guild_id=guild_id,
+                    discord_id=discord_id,
+                    team=team,
+                    amount=amount,
+                    bet_time=shuffle_timestamp,
+                    since_ts=shuffle_timestamp,
+                    leverage=1,
+                    max_debt=self.max_debt,
+                    is_blind=True,
+                    odds_at_placement=odds_at_placement,
+                    pending_match_id=pending_match_id,
+                )
+            except ValueError as e:
+                result["skipped"].append({
+                    "discord_id": discord_id,
+                    "reason": str(e),
+                })
+                continue
+
+            result["created"] += 1
+            result["bets"].append({
+                "discord_id": discord_id,
+                "team": team,
+                "amount": amount,
+                "networth": balance,
+            })
+            cached_totals[team] += amount
+            spectator_totals[team] += amount
+            if team == "radiant":
+                result["total_radiant"] += amount
+            else:
+                result["total_dire"] += amount
+
+        return result
+
+    def _choose_auto_spectator_team(
+        self,
+        *,
+        amount: int,
+        spectator_totals: dict[str, int],
+        guild_id: int | None,
+        discord_id: int,
+        shuffle_timestamp: int,
+        pending_match_id: int | None,
+        index: int,
+    ) -> str:
+        radiant_after_diff = abs((spectator_totals["radiant"] + amount) - spectator_totals["dire"])
+        dire_after_diff = abs(spectator_totals["radiant"] - (spectator_totals["dire"] + amount))
+        if radiant_after_diff < dire_after_diff:
+            return "radiant"
+        if dire_after_diff < radiant_after_diff:
+            return "dire"
+
+        seed = f"{guild_id or 0}:{pending_match_id or shuffle_timestamp}:{discord_id}:{index}:auto-spectator"
+        digest = hashlib.sha256(seed.encode("ascii")).digest()
+        return "radiant" if digest[0] % 2 == 0 else "dire"
 
     def get_all_pending_bets(
         self, guild_id: int | None, pending_state: PendingMatchState | None = None
