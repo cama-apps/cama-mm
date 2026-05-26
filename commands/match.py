@@ -1156,7 +1156,7 @@ class MatchCommands(commands.Cog):
             guild_id, winning_result, thread_id=thread_id_for_finalize
         )
 
-        await self._run_neon_match_hooks(interaction, guild_id, losers, record_result)
+        await self._run_neon_match_hooks(interaction, guild_id, winners, losers, record_result)
 
         # Trigger auto-discovery in background if enabled
         match_id = record_result.get("match_id")
@@ -1566,6 +1566,7 @@ class MatchCommands(commands.Cog):
         self,
         interaction: discord.Interaction,
         guild_id: int | None,
+        winners: list[dict],
         losers: list[dict],
         record_result: dict,
     ) -> None:
@@ -1579,14 +1580,36 @@ class MatchCommands(commands.Cog):
             return
 
         try:
-            neon_result = await neon.on_match_recorded(
-                guild_id,
-                streak_data=record_result.get("notable_streak"),
-            )
-            await send_neon_result(interaction, neon_result)
+            neon_sent = False
+
+            # Headline: a big match-bet win (rare, payout-scaled). The top payout
+            # takes the slot; an underdog upset (winning side was the minority
+            # stake) is flagged so the GIF banner reads accordingly.
+            if winners:
+                top = max(winners, key=lambda w: w.get("payout", 0) or 0)
+                top_payout = top.get("payout", 0) or 0
+                if top_payout and not top.get("refunded"):
+                    win_stake = sum((w.get("amount", 0) or 0) for w in winners)
+                    lose_stake = sum((entry.get("amount", 0) or 0) for entry in losers)
+                    flavor = "underdog" if (win_stake and lose_stake > win_stake) else "top_dog"
+                    bw = await neon.on_big_win(
+                        top["discord_id"], guild_id,
+                        source="match", payout=top_payout, flavor=flavor,
+                    )
+                    if bw:
+                        await send_neon_result(interaction, bw)
+                        neon_sent = True
+
+            if not neon_sent:
+                neon_result = await neon.on_match_recorded(
+                    guild_id,
+                    streak_data=record_result.get("notable_streak"),
+                )
+                if neon_result:
+                    await send_neon_result(interaction, neon_result)
+                    neon_sent = True
 
             # Wire on_bet_settled + on_leverage_loss for losers (max ONE per match)
-            neon_sent = neon_result is not None
             if not neon_sent and losers:
                 for entry in losers:
                     if entry.get("refunded"):

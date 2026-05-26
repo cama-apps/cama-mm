@@ -18,10 +18,19 @@ from typing import TYPE_CHECKING, Any
 import config as _config
 from config import (
     MAX_DEBT,
+    NEON_BIGWIN_FLOOR,
+    NEON_BIGWIN_FULL_PAYOUT,
+    NEON_BIGWIN_MIN_PAYOUT,
     NEON_COOLDOWN_SECONDS,
+    NEON_DIG_CHANCE,
     NEON_LAYER1_CHANCE,
     NEON_LLM_CHANCE,
     NEON_MVP_CHANCE,
+)
+from services.dig_personas import (
+    DIG_NARRATOR_SYSTEM_PROMPT,
+    fallback_line,
+    pick_dig_voice,
 )
 from utils.neon_terminal import (
     # New event templates (Easter Egg Expansion)
@@ -363,10 +372,241 @@ class NeonDegenService:
             ctx["degen_score"] = degen
         return ctx
 
+    def _scaled_chance(self, score: float, *, floor: float, cap: float, full_at: float) -> float:
+        """Probability that ramps linearly from `floor` (score 0) to `cap` (score >= full_at)."""
+        if full_at <= 0:
+            return cap
+        frac = max(0.0, min(1.0, score / full_at))
+        return floor + (cap - floor) * frac
+
+    async def _dig_caption(self, event_key: str, event_description: str) -> str:
+        """Cryptic dig caption: an LLM narrator voice (chance-gated) or a static fallback line."""
+        voice = pick_dig_voice(event_key)
+        line = fallback_line(event_key)
+        if self.ai_service and self._roll(NEON_LLM_CHANCE):
+            try:
+                prompt = (
+                    f"A lone digger {event_description}, far beneath the earth. "
+                    f"Speak one or two short, cryptic lines as {voice.name} - {voice.description}. "
+                    "Only image and omen. Never name mechanics, numbers, or items."
+                )
+                result = await self.ai_service.complete(
+                    prompt=prompt,
+                    system_prompt=DIG_NARRATOR_SYSTEM_PROMPT,
+                    temperature=1.0,
+                    max_tokens=120,
+                )
+                if result and result.strip():
+                    cleaned = result.strip()
+                    if cleaned.startswith("```"):
+                        first_nl = cleaned.find("\n")
+                        if first_nl != -1:
+                            cleaned = cleaned[first_nl + 1 :]
+                        if cleaned.endswith("```"):
+                            cleaned = cleaned[:-3]
+                    line = cleaned.strip().strip('"').strip() or line
+            except Exception as e:
+                logger.info(f"dig caption LLM failed, using static line: {e}")
+        return f"> *{line}*\n> — {voice.name}"
+
     # -------------------------------------------------------------------
     # Public event handlers - all return NeonResult | None
     # All wrapped in try/except so failures never block bot operation.
     # -------------------------------------------------------------------
+
+    async def on_dig_boss_victory(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        boss_name: str,
+        boundary: int,
+        layer_name: str,
+        jc_delta: int = 0,
+        gear_drop: Any = None,
+        trophy_relic_drop: Any = None,
+    ) -> NeonResult | None:
+        """A depth guardian is slain. Pinnacle (boundary 350) is a marquee set-piece."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+
+            from utils import dig_drawing
+
+            if boundary >= 350:
+                if not self._roll(0.95):
+                    return None
+                gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, layer_name, prestige=False)
+                event_key, desc = "pinnacle", "has reached the Pinnacle, the floor of the world"
+            else:
+                chance = self._scaled_chance(boundary, floor=NEON_DIG_CHANCE, cap=0.30, full_at=350)
+                if gear_drop or trophy_relic_drop:
+                    chance = min(0.45, chance + 0.10)
+                if not self._roll(chance):
+                    return None
+                title = (boss_name or "the guardian").upper()
+                sub = (f"+{jc_delta:,} jc",) if jc_delta else ()
+                gif = await asyncio.to_thread(
+                    dig_drawing.animate_dig_reveal,
+                    layer_name,
+                    motion="victory",
+                    title=title,
+                    sub_lines=sub,
+                )
+                event_key, desc = "boss_victory", f"has struck down the guardian {boss_name}"
+
+            text = await self._dig_caption(event_key, desc)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=3, text_block=text, gif_file=gif)
+        except Exception as e:
+            logger.debug(f"neon on_dig_boss_victory error: {e}")
+            return None
+
+    async def on_dig_relic_found(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        relic_name: str,
+        rarity: str,
+        layer_name: str,
+    ) -> NeonResult | None:
+        """A rare or legendary relic surfaces. Legendary is a near-certain marquee moment."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+
+            from utils import dig_drawing
+
+            rarity_l = (rarity or "").lower()
+            if rarity_l == "legendary":
+                if not self._roll(0.95):
+                    return None
+                gif = await asyncio.to_thread(dig_drawing.animate_legendary_relic, layer_name, relic_name)
+                event_key, desc = "legendary_relic", f"has unearthed the legendary {relic_name}"
+            elif rarity_l == "rare":
+                if not self._roll(NEON_DIG_CHANCE):
+                    return None
+                gif = await asyncio.to_thread(
+                    dig_drawing.animate_dig_reveal,
+                    layer_name,
+                    motion="unearth",
+                    title=relic_name,
+                    sprite_id="crystal",
+                )
+                event_key, desc = "rare_relic", f"has unearthed the rare {relic_name}"
+            else:
+                return None  # common / uncommon do not animate
+
+            text = await self._dig_caption(event_key, desc)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=3, text_block=text, gif_file=gif)
+        except Exception as e:
+            logger.debug(f"neon on_dig_relic_found error: {e}")
+            return None
+
+    async def on_dig_cave_in(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        depth_before: int,
+        depth_after: int,
+        layer_name: str,
+    ) -> NeonResult | None:
+        """A catastrophic cave-in rolls hard-won depth back. Odds scale with depth lost."""
+        try:
+            if not self._is_enabled():
+                return None
+            lost = depth_before - depth_after
+            if lost <= 0:
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            chance = self._scaled_chance(lost, floor=NEON_DIG_CHANCE, cap=0.40, full_at=40)
+            if not self._roll(chance):
+                return None
+
+            from utils import dig_drawing
+            gif = await asyncio.to_thread(dig_drawing.animate_cave_in, layer_name, depth_before, depth_after)
+            text = await self._dig_caption(
+                "cave_in", "has lost their footing to a cave-in, the dark swallowing the way down"
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=3, text_block=text, gif_file=gif)
+        except Exception as e:
+            logger.debug(f"neon on_dig_cave_in error: {e}")
+            return None
+
+    async def on_dig_prestige(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        layer_name: str = "The Hollow",
+    ) -> NeonResult | None:
+        """Depth-400 ascension / prestige reset — a rare endgame milestone."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.95):
+                return None
+
+            from utils import dig_drawing
+            gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, layer_name, prestige=True)
+            text = await self._dig_caption("prestige", "has ascended, prestiging beyond the deepest dark")
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=3, text_block=text, gif_file=gif)
+        except Exception as e:
+            logger.debug(f"neon on_dig_prestige error: {e}")
+            return None
+
+    async def on_big_win(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        source: str,
+        payout: int,
+        flavor: str = "bigwin",
+    ) -> NeonResult | None:
+        """Celebrate a big betting win (match / prediction / gamba). Odds scale with payout."""
+        try:
+            if not self._is_enabled():
+                return None
+            if payout < NEON_BIGWIN_MIN_PAYOUT:
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            chance = self._scaled_chance(
+                payout, floor=NEON_BIGWIN_FLOOR, cap=0.95, full_at=NEON_BIGWIN_FULL_PAYOUT
+            )
+            if not self._roll(chance):
+                return None
+
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
+            from utils.neon_drawing import create_bigwin_gif
+            gif = await asyncio.to_thread(create_bigwin_gif, name, payout, source=source, flavor=flavor)
+
+            from utils.neon_terminal import ansi_block
+            fallback = ansi_block(
+                f"[LEDGER] +{payout:,} JC settled. The house keeps receipts on winners too."
+            )
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} won big: +{payout} JC on {source} betting.", ctx, fallback
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=3, text_block=text, gif_file=gif)
+        except Exception as e:
+            logger.debug(f"neon on_big_win error: {e}")
+            return None
 
     async def on_balance_check(
         self, discord_id: int, guild_id: int | None, balance: int
@@ -572,10 +812,16 @@ class NeonDegenService:
         result_value: int,
         new_balance: int,
     ) -> NeonResult | None:
-        """Trigger on /gamba result. Layer 2 for BANKRUPT, Layer 2 for freefall."""
+        """Trigger on /gamba result. Layer 3 big-win, Layer 2 for BANKRUPT/freefall."""
         try:
             if not self._is_enabled():
                 return None
+
+            # Layer 3: big win on the wheel (rare, payout-scaled)
+            if result_value > 0:
+                return await self.on_big_win(
+                    discord_id, guild_id, source="gamba", payout=result_value
+                )
 
             name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
@@ -594,7 +840,7 @@ class NeonDegenService:
             # Layer 3: Freefall - went from 100+ to 0 in one spin
             if result_value < 0 and new_balance <= 0:
                 prior_balance = new_balance - result_value  # result_value is negative
-                if prior_balance >= 100 and self._roll(0.50):
+                if prior_balance >= 100 and self._roll(0.25):
                     try:
                         from utils.neon_drawing import create_freefall_gif
                         gif = await asyncio.to_thread(create_freefall_gif, name, prior_balance, new_balance)
@@ -738,7 +984,7 @@ class NeonDegenService:
             self._set_cooldown(discord_id, guild_id)
 
             # Layer 3: 5x leverage into exactly MAX_DEBT
-            if leverage >= 5 and new_balance <= -MAX_DEBT:
+            if leverage >= 5 and new_balance <= -MAX_DEBT and self._roll(0.30):
                 try:
                     from utils.neon_drawing import create_debt_collector_gif
                     gif = await asyncio.to_thread(create_debt_collector_gif, name, debt)
@@ -876,6 +1122,12 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
 
             if won:
+                # Layer 3: big Double-or-Nothing win (rare, payout-scaled)
+                bw = await self.on_big_win(
+                    discord_id, guild_id, source="gamba", payout=balance_at_risk
+                )
+                if bw:
+                    return bw
                 # Layer 1: Always fire on win (100%)
                 text = render_don_win(name, final_balance)
                 text = await self._generate_text(
@@ -887,8 +1139,8 @@ class NeonDegenService:
 
             # Loss path
 
-            # Layer 3: Large loss (>100 JC at risk) - coin flip GIF
-            if balance_at_risk > 100:
+            # Layer 3: Large loss (>100 JC at risk) - coin flip GIF (rare)
+            if balance_at_risk > 100 and self._roll(0.18):
                 try:
                     from utils.neon_drawing import create_don_coin_flip_gif
                     gif = await asyncio.to_thread(create_don_coin_flip_gif, name, balance_at_risk)
@@ -1000,8 +1252,8 @@ class NeonDegenService:
                 "total_pool": total_pool, "winners": winner_count, "losers": loser_count,
             }
 
-            # Layer 3: Massive pool (>=500 JC) - market crash GIF
-            if total_pool >= 500:
+            # Layer 3: Massive pool (>=500 JC) - market crash GIF (rare)
+            if total_pool >= 500 and self._roll(0.30):
                 try:
                     from utils.neon_drawing import create_market_crash_gif
                     gif = await asyncio.to_thread(create_market_crash_gif, total_pool, outcome, winner_count, loser_count)
@@ -1149,11 +1401,11 @@ class NeonDegenService:
         pool_amount: int,
         contributor_count: int,
     ) -> NeonResult | None:
-        """Trigger on bomb pot event. Layer 3 GIF at 50%."""
+        """Trigger on bomb pot event. Layer 3 GIF at 25%."""
         try:
             if not self._is_enabled():
                 return None
-            if not self._roll(0.50):
+            if not self._roll(0.25):
                 return None
 
             logger.info(
@@ -1293,7 +1545,7 @@ class NeonDegenService:
                 return None  # Not a new record
             if not self._check_cooldown(discord_id, guild_id):
                 return None
-            if not self._roll(0.50):
+            if not self._roll(0.20):
                 return None
 
             name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
@@ -1437,13 +1689,13 @@ class NeonDegenService:
         winning_side: str,
         loser_count: int,
     ) -> NeonResult | None:
-        """Trigger when 90%+ consensus prediction loses. Layer 3 GIF at 50%."""
+        """Trigger when 90%+ consensus prediction loses. Layer 3 GIF at 20%."""
         try:
             if not self._is_enabled():
                 return None
             if consensus_percentage < 90:
                 return None
-            if not self._roll(0.50):
+            if not self._roll(0.20):
                 return None
 
             # Layer 3: Market crash GIF

@@ -13,11 +13,42 @@ from commands.dig_helpers._shared import _wrap
 from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.neon_helpers import get_neon_service, send_neon_result
 
 if TYPE_CHECKING:
     from services.dig_service import DigService
 
 logger = logging.getLogger("cama_bot.commands.dig")
+
+
+async def _send_boss_victory_neon(interaction, *, result, user_id, guild_id) -> None:
+    """Best-effort: post a rare neon GIF when a boss duel is won."""
+    if not getattr(result, "won", False):
+        return
+    try:
+        neon = get_neon_service(interaction.client)
+        if not neon:
+            return
+        boundary = getattr(result, "boundary", None) or 0
+        try:
+            depth_for_layer = int(getattr(result, "new_depth", 0) or 0) or int(boundary or 0)
+        except (TypeError, ValueError):
+            depth_for_layer = 0
+        ld = get_layer_def(depth_for_layer)
+        ln = ld.name if ld else "Dirt"
+        nr = await neon.on_dig_boss_victory(
+            user_id,
+            guild_id,
+            boss_name=getattr(result, "boss_name", "the guardian"),
+            boundary=int(boundary or 0),
+            layer_name=ln,
+            jc_delta=getattr(result, "payout", 0) or 0,
+            gear_drop=getattr(result, "gear_drop", None),
+            trophy_relic_drop=getattr(result, "trophy_relic_drop", None),
+        )
+        await send_neon_result(interaction, nr)
+    except Exception:
+        logger.debug("Boss victory neon failed", exc_info=True)
 
 
 class BossWagerModal(discord.ui.Modal):
@@ -221,6 +252,10 @@ class BossWagerModal(discord.ui.Modal):
                 await interaction.followup.send(embed=embed, file=boss_file)
             else:
                 await interaction.followup.send(embed=embed)
+
+            await _send_boss_victory_neon(
+                interaction, result=self.result, user_id=self.user_id, guild_id=self.guild_id
+            )
         except Exception as e:
             logger.error("Boss fight error: %s", e, exc_info=True)
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
@@ -420,6 +455,9 @@ async def _resolve_carried_phase_fight(
         inline=False,
     )
     await interaction.followup.send(embed=embed)
+    await _send_boss_victory_neon(
+        interaction, result=result, user_id=user_id, guild_id=guild_id
+    )
 
 
 def _build_duel_prompt_embed(result) -> discord.Embed:
@@ -718,7 +756,7 @@ class BossDuelView(discord.ui.View):
                 )
                 return
             await safe_defer(interaction)
-            await self._submit(option_idx)
+            await self._submit(option_idx, interaction)
         return callback
 
     async def on_timeout(self):
@@ -726,7 +764,7 @@ class BossDuelView(discord.ui.View):
             return
         await self._submit(self._safe_option_idx)
 
-    async def _submit(self, option_idx: int) -> None:
+    async def _submit(self, option_idx: int, interaction: discord.Interaction | None = None) -> None:
         if self._resolved:
             return
         self._resolved = True
@@ -757,6 +795,19 @@ class BossDuelView(discord.ui.View):
             await self._edit_message(
                 content="Fight resolved but display failed — check `/dig info` for your current state.",
                 embed=None, view=None,
+            )
+
+        # Only the final outcome is a true victory. _render_resolution handles the
+        # re-prompt and phase-transition branches (which carry won=True mid-fight),
+        # so guard against firing a premature victory GIF on a non-final phase.
+        is_final = not (
+            getattr(result, "pending_prompt", None)
+            or getattr(result, "phase2_incoming", False)
+            or getattr(result, "phase3_incoming", False)
+        )
+        if interaction is not None and is_final:
+            await _send_boss_victory_neon(
+                interaction, result=result, user_id=self.user_id, guild_id=self.guild_id
             )
 
     async def _render_resolution(self, result) -> None:
