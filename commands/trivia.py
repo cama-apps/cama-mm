@@ -34,11 +34,13 @@ _TIER_BREAKPOINTS = frozenset({3, 6, 10})  # end of easy, medium, hard
 
 
 def _jc_for_streak(streak: int) -> int:
-    """JC earned for reaching this streak (0 or 1).
+    """JC earned for reaching this streak.
 
-    +1 JC for completing each tier (easy@3, medium@6, hard@10),
-    then +1 JC every 4 questions in uncapped challenging mode.
+    +1 JC for the easy/medium tiers (streak 3, 6), +2 for the hard tier
+    (streak 10), then +1 JC every 4 questions in uncapped challenging mode.
     """
+    if streak == 10:
+        return 2
     if streak in _TIER_BREAKPOINTS:
         return 1
     if streak > 10 and (streak - 10) % 4 == 0:
@@ -205,6 +207,7 @@ class TriviaView(discord.ui.View):
             mana_tithe = 0
             if jc > 0:
                 mana_fx = getattr(self.cog.bot, "mana_effects_service", None)
+                effects = None
                 if mana_fx is not None:
                     try:
                         effects = await asyncio.to_thread(
@@ -216,31 +219,9 @@ class TriviaView(discord.ui.View):
                         # Green: +1 steady per milestone
                         if effects.trivia_streak_bonus > 0:
                             jc += effects.trivia_streak_bonus
-                        # White: tithe to nonprofit fund. Skip if the tithe
-                        # would zero out the player's payout, or if loan_service
-                        # is missing / fails — never destroy JC silently.
-                        loan_service = getattr(mana_fx, "loan_service", None)
-                        if (
-                            effects.plains_tithe_rate > 0
-                            and loan_service is not None
-                            and jc > 1
-                        ):
-                            mana_tithe = max(1, int(jc * effects.plains_tithe_rate))
-                            if mana_tithe < jc:
-                                try:
-                                    await asyncio.to_thread(
-                                        loan_service.add_to_nonprofit_fund,
-                                        self.session.guild_id,
-                                        mana_tithe,
-                                    )
-                                    jc -= mana_tithe
-                                except Exception:
-                                    logger.warning(
-                                        "Trivia tithe transfer failed; tithe skipped.",
-                                        exc_info=True,
-                                    )
                     except Exception:
                         logger.exception("Failed to apply trivia mana effects")
+                        effects = None
                 # Bankrupt buff: multiply milestone payout when balance ≤ 0.
                 # Stacks multiplicatively with mana effects above.
                 try:
@@ -253,6 +234,50 @@ class TriviaView(discord.ui.View):
                         jc = max(1, int(jc * TRIVIA_BANKRUPT_MULTIPLIER))
                 except Exception:
                     logger.exception("Failed to apply trivia bankrupt multiplier")
+
+                # Bankruptcy debuff: withhold a share of milestone winnings while
+                # penalty games remain. Cleared only by inhouse match wins (not
+                # trivia), matching the other payout sources. The withheld JC is a
+                # coin sink — simply not minted.
+                bankruptcy_service = getattr(self.cog.bot, "bankruptcy_service", None)
+                if bankruptcy_service is not None:
+                    try:
+                        info = await asyncio.to_thread(
+                            bankruptcy_service.apply_penalty_to_winnings,
+                            self.session.user_id,
+                            jc,
+                            self.session.guild_id,
+                        )
+                        jc = info["penalized"]
+                    except Exception:
+                        logger.exception("Failed to apply trivia bankruptcy debuff")
+
+                # White: tithe to the nonprofit fund from the player's NET payout
+                # (after the bankrupt buff and bankruptcy debuff), so the tithe is
+                # taken from what the player actually keeps and never drives their
+                # payout to zero. Skip if it would zero them out, or if
+                # loan_service is missing / fails — never destroy JC silently.
+                if effects is not None:
+                    loan_service = getattr(mana_fx, "loan_service", None)
+                    if (
+                        effects.plains_tithe_rate > 0
+                        and loan_service is not None
+                        and jc > 1
+                    ):
+                        mana_tithe = max(1, int(jc * effects.plains_tithe_rate))
+                        if mana_tithe < jc:
+                            try:
+                                await asyncio.to_thread(
+                                    loan_service.add_to_nonprofit_fund,
+                                    self.session.guild_id,
+                                    mana_tithe,
+                                )
+                                jc -= mana_tithe
+                            except Exception:
+                                logger.warning(
+                                    "Trivia tithe transfer failed; tithe skipped.",
+                                    exc_info=True,
+                                )
             self.session.total_jc += jc
 
             # Award jopacoin (only when jc > 0)

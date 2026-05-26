@@ -18,6 +18,7 @@ import time
 
 import pytest
 
+from commands.trivia import _jc_for_streak
 from config import (
     BANKRUPTCY_PENALTY_GAMES,
     BANKRUPTCY_PENALTY_RATE,
@@ -379,3 +380,65 @@ class TestDigDebuff:
         assert penalty > 0  # boss winnings were debuffed
         gross = result["payout"] + penalty
         assert result["payout"] == int(gross * BANKRUPTCY_PENALTY_RATE)
+
+
+# --------------------------------------------------------------------------- #
+# /trivia — milestone payouts (debuff applied in commands/trivia.py)
+# --------------------------------------------------------------------------- #
+
+
+class TestTriviaDebuff:
+    """Trivia milestone payouts are debuffed for a bankrupt player.
+
+    The trivia view (``commands/trivia.py:_handle_answer``) runs its milestone JC
+    through ``apply_penalty_to_winnings`` as the last step before crediting. That
+    payout lives inside a Discord View and isn't unit-invokable, so — mirroring
+    the trivia coverage in ``test_bankruptcy_buffs.py`` — we pin the building
+    blocks the view composes: the buffed milestone schedule and the per-source
+    debuff applied to it. Trivia must NOT clear the penalty; only inhouse match
+    wins do.
+    """
+
+    def test_hard_tier_milestone_buffed_to_two(self):
+        # Buff: the hard tier (streak 10) now pays +2; everything else unchanged.
+        assert _jc_for_streak(3) == 1
+        assert _jc_for_streak(6) == 1
+        assert _jc_for_streak(10) == 2
+        assert _jc_for_streak(14) == 1  # challenging cadence (+1 every 4) intact
+        assert _jc_for_streak(7) == 0  # non-milestone streaks award nothing
+
+    def test_penalized_trivia_milestone_is_debuffed(self, repos, bankruptcy_service):
+        pid = 8001
+        _add_player(repos["player"], pid)
+        _penalize(repos, bankruptcy_service, pid)
+
+        # The buffed hard-tier milestone (2 JC) survives the 25% debuff as 1 JC
+        # (int(2 * 0.75)) — a bankrupt player still nets something from it.
+        assert _jc_for_streak(10) == 2
+        assert bankruptcy_service.apply_penalty_to_winnings(pid, 2, TEST_GUILD_ID)["penalized"] == 1
+        # A 1-JC milestone (easy/medium) is fully withheld while penalized
+        # (int(1 * 0.75) == 0) — the reason the buff targets the hard tier.
+        assert bankruptcy_service.apply_penalty_to_winnings(pid, 1, TEST_GUILD_ID)["penalized"] == 0
+
+    def test_non_penalized_trivia_keeps_full_milestone(self, repos, bankruptcy_service):
+        pid = 8002
+        _add_player(repos["player"], pid, balance=100)
+        jc = _jc_for_streak(10)
+        info = bankruptcy_service.apply_penalty_to_winnings(pid, jc, TEST_GUILD_ID)
+        assert info["penalized"] == jc  # no bankruptcy declared -> full payout
+        assert info["penalty_applied"] == 0
+
+    def test_trivia_does_not_clear_penalty(self, repos, bankruptcy_service):
+        """Awarding debuffed trivia JC must not decrement the penalty counter —
+        only inhouse match wins clear bankruptcy. The trivia path uses the
+        read-only ``apply_penalty_to_winnings`` primitive, never ``on_game_won``."""
+        pid = 8003
+        _add_player(repos["player"], pid)
+        _penalize(repos, bankruptcy_service, pid)
+
+        before = bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining
+        # Apply the trivia debuff several times (as multiple milestones would).
+        for _ in range(3):
+            bankruptcy_service.apply_penalty_to_winnings(pid, _jc_for_streak(10), TEST_GUILD_ID)
+        after = bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining
+        assert after == before == BANKRUPTCY_PENALTY_GAMES
