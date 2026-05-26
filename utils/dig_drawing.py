@@ -7,10 +7,11 @@ creatures, items, and effects on the dungeon background.
 """
 
 import io
+import math
 import random
 from dataclasses import dataclass
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 # ---------------------------------------------------------------------------
 # Tile Size & Scene Dimensions
@@ -584,3 +585,314 @@ def draw_layer_thumbnail(layer_name: str) -> io.BytesIO:
 def has_event_scene(event_id: str) -> bool:
     """Check if an event has a registered pixel art scene."""
     return event_id in EVENT_SCENES
+
+
+# ---------------------------------------------------------------------------
+# Animated GIF builders
+#
+# Dig-native motion: warm torchlight, amber/violet glow, slow reveals. These
+# reuse the static scene renderers above for visual consistency, and
+# deliberately avoid the loud neon-green CRT chrome of utils/neon_drawing.py —
+# /dig keeps its quiet, subterranean tone. Output mirrors that engine's
+# mechanics: a list of PIL frames quantized to a 256-colour palette, saved to an
+# in-memory GIF that plays once and holds on the final frame.
+# ---------------------------------------------------------------------------
+
+_FONT_CACHE: dict[str, "ImageFont.FreeTypeFont | ImageFont.ImageFont"] = {}
+
+# Hold duration (ms) for the final frame so Discord lingers on the payoff.
+_HOLD_MS = 60000
+
+
+def _dig_font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont | ImageFont.ImageFont":
+    """Cached monospace font (mirrors neon_drawing's loader, with a safe fallback)."""
+    key = f"{'b' if bold else 'r'}_{size}"
+    if key not in _FONT_CACHE:
+        suffix = "-Bold" if bold else ""
+        for path in (
+            f"/usr/share/fonts/truetype/dejavu/DejaVuSansMono{suffix}.ttf",
+            f"/usr/share/fonts/truetype/dejavu/DejaVuSans{suffix}.ttf",
+        ):
+            try:
+                _FONT_CACHE[key] = ImageFont.truetype(path, size)
+                break
+            except OSError:
+                continue
+        else:
+            _FONT_CACHE[key] = ImageFont.load_default()
+    return _FONT_CACHE[key]
+
+
+def _ease(t: float) -> float:
+    """Smoothstep easing, clamped to [0, 1]."""
+    t = max(0.0, min(1.0, t))
+    return t * t * (3 - 2 * t)
+
+
+def _dig_frame(img: Image.Image) -> Image.Image:
+    """Quantize a frame to a 256-colour adaptive palette for the GIF."""
+    return img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+
+
+def _save_dig_gif(frames: list[Image.Image], durations: list[int]) -> io.BytesIO:
+    """Save frames as a play-once GIF that holds on the final frame."""
+    buf = io.BytesIO()
+    frames[0].save(
+        buf,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=1,
+    )
+    buf.seek(0)
+    return buf
+
+
+def _text_layer(
+    text: str, y: int, color: tuple[int, int, int], font, alpha: int
+) -> Image.Image:
+    """A full-scene transparent layer with horizontally-centred text at the given alpha."""
+    ov = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (0, 0, 0, 0))
+    if alpha <= 0:
+        return ov
+    d = ImageDraw.Draw(ov)
+    bbox = d.textbbox((0, 0), text, font=font)
+    x = (SCENE_WIDTH - (bbox[2] - bbox[0])) // 2
+    d.text((x, y), text, fill=(*color, max(0, min(255, alpha))), font=font)
+    return ov
+
+
+def _radial_glow(
+    cx: int, cy: int, max_r: int, color: tuple[int, int, int], max_alpha: int
+) -> Image.Image:
+    """A soft radial glow as concentric translucent rings (cheap, matches the torch glow)."""
+    ov = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (0, 0, 0, 0))
+    if max_r <= 0 or max_alpha <= 0:
+        return ov
+    d = ImageDraw.Draw(ov)
+    steps = max(1, max_r // 4)
+    for s in range(steps, 0, -1):
+        r = int(max_r * s / steps)
+        a = int(max_alpha * (1 - s / steps) ** 2)
+        if a > 0:
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*color, a))
+    return ov
+
+
+def animate_dig_reveal(
+    layer_name: str,
+    *,
+    motion: str,
+    title: str | None = None,
+    sub_lines: tuple[str, ...] = (),
+    sprite_id: str | None = None,
+) -> io.BytesIO:
+    """Standard dig reveal — boss victory (``motion="victory"``) or relic
+    unearthing (``motion="unearth"``). Animates the existing pixel-art scene
+    with warm, slow motion."""
+    palette = LAYER_PALETTES.get(layer_name, LAYER_PALETTES["Dirt"])
+    title_font = _dig_font(15, bold=True)
+    sub_font = _dig_font(12)
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    n = 26
+
+    if motion == "victory":
+        boss = _draw_creature_sprite("boss").resize(
+            (TILE_SIZE * 2, TILE_SIZE * 2), Image.Resampling.NEAREST
+        )
+        player = _draw_player_sprite().resize(
+            (TILE_SIZE * 2, TILE_SIZE * 2), Image.Resampling.NEAREST
+        )
+        bx, by = SCENE_WIDTH // 2 + 20, SCENE_HEIGHT // 3
+        px, py = SCENE_WIDTH // 3 - TILE_SIZE, SCENE_HEIGHT // 2 - TILE_SIZE
+        srng = random.Random(1)
+        sparkles = [
+            (srng.randint(40, SCENE_WIDTH - 40), srng.randint(25, SCENE_HEIGHT - 45))
+            for _ in range(24)
+        ]
+        for i in range(n):
+            t = _ease(i / (n - 1))
+            scene = _get_layer_background(layer_name, SCENE_WIDTH, SCENE_HEIGHT).convert("RGBA")
+            scene.alpha_composite(
+                _radial_glow(px + TILE_SIZE, py + TILE_SIZE, int(30 + 50 * t), (255, 210, 90), int(120 * t))
+            )
+            ba = int(220 * (1 - t) + 25)
+            faded = boss.copy()
+            faded.putalpha(faded.getchannel("A").point(lambda v, m=ba: v * m // 255))
+            scene.alpha_composite(faded, (bx, by))
+            scene.alpha_composite(player, (px, py))
+            shown = int(len(sparkles) * t)
+            sp = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (0, 0, 0, 0))
+            spd = ImageDraw.Draw(sp)
+            for sx, sy in sparkles[:shown]:
+                spd.ellipse([sx - 2, sy - 2, sx + 2, sy + 2], fill=(255, 225, 120, 200))
+            scene.alpha_composite(sp)
+            if title:
+                scene.alpha_composite(_text_layer(title, SCENE_HEIGHT - 42, (255, 235, 170), title_font, int(255 * t)))
+            for k, line in enumerate(sub_lines):
+                la = int(255 * max(0.0, (t - 0.4) / 0.6))
+                scene.alpha_composite(_text_layer(line, SCENE_HEIGHT - 24 + k * 14, (255, 215, 0), sub_font, la))
+            frame = _apply_retro_overlay(scene.convert("RGB"))
+            frame = ImageEnhance.Brightness(frame).enhance(0.92 + 0.10 * abs(math.sin(i * 0.7)))
+            frames.append(_dig_frame(frame))
+            durations.append(_HOLD_MS if i == n - 1 else (70 if t < 0.6 else 110))
+    else:  # "unearth"
+        relic = _draw_item_sprite(sprite_id or "treasure").resize(
+            (TILE_SIZE * 3, TILE_SIZE * 3), Image.Resampling.NEAREST
+        )
+        rw = TILE_SIZE * 3
+        rx = SCENE_WIDTH // 2 - rw // 2
+        ry = SCENE_HEIGHT // 2 - rw // 2 + 8
+        for i in range(n):
+            t = _ease(i / (n - 1))
+            scene = _get_layer_background(layer_name, SCENE_WIDTH, SCENE_HEIGHT).convert("RGBA")
+            scene.alpha_composite(
+                _radial_glow(rx + rw // 2, ry + rw // 2, int(20 + 55 * t), (255, 200, 110), int(140 * t))
+            )
+            scene.alpha_composite(relic, (rx, ry))
+            # Dirt curtain recedes downward, revealing the relic from the top.
+            reveal = int(ry + rw * t)
+            curtain = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (0, 0, 0, 0))
+            cd = ImageDraw.Draw(curtain)
+            cd.rectangle([rx - 6, reveal, rx + rw + 6, ry + rw + 8], fill=(*palette[1], 255))
+            crng = random.Random(i)
+            for _ in range(5):
+                fx = crng.randint(rx - 4, rx + rw + 2)
+                fy = reveal + crng.randint(0, 14)
+                cd.rectangle([fx, fy, fx + 2, fy + 2], fill=(*palette[0], 255))
+            scene.alpha_composite(curtain)
+            if title:
+                ta = int(255 * max(0.0, (t - 0.5) / 0.5))
+                scene.alpha_composite(_text_layer(title, SCENE_HEIGHT - 26, (255, 225, 150), sub_font, ta))
+            frame = _apply_retro_overlay(scene.convert("RGB"))
+            frame = ImageEnhance.Brightness(frame).enhance(0.90 + 0.12 * abs(math.sin(i * 0.6)))
+            frames.append(_dig_frame(frame))
+            durations.append(_HOLD_MS if i == n - 1 else (80 if t < 0.7 else 120))
+
+    return _save_dig_gif(frames, durations)
+
+
+def animate_legendary_relic(layer_name: str, relic_name: str) -> io.BytesIO:
+    """Bespoke set-piece: a legendary relic ascends from the void with a particle bloom."""
+    name_font = _dig_font(16, bold=True)
+    relic = _draw_item_sprite("crystal")
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    n = 34
+    cx, cy = SCENE_WIDTH // 2, SCENE_HEIGHT // 2 - 6
+    star_rng = random.Random(7)
+    stars = [
+        (star_rng.randint(0, SCENE_WIDTH - 1), star_rng.randint(0, SCENE_HEIGHT - 1), star_rng.randint(60, 160))
+        for _ in range(50)
+    ]
+    for i in range(n):
+        t = _ease(i / (n - 1))
+        bg = int(8 + 18 * t)
+        scene = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (bg, 4, bg + 14, 255))
+        sd = ImageDraw.Draw(scene)
+        for sx, sy, sa in stars:
+            tw = int(sa * (0.5 + 0.5 * abs(math.sin(i * 0.3 + sx))))
+            sd.point((sx, sy), fill=(180, 170, 220, tw))
+        scale = int(20 + 40 * t)
+        start_top = SCENE_HEIGHT - scale - 4
+        end_top = cy - scale // 2
+        ry = int(start_top + (end_top - start_top) * t)
+        glow_cy = ry + scale // 2
+        scene.alpha_composite(_radial_glow(cx, glow_cy, int(30 + 70 * t), (150, 90, 230), int(150 * t)))
+        scene.alpha_composite(_radial_glow(cx, glow_cy, int(16 + 40 * t), (255, 210, 120), int(120 * t)))
+        big = relic.resize((scale, scale), Image.Resampling.NEAREST)
+        scene.alpha_composite(big, (cx - scale // 2, ry))
+        pr = int(80 * t)
+        prng = random.Random(100 + i)
+        pl = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (0, 0, 0, 0))
+        pld = ImageDraw.Draw(pl)
+        for _ in range(int(26 * t)):
+            ang = prng.uniform(0, math.tau)
+            dist = prng.uniform(pr * 0.4, pr + 1)
+            ux = int(cx + dist * math.cos(ang))
+            uy = int(glow_cy + dist * math.sin(ang))
+            if 0 <= ux < SCENE_WIDTH and 0 <= uy < SCENE_HEIGHT:
+                pld.point((ux, uy), fill=(255, 235, 180, 220))
+        scene.alpha_composite(pl)
+        na = int(255 * max(0.0, (t - 0.5) / 0.5))
+        scene.alpha_composite(_text_layer(relic_name.upper(), SCENE_HEIGHT - 30, (235, 220, 255), name_font, na))
+        frame = scene.convert("RGB")
+        if i >= n - 6:
+            frame = Image.blend(frame, frame.filter(ImageFilter.GaussianBlur(3)), 0.35)
+        frames.append(_dig_frame(frame))
+        durations.append(_HOLD_MS if i == n - 1 else (90 if t < 0.7 else 130))
+    return _save_dig_gif(frames, durations)
+
+
+def animate_cave_in(layer_name: str, depth_before: int, depth_after: int) -> io.BytesIO:
+    """Bespoke tragedy: the dark closes in and hard-won progress rolls back."""
+    big_font = _dig_font(18, bold=True)
+    palette = LAYER_PALETTES.get(layer_name, LAYER_PALETTES["Dirt"])
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    n = 28
+    base = _get_layer_background(layer_name, SCENE_WIDTH, SCENE_HEIGHT)
+    rrng = random.Random(3)
+    rubble = [
+        (rrng.randint(10, SCENE_WIDTH - 20), rrng.randint(6, 14), rrng.uniform(0.0, 1.4))
+        for _ in range(22)
+    ]
+    for i in range(n):
+        t = i / (n - 1)
+        et = _ease(t)
+        scene = base.convert("RGBA")
+        rl = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (0, 0, 0, 0))
+        rld = ImageDraw.Draw(rl)
+        for rxp, rs, phase in rubble:
+            fall = (t * 1.4 + phase) % 1.4
+            ryp = int(fall / 1.4 * SCENE_HEIGHT)
+            rld.rectangle([rxp, ryp, rxp + rs, ryp + rs], fill=(*palette[1], 230))
+        scene.alpha_composite(rl)
+        scene.alpha_composite(_radial_glow(SCENE_WIDTH // 2, SCENE_HEIGHT // 2, 210, (10, 12, 30), int(170 * et)))
+        if t > 0.25:
+            ct = _ease(max(0.0, (t - 0.25) / 0.75))
+            cur = int(round(depth_before + (depth_after - depth_before) * ct))
+            scene.alpha_composite(_text_layer(f"DEPTH {cur}", SCENE_HEIGHT // 2 - 12, (200, 205, 225), big_font, 255))
+        frame = _apply_retro_overlay(scene.convert("RGB"))
+        frame = ImageEnhance.Color(frame).enhance(1.0 - 0.5 * et)
+        frame = ImageEnhance.Brightness(frame).enhance(1.0 - 0.45 * et)
+        frames.append(_dig_frame(frame))
+        durations.append(_HOLD_MS if i == n - 1 else (70 + int(40 * t)))
+    return _save_dig_gif(frames, durations)
+
+
+def animate_pinnacle(layer_name: str, *, prestige: bool) -> io.BytesIO:
+    """Bespoke endgame: depth-350 Pinnacle descent, or depth-400 prestige ascension."""
+    title_font = _dig_font(18, bold=True)
+    sub_font = _dig_font(12)
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+    n = 30
+    cx = SCENE_WIDTH // 2
+    player = _draw_player_sprite().resize((TILE_SIZE * 2, TILE_SIZE * 2), Image.Resampling.NEAREST)
+    for i in range(n):
+        t = _ease(i / (n - 1))
+        if prestige:
+            bg = int(10 + 60 * t)
+            scene = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (bg, max(0, bg - 4), max(0, bg - 20), 255))
+            scene.alpha_composite(_radial_glow(cx, SCENE_HEIGHT // 2, int(40 + 130 * t), (255, 230, 150), int(180 * t)))
+            py = int(SCENE_HEIGHT // 2 - (SCENE_HEIGHT // 3) * t)
+            scene.alpha_composite(player, (cx - TILE_SIZE, py))
+            title, sub, tcol = "ASCENSION", "PRESTIGE", (255, 240, 200)
+        else:
+            scene = Image.new("RGBA", (SCENE_WIDTH, SCENE_HEIGHT), (6, 5, 9, 255))
+            scene.alpha_composite(_radial_glow(cx, SCENE_HEIGHT // 2 + 10, int(20 + 80 * t), (220, 150, 70), int(150 * t)))
+            py = int(SCENE_HEIGHT // 3 + (SCENE_HEIGHT // 3) * t)
+            scene.alpha_composite(player, (cx - TILE_SIZE, py))
+            title, sub, tcol = "THE PINNACLE", "DEPTH 350", (235, 195, 140)
+        na = int(255 * max(0.0, (t - 0.45) / 0.55))
+        scene.alpha_composite(_text_layer(title, SCENE_HEIGHT - 46, tcol, title_font, na))
+        scene.alpha_composite(_text_layer(sub, SCENE_HEIGHT - 26, tuple(int(c * 0.8) for c in tcol), sub_font, na))
+        frame = scene.convert("RGB")
+        if i >= n - 5:
+            frame = Image.blend(frame, frame.filter(ImageFilter.GaussianBlur(2)), 0.3)
+        frames.append(_dig_frame(frame))
+        durations.append(_HOLD_MS if i == n - 1 else (90 if t < 0.6 else 130))
+    return _save_dig_gif(frames, durations)

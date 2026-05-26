@@ -73,6 +73,7 @@ from services.permissions import has_admin_permission
 from utils.embed_safety import add_lines_field, truncate_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
+from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -440,6 +441,9 @@ class DigCommands(commands.Cog):
                 from services.dig_flame import post_catastrophic
                 post_catastrophic(interaction.channel)
 
+            # Rare animated dig moment (relic unearthed / catastrophic cave-in).
+            await self._maybe_send_dig_neon(interaction, result, guild_id)
+
         # Dispatch by result shape. Each branch handles its own reply + reactions.
         if getattr(result, "is_first_dig", False):
             await self._send_first_dig_welcome(interaction)
@@ -606,6 +610,56 @@ class DigCommands(commands.Cog):
         except Exception as e:
             logger.debug("Event art failed: %s", e)
             return None
+
+    async def _maybe_send_dig_neon(self, interaction, result, guild_id) -> None:
+        """Best-effort: a rare neon GIF for a relic unearthed or a catastrophic cave-in."""
+        try:
+            neon = get_neon_service(self.bot)
+            if not neon:
+                return
+            depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+            ld = get_layer_def(depth)
+            layer_name = ld.name if ld else "Dirt"
+
+            cave_in_detail = getattr(result, "cave_in_detail", None)
+            cave_type = ""
+            if cave_in_detail is not None:
+                cave_type = (
+                    cave_in_detail.get("type", "")
+                    if isinstance(cave_in_detail, dict)
+                    else getattr(cave_in_detail, "type", "")
+                )
+
+            nr = None
+            if cave_type == "catastrophic":
+                depth_after = getattr(result, "depth_after", 0) or depth
+                block_loss = (
+                    cave_in_detail.get("block_loss", 0)
+                    if isinstance(cave_in_detail, dict)
+                    else getattr(cave_in_detail, "block_loss", 0)
+                ) or 0
+                nr = await neon.on_dig_cave_in(
+                    interaction.user.id,
+                    guild_id,
+                    depth_before=depth_after + int(block_loss),
+                    depth_after=depth_after,
+                    layer_name=layer_name,
+                )
+            else:
+                artifact = getattr(result, "artifact", None)
+                if artifact and not isinstance(artifact, str):
+                    rarity = (getattr(artifact, "rarity", "") or "").lower()
+                    if rarity in ("rare", "legendary"):
+                        nr = await neon.on_dig_relic_found(
+                            interaction.user.id,
+                            guild_id,
+                            relic_name=getattr(artifact, "name", "a relic"),
+                            rarity=rarity,
+                            layer_name=layer_name,
+                        )
+            await send_neon_result(interaction, nr)
+        except Exception as e:
+            logger.debug("dig neon hook failed: %s", e)
 
     async def _send_dig_result_with_attachments(
         self, interaction: discord.Interaction, result
