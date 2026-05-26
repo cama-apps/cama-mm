@@ -77,7 +77,7 @@ class BalancedShuffler:
             use_glicko: Whether to use Glicko-2 ratings (default True)
             consider_roles: Whether to consider role distribution
             off_role_multiplier: Multiplier for MMR when playing off-role (default 0.95 = 95% effectiveness)
-            off_role_flat_penalty: Flat penalty per off-role player added to team value difference (default 350)
+            off_role_flat_penalty: Flat penalty per off-role player added to team value difference (see SHUFFLER_SETTINGS)
             role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
             use_openskill: Whether to use OpenSkill ratings instead of Glicko-2 (default False)
