@@ -801,9 +801,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             amount: Gross income to credit.
             garnishment_rate: Fraction garnished when the player is in debt.
             bankruptcy_penalty_rate: When > 0, the repo computes
-                ``penalty = net - int(net * bankruptcy_penalty_rate)`` inside
+                ``penalty = int(net * (1 - bankruptcy_penalty_rate))`` inside
                 this atomic txn and debits it, fusing garnishment credit and
-                penalty debit. Pass 0.0 (default) to skip the penalty.
+                penalty debit. Flooring the penalty (not the kept net) keeps a
+                fractional rate from rounding a small net down to zero. Pass
+                0.0 (default) to skip the penalty.
 
         Returns:
             Dict with 'gross', 'garnished', 'net', 'bankruptcy_penalty'.
@@ -855,7 +857,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             # Bankruptcy penalty (if requested) is computed against the live
             # post-garnishment net and debited in the same txn.
             if bankruptcy_penalty_rate > 0 and net_before_penalty > 0:
-                penalty = net_before_penalty - int(net_before_penalty * bankruptcy_penalty_rate)
+                # Floor the penalty (amount withheld), not the kept net, so a
+                # fractional rate never rounds a small net down to zero.
+                penalty = int(net_before_penalty * (1 - bankruptcy_penalty_rate))
             else:
                 penalty = 0
 

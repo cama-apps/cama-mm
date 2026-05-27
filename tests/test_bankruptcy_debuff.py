@@ -81,8 +81,11 @@ def _penalize(repos, bankruptcy_service, pid):
 
 
 def _expected_penalty(profit: int) -> int:
-    """The withheld share for a given gross profit, per the configured rate."""
-    return profit - int(profit * BANKRUPTCY_PENALTY_RATE)
+    """The withheld share for a given gross profit, per the configured rate.
+
+    Floors the penalty (the withheld share), not the kept winnings, so a
+    fractional rate never rounds a small payout all the way down to zero."""
+    return int(profit * (1 - BANKRUPTCY_PENALTY_RATE))
 
 
 # --------------------------------------------------------------------------- #
@@ -207,11 +210,12 @@ class TestBettingDebuff:
 
         dist = betting_service.settle_bets(123, TEST_GUILD_ID, "radiant", pending_state=pending)
 
-        # House 1:1 -> payout 10 on a 5 stake => profit 5; withheld = 5 - int(5*0.75) = 2.
+        # House 1:1 -> payout 10 on a 5 stake => profit 5; withheld = int(5*0.25) = 1
+        # (the penalty is floored, so it rounds down on this small profit).
         assert dist["bankruptcy_penalties"][bettor] == _expected_penalty(5)
-        # 18 (post-bet) + 10 (payout) - 2 (debuff) = 26. Stake of 5 returned whole;
-        # the win still nets a gain (26 > 23), never a loss.
-        assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 26
+        # 18 (post-bet) + 10 (payout) - 1 (debuff) = 27. Stake of 5 returned whole;
+        # the win still nets a gain (27 > 23), never a loss.
+        assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 27
 
     def test_non_penalized_winner_keeps_full_payout(self, repos, bankruptcy_service):
         player_repo = repos["player"]
@@ -339,7 +343,7 @@ class TestDigDebuff:
         assert seen, "normal dig did not route its yield through the bankruptcy debuff"
         gross = r["jc_earned"] + r["bankruptcy_penalty"]
         if gross > 0:
-            assert r["jc_earned"] == int(gross * BANKRUPTCY_PENALTY_RATE)
+            assert r["jc_earned"] == gross - _expected_penalty(gross)
             assert r["bankruptcy_penalty"] == gross - r["jc_earned"]
 
     def test_boss_victory_jc_debuffed(
@@ -379,7 +383,7 @@ class TestDigDebuff:
         penalty = result["bankruptcy_penalty"]
         assert penalty > 0  # boss winnings were debuffed
         gross = result["payout"] + penalty
-        assert result["payout"] == int(gross * BANKRUPTCY_PENALTY_RATE)
+        assert result["payout"] == gross - _expected_penalty(gross)
 
 
 # --------------------------------------------------------------------------- #
@@ -407,18 +411,18 @@ class TestTriviaDebuff:
         assert _jc_for_streak(14) == 1  # challenging cadence (+1 every 4) intact
         assert _jc_for_streak(7) == 0  # non-milestone streaks award nothing
 
-    def test_penalized_trivia_milestone_is_debuffed(self, repos, bankruptcy_service):
+    def test_penalized_trivia_milestone_is_not_zeroed_by_rounding(self, repos, bankruptcy_service):
         pid = 8001
         _add_player(repos["player"], pid)
         _penalize(repos, bankruptcy_service, pid)
 
-        # The buffed hard-tier milestone (2 JC) survives the 25% debuff as 1 JC
-        # (int(2 * 0.75)) — a bankrupt player still nets something from it.
+        # Milestone payouts are tiny (1-2 JC). The debuff floors the *withheld*
+        # share (int(amount * 0.25)), not the kept amount, so on these small
+        # payouts the penalty rounds to 0 and the bankrupt player keeps the whole
+        # milestone — instead of having a 1-JC payout zeroed out entirely.
         assert _jc_for_streak(10) == 2
-        assert bankruptcy_service.apply_penalty_to_winnings(pid, 2, TEST_GUILD_ID)["penalized"] == 1
-        # A 1-JC milestone (easy/medium) is fully withheld while penalized
-        # (int(1 * 0.75) == 0) — the reason the buff targets the hard tier.
-        assert bankruptcy_service.apply_penalty_to_winnings(pid, 1, TEST_GUILD_ID)["penalized"] == 0
+        assert bankruptcy_service.apply_penalty_to_winnings(pid, 2, TEST_GUILD_ID)["penalized"] == 2
+        assert bankruptcy_service.apply_penalty_to_winnings(pid, 1, TEST_GUILD_ID)["penalized"] == 1
 
     def test_non_penalized_trivia_keeps_full_milestone(self, repos, bankruptcy_service):
         pid = 8002
