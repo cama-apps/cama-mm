@@ -387,9 +387,9 @@ def test_fix4_garnishment_runs_before_bankruptcy_penalty(
 
     Expected math for gross=10, debt (balance < 0), garn_rate=0.5, pen_rate=0.5:
       - garnishment first: gross=10, garnished=int(10*0.5)=5, net=5
-      - penalty on net:   penalized_net=int(5*0.5)=2, penalty_applied=3
-      - balance delta:     +10 (garnishment credit) - 3 (penalty) = +7
-      - final dict:        gross=10, garnished=5, net=2, bankruptcy_penalty=3
+      - penalty on net:   penalty=int(5*(1-0.5))=2, penalized_net=3
+      - balance delta:     +10 (garnishment credit) - 2 (penalty) = +8
+      - final dict:        gross=10, garnished=5, net=3, bankruptcy_penalty=2
     """
     garnishment_service = GarnishmentService(player_repo, garnishment_rate=0.5)
     bankruptcy_service = BankruptcyService(
@@ -434,14 +434,14 @@ def test_fix4_garnishment_runs_before_bankruptcy_penalty(
     # Garnishment-first arithmetic:
     assert info["gross"] == 10
     assert info["garnished"] == 5, f"Garnishment must operate on gross=10, got {info}"
-    assert info["bankruptcy_penalty"] == 3, (
+    assert info["bankruptcy_penalty"] == 2, (
         f"Penalty must apply to post-garnishment net (5), got {info}"
     )
-    assert info["net"] == 2, f"Net after penalty should be 2, got {info}"
+    assert info["net"] == 3, f"Net after penalty should be 3, got {info}"
 
-    # Balance delta: +10 (gross credited) - 3 (penalty withdrawn) = +7
-    assert after - before == 7, (
-        f"Balance delta should be +7 (gross 10 minus penalty 3), got {after - before}. "
+    # Balance delta: +10 (gross credited) - 2 (penalty withdrawn) = +8
+    assert after - before == 8, (
+        f"Balance delta should be +8 (gross 10 minus penalty 2), got {after - before}. "
         f"before={before}, after={after}, info={info}"
     )
 
@@ -780,7 +780,7 @@ def test_fix7_penalty_base_matches_live_garnishment_under_balance_flip(
     same BEGIN IMMEDIATE, so the penalty base is ALWAYS the live post-
     garnishment net. Invariant asserted here:
 
-        bankruptcy_penalty == net_after_garnishment - int(net_after_garnishment * penalty_rate)
+        bankruptcy_penalty == int(net_after_garnishment * (1 - penalty_rate))
 
     where net_after_garnishment = gross - garnished, both from the SAME
     returned result dict. No matter how the balance flips concurrently,
@@ -831,7 +831,7 @@ def test_fix7_penalty_base_matches_live_garnishment_under_balance_flip(
 
     # Many awards over a large gross so integer rounding bites: gross=10,
     # garn_rate=0.5 -> garnished is either 0 or 5, net is either 10 or 5,
-    # penalty is either 5 or 3. The award thread repeatedly hits both
+    # penalty (floored at int(net*0.5)) is either 5 or 2. The award thread hits both
     # players; the flip thread toggles balances between runs.
     gross = 10
     num_awards = 40
@@ -885,7 +885,7 @@ def test_fix7_penalty_base_matches_live_garnishment_under_balance_flip(
             f"Unexpected garnished for {pid}: {info}"
         )
         net_after_garnishment = info["gross"] - info["garnished"]
-        expected_penalty = net_after_garnishment - int(net_after_garnishment * penalty_rate)
+        expected_penalty = int(net_after_garnishment * (1 - penalty_rate))
         assert info["bankruptcy_penalty"] == expected_penalty, (
             f"Penalty base drifted for {pid}: gross={info['gross']}, "
             f"garnished={info['garnished']}, net_after_garn={net_after_garnishment}, "

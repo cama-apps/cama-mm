@@ -164,9 +164,11 @@ class BankruptcyService(IBankruptcyService):
         if penalty_games <= 0:
             return {"original": amount, "penalized": amount, "penalty_applied": 0}
 
-        # Apply penalty rate (e.g., 0.5 means they get half)
-        penalized = int(amount * self.penalty_rate)
-        penalty_applied = amount - penalized
+        # Floor the penalty (the amount withheld), not the kept winnings, so a
+        # fractional rate never rounds a small payout (e.g. a 1 JC trivia
+        # milestone) all the way down to zero.
+        penalty_applied = int(amount * (1 - self.penalty_rate))
+        penalized = amount - penalty_applied
 
         return {
             "original": amount,
@@ -344,9 +346,11 @@ class BankruptcyService(IBankruptcyService):
                 )
             )
 
-        # Apply penalty rate (e.g., 0.5 means they get half)
-        penalized = int(amount * self.penalty_rate)
-        penalty_applied = amount - penalized
+        # Floor the penalty (the amount withheld), not the kept winnings, so a
+        # fractional rate never rounds a small payout (e.g. a 1 JC trivia
+        # milestone) all the way down to zero.
+        penalty_applied = int(amount * (1 - self.penalty_rate))
+        penalized = amount - penalty_applied
 
         return Result.ok(
             PenaltyApplication(
