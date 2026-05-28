@@ -1039,20 +1039,34 @@ class MatchCommands(commands.Cog):
             # Single match - use it (backward compatible)
             pending_state = all_pending[0]
         else:
-            # Multiple matches - find the one the voter is in
-            player_match = await asyncio.to_thread(
-                self.match_service.state_service.get_pending_match_for_player,
-                guild_id,
-                interaction.user.id,
-            )
+            # Multiple matches - find the one the voter is in. Abort votes are
+            # allowed for the full shuffled lobby, including excluded players.
+            if result.value == "abort":
+                player_match = await asyncio.to_thread(
+                    self.match_service.get_pending_match_for_abort_voter,
+                    guild_id,
+                    interaction.user.id,
+                )
+            else:
+                player_match = await asyncio.to_thread(
+                    self.match_service.state_service.get_pending_match_for_player,
+                    guild_id,
+                    interaction.user.id,
+                )
             if player_match:
                 pending_state = player_match
             else:
                 # Voter not in any match - they can't vote
                 match_ids = ", ".join(f"#{m.pending_match_id}" for m in all_pending)
+                if result.value == "abort":
+                    voter_context = "you're not in any shuffled lobby"
+                    vote_target = "Only players in the shuffled lobby can vote to abort."
+                else:
+                    voter_context = "you're not a participant in any of them"
+                    vote_target = "Only match participants can vote on the result."
                 await interaction.followup.send(
-                    f"❌ Multiple pending matches exist ({match_ids}) but you're not a participant in any of them. "
-                    "Only match participants can vote on the result.",
+                    f"❌ Multiple pending matches exist ({match_ids}) but {voter_context}. "
+                    f"{vote_target}",
                     ephemeral=True,
                 )
                 return
@@ -1074,7 +1088,7 @@ class MatchCommands(commands.Cog):
                 await interaction.followup.send(f"❌ {exc}", ephemeral=True)
                 return
             if not submission["is_ready"]:
-                min_subs = self.match_service.MIN_NON_ADMIN_SUBMISSIONS
+                min_subs = self.match_service.MIN_ABORT_SUBMISSIONS
                 match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
                 await interaction.followup.send(
                     f"✅ Abort request recorded{match_id_note}. Non-admin submissions: {submission['non_admin_count']}/{min_subs} "

@@ -52,7 +52,8 @@ class MatchService(
     composes the mixins into the single public service object.
     """
 
-    MIN_NON_ADMIN_SUBMISSIONS = 3
+    MIN_NON_ADMIN_SUBMISSIONS = MatchVotingService.MIN_NON_ADMIN_SUBMISSIONS
+    MIN_ABORT_SUBMISSIONS = MatchVotingService.MIN_ABORT_SUBMISSIONS
 
     def __init__(
         self,

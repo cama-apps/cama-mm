@@ -6,6 +6,7 @@ Handles vote tracking for match result recording and aborting.
 
 from typing import Any
 
+from domain.models.pending_match_state import PendingMatchState
 from services.match_state_service import MatchStateService
 
 
@@ -21,6 +22,7 @@ class MatchVotingService:
     """
 
     MIN_NON_ADMIN_SUBMISSIONS = 3
+    MIN_ABORT_SUBMISSIONS = 4
 
     def __init__(self, state_service: MatchStateService):
         """
@@ -134,24 +136,45 @@ class MatchVotingService:
             if not sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
         )
 
+    def _abort_eligible_player_ids(self, state: PendingMatchState) -> set[int]:
+        return (
+            set(state.radiant_team_ids or [])
+            | set(state.dire_team_ids or [])
+            | set(state.excluded_player_ids or [])
+            | set(state.excluded_conditional_player_ids or [])
+        )
+
+    def _is_abort_voter_eligible(self, state: PendingMatchState, user_id: int) -> bool:
+        return user_id in self._abort_eligible_player_ids(state)
+
+    def get_pending_match_for_abort_voter(
+        self, guild_id: int | None, user_id: int
+    ) -> PendingMatchState | None:
+        for state in self.state_service.get_all_pending_matches(guild_id):
+            if self._is_abort_voter_eligible(state, user_id):
+                return state
+        return None
+
     def get_abort_submission_count(self, guild_id: int | None, pending_match_id: int | None = None) -> int:
         """
-        Get count of non-admin votes to abort.
+        Get count of eligible non-admin votes to abort.
 
         Args:
             guild_id: Guild ID
             pending_match_id: Optional specific match ID for concurrent match support
 
         Returns:
-            Number of non-admin abort votes
+            Number of eligible non-admin abort votes
         """
         state = self.state_service.get_last_shuffle(guild_id, pending_match_id)
         if not state:
             return 0
         return sum(
             1
-            for sub in state.record_submissions.values()
-            if not sub.get("is_admin") and sub.get("result") == "abort"
+            for user_id, sub in state.record_submissions.items()
+            if not sub.get("is_admin")
+            and sub.get("result") == "abort"
+            and self._is_abort_voter_eligible(state, user_id)
         )
 
     def can_abort_match(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
@@ -163,11 +186,11 @@ class MatchVotingService:
             pending_match_id: Optional specific match ID for concurrent match support
 
         Returns:
-            True if abort threshold is met (admin vote or MIN_NON_ADMIN_SUBMISSIONS)
+            True if abort threshold is met (admin vote or MIN_ABORT_SUBMISSIONS)
         """
         if self.has_admin_abort_submission(guild_id, pending_match_id):
             return True
-        return self.get_abort_submission_count(guild_id, pending_match_id) >= self.MIN_NON_ADMIN_SUBMISSIONS
+        return self.get_abort_submission_count(guild_id, pending_match_id) >= self.MIN_ABORT_SUBMISSIONS
 
     def add_abort_submission(
         self, guild_id: int | None, user_id: int, is_admin: bool,
@@ -194,6 +217,8 @@ class MatchVotingService:
         with self.state_service.state_lock():
             state = self.state_service.ensure_pending_state(guild_id, pending_match_id)
             submissions = self.state_service.ensure_record_submissions(state)
+            if not is_admin and not self._is_abort_voter_eligible(state, user_id):
+                raise ValueError("Only players in the shuffled lobby can vote to abort this match.")
             existing = submissions.get(user_id)
             if existing and existing["result"] != "abort":
                 raise ValueError("You already submitted a different result.")

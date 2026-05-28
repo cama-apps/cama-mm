@@ -8,8 +8,10 @@ MatchVotingService tracks two parallel votes on a pending match:
 The rules under test:
   * An admin vote is decisive on its own (single admin radiant/dire vote can
     record; single admin abort vote can abort).
-  * Non-admin votes need ``MIN_NON_ADMIN_SUBMISSIONS`` (3) *matching* votes on
-    one side before that side can record / abort.
+  * Non-admin record votes need ``MIN_NON_ADMIN_SUBMISSIONS`` (3) *matching*
+    votes on one side before that side can record.
+  * Non-admin abort votes need ``MIN_ABORT_SUBMISSIONS`` (4) eligible lobby
+    votes before the match can abort.
   * A user may not switch their vote to a different result.
   * Vote tallies count non-admins only; admins are excluded from the counts so
     an admin can't be double-counted toward the non-admin threshold.
@@ -142,16 +144,16 @@ def test_user_cannot_switch_from_record_to_abort(voting_service, pending_match_i
     record_submissions is a single per-user slot shared by record and abort
     votes, so abort must honor the same conflict guard.
     """
-    voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="radiant", is_admin=False)
+    voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="radiant", is_admin=False)
     with pytest.raises(ValueError, match="already submitted"):
-        voting_service.add_abort_submission(TEST_GUILD_ID, user_id=100, is_admin=False)
+        voting_service.add_abort_submission(TEST_GUILD_ID, user_id=1, is_admin=False)
 
 
 def test_user_cannot_switch_from_abort_to_record(voting_service, pending_match_id):
     """Symmetric guard: an abort voter cannot then cast a result vote."""
-    voting_service.add_abort_submission(TEST_GUILD_ID, user_id=100, is_admin=False)
+    voting_service.add_abort_submission(TEST_GUILD_ID, user_id=1, is_admin=False)
     with pytest.raises(ValueError, match="already submitted"):
-        voting_service.add_record_submission(TEST_GUILD_ID, user_id=100, result="dire", is_admin=False)
+        voting_service.add_record_submission(TEST_GUILD_ID, user_id=1, result="dire", is_admin=False)
 
 
 def test_duplicate_identical_vote_is_idempotent(voting_service, pending_match_id):
@@ -303,36 +305,39 @@ def test_single_admin_abort_vote_is_decisive(voting_service, pending_match_id):
 
 
 def test_below_threshold_non_admin_aborts_cannot_abort(voting_service, pending_match_id):
-    """Two non-admin abort votes are not enough — the threshold is 3."""
+    """Three eligible non-admin abort votes are not enough — the threshold is 4."""
     gid = TEST_GUILD_ID
-    voting_service.add_abort_submission(gid, user_id=100, is_admin=False)
-    result = voting_service.add_abort_submission(gid, user_id=101, is_admin=False)
-    assert result["non_admin_count"] == 2
+    voting_service.add_abort_submission(gid, user_id=1, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=2, is_admin=False)
+    result = voting_service.add_abort_submission(gid, user_id=3, is_admin=False)
+    assert result["non_admin_count"] == 3
     assert result["is_ready"] is False
     assert voting_service.can_abort_match(gid) is False
 
 
-def test_third_non_admin_abort_reaches_threshold(voting_service, pending_match_id):
-    """Three non-admin abort votes meet the abort quorum."""
+def test_fourth_non_admin_abort_reaches_threshold(voting_service, pending_match_id):
+    """Four eligible non-admin abort votes meet the abort quorum."""
     gid = TEST_GUILD_ID
-    voting_service.add_abort_submission(gid, user_id=100, is_admin=False)
-    voting_service.add_abort_submission(gid, user_id=101, is_admin=False)
-    result = voting_service.add_abort_submission(gid, user_id=102, is_admin=False)
-    assert result["non_admin_count"] == 3
+    voting_service.add_abort_submission(gid, user_id=1, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=2, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=3, is_admin=False)
+    result = voting_service.add_abort_submission(gid, user_id=4, is_admin=False)
+    assert result["non_admin_count"] == 4
     assert result["is_ready"] is True
     assert voting_service.can_abort_match(gid) is True
 
 
 def test_abort_votes_do_not_count_as_record_votes(voting_service, pending_match_id):
-    """Three abort votes never make the match *recordable*.
+    """Four abort votes never make the match *recordable*.
 
     Record and abort are distinct outcomes sharing one submissions dict; abort
     votes must not bleed into the record tally and trigger a phantom result.
     """
     gid = TEST_GUILD_ID
-    voting_service.add_abort_submission(gid, user_id=100, is_admin=False)
-    voting_service.add_abort_submission(gid, user_id=101, is_admin=False)
-    voting_service.add_abort_submission(gid, user_id=102, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=1, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=2, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=3, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=4, is_admin=False)
     assert voting_service.get_vote_counts(gid) == {"radiant": 0, "dire": 0}
     assert voting_service.can_record_match(gid) is False
     assert voting_service.get_pending_record_result(gid) is None
@@ -354,10 +359,38 @@ def test_admin_abort_vote_does_not_make_match_recordable(voting_service, pending
 def test_duplicate_abort_vote_is_idempotent(voting_service, pending_match_id):
     """Re-casting the same abort vote does not double-count the user."""
     gid = TEST_GUILD_ID
-    voting_service.add_abort_submission(gid, user_id=100, is_admin=False)
-    result = voting_service.add_abort_submission(gid, user_id=100, is_admin=False)
+    voting_service.add_abort_submission(gid, user_id=1, is_admin=False)
+    result = voting_service.add_abort_submission(gid, user_id=1, is_admin=False)
     assert result["non_admin_count"] == 1
     assert result["total_count"] == 1
+
+
+def test_non_lobby_player_cannot_vote_to_abort(voting_service, pending_match_id):
+    """Abort voting is limited to players in the shuffled lobby."""
+    with pytest.raises(ValueError, match="shuffled lobby"):
+        voting_service.add_abort_submission(TEST_GUILD_ID, user_id=999_999, is_admin=False)
+
+    assert voting_service.get_abort_submission_count(TEST_GUILD_ID) == 0
+    assert voting_service.can_abort_match(TEST_GUILD_ID) is False
+
+
+def test_excluded_lobby_player_can_vote_to_abort(state_service, voting_service):
+    """Excluded players were in the shuffled lobby, so their abort vote counts."""
+    from domain.models.pending_match_state import PendingMatchState
+
+    state = PendingMatchState(
+        radiant_team_ids=[1, 2, 3, 4, 5],
+        dire_team_ids=[6, 7, 8, 9, 10],
+        excluded_player_ids=[11],
+        excluded_conditional_player_ids=[12],
+    )
+    state_service.persist_state(TEST_GUILD_ID, state)
+
+    voting_service.add_abort_submission(TEST_GUILD_ID, user_id=11, is_admin=False)
+    result = voting_service.add_abort_submission(TEST_GUILD_ID, user_id=12, is_admin=False)
+
+    assert result["non_admin_count"] == 2
+    assert result["is_ready"] is False
 
 
 # =============================================================================
