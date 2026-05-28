@@ -4,6 +4,7 @@ Tests for Immortal Draft functionality.
 
 import logging
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1382,12 +1383,18 @@ class _FakeMessage:
 
     _counter = 0
 
-    def __init__(self, content=None, embed=None, view=None, fail_edit=False):
+    def __init__(self, content=None, embed=None, view=None, fail_edit=False, channel=None):
         _FakeMessage._counter += 1
         self.id = 9_000_000 + _FakeMessage._counter
         self.content = content
         self.embed = embed
         self.view = view
+        self.channel = channel
+        self.jump_url = (
+            f"https://discord.test/channels/0/{channel.id}/{self.id}"
+            if channel is not None
+            else None
+        )
         self.edited = False
         self.deleted = False
         self._fail_edit = fail_edit
@@ -1425,10 +1432,11 @@ class _FakeFollowup:
 
 class _FakeChannel:
     def __init__(self):
+        self.id = 555_000
         self.sent = []
 
     async def send(self, content=None, **kwargs):
-        msg = _FakeMessage(content=content)
+        msg = _FakeMessage(content=content, channel=self)
         self.sent.append(msg)
         return msg
 
@@ -1449,8 +1457,71 @@ class _FakeInteraction:
         self.guild = _FakeGuild(guild_id)
         self.guild_id = guild_id
         self.channel = _FakeChannel()
-        self.channel_id = 555_000
+        self.channel_id = self.channel.id
         self.followup = _FakeFollowup(fail_edit=fail_edit)
+
+
+class _FakeComponentResponse:
+    def __init__(self):
+        self.deferred = False
+        self.defer_kwargs = None
+        self.sent_messages = []
+        self.edit_message_calls = []
+
+    def is_done(self):
+        return self.deferred or bool(self.sent_messages or self.edit_message_calls)
+
+    async def defer(self, **kwargs):
+        self.deferred = True
+        self.defer_kwargs = kwargs
+
+    async def send_message(self, content=None, **kwargs):
+        self.sent_messages.append({"content": content, **kwargs})
+
+    async def edit_message(self, **kwargs):
+        self.edit_message_calls.append(kwargs)
+        raise AssertionError("deferred player picks must edit the original response")
+
+
+class _FakeComponentInteraction(_FakeInteraction):
+    def __init__(self, guild_id, user_id):
+        super().__init__(guild_id)
+        self.user = SimpleNamespace(id=user_id)
+        self.response = _FakeComponentResponse()
+        self.message = _FakeMessage(channel=self.channel)
+        self.edited_original = False
+
+    async def edit_original_response(self, *, embed=None, view=None):
+        self.edited_original = True
+        self.message.embed = embed
+        self.message.view = view
+        return self.message
+
+    async def original_response(self):
+        return self.message
+
+
+class _FakeDraftMatchService:
+    def __init__(self):
+        self.state = None
+        self.message_info = None
+
+    def _persist_match_state(self, guild_id, state):
+        state.pending_match_id = 1234
+        self.state = state
+
+    def get_last_shuffle(self, guild_id, pending_match_id=None):
+        return self.state
+
+    def set_last_shuffle(self, guild_id, state):
+        self.state = state
+
+    def set_shuffle_message_info(self, guild_id, **kwargs):
+        self.message_info = kwargs
+        if self.state:
+            self.state.shuffle_message_id = kwargs.get("message_id")
+            self.state.shuffle_channel_id = kwargs.get("channel_id")
+            self.state.shuffle_message_jump_url = kwargs.get("jump_url")
 
 
 _ROLE_CYCLE = [["1"], ["2"], ["3"], ["4"], ["5"], ["1", "2"], ["3", "4"], ["2", "5"]]
@@ -1641,6 +1712,73 @@ class TestExecuteDraft:
             rec.levelno == logging.WARNING and "unexpected" in rec.getMessage()
             for rec in caplog.records
         )
+
+
+class TestHandlePlayerPick:
+    """Regression tests for Discord component handling during active drafting."""
+
+    async def test_final_pick_defers_then_edits_original_message(self, player_repository):
+        """The last pick does slow match setup, so it must acknowledge the button first."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        captain1, captain2 = player_ids[0], player_ids[1]
+        final_pick = player_ids[9]
+
+        match_service = _FakeDraftMatchService()
+        lobby_manager = MagicMock()
+        bot = SimpleNamespace(
+            betting_service=None,
+            lobby_service=None,
+            get_cog=lambda _name: None,
+        )
+        cog = DraftCommands(
+            bot=bot,
+            player_repo=player_repository,
+            lobby_manager=lobby_manager,
+            draft_state_manager=DraftStateManager(),
+            draft_service=DraftService(),
+            match_service=match_service,
+        )
+
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.phase = DraftPhase.DRAFTING
+        state.player_pool_ids = player_ids
+        state.captain1_id = captain1
+        state.captain2_id = captain2
+        state.captain1_rating = 1700
+        state.captain2_rating = 1600
+        state.radiant_captain_id = captain1
+        state.dire_captain_id = captain2
+        state.player_draft_first_captain_id = captain1
+        state.radiant_hero_pick_order = 1
+        state.dire_hero_pick_order = 2
+        state.draft_channel_id = 555_000
+        state.draft_message_id = 9_000_001
+        state.current_pick_index = 7
+        state.radiant_player_ids = [captain1, player_ids[2], player_ids[5], player_ids[6]]
+        state.dire_player_ids = [
+            captain2,
+            player_ids[3],
+            player_ids[4],
+            player_ids[7],
+            player_ids[8],
+        ]
+
+        interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
+
+        await cog.handle_player_pick(interaction, guild_id, final_pick)
+
+        assert interaction.response.deferred is True
+        assert interaction.response.edit_message_calls == []
+        assert interaction.edited_original is True
+        assert interaction.message.view is None
+        assert state.phase == DraftPhase.COMPLETE
+        assert final_pick in state.radiant_player_ids
+        assert cog.draft_state_manager.get_state(guild_id) is None
+        assert match_service.state.pending_match_id == 1234
+        assert match_service.message_info["message_id"] == interaction.message.id
+        assert match_service.message_info["channel_id"] == interaction.channel.id
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id)
 
 
 class TestShuffleDraftRedirect:
