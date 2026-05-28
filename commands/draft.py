@@ -382,6 +382,19 @@ class DraftCommands(commands.Cog):
         finally:
             state.captain_ping_message_id = None
 
+    async def _edit_interaction_message(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed,
+        view: discord.ui.View | None,
+    ):
+        """Edit the component message whether the interaction was deferred or not."""
+        if interaction.response.is_done():
+            return await interaction.edit_original_response(embed=embed, view=view)
+        await interaction.response.edit_message(embed=embed, view=view)
+        return getattr(interaction, "message", None)
+
     # ========================================================================
     # /setcaptain command
     # ========================================================================
@@ -1575,7 +1588,7 @@ class DraftCommands(commands.Cog):
         )
 
         if is_edit:
-            await interaction.response.edit_message(embed=embed, view=view)
+            await self._edit_interaction_message(interaction, embed=embed, view=view)
         else:
             await interaction.edit_original_response(embed=embed, view=view)
 
@@ -1825,13 +1838,24 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Attempt to pick the player
-        success = state.pick_player(player_id)
-        if not success:
+        if player_id not in state.available_player_ids:
             await interaction.response.send_message(
                 "❌ Cannot pick that player. They may already be picked.",
                 ephemeral=True,
             )
+            return
+
+        if not await safe_defer(interaction):
+            return
+
+        # Attempt to pick the player
+        success = state.pick_player(player_id)
+        if not success:
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(
+                    "❌ Cannot pick that player. They may already be picked.",
+                    ephemeral=True,
+                )
             return
 
         picked_name = await self._get_member_name(interaction.guild, player_id)
@@ -1859,7 +1883,7 @@ class DraftCommands(commands.Cog):
                         ),
                         color=discord.Color.orange(),
                     )
-                    await interaction.response.edit_message(embed=embed, view=None)
+                    await self._edit_interaction_message(interaction, embed=embed, view=None)
                     return
 
                 # Get pending state for betting display (use specific pending_match_id for concurrent match support)
@@ -1947,20 +1971,23 @@ class DraftCommands(commands.Cog):
                 await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
 
                 embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
-                await interaction.response.edit_message(embed=embed, view=None)
+                draft_message = await self._edit_interaction_message(interaction, embed=embed, view=None)
 
                 # === NEW: Store message info for odds updates ===
                 try:
-                    # Get the message we just sent (interaction response)
-                    original_message = await interaction.original_response()
+                    original_message = draft_message or getattr(interaction, "message", None)
+                    if original_message is None:
+                        with contextlib.suppress(Exception):
+                            original_message = await interaction.original_response()
                     if original_message:
+                        message_channel = getattr(original_message, "channel", None)
                         await asyncio.to_thread(
                             functools.partial(
                                 self.match_service.set_shuffle_message_info,
                                 guild_id,
-                                message_id=original_message.id,
-                                channel_id=original_message.channel.id,
-                                jump_url=original_message.jump_url,
+                                message_id=getattr(original_message, "id", None) or state.draft_message_id,
+                                channel_id=getattr(message_channel, "id", None) or state.draft_channel_id,
+                                jump_url=getattr(original_message, "jump_url", None),
                                 origin_channel_id=state.draft_channel_id,
                                 pending_match_id=pending_state.pending_match_id if pending_state else None,
                             )
