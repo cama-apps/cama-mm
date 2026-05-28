@@ -49,6 +49,10 @@ class VotingCorrectionMixin:
         """Check if there are enough votes to abort (delegates to voting_service)."""
         return self.voting_service.can_abort_match(guild_id, pending_match_id)
 
+    def get_pending_match_for_abort_voter(self, guild_id: int | None, user_id: int):
+        """Find the pending match whose shuffled lobby can cast an abort vote."""
+        return self.voting_service.get_pending_match_for_abort_voter(guild_id, user_id)
+
     def add_abort_submission(
         self, guild_id: int | None, user_id: int, is_admin: bool,
         pending_match_id: int | None = None

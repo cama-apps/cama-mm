@@ -1744,17 +1744,27 @@ class TestFirstToThreeVoting:
 class TestAbortVoting:
     """Test abort submission handling for match recording."""
 
-    def test_non_admin_abort_requires_three_votes(self, admin_match_service, abort_test_players):
+    def test_non_admin_abort_requires_four_lobby_votes(self, admin_match_service, abort_test_players):
         admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is False
 
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=1001, is_admin=False)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=1002, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7001, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7002, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7003, is_admin=False)
 
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is False
-        submission = admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=1003, is_admin=False)
+        submission = admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7004, is_admin=False)
         assert submission["is_ready"] is True
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is True
+
+    def test_non_lobby_player_cannot_vote_to_abort(self, admin_match_service, abort_test_players):
+        admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
+
+        with pytest.raises(ValueError, match="shuffled lobby"):
+            admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=9999, is_admin=False)
+
+        assert admin_match_service.get_abort_submission_count(TEST_GUILD_ID) == 0
+        assert admin_match_service.can_abort_match(TEST_GUILD_ID) is False
 
     def test_admin_abort_overrides_minimum(self, admin_match_service, abort_test_players):
         admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
@@ -1766,9 +1776,10 @@ class TestAbortVoting:
 
     def test_clear_abort_state_after_abort(self, admin_match_service, abort_test_players):
         admin_match_service.shuffle_players(abort_test_players, guild_id=TEST_GUILD_ID)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=1001, is_admin=False)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=1002, is_admin=False)
-        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=1003, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7001, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7002, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7003, is_admin=False)
+        admin_match_service.add_abort_submission(TEST_GUILD_ID, user_id=7004, is_admin=False)
         assert admin_match_service.can_abort_match(TEST_GUILD_ID) is True
 
         admin_match_service.clear_last_shuffle(TEST_GUILD_ID)
