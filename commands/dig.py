@@ -811,13 +811,21 @@ class DigCommands(commands.Cog):
         if not await require_dig_channel(interaction):
             return
 
-        player = await _check_registered(interaction, self.bot)
-        if not player:
+        if not await safe_defer(interaction):
             return
 
-        await safe_defer(interaction)
-
         guild_id = interaction.guild.id
+        player = await asyncio.to_thread(
+            self.bot.player_service.get_player, interaction.user.id, guild_id
+        )
+        if not player:
+            await safe_followup(
+                interaction,
+                content="You must be registered first. Use `/player register`.",
+                ephemeral=True,
+            )
+            return
+
         if user.id == interaction.user.id:
             self_help_lines = [
                 "You tried to help yourself. The pickaxe is confused.",
