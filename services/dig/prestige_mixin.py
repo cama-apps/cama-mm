@@ -235,6 +235,10 @@ class PrestigeMixin:
                 "current_run_events": 0,
                 "total_prestige_score": total_score,
                 "mutations": mutations_json,
+                "stat_boss_awards": json.dumps({
+                    "prestige_level": prestige_level,
+                    "awards": [],
+                }),
                 "pinnacle_boss_id": None,
                 "pinnacle_phase": 0,
                 "pinnacle_hp_remaining": None,
@@ -324,4 +328,3 @@ class PrestigeMixin:
     # ------------------------------------------------------------------
     # Stats & Utility
     # ------------------------------------------------------------------
-

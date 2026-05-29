@@ -386,10 +386,30 @@ class ProgressionMixin:
         raw = tunnel.get("stat_boss_awards")
         if not raw:
             return []
+        prestige_level = int(tunnel.get("prestige_level", 0) or 0)
         try:
             decoded = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return []
+
+        if isinstance(decoded, dict):
+            try:
+                stored_prestige = int(decoded.get("prestige_level", 0) or 0)
+            except (TypeError, ValueError):
+                stored_prestige = 0
+            if stored_prestige != prestige_level:
+                return []
+            decoded = decoded.get("awards", [])
+        elif isinstance(decoded, list):
+            # Legacy ledgers were global across prestiges, which made re-cleared
+            # bosses stop paying S points after ascension. At P1+, treat the old
+            # list as stale so already-prestiged players can earn this run's
+            # boss points without waiting for another prestige.
+            if prestige_level > 0:
+                return []
+        else:
+            return []
+
         if not isinstance(decoded, list):
             return []
         awards = []
@@ -400,26 +420,41 @@ class ProgressionMixin:
                 continue
         return awards
 
-    def _award_boss_stat_point_if_first(
-        self, discord_id: int, guild_id, tunnel: dict, boundary: int
-    ) -> bool:
-        """Award one S-stat point the first time this boss is fully defeated."""
+    def _encode_stat_boss_awards(self, tunnel: dict, awards: list[int]) -> str:
+        prestige_level = int(tunnel.get("prestige_level", 0) or 0)
+        return json.dumps({
+            "prestige_level": prestige_level,
+            "awards": sorted(set(awards)),
+        })
+
+    def _boss_stat_point_award_updates(self, tunnel: dict, boundary: int) -> dict | None:
+        """Return tunnel column updates for a first-clear S point, if any."""
         awarded = self._get_stat_boss_awards(tunnel)
         if boundary in awarded:
-            return False
+            return None
         awarded.append(boundary)
         current_points = max(
             DIG_STARTING_STAT_POINTS,
             int(tunnel.get("stat_points") or DIG_STARTING_STAT_POINTS),
         )
+        return {
+            "stat_points": current_points + DIG_BOSS_STAT_POINT_BONUS,
+            "stat_boss_awards": self._encode_stat_boss_awards(tunnel, awarded),
+        }
+
+    def _award_boss_stat_point_if_first(
+        self, discord_id: int, guild_id, tunnel: dict, boundary: int
+    ) -> bool:
+        """Award one S-stat point the first time this boss is fully defeated."""
+        updates = self._boss_stat_point_award_updates(tunnel, boundary)
+        if updates is None:
+            return False
         self.dig_repo.update_tunnel(
             discord_id,
             guild_id,
-            stat_points=current_points + DIG_BOSS_STAT_POINT_BONUS,
-            stat_boss_awards=json.dumps(sorted(set(awarded))),
+            **updates,
         )
-        tunnel["stat_points"] = current_points + DIG_BOSS_STAT_POINT_BONUS
-        tunnel["stat_boss_awards"] = json.dumps(sorted(set(awarded)))
+        tunnel.update(updates)
         return True
 
     def get_miner_profile(self, discord_id: int, guild_id) -> dict:
@@ -1263,4 +1298,3 @@ class ProgressionMixin:
     def get_guild_stats(self, guild_id) -> dict:
         """Aggregate stats for the guild."""
         return self.leaderboard_service.get_guild_stats(guild_id)
-
