@@ -191,7 +191,7 @@ ASCENSION_MODIFIERS: dict[int, AscensionModifier] = {
         level=5, name="Erosion",
         penalty="Decay rate +50%",
         reward="Milestone rewards +50%",
-        effects={"decay_multiplier": 0.50, "milestone_multiplier": 0.50, "jc_layer_penalty": 0.05},
+        effects={"decay_multiplier": 0.50, "milestone_multiplier": 0.50, "jc_layer_penalty": 0.07},
         gameplay=False,
     ),
     6: AscensionModifier(

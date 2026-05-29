@@ -749,6 +749,28 @@ class TestHighPrestigeLayerPenalty:
         # The penalty must actually bite: P4 strictly below P3 by ~5% of base.
         assert jc_p3 - jc_p4 == pytest.approx(500, abs=2)
 
+    def test_p5_layer_penalty_reduces_layer_payout(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
+        monkeypatch.setattr(
+            random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
+        )
+
+        jc_p4 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30003, 4,
+        )["jc_earned"]
+        jc_p5 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30004, 5,
+        )["jc_earned"]
+
+        # P4: base 10000 x (1 + 0.18 - 0.05) = 11300.
+        # P5: x (1 + 0.18 - 0.12) = 10600 (P5 Erosion slice 0.07).
+        assert jc_p4 == pytest.approx(11300, abs=1)
+        assert jc_p5 == pytest.approx(10600, abs=1)
+        assert jc_p4 - jc_p5 == pytest.approx(700, abs=2)
+
 
 class TestDecay:
     """Tests for tunnel depth decay mechanics."""
