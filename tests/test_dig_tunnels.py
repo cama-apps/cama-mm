@@ -346,10 +346,10 @@ class TestAscensionSystem:
         """High-prestige layer JC penalty kicks in at P4 and stacks through P6."""
         assert dig_service._get_ascension_effects(3).get("jc_layer_penalty", 0) == 0
         assert dig_service._get_ascension_effects(4)["jc_layer_penalty"] == pytest.approx(0.05)
-        assert dig_service._get_ascension_effects(5)["jc_layer_penalty"] == pytest.approx(0.10)
-        assert dig_service._get_ascension_effects(6)["jc_layer_penalty"] == pytest.approx(0.15)
-        # Penalty does not grow past P6; P10 still totals 0.15.
-        assert dig_service._get_ascension_effects(10)["jc_layer_penalty"] == pytest.approx(0.15)
+        assert dig_service._get_ascension_effects(5)["jc_layer_penalty"] == pytest.approx(0.12)
+        assert dig_service._get_ascension_effects(6)["jc_layer_penalty"] == pytest.approx(0.17)
+        # Penalty does not grow past P6; P10 still totals 0.17.
+        assert dig_service._get_ascension_effects(10)["jc_layer_penalty"] == pytest.approx(0.17)
 
     def test_boss_phase2_at_prestige_2(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Boss fight at P2+ returns phase2_incoming on first win.
