@@ -56,6 +56,18 @@ def _run_reconcile_stat_points_migration(db_path: str) -> None:
         conn.close()
 
 
+def _run_reconcile_cumulative_stat_points_migration(db_path: str) -> None:
+    """Invoke the cumulative prestige S-stat reconciliation directly."""
+    manager = SchemaManager(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        manager._migration_reconcile_cumulative_prestige_boss_stat_points(cursor)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _read_tunnel_stats(db_path: str, discord_id: int, guild_id: int) -> tuple[int, str]:
     conn = sqlite3.connect(db_path)
     try:
@@ -277,6 +289,123 @@ class TestReconcilePostPrestigeBossStatPoints:
         finally:
             conn.close()
         assert "reconcile_post_prestige_boss_stat_points" in applied
+
+
+class TestReconcileCumulativePrestigeBossStatPoints:
+    """Covers _migration_reconcile_cumulative_prestige_boss_stat_points."""
+
+    def _seed(
+        self,
+        db_path: str,
+        *,
+        discord_id: int = 111,
+        guild_id: int = 222,
+        prestige_level: int = 1,
+        stat_points: int = 12,
+        stat_boss_awards=None,
+        boss_progress=None,
+    ) -> None:
+        awards = stat_boss_awards if stat_boss_awards is not None else {
+            "prestige_level": prestige_level,
+            "awards": [],
+        }
+        progress = boss_progress if boss_progress is not None else {}
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO tunnels (
+                    discord_id, guild_id, prestige_level, stat_points,
+                    stat_boss_awards, boss_progress
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    discord_id,
+                    guild_id,
+                    prestige_level,
+                    stat_points,
+                    json.dumps(awards),
+                    json.dumps(progress),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_completed_prestige_levels_imply_prior_tier_boss_points(self, repo_db_path):
+        self._seed(
+            repo_db_path,
+            prestige_level=5,
+            stat_points=16,
+            stat_boss_awards={"prestige_level": 5, "awards": [25, 50, 75, 100]},
+            boss_progress={
+                "25": "defeated",
+                "50": "defeated",
+                "75": "defeated",
+                "100": "defeated",
+                "150": "active",
+            },
+        )
+
+        _run_reconcile_cumulative_stat_points_migration(repo_db_path)
+
+        stat_points, awards_raw = _read_tunnel_stats(repo_db_path, 111, 222)
+        assert stat_points == 44  # 5 base + 5 completed prestiges * 7 + 4 current
+        assert json.loads(awards_raw) == {
+            "prestige_level": 5,
+            "awards": [25, 50, 75, 100],
+        }
+
+    def test_current_run_defeated_bosses_are_folded_into_awards(self, repo_db_path):
+        self._seed(
+            repo_db_path,
+            prestige_level=2,
+            stat_points=13,
+            stat_boss_awards={"prestige_level": 2, "awards": []},
+            boss_progress={"25": {"status": "defeated", "boss_id": "grothak"}},
+        )
+
+        _run_reconcile_cumulative_stat_points_migration(repo_db_path)
+
+        stat_points, awards_raw = _read_tunnel_stats(repo_db_path, 111, 222)
+        assert stat_points == 20  # 5 base + 2 completed prestiges * 7 + 1 current
+        assert json.loads(awards_raw) == {
+            "prestige_level": 2,
+            "awards": [25],
+        }
+
+    def test_does_not_lower_already_higher_totals(self, repo_db_path):
+        self._seed(
+            repo_db_path,
+            prestige_level=1,
+            stat_points=99,
+            stat_boss_awards={"prestige_level": 1, "awards": [25]},
+            boss_progress={"25": "defeated"},
+        )
+
+        _run_reconcile_cumulative_stat_points_migration(repo_db_path)
+
+        stat_points, awards_raw = _read_tunnel_stats(repo_db_path, 111, 222)
+        assert stat_points == 99
+        assert json.loads(awards_raw) == {
+            "prestige_level": 1,
+            "awards": [25],
+        }
+
+    def test_runs_during_normal_initialization(self, tmp_path):
+        db_path = str(tmp_path / "fresh.db")
+        SchemaManager(db_path).initialize()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            applied = {
+                row[0]
+                for row in conn.execute("SELECT name FROM schema_migrations").fetchall()
+            }
+        finally:
+            conn.close()
+        assert "reconcile_cumulative_prestige_boss_stat_points" in applied
 
 
 class TestDigGearMigration:

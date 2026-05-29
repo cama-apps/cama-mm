@@ -428,6 +428,12 @@ class SchemaManager:
                 "reconcile_post_prestige_boss_stat_points",
                 self._migration_reconcile_post_prestige_boss_stat_points,
             ),
+            # Completed prestige levels imply prior full clears. The earlier
+            # reconciliation only repaired the current run's boss_progress.
+            (
+                "reconcile_cumulative_prestige_boss_stat_points",
+                self._migration_reconcile_cumulative_prestige_boss_stat_points,
+            ),
         ]
 
     # --- Migrations ---
@@ -2602,6 +2608,93 @@ class SchemaManager:
                 """,
                 (
                     updated_stat_points,
+                    json.dumps({
+                        "prestige_level": prestige_level,
+                        "awards": updated_awards,
+                    }),
+                    discord_id,
+                    guild_id,
+                ),
+            )
+
+    def _migration_reconcile_cumulative_prestige_boss_stat_points(self, cursor) -> None:
+        """Top up S points implied by completed prestige clears.
+
+        ``prestige_level`` is the number of completed ascensions. Each completed
+        ascension required all seven tier bosses, and the current run can award
+        those seven again. The current-run award ledger intentionally only
+        tracks this run, so this migration repairs the cumulative ``stat_points``
+        total without trying to encode prior-run awards into that ledger.
+        """
+        boss_boundaries = (25, 50, 75, 100, 150, 200, 275)
+        rows = cursor.execute(
+            """
+            SELECT discord_id, guild_id, prestige_level, stat_points,
+                   stat_boss_awards, boss_progress
+            FROM tunnels
+            WHERE COALESCE(prestige_level, 0) > 0
+            """
+        ).fetchall()
+
+        for row in rows:
+            discord_id, guild_id = row[0], row[1]
+            prestige_level = int(row[2] or 0)
+            stat_points = int(row[3] or 5)
+            stat_boss_awards = row[4]
+            raw_boss_progress = row[5]
+
+            current_defeated = set()
+            try:
+                boss_progress = json.loads(raw_boss_progress or "{}")
+            except (json.JSONDecodeError, TypeError):
+                boss_progress = {}
+            if isinstance(boss_progress, dict):
+                for boundary in boss_boundaries:
+                    entry = boss_progress.get(str(boundary))
+                    status = entry.get("status") if isinstance(entry, dict) else entry
+                    if status == "defeated":
+                        current_defeated.add(boundary)
+
+            expected_points = 5 + (prestige_level * len(boss_boundaries))
+            expected_points += len(current_defeated)
+            if stat_points >= expected_points:
+                continue
+
+            awarded = set()
+            try:
+                decoded_awards = json.loads(stat_boss_awards or "[]")
+            except (json.JSONDecodeError, TypeError):
+                decoded_awards = []
+            if isinstance(decoded_awards, dict):
+                try:
+                    stored_prestige = int(decoded_awards.get("prestige_level", 0) or 0)
+                except (TypeError, ValueError):
+                    stored_prestige = 0
+                if stored_prestige == prestige_level:
+                    award_values = decoded_awards.get("awards", [])
+                else:
+                    award_values = []
+            elif isinstance(decoded_awards, list):
+                award_values = []
+            else:
+                award_values = []
+
+            if isinstance(award_values, list):
+                for value in award_values:
+                    try:
+                        awarded.add(int(value))
+                    except (TypeError, ValueError):
+                        continue
+
+            updated_awards = sorted(awarded | current_defeated)
+            cursor.execute(
+                """
+                UPDATE tunnels
+                SET stat_points = ?, stat_boss_awards = ?
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (
+                    expected_points,
                     json.dumps({
                         "prestige_level": prestige_level,
                         "awards": updated_awards,
