@@ -681,7 +681,7 @@ class TestAutoSpectatorBets:
         bet_ids = {bet["discord_id"] for bet in result["bets"]}
         assert bet_ids == {15100, 15101, 15102, 15103, 15104}
         assert bet_ids.isdisjoint(radiant_ids + dire_ids)
-        assert {bet["amount"] for bet in result["bets"]} == {10, 8, 6, 4, 2}
+        assert {bet["amount"] for bet in result["bets"]} == {5, 4, 3, 2, 1}
         assert abs(result["total_radiant"] - result["total_dire"]) <= 2
 
         for bet in result["bets"]:
@@ -694,6 +694,51 @@ class TestAutoSpectatorBets:
         placed_bets = betting_service.bet_repo.get_bets_for_pending_match(TEST_GUILD_ID, since_ts=now_ts)
         assert len(placed_bets) == 5
         assert all(bet["is_blind"] for bet in placed_bets)
+
+    def test_auto_spectator_can_manual_bet_opposite_team_on_shuffle(self, services):
+        """After auto-wager, shuffle spectator can /bet on the other team."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(15200, 15210))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repo.update_balance(pid, TEST_GUILD_ID, 50)
+
+        spectator = 15300
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="RichSpectator",
+            dotabuff_url="https://dotabuff.com/players/15300",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repo.update_balance(spectator, TEST_GUILD_ID, 5000)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        pending.bet_lock_until = int(time.time()) + 600
+
+        auto_result = betting_service.create_auto_spectator_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=pending.radiant_team_ids,
+            dire_ids=pending.dire_team_ids,
+            shuffle_timestamp=pending.shuffle_timestamp,
+            pending_match_id=pending.pending_match_id,
+        )
+        assert auto_result["created"] == 1
+        auto_team = auto_result["bets"][0]["team"]
+        other_team = "dire" if auto_team == "radiant" else "radiant"
+
+        betting_service.place_bet(TEST_GUILD_ID, spectator, other_team, 10, pending)
+
+        bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
+        assert {b["team_bet_on"] for b in bets} == {auto_team, other_team}
 
 
 class TestPendingMatchPersistence:

@@ -108,9 +108,8 @@ def test_participant_can_only_bet_on_own_team(services):
     # Can add another bet on the same team
     betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 3, pending)
 
-    # But cannot bet on the opposite team after betting
-    with pytest.raises(ValueError, match="already have bets on Dire"):
-        betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
+    # Shuffle spectator can bet on the opposite team after betting
+    betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
 
 
 class TestBettingModeValidation:
@@ -141,8 +140,8 @@ class TestBettingModeValidation:
 class TestMultipleBetsValidation:
     """Validation rules around multi-bet placement (team gates, balance, debt)."""
 
-    def test_cannot_bet_opposite_team_after_betting(self, services):
-        """Once bet on a team, cannot bet on the opposite team."""
+    def test_shuffle_spectator_can_bet_both_teams(self, services):
+        """Shuffle spectators may bet on both Radiant and Dire."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -173,12 +172,12 @@ class TestMultipleBetsValidation:
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         pending.bet_lock_until = int(time.time()) + 600
 
-        # Bet on radiant first
         betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
 
-        # Try to bet on dire - should fail
-        with pytest.raises(ValueError, match="already have bets on Radiant"):
-            betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
+        bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
+        teams = {b["team_bet_on"] for b in bets}
+        assert teams == {"radiant", "dire"}
 
     def test_multiple_bets_balance_enforced_each_bet(self, services):
         """Each bet checks balance independently, so multiple small bets can fail if balance runs out."""
@@ -359,8 +358,8 @@ class TestMultipleBetsValidation:
         with pytest.raises(ValueError, match="cannot place bets while in debt"):
             betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending, leverage=5)
 
-    def test_spectator_bet_then_opposite_team_blocked(self, services):
-        """Spectator who bet on one team cannot switch to opposite team."""
+    def test_shuffle_spectator_can_add_opposite_team_after_first_bet(self, services):
+        """Shuffle spectator can bet on the other team after wagering on one side."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -397,7 +396,93 @@ class TestMultipleBetsValidation:
         # Can add more to dire
         betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 15, pending)
 
-        # Cannot switch to radiant
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
+
+        bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
+        assert {b["team_bet_on"] for b in bets} == {"dire", "radiant"}
+
+    def test_draft_spectator_cannot_bet_both_teams(self, services):
+        """Draft matches keep one-side betting for spectators."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12300, 12310))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+                guild_id=TEST_GUILD_ID,
+            )
+
+        spectator = 12400
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="DraftSpectator",
+            dotabuff_url="https://dotabuff.com/players/12400",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repo.add_balance(spectator, TEST_GUILD_ID, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        pending.bet_lock_until = int(time.time()) + 600
+        pending.is_draft = True
+        match_service.match_repo.update_pending_match(
+            pending.pending_match_id,
+            match_service._build_pending_match_payload(pending),
+            guild_id=TEST_GUILD_ID,
+        )
+
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
+        with pytest.raises(ValueError, match="Draft matches only allow bets on one team"):
+            betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
+
+    def test_shuffle_spectator_dual_team_requires_explicit_is_draft_false(self, services):
+        """Pending payload without is_draft=False does not allow dual-team betting."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12500, 12510))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+                guild_id=TEST_GUILD_ID,
+            )
+
+        spectator = 12600
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="LegacyPayloadSpectator",
+            dotabuff_url="https://dotabuff.com/players/12600",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repo.add_balance(spectator, TEST_GUILD_ID, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        pending.bet_lock_until = int(time.time()) + 600
+        payload = match_service._build_pending_match_payload(pending)
+        payload.pop("is_draft", None)
+        match_service.match_repo.update_pending_match(
+            pending.pending_match_id,
+            payload,
+            guild_id=TEST_GUILD_ID,
+        )
+
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
         with pytest.raises(ValueError, match="already have bets on Dire"):
             betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
 

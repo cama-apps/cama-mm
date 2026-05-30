@@ -302,74 +302,90 @@ async def mybets_action(
     output_sections = []
     for pmid, bets in bets_by_match.items():
         pending_state = pending_by_id.get(pmid) if pmid else None
-
-        # Calculate totals for this match
-        total_amount = sum(b["amount"] for b in bets)
-        total_effective = sum(b["amount"] * (b.get("leverage", 1) or 1) for b in bets)
-        team_name = bets[0]["team_bet_on"].title()
-
-        # Build bet lines
-        bet_lines = []
-        for i, bet in enumerate(bets, 1):
-            leverage = bet.get("leverage", 1) or 1
-            effective = bet["amount"] * leverage
-            time_str = f"<t:{int(bet['bet_time'])}:t>"
-            is_blind = bet.get("is_blind", 0)
-            auto_tag = " (auto)" if is_blind else ""
-            if leverage > 1:
-                bet_lines.append(
-                    f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
-                    f"(effective: {effective} {JOPACOIN_EMOTE}){auto_tag} — {time_str}"
-                )
-            else:
-                bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE}{auto_tag} — {time_str}")
-
-        # Header with match ID if multiple matches
         match_label = f" (Match #{pmid})" if pmid and len(bets_by_match) > 1 else ""
-        if len(bets) == 1:
-            header = f"**Active bet on {team_name}{match_label}:**"
-        else:
-            header = f"**Active bets on {team_name}{match_label}** ({len(bets)} bets):"
 
-        # Show total if multiple bets
-        if len(bets) > 1:
-            if total_amount != total_effective:
-                bet_lines.append(
-                    f"\n**Total:** {total_amount} {JOPACOIN_EMOTE} "
-                    f"(effective: {total_effective} {JOPACOIN_EMOTE})"
-                )
-            else:
-                bet_lines.append(f"\n**Total:** {total_amount} {JOPACOIN_EMOTE}")
+        bets_by_team: dict[str, list[dict]] = {}
+        for bet in bets:
+            side = bet["team_bet_on"]
+            bets_by_team.setdefault(side, []).append(bet)
 
-        section_msg = header + "\n" + "\n".join(bet_lines)
-
-        # Add EV info for pool mode
         betting_mode = pending_state.betting_mode if pending_state else "pool"
+        pool_totals = None
         if betting_mode == "pool" and pending_state:
-            totals = await asyncio.to_thread(
+            pool_totals = await asyncio.to_thread(
                 functools.partial(cog.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
             )
-            total_pool = totals["radiant"] + totals["dire"]
-            my_team_total = totals[bets[0]["team_bet_on"]]
 
-            if my_team_total > 0 and total_pool > 0:
-                my_share = total_effective / my_team_total
-                potential_payout = int(total_pool * my_share)
-                other_team = "dire" if bets[0]["team_bet_on"] == "radiant" else "radiant"
-                odds_ratio = totals[other_team] / my_team_total if my_team_total > 0 else 0
+        team_sections = []
+        for team_key in ("radiant", "dire"):
+            team_bets = bets_by_team.get(team_key)
+            if not team_bets:
+                continue
+            team_name = team_key.title()
+            total_amount = sum(b["amount"] for b in team_bets)
+            total_effective = sum(b["amount"] * (b.get("leverage", 1) or 1) for b in team_bets)
 
-                section_msg += (
-                    f"\n\n📊 **Current Pool Odds** (may change):"
-                    f"\nTotal pool: {total_pool} {JOPACOIN_EMOTE}"
-                    f"\nYour team ({team_name}): {my_team_total} {JOPACOIN_EMOTE}"
-                    f"\nIf you win: ~{potential_payout} {JOPACOIN_EMOTE} ({odds_ratio:.2f}:1 odds)"
-                )
-        elif betting_mode == "house":
-            # House mode: 1:1 payout
-            potential_payout = total_effective * 2
-            section_msg += f"\n\nIf you win: {potential_payout} {JOPACOIN_EMOTE} (1:1 odds)"
+            bet_lines = []
+            for i, bet in enumerate(team_bets, 1):
+                leverage = bet.get("leverage", 1) or 1
+                effective = bet["amount"] * leverage
+                time_str = f"<t:{int(bet['bet_time'])}:t>"
+                is_blind = bet.get("is_blind", 0)
+                auto_tag = " (auto)" if is_blind else ""
+                if leverage > 1:
+                    bet_lines.append(
+                        f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
+                        f"(effective: {effective} {JOPACOIN_EMOTE}){auto_tag} — {time_str}"
+                    )
+                else:
+                    bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE}{auto_tag} — {time_str}")
 
-        output_sections.append(section_msg)
+            if len(team_bets) == 1:
+                header = f"**{team_name}{match_label}:**"
+            else:
+                header = f"**{team_name}{match_label}** ({len(team_bets)} bets):"
+
+            if len(team_bets) > 1:
+                if total_amount != total_effective:
+                    bet_lines.append(
+                        f"\n**Total:** {total_amount} {JOPACOIN_EMOTE} "
+                        f"(effective: {total_effective} {JOPACOIN_EMOTE})"
+                    )
+                else:
+                    bet_lines.append(f"\n**Total:** {total_amount} {JOPACOIN_EMOTE}")
+
+            section_msg = header + "\n" + "\n".join(bet_lines)
+
+            if pool_totals:
+                total_pool = pool_totals["radiant"] + pool_totals["dire"]
+                my_team_total = pool_totals[team_key]
+                if my_team_total > 0 and total_pool > 0:
+                    my_share = total_effective / my_team_total
+                    potential_payout = int(total_pool * my_share)
+                    other_team = "dire" if team_key == "radiant" else "radiant"
+                    odds_ratio = pool_totals[other_team] / my_team_total if my_team_total > 0 else 0
+                    section_msg += (
+                        f"\n📊 If {team_name} wins: ~{potential_payout} {JOPACOIN_EMOTE} "
+                        f"({odds_ratio:.2f}:1)"
+                    )
+            elif betting_mode == "house":
+                potential_payout = total_effective * 2
+                section_msg += f"\nIf {team_name} wins: {potential_payout} {JOPACOIN_EMOTE} (1:1)"
+
+            team_sections.append(section_msg)
+
+        if len(bets_by_team) > 1:
+            team_sections.append(
+                "_You have bets on both teams; only one side wins — payouts are not additive._"
+            )
+
+        if pool_totals and len(bets_by_team) > 1:
+            total_pool = pool_totals["radiant"] + pool_totals["dire"]
+            team_sections.append(
+                f"📊 **Pool total:** {total_pool} {JOPACOIN_EMOTE} (odds may change)"
+            )
+
+        output_sections.append("\n\n".join(team_sections))
 
     # Join all sections with a separator if multiple matches
     if len(output_sections) > 1:
