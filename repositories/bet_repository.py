@@ -14,6 +14,35 @@ logger = logging.getLogger("cama_bot.repositories.bet")
 from repositories.interfaces import IBetRepository
 
 
+def _allows_shuffle_spectator_dual_team(
+    payload: dict,
+    *,
+    discord_id: int,
+    radiant_ids: set[int] | None = None,
+    dire_ids: set[int] | None = None,
+) -> bool:
+    """Shuffle spectators (not on either team) may bet both Radiant and Dire."""
+    if payload.get("is_draft") is not False:
+        return False
+    if radiant_ids is None:
+        radiant_ids = set(payload.get("radiant_team_ids") or [])
+    if dire_ids is None:
+        dire_ids = set(payload.get("dire_team_ids") or [])
+    return discord_id not in radiant_ids and discord_id not in dire_ids
+
+
+def _raise_one_side_bet_required(existing_team: str, payload: dict | None) -> None:
+    """Raise when a second team bet is not allowed."""
+    side = existing_team.title()
+    if payload and payload.get("is_draft"):
+        raise ValueError(
+            f"You already have bets on {side}. Draft matches only allow bets on one team."
+        )
+    raise ValueError(
+        f"You already have bets on {side}. You can only add more bets on the same team."
+    )
+
+
 class BetRepository(BaseRepository, IBetRepository):
     """
     Handles CRUD operations against the bets table.
@@ -83,14 +112,30 @@ class BetRepository(BaseRepository, IBetRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            # Check for existing bets - allow additional bets only on the same team
-            # When pending_match_id is provided, filter by it; otherwise use since_ts
+            # Reject opposite-team bets unless shuffle spectator dual-team is allowed
+            payload: dict | None = None
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT payload FROM pending_matches
+                    WHERE pending_match_id = ? AND guild_id = ?
+                    """,
+                    (pending_match_id, normalized_guild),
+                )
+                pm_row = cursor.fetchone()
+                if pm_row:
+                    try:
+                        payload = json.loads(pm_row["payload"])
+                    except Exception:
+                        payload = None
+
             if pending_match_id is not None:
                 cursor.execute(
                     """
                     SELECT team_bet_on
                     FROM bets
                     WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    ORDER BY bet_time ASC
                     """,
                     (normalized_guild, discord_id, pending_match_id),
                 )
@@ -100,6 +145,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     SELECT team_bet_on
                     FROM bets
                     WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
+                    ORDER BY bet_time ASC
                     """,
                     (normalized_guild, discord_id, int(since_ts)),
                 )
@@ -107,10 +153,11 @@ class BetRepository(BaseRepository, IBetRepository):
             if existing_bets:
                 existing_team = existing_bets[0]["team_bet_on"]
                 if existing_team != team:
-                    raise ValueError(
-                        f"You already have bets on {existing_team.title()}. "
-                        "You can only add more bets on the same team."
+                    allow_dual = payload is not None and _allows_shuffle_spectator_dual_team(
+                        payload, discord_id=discord_id
                     )
+                    if not allow_dual:
+                        _raise_one_side_bet_required(existing_team, payload)
 
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
@@ -183,6 +230,7 @@ class BetRepository(BaseRepository, IBetRepository):
         - there is an active pending match
         - betting is still open (bet_lock_until)
         - participants may only bet on their own team
+        - shuffle spectators may bet both teams; draft/participants one team per match
         - per-match-window duplicate-bet prevention (pending_match_id)
         - sufficient balance or debt limit, then debits + inserts bet in the same transaction
 
@@ -261,13 +309,13 @@ class BetRepository(BaseRepository, IBetRepository):
             if discord_id in dire_ids and team != "dire":
                 raise ValueError("Participants on Dire can only bet on Dire.")
 
-            # Check for existing bets - allow additional bets only on the same team
-            # Filter by pending_match_id to support concurrent matches
+            # Reject opposite-team bets unless shuffle spectator dual-team is allowed
             cursor.execute(
                 """
                 SELECT team_bet_on
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
+                ORDER BY bet_time ASC
                 """,
                 (normalized_guild, discord_id, actual_pending_match_id),
             )
@@ -275,10 +323,11 @@ class BetRepository(BaseRepository, IBetRepository):
             if existing_bets:
                 existing_team = existing_bets[0]["team_bet_on"]
                 if existing_team != team:
-                    raise ValueError(
-                        f"You already have bets on {existing_team.title()}. "
-                        "You can only add more bets on the same team."
+                    allow_dual = _allows_shuffle_spectator_dual_team(
+                        payload, discord_id=discord_id, radiant_ids=radiant_ids, dire_ids=dire_ids
                     )
+                    if not allow_dual:
+                        _raise_one_side_bet_required(existing_team, payload)
 
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",

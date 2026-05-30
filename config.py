@@ -124,7 +124,7 @@ AUTO_BLIND_THRESHOLD = _parse_int("AUTO_BLIND_THRESHOLD", 50)  # Min balance to 
 AUTO_BLIND_PERCENTAGE = _parse_float("AUTO_BLIND_PERCENTAGE", 0.10)  # 10% of balance
 AUTO_SPECTATOR_BET_ENABLED = _parse_bool("AUTO_SPECTATOR_BET_ENABLED", True)
 AUTO_SPECTATOR_BET_COUNT = _parse_int("AUTO_SPECTATOR_BET_COUNT", 5)
-AUTO_SPECTATOR_BET_PERCENTAGE = _parse_float("AUTO_SPECTATOR_BET_PERCENTAGE", 0.02)  # 2% of balance
+AUTO_SPECTATOR_BET_PERCENTAGE = _parse_float("AUTO_SPECTATOR_BET_PERCENTAGE", 0.01)  # 1% of balance
 
 # Bomb Pot configuration (randomly triggered ~20% of matches)
 BOMB_POT_CHANCE = _parse_float("BOMB_POT_CHANCE", 0.20)  # 20% chance per match

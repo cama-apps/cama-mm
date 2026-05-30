@@ -76,7 +76,7 @@ def test_betting_flow_with_repos(repo_db_path):
 def test_place_bet_atomic_debits_and_allows_same_team(repo_db_path):
     """
     Ensure bet placement is atomic (debit + insert) and allows additional bets on the same team.
-    Bets on the opposite team should be rejected.
+    Without pending_match_id, bets on the opposite team are rejected.
     """
     guild_id = 42
     player_repo = PlayerRepository(repo_db_path)
@@ -137,6 +137,67 @@ def test_place_bet_atomic_debits_and_allows_same_team(repo_db_path):
 
     # Balance should not have changed after rejected bet
     assert player_repo.get_balance(pid, guild_id=guild_id) == 10
+
+
+def test_place_bet_atomic_shuffle_spectator_dual_team(repo_db_path):
+    """With shuffle pending_match payload, spectators may bet both teams."""
+    guild_id = 99
+    player_repo = PlayerRepository(repo_db_path)
+    bet_repo = BetRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=BettingService(bet_repo, player_repo),
+    )
+
+    player_ids = list(range(6000, 6010))
+    _seed_players(player_repo, player_ids, guild_id=guild_id)
+    spectator = 6100
+    player_repo.add(
+        discord_id=spectator,
+        discord_username="Spectator6100",
+        guild_id=guild_id,
+        preferred_roles=["1", "2", "3", "4", "5"],
+        initial_mmr=3000,
+        glicko_rating=1500.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    player_repo.add_balance(spectator, guild_id=guild_id, amount=100)
+
+    match_service.shuffle_players(player_ids, guild_id=guild_id)
+    state = match_service.get_last_shuffle(guild_id)
+    assert state is not None
+    pending_match_id = state.pending_match_id
+    now_ts = int(time.time())
+    state.bet_lock_until = now_ts + 600
+    match_repo.update_pending_match(
+        pending_match_id,
+        match_service._build_pending_match_payload(state),
+        guild_id=guild_id,
+    )
+
+    bet_repo.place_bet_atomic(
+        guild_id=guild_id,
+        discord_id=spectator,
+        team="radiant",
+        amount=5,
+        bet_time=now_ts,
+        since_ts=state.shuffle_timestamp,
+        pending_match_id=pending_match_id,
+    )
+    bet_repo.place_bet_atomic(
+        guild_id=guild_id,
+        discord_id=spectator,
+        team="dire",
+        amount=5,
+        bet_time=now_ts + 1,
+        since_ts=state.shuffle_timestamp,
+        pending_match_id=pending_match_id,
+    )
+    assert player_repo.get_balance(spectator, guild_id=guild_id) == 93
 
 
 def test_place_bet_against_pending_match_enforces_team_and_lock(repo_db_path):
