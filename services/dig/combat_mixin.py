@@ -13,8 +13,6 @@ import time
 
 import services.dig_service as dig_service
 from services.dig._common import (
-    DIG_BOSS_STAT_POINT_BONUS,
-    DIG_STARTING_STAT_POINTS,
     _luminosity_combat_penalty,
 )
 from services.dig_constants import (
@@ -946,16 +944,10 @@ class BossCombatMixin:
                 "cheer_data": None,  # Clear cheers
                 "last_dig_at": now,
             }
-            awarded_bosses = self._get_stat_boss_awards(tunnel)
-            stat_point_awarded = at_boss not in awarded_bosses
-            if stat_point_awarded:
-                new_awarded = sorted(set(awarded_bosses + [at_boss]))
-                current_points = max(
-                    DIG_STARTING_STAT_POINTS,
-                    int(tunnel.get("stat_points") or DIG_STARTING_STAT_POINTS),
-                )
-                tunnel_updates["stat_points"] = current_points + DIG_BOSS_STAT_POINT_BONUS
-                tunnel_updates["stat_boss_awards"] = json.dumps(new_awarded)
+            stat_award_updates = self._boss_stat_point_award_updates(tunnel, at_boss)
+            stat_point_awarded = stat_award_updates is not None
+            if stat_award_updates is not None:
+                tunnel_updates.update(stat_award_updates)
 
             # Every boss victory pays a flat depth-scaled base reward so a
             # win is never empty; a wagered win adds its taper-floored profit
@@ -2510,4 +2502,3 @@ class BossCombatMixin:
     # ------------------------------------------------------------------
     # Prestige
     # ------------------------------------------------------------------
-
