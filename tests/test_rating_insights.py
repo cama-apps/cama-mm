@@ -65,11 +65,54 @@ def test_compute_calibration_stats_with_predictions_and_drift():
 
     prediction_quality = stats["prediction_quality"]
     assert prediction_quality["count"] == 2
+    assert prediction_quality["brier"] == pytest.approx(0.29, rel=1e-6)
+    assert prediction_quality["ece"] == pytest.approx(0.5, rel=1e-6)
     assert prediction_quality["accuracy"] == pytest.approx(0.5, rel=1e-6)
     assert prediction_quality["balance_rate"] == pytest.approx(0.0, rel=1e-6)
     assert prediction_quality["upset_rate"] == pytest.approx(0.5, rel=1e-6)
+    assert stats["glicko_prediction_quality"] == prediction_quality
+    assert stats["openskill_prediction_quality"]["count"] == 0
 
     rating_movement = stats["rating_movement"]
     assert rating_movement["count"] == 2
     assert rating_movement["avg_delta"] == pytest.approx(15.0, rel=1e-6)
     assert rating_movement["median_delta"] == pytest.approx(15.0, rel=1e-6)
+
+
+def test_compute_calibration_stats_openskill_prediction_quality_from_history():
+    players = []
+    rating_history_entries = []
+    for match_id in range(2):
+        team1_won = match_id == 0
+        for i in range(5):
+            rating_history_entries.append({
+                "match_id": match_id,
+                "team_number": 1,
+                "won": team1_won,
+                "rating_before": 1000.0,
+                "rating": 1010.0,
+                "os_mu_before": 60.0,
+                "os_sigma_before": 4.0,
+            })
+            rating_history_entries.append({
+                "match_id": match_id,
+                "team_number": 2,
+                "won": not team1_won,
+                "rating_before": 1000.0,
+                "rating": 990.0,
+                "os_mu_before": 35.0,
+                "os_sigma_before": 4.0,
+            })
+
+    stats = compute_calibration_stats(
+        players=players,
+        match_count=2,
+        match_predictions=[],
+        rating_history_entries=rating_history_entries,
+    )
+
+    os_quality = stats["openskill_prediction_quality"]
+    assert os_quality["count"] == 2
+    assert os_quality["brier"] is not None
+    assert os_quality["ece"] is not None
+    assert os_quality["accuracy"] == pytest.approx(0.5, rel=1e-6)

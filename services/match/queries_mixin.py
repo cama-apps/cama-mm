@@ -195,9 +195,9 @@ class QueriesMixin:
         """Get detailed rating history for a player including predictions."""
         return self.match_repo.get_player_rating_history_detailed(discord_id, guild_id, limit)
 
-    def get_os_ratings_for_match(self, match_id: int) -> dict:
+    def get_os_ratings_for_match(self, match_id: int, guild_id: int | None = None) -> dict:
         """Get OpenSkill ratings for teams in a match."""
-        return self.match_repo.get_os_ratings_for_match(match_id)
+        return self.match_repo.get_os_ratings_for_match(match_id, guild_id)
 
     def get_player_lobby_type_stats(self, discord_id: int, guild_id: int | None) -> list[dict]:
         """Get lobby type statistics for a specific player."""

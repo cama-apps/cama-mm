@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from openskill_rating_system import CamaOpenSkillSystem
+
 if TYPE_CHECKING:
     from repositories.match_repository import MatchRepository
     from repositories.player_repository import PlayerRepository
@@ -51,6 +53,7 @@ class RatingComparisonService:
         self.match_repo = match_repo
         self.player_repo = player_repo
         self.match_service = match_service
+        self.openskill_system = CamaOpenSkillSystem()
 
     def analyze_rating_systems(self, guild_id: int | None = None) -> ComparisonResult | None:
         """
@@ -80,17 +83,26 @@ class RatingComparisonService:
             if glicko_radiant_prob is None:
                 continue
 
-            # OpenSkill prediction (recalculate from current ratings)
             team1_ids = match.get("team1_players", [])
             team2_ids = match.get("team2_players", [])
 
             if not team1_ids or not team2_ids:
                 continue
 
-            os_prediction = self.match_service.get_openskill_predictions_for_match(
-                team1_ids, team2_ids
+            # OpenSkill prediction from pre-match rating_history snapshots.
+            # Do not use current player ratings here, or old matches leak future
+            # information and become incomparable with stored Glicko snapshots.
+            os_ratings = self.match_repo.get_os_ratings_for_match(match_id, guild_id)
+            team1_os_ratings = os_ratings.get("team1", [])
+            team2_os_ratings = os_ratings.get("team2", [])
+            if (
+                len(team1_os_ratings) != len(team1_ids)
+                or len(team2_os_ratings) != len(team2_ids)
+            ):
+                continue
+            os_radiant_prob = self.openskill_system.os_predict_win_probability(
+                team1_os_ratings, team2_os_ratings
             )
-            os_radiant_prob = os_prediction.get("team1_win_prob", 0.5)
 
             match_data.append({
                 "match_id": match_id,

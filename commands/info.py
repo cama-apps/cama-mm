@@ -1201,8 +1201,9 @@ class InfoCommands(commands.Cog):
                 f"\nAvg: RD {avg_rd_text} ({avg_certainty_text} certain)"
             )
 
-            prediction_quality = stats["prediction_quality"]
-            if prediction_quality["count"]:
+            def _format_prediction_quality(prediction_quality: dict) -> str:
+                if not prediction_quality["count"]:
+                    return "No prediction data yet."
                 upset_rate = (
                     f"{prediction_quality['upset_rate']:.0%}"
                     if prediction_quality["upset_rate"] is not None
@@ -1211,17 +1212,25 @@ class InfoCommands(commands.Cog):
                 # Brier score: 0 = perfect, 0.25 = coin flip, lower is better
                 brier = prediction_quality["brier"]
                 brier_quality = "excellent" if brier < 0.15 else "good" if brier < 0.20 else "fair" if brier < 0.25 else "poor"
+                ece = prediction_quality.get("ece")
+                ece_text = f"{ece:.3f}" if ece is not None else "n/a"
                 balance_rate = prediction_quality["balance_rate"]
                 balance_desc = "very balanced" if balance_rate >= 0.8 else "balanced" if balance_rate >= 0.5 else "unbalanced"
-                prediction_text = (
+                return (
                     f"**{prediction_quality['count']}** matches analyzed\n"
                     f"Brier Score: **{brier:.3f}** ({brier_quality})\n"
+                    f"ECE: **{ece_text}**\n"
                     f"Pick Accuracy: **{prediction_quality['accuracy']:.0%}** of favorites won\n"
                     f"Balance Rate: **{balance_rate:.0%}** were close games ({balance_desc})\n"
                     f"Upset Rate: **{upset_rate}** underdogs won"
                 )
-            else:
-                prediction_text = "No prediction data yet."
+
+            glicko_prediction_text = _format_prediction_quality(
+                stats["glicko_prediction_quality"]
+            )
+            openskill_prediction_text = _format_prediction_quality(
+                stats["openskill_prediction_quality"]
+            )
 
             rating_movement = stats["rating_movement"]
             if rating_movement["count"]:
@@ -1312,7 +1321,8 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="Rating Distribution", value=rating_distribution, inline=False)
             embed.add_field(name="📈 Calibration Progress", value=calibration_progress, inline=False)
             embed.add_field(name="⚔️ Side Balance", value=side_text, inline=True)
-            embed.add_field(name="🎯 Prediction Quality", value=prediction_text, inline=True)
+            embed.add_field(name="🎯 Glicko Prediction Quality", value=glicko_prediction_text, inline=True)
+            embed.add_field(name="🎯 OpenSkill Prediction Quality", value=openskill_prediction_text, inline=True)
             embed.add_field(name="📊 Rating Movement", value=movement_text, inline=False)
             embed.add_field(name="🔄 Rating Drift (Seed vs Current)", value=drift_text, inline=False)
             embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
@@ -1492,7 +1502,7 @@ class InfoCommands(commands.Cog):
                         inline=False,
                     )
 
-            embed.set_footer(text="RD = Rating Deviation | Drift = Current - Seed | Brier: 0=perfect, 0.25=coin flip")
+            embed.set_footer(text="RD = Rating Deviation | Drift = Current - Seed | Brier: 0=perfect, 0.25=coin flip | ECE: lower=better calibrated")
 
             # Generate rating distribution chart
             rating_values = [p.glicko_rating for p in players if p.glicko_rating is not None]
@@ -1609,7 +1619,7 @@ class InfoCommands(commands.Cog):
 
             # Get OpenSkill expected outcome for this match
             os_expected = await get_os_win_probability(
-                self.match_service, os_system, match_id, h.get("team_number")
+                self.match_service, os_system, match_id, h.get("team_number"), guild_id
             )
 
             # Build compact prediction string: G=Glicko, O=OpenSkill
@@ -1636,7 +1646,7 @@ class InfoCommands(commands.Cog):
         percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
 
         profile_lines = [
-            f"**Rating:** {rating_display} ({certainty:.0f}% certain)",
+            f"**Rating:** {rating_display} | **RD:** {rd:.0f} ({certainty:.0f}% certain)",
             f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}",
         ]
         if player.glicko_volatility:

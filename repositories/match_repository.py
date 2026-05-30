@@ -1166,7 +1166,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_os_ratings_for_match(self, match_id: int) -> dict:
+    def get_os_ratings_for_match(self, match_id: int, guild_id: int | None = None) -> dict:
         """
         Get OpenSkill ratings (before match) for all players in a match, grouped by team.
 
@@ -1174,18 +1174,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
             Dict with 'team1' and 'team2' keys, each containing list of (os_mu, os_sigma) tuples.
             Returns empty lists if no OpenSkill data available.
         """
+        normalized_guild = self.normalize_guild_id(guild_id) if guild_id is not None else None
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
+            query = """
                 SELECT discord_id, team_number, os_mu_before, os_sigma_before
                 FROM rating_history
                 WHERE match_id = ?
                   AND os_mu_before IS NOT NULL
                   AND os_sigma_before IS NOT NULL
-            """,
-                (match_id,),
-            )
+            """
+            params: list[int] = [match_id]
+            if normalized_guild is not None:
+                query += " AND guild_id = ?"
+                params.append(normalized_guild)
+            cursor.execute(query, params)
             rows = cursor.fetchall()
 
             team1_ratings: list[tuple[float, float]] = []
@@ -1228,6 +1231,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "team_number": row["team_number"],
                     "won": row["won"],
                     "match_id": row["match_id"],
+                    "os_mu_before": row["os_mu_before"] if "os_mu_before" in row.keys() else None,
+                    "os_sigma_before": row["os_sigma_before"] if "os_sigma_before" in row.keys() else None,
                     "timestamp": row["timestamp"],
                 }
                 for row in rows
@@ -2787,7 +2792,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.rowcount
 
-    def get_os_baseline_for_match(self, match_id: int) -> dict[int, tuple[float, float]]:
+    def get_os_baseline_for_match(
+        self, match_id: int, guild_id: int | None = None
+    ) -> dict[int, tuple[float, float]]:
         """
         Get os_mu_before/os_sigma_before from rating_history for Phase 2 recalculation.
 
@@ -2802,18 +2809,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
             Dict mapping discord_id -> (os_mu_before, os_sigma_before)
             Empty dict if no baseline data exists
         """
+        normalized_guild = self.normalize_guild_id(guild_id) if guild_id is not None else None
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
+            query = """
                 SELECT discord_id, os_mu_before, os_sigma_before
                 FROM rating_history
                 WHERE match_id = ?
                   AND os_mu_before IS NOT NULL
                   AND os_sigma_before IS NOT NULL
-                """,
-                (match_id,),
-            )
+            """
+            params: list[int] = [match_id]
+            if normalized_guild is not None:
+                query += " AND guild_id = ?"
+                params.append(normalized_guild)
+            cursor.execute(query, params)
             rows = cursor.fetchall()
             return {
                 row["discord_id"]: (row["os_mu_before"], row["os_sigma_before"])

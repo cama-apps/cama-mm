@@ -223,3 +223,46 @@ def test_backfill_no_matches_reports_empty(repo_db_path):
     assert summary["matches_processed"] == 0
     assert summary["players_updated"] == 0
     assert summary["errors"] == ["No matches found"]
+
+
+def test_openskill_prediction_uses_requested_guild_and_shared_probability_model(repo_db_path):
+    """Prediction lookup is guild-scoped and uses the same model as shuffle preview."""
+    service, player_repo, _match_repo = _build_service(repo_db_path)
+    team1 = [3100, 3101, 3102, 3103, 3104]
+    team2 = [3200, 3201, 3202, 3203, 3204]
+    all_ids = team1 + team2
+
+    target_guild = TEST_GUILD_ID
+    other_guild = 0
+    for pid in all_ids:
+        for guild in (target_guild, other_guild):
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"OsPlayer{pid}-{guild}",
+                guild_id=guild,
+                preferred_roles=["1", "2", "3", "4", "5"],
+                initial_mmr=SEED_MMR,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+    target_updates = [(pid, 60.0, 4.0) for pid in team1] + [(pid, 35.0, 4.0) for pid in team2]
+    other_updates = [(pid, 35.0, 4.0) for pid in team1] + [(pid, 60.0, 4.0) for pid in team2]
+    player_repo.update_openskill_ratings_bulk(target_updates, target_guild)
+    player_repo.update_openskill_ratings_bulk(other_updates, other_guild)
+
+    target_prediction = service.get_openskill_predictions_for_match(
+        team1, team2, guild_id=target_guild
+    )
+    other_prediction = service.get_openskill_predictions_for_match(
+        team1, team2, guild_id=other_guild
+    )
+
+    expected = service.openskill_system.os_predict_win_probability(
+        [(60.0, 4.0)] * 5,
+        [(35.0, 4.0)] * 5,
+    )
+    assert target_prediction["team1_win_prob"] == expected
+    assert target_prediction["team1_win_prob"] > 0.5
+    assert other_prediction["team1_win_prob"] < 0.5

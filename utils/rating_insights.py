@@ -104,7 +104,10 @@ def compute_calibration_stats(
     drift_values = [drift for _, drift in drifts]
     drifts_sorted = sorted(drifts, key=lambda x: x[1], reverse=True)
 
-    prediction_quality = _compute_prediction_quality(match_predictions or [])
+    glicko_prediction_quality = _compute_prediction_quality(match_predictions or [])
+    openskill_prediction_quality = _compute_openskill_prediction_quality(
+        rating_history_entries or []
+    )
     rating_movement = _compute_rating_movement(rating_history_entries or [])
     side_balance = _compute_side_balance(match_predictions or [])
     rating_stability = _compute_rating_stability(rating_history_entries or [])
@@ -133,7 +136,9 @@ def compute_calibration_stats(
         "median_drift": _median(drift_values),
         "biggest_gainers": drifts_sorted[:3],
         "biggest_drops": list(reversed(drifts_sorted[-3:])),
-        "prediction_quality": prediction_quality,
+        "prediction_quality": glicko_prediction_quality,
+        "glicko_prediction_quality": glicko_prediction_quality,
+        "openskill_prediction_quality": openskill_prediction_quality,
         "rating_movement": rating_movement,
         "side_balance": side_balance,
         "rating_stability": rating_stability,
@@ -144,6 +149,7 @@ def compute_calibration_stats(
 
 
 def _compute_prediction_quality(match_predictions: list[dict]) -> dict:
+    prob_actual_pairs = []
     brier_scores = []
     correct = 0
     balanced = 0
@@ -156,6 +162,7 @@ def _compute_prediction_quality(match_predictions: list[dict]) -> dict:
         if prob is None or winning_team not in (1, 2):
             continue
         actual = 1 if winning_team == 1 else 0
+        prob_actual_pairs.append((prob, actual))
         brier_scores.append((prob - actual) ** 2)
         predicted = 1 if prob >= 0.5 else 0
         if predicted == actual:
@@ -171,10 +178,89 @@ def _compute_prediction_quality(match_predictions: list[dict]) -> dict:
     return {
         "count": count,
         "brier": _mean(brier_scores),
+        "ece": _compute_ece(prob_actual_pairs),
         "accuracy": (correct / count) if count else None,
         "balance_rate": (balanced / count) if count else None,
         "upset_rate": (upset / upset_eligible) if upset_eligible else None,
     }
+
+
+def _empty_prediction_quality() -> dict:
+    return {
+        "count": 0,
+        "brier": None,
+        "ece": None,
+        "accuracy": None,
+        "balance_rate": None,
+        "upset_rate": None,
+    }
+
+
+def _compute_ece(prob_actual_pairs: list[tuple[float, int]], max_bins: int = 5) -> float | None:
+    """Compute adaptive-binned expected calibration error for binary probabilities."""
+    if not prob_actual_pairs:
+        return None
+
+    sorted_pairs = sorted(prob_actual_pairs, key=lambda item: item[0])
+    n = len(sorted_pairs)
+    bins = min(max_bins, n)
+    ece = 0.0
+    for i in range(bins):
+        start = (i * n) // bins
+        end = ((i + 1) * n) // bins
+        bucket = sorted_pairs[start:end]
+        if not bucket:
+            continue
+        avg_prob = statistics.mean(prob for prob, _actual in bucket)
+        actual_rate = statistics.mean(actual for _prob, actual in bucket)
+        ece += (len(bucket) / n) * abs(avg_prob - actual_rate)
+    return ece
+
+
+def _compute_openskill_prediction_quality(rating_history_entries: list[dict]) -> dict:
+    if not rating_history_entries:
+        return _empty_prediction_quality()
+
+    os_system = CamaOpenSkillSystem()
+    matches: dict[int, dict[int, list[dict]]] = {}
+    for entry in rating_history_entries:
+        match_id = entry.get("match_id")
+        team_number = entry.get("team_number")
+        if match_id is None or team_number not in (1, 2):
+            continue
+        matches.setdefault(match_id, {1: [], 2: []})[team_number].append(entry)
+
+    predictions = []
+    for teams in matches.values():
+        team1_entries = teams.get(1, [])
+        team2_entries = teams.get(2, [])
+        if len(team1_entries) != 5 or len(team2_entries) != 5:
+            continue
+
+        team1_ratings = [
+            (entry.get("os_mu_before"), entry.get("os_sigma_before"))
+            for entry in team1_entries
+        ]
+        team2_ratings = [
+            (entry.get("os_mu_before"), entry.get("os_sigma_before"))
+            for entry in team2_entries
+        ]
+        if any(mu is None or sigma is None for mu, sigma in team1_ratings + team2_ratings):
+            continue
+
+        team1_won = bool(team1_entries[0].get("won"))
+        team2_won = bool(team2_entries[0].get("won"))
+        if team1_won == team2_won:
+            continue
+
+        predictions.append({
+            "expected_radiant_win_prob": os_system.os_predict_win_probability(
+                team1_ratings, team2_ratings
+            ),
+            "winning_team": 1 if team1_won else 2,
+        })
+
+    return _compute_prediction_quality(predictions)
 
 
 def _compute_rating_movement(rating_history_entries: list[dict]) -> dict:
@@ -534,6 +620,7 @@ async def get_os_win_probability(
     os_system: CamaOpenSkillSystem,
     match_id: int | None,
     team_number: int | None,
+    guild_id: int | None = None,
 ) -> float | None:
     """Fetch the OpenSkill expected win probability for a player's match side.
 
@@ -543,7 +630,7 @@ async def get_os_win_probability(
     """
     if not match_id or match_source is None:
         return None
-    os_ratings = await asyncio.to_thread(match_source.get_os_ratings_for_match, match_id)
+    os_ratings = await asyncio.to_thread(match_source.get_os_ratings_for_match, match_id, guild_id)
     if not (os_ratings["team1"] and os_ratings["team2"]):
         return None
     if team_number == 1:

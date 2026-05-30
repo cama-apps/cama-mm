@@ -608,7 +608,7 @@ class ProfileCommands(commands.Cog):
 
                 # Get OpenSkill expected outcome
                 os_prob = await get_os_win_probability(
-                    match_repo, os_system, match_id, h.get("team_number")
+                    match_repo, os_system, match_id, h.get("team_number"), guild_id
                 )
 
                 if won:

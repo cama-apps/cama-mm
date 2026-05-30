@@ -199,6 +199,7 @@ class TestIndividualCalibrationProfile:
         # The Rating and Tier lines must each appear exactly once.
         assert profile_field.value.count("**Rating:**") == 1
         assert profile_field.value.count("**Tier:**") == 1
+        assert "**RD:** 350" in profile_field.value
 
 
 if __name__ == "__main__":

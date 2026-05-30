@@ -90,7 +90,7 @@ class RatingUpdateMixin:
         # Phase 1, allowing us to recalculate with fantasy weights from the same
         # starting point.
         discord_ids = [p["discord_id"] for p in participants]
-        os_baseline = self.match_repo.get_os_baseline_for_match(match_id)
+        os_baseline = self.match_repo.get_os_baseline_for_match(match_id, guild_id)
 
         if os_baseline:
             # Use Phase 1 baseline (os_mu_before/os_sigma_before from rating_history)
@@ -449,37 +449,32 @@ class RatingUpdateMixin:
         all_ids = team1_ids + team2_ids
         os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids, guild_id)
 
-        # Build ratings for each team
+        # Build ratings for each team. Use the same OpenSkill probability model as
+        # shuffle-time previews instead of a separate ordinal logistic approximation.
         team1_ratings = []
         team1_ordinals = []
         for pid in team1_ids:
             mu, sigma = os_ratings.get(pid, (None, None))
-            rating = self.openskill_system.create_rating(mu, sigma)
-            team1_ratings.append(rating)
             actual_mu = mu if mu is not None else self.openskill_system.DEFAULT_MU
             actual_sigma = sigma if sigma is not None else self.openskill_system.DEFAULT_SIGMA
+            team1_ratings.append((actual_mu, actual_sigma))
             team1_ordinals.append(self.openskill_system.ordinal(actual_mu, actual_sigma))
 
         team2_ratings = []
         team2_ordinals = []
         for pid in team2_ids:
             mu, sigma = os_ratings.get(pid, (None, None))
-            rating = self.openskill_system.create_rating(mu, sigma)
-            team2_ratings.append(rating)
             actual_mu = mu if mu is not None else self.openskill_system.DEFAULT_MU
             actual_sigma = sigma if sigma is not None else self.openskill_system.DEFAULT_SIGMA
+            team2_ratings.append((actual_mu, actual_sigma))
             team2_ordinals.append(self.openskill_system.ordinal(actual_mu, actual_sigma))
 
-        # Calculate win probability using ordinals
-        # Higher ordinal = higher skill
         team1_avg_ordinal = sum(team1_ordinals) / len(team1_ordinals) if team1_ordinals else 0
         team2_avg_ordinal = sum(team2_ordinals) / len(team2_ordinals) if team2_ordinals else 0
 
-        # Use a logistic function to convert ordinal difference to win probability
-        # Similar to Elo expected score calculation
-        ordinal_diff = team1_avg_ordinal - team2_avg_ordinal
-        # Scale factor: typical ordinal range is roughly -10 to +15, so 10 point diff ≈ 76% win
-        team1_win_prob = 1.0 / (1.0 + 10 ** (-ordinal_diff / 10.0))
+        team1_win_prob = self.openskill_system.os_predict_win_probability(
+            team1_ratings, team2_ratings
+        )
 
         return {
             "team1_win_prob": team1_win_prob,
