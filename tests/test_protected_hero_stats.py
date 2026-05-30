@@ -64,7 +64,8 @@ def test_protected_hero_purchase_debits_atomically_and_blocks_duplicates(
     player_repository,
     match_repository,
 ):
-    _register(player_repository, 1, balance=300)
+    starting_balance = SHOP_PROTECT_HERO_COST + 100
+    _register(player_repository, 1, balance=starting_balance)
     pending_match_id = match_repository.save_pending_match(
         TEST_GUILD_ID,
         {"radiant_team_ids": [1], "dire_team_ids": [2]},
@@ -80,8 +81,8 @@ def test_protected_hero_purchase_debits_atomically_and_blocks_duplicates(
     )
 
     assert result["success"] is True
-    assert result["balance_after"] == 300 - SHOP_PROTECT_HERO_COST
-    assert player_repository.get_balance(1, TEST_GUILD_ID) == 300 - SHOP_PROTECT_HERO_COST
+    assert result["balance_after"] == starting_balance - SHOP_PROTECT_HERO_COST
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == starting_balance - SHOP_PROTECT_HERO_COST
 
     duplicate = match_repository.purchase_protected_hero_atomic(
         guild_id=TEST_GUILD_ID,
@@ -95,7 +96,7 @@ def test_protected_hero_purchase_debits_atomically_and_blocks_duplicates(
     assert duplicate["success"] is False
     assert duplicate["reason"] == "already_protected"
     assert duplicate["hero_id"] == 1
-    assert player_repository.get_balance(1, TEST_GUILD_ID) == 300 - SHOP_PROTECT_HERO_COST
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == starting_balance - SHOP_PROTECT_HERO_COST
 
 
 def test_protected_hero_stats_count_confirmed_enriched_games(
@@ -145,6 +146,7 @@ def test_protected_hero_stats_track_not_played_and_unenriched_games(
     team1, team2 = [1, 2, 3, 4, 5], [6, 7, 8, 9, 10]
     for discord_id in team1 + team2:
         _register(player_repository, discord_id)
+    player_repository.update_balance(1, TEST_GUILD_ID, 2 * SHOP_PROTECT_HERO_COST)
 
     mismatch_pending_id = match_repository.save_pending_match(
         TEST_GUILD_ID,
