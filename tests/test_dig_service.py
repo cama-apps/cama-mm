@@ -432,6 +432,91 @@ class TestMinerProfile:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["stat_points"] == 6
 
+    def test_prestige_resets_boss_stat_awards_for_new_run(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(
+            dig_service,
+            "_scale_boss_stats",
+            lambda stats, *args, **kwargs: {
+                **stats,
+                "boss_hp": 1,
+                "boss_hit": 0.0,
+                "boss_dmg": 1,
+            },
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        first_clear = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert first_clear["success"]
+        assert first_clear["stat_point_awarded"] is True
+        assert dig_repo.get_tunnel(10001, guild_id)["stat_points"] == 6
+
+        boss_progress = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        boss_progress[str(PINNACLE_DEPTH)] = "defeated"
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=PINNACLE_DEPTH,
+            boss_progress=json.dumps(boss_progress),
+        )
+        prestige = dig_service.prestige(10001, guild_id, "advance_boost")
+        assert prestige["success"]
+        profile = dig_service.get_miner_profile(10001, guild_id)
+        assert profile["awarded_bosses"] == []
+
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+        second_run_clear = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert second_run_clear["success"]
+        assert second_run_clear["stat_point_awarded"] is True
+        assert dig_repo.get_tunnel(10001, guild_id)["stat_points"] == 7
+
+    def test_legacy_global_boss_awards_do_not_block_prestiged_run(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(
+            dig_service,
+            "_scale_boss_stats",
+            lambda stats, *args, **kwargs: {
+                **stats,
+                "boss_hp": 1,
+                "boss_hit": 0.0,
+                "boss_dmg": 1,
+            },
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            prestige_level=1,
+            stat_points=6,
+            stat_boss_awards=json.dumps([25]),
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert result["success"]
+        assert result["stat_point_awarded"] is True
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["stat_points"] == 7
+        assert dig_service.get_miner_profile(10001, guild_id)["awarded_bosses"] == [25]
+
 
 class TestCaveIn:
     """Tests for cave-in mechanics."""
