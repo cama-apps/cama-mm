@@ -26,32 +26,43 @@ class NeonEventRepository(BaseRepository):
                 cursor.execute(
                     "SELECT discord_id, guild_id, event_type FROM neon_events WHERE one_time = 1"
                 )
-                return [(row["discord_id"], row["guild_id"], row["event_type"]) for row in cursor.fetchall()]
+                return [
+                    (
+                        row["discord_id"],
+                        self.normalize_guild_id(row["guild_id"]),
+                        row["event_type"],
+                    )
+                    for row in cursor.fetchall()
+                ]
         except Exception as e:
             logger.error(f"Failed to load one-time events: {e}", exc_info=True)
             return []
 
-    def check_one_time_event(self, discord_id: int, guild_id: int, event_type: str) -> bool:
+    def check_one_time_event(self, discord_id: int, guild_id: int | None, event_type: str) -> bool:
         """
         Check if a one-time event exists in the database.
 
         Returns:
             True if the event has already been triggered.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         try:
             with self.connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT 1 FROM neon_events WHERE discord_id = ? AND guild_id = ? "
+                    "SELECT 1 FROM neon_events WHERE discord_id = ? "
+                    "AND (guild_id = ? OR (guild_id IS NULL AND ? = 0)) "
                     "AND event_type = ? AND one_time = 1 LIMIT 1",
-                    (discord_id, guild_id, event_type),
+                    (discord_id, guild_id, guild_id, event_type),
                 )
                 return cursor.fetchone() is not None
         except Exception as e:
             logger.error(f"Failed to check one-time event: {e}", exc_info=True)
             return False
 
-    def persist_one_time_event(self, discord_id: int, guild_id: int, event_type: str, layer: int) -> None:
+    def persist_one_time_event(
+        self, discord_id: int, guild_id: int | None, event_type: str, layer: int
+    ) -> None:
         """
         Persist a one-time event to the database.
 
@@ -59,6 +70,7 @@ class NeonEventRepository(BaseRepository):
         exception re-raised, since silently dropping the row would let a
         one-time event re-trigger.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         try:
             with self.connection() as conn:
                 cursor = conn.cursor()

@@ -688,3 +688,22 @@ class TestPairingsRepository:
         counts = pairings_repo.get_pairing_counts(1, TEST_GUILD_ID, min_games=1)
         assert counts["unique_teammates"] == 4  # Players 2, 3, 4, 5
         assert counts["unique_opponents"] == 5  # Players 6, 7, 8, 9, 10
+
+    def test_guild_id_none_normalized_to_zero(self, pairings_repo, player_repo):
+        """None guild_id must resolve to the same rows as guild_id=0 (DM/tests)."""
+        team1 = [1, 2, 3, 4, 5]
+        team2 = [6, 7, 8, 9, 10]
+        register_players(player_repo, team1 + team2)
+
+        pairings_repo.update_pairings_for_match(
+            match_id=1,
+            guild_id=None,
+            team1_ids=team1,
+            team2_ids=team2,
+            winning_team=1,
+        )
+
+        via_none = pairings_repo.get_head_to_head(1, 2, None)
+        via_zero = pairings_repo.get_head_to_head(1, 2, 0)
+        assert via_none is not None
+        assert via_zero == via_none

@@ -412,7 +412,7 @@ class TestCommandLayerConstraints:
         findings = []
         for path in paths:
             try:
-                tree = ast.parse(path.read_text(), filename=str(path))
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             except SyntaxError:
                 continue
             scanner = _AsyncCallScanner(path.relative_to(root), reason_for_call=reason_for_call)
@@ -478,7 +478,7 @@ class TestServiceAsyncConstraints:
         findings = []
         for path in get_all_python_files(services_dir):
             try:
-                tree = ast.parse(path.read_text(), filename=str(path))
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             except SyntaxError:
                 continue
             scanner = _AsyncCallScanner(path.relative_to(root), reason_for_call=reason_for_call)

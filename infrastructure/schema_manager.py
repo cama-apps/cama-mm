@@ -434,6 +434,11 @@ class SchemaManager:
                 "reconcile_cumulative_prestige_boss_stat_points",
                 self._migration_reconcile_cumulative_prestige_boss_stat_points,
             ),
+            # Coalesce legacy NULL guild_id rows (pre-normalize_guild_id writes).
+            (
+                "normalize_null_guild_id_pairings_and_neon",
+                self._migration_normalize_null_guild_id_pairings_and_neon,
+            ),
         ]
 
     # --- Migrations ---
@@ -1783,6 +1788,11 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_neon_events_user_event "
             "ON neon_events(discord_id, guild_id, event_type)"
         )
+
+    def _migration_normalize_null_guild_id_pairings_and_neon(self, cursor) -> None:
+        """Set NULL guild_id to 0 on pairings and neon one-time events."""
+        cursor.execute("UPDATE player_pairings SET guild_id = 0 WHERE guild_id IS NULL")
+        cursor.execute("UPDATE neon_events SET guild_id = 0 WHERE guild_id IS NULL")
 
     def _migration_restructure_pending_matches_for_concurrent(self, cursor) -> None:
         """
