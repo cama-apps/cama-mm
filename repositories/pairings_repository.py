@@ -20,7 +20,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
     def update_pairings_for_match(
         self,
         match_id: int,
-        guild_id: int,
+        guild_id: int | None,
         team1_ids: list[int],
         team2_ids: list[int],
         winning_team: int,
@@ -35,6 +35,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             team2_ids: List of discord IDs for team 2
             winning_team: 1 or 2 indicating which team won
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -91,8 +92,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             (guild_id, p1, p2, 1 if player1_won else 0, match_id, 1 if player1_won else 0, match_id),
         )
 
-    def get_pairings_for_player(self, discord_id: int, guild_id: int) -> list[dict]:
+    def get_pairings_for_player(self, discord_id: int, guild_id: int | None) -> list[dict]:
         """Get all pairwise stats involving a player in a guild."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -109,8 +111,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_best_teammates(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_best_teammates(self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on same team (win rate > 50%)."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -132,9 +135,10 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_worst_teammates(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get players with lowest win rate when on same team (win rate < 50%)."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -155,8 +159,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_best_matchups(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_best_matchups(self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on opposing teams (win rate > 50%)."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -200,8 +205,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_worst_matchups(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_worst_matchups(self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with lowest win rate when on opposing teams (win rate < 50%)."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -246,9 +252,10 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_most_played_with(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get teammates sorted by most games played together."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -269,9 +276,10 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_most_played_against(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get opponents sorted by most games played against."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -300,9 +308,10 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_evenly_matched_teammates(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get teammates with exactly 50% win rate."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -324,9 +333,10 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_evenly_matched_opponents(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get opponents with exactly 50% win rate."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -370,8 +380,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_pairing_counts(self, discord_id: int, guild_id: int, min_games: int = 1) -> dict:
+    def get_pairing_counts(self, discord_id: int, guild_id: int | None, min_games: int = 1) -> dict:
         """Get total counts of unique teammates and opponents."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -390,8 +401,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 "unique_opponents": row["unique_opponents"] or 0,
             }
 
-    def get_head_to_head(self, player1_id: int, player2_id: int, guild_id: int) -> dict | None:
+    def get_head_to_head(self, player1_id: int, player2_id: int, guild_id: int | None) -> dict | None:
         """Get detailed stats between two specific players in a guild."""
+        guild_id = self.normalize_guild_id(guild_id)
         p1, p2 = self._canonical_pair(player1_id, player2_id)
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -423,7 +435,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
 
     def reverse_pairings_for_match(
         self,
-        guild_id: int,
+        guild_id: int | None,
         team1_ids: list[int],
         team2_ids: list[int],
         original_winning_team: int,
@@ -440,6 +452,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             team2_ids: List of discord IDs for team 2 (Dire)
             original_winning_team: 1 or 2 indicating which team originally won
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -490,12 +503,13 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             (1 if player1_won else 0, guild_id, p1, p2),
         )
 
-    def rebuild_all_pairings(self, guild_id: int) -> int:
+    def rebuild_all_pairings(self, guild_id: int | None) -> int:
         """
         Recalculate all pairings from match history for a guild.
 
         Returns count of pairings updated.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 

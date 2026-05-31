@@ -615,81 +615,100 @@ class IPairingsRepository(ABC):
     def update_pairings_for_match(
         self,
         match_id: int,
+        guild_id: int | None,
         team1_ids: list[int],
         team2_ids: list[int],
         winning_team: int,
-        guild_id: int,
     ) -> None:
         """Update pairwise statistics for all player pairs in a match."""
         ...
 
     @abstractmethod
-    def get_pairings_for_player(self, discord_id: int, guild_id: int) -> list[dict]:
+    def get_pairings_for_player(self, discord_id: int, guild_id: int | None) -> list[dict]:
         """Get all pairwise stats involving a player."""
         ...
 
     @abstractmethod
-    def get_best_teammates(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_best_teammates(
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get players with highest win rate when on same team."""
         ...
 
     @abstractmethod
     def get_worst_teammates(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get players with lowest win rate when on same team."""
         ...
 
     @abstractmethod
-    def get_best_matchups(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_best_matchups(
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get players with highest win rate when on opposing teams."""
         ...
 
     @abstractmethod
-    def get_worst_matchups(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_worst_matchups(
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get players with lowest win rate when on opposing teams."""
         ...
 
     @abstractmethod
     def get_most_played_with(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get teammates sorted by most games played together."""
         ...
 
     @abstractmethod
     def get_most_played_against(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get opponents sorted by most games played against."""
         ...
 
     @abstractmethod
     def get_evenly_matched_teammates(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get teammates with exactly 50% win rate."""
         ...
 
     @abstractmethod
     def get_evenly_matched_opponents(
-        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get opponents with exactly 50% win rate."""
         ...
 
     @abstractmethod
-    def get_pairing_counts(self, discord_id: int, guild_id: int, min_games: int = 1) -> dict:
+    def get_pairing_counts(self, discord_id: int, guild_id: int | None, min_games: int = 1) -> dict:
         """Get total counts of unique teammates and opponents."""
         ...
 
     @abstractmethod
-    def get_head_to_head(self, player1_id: int, player2_id: int, guild_id: int) -> dict | None:
+    def get_head_to_head(
+        self, player1_id: int, player2_id: int, guild_id: int | None
+    ) -> dict | None:
         """Get detailed stats between two specific players."""
         ...
 
     @abstractmethod
-    def rebuild_all_pairings(self, guild_id: int) -> int:
+    def reverse_pairings_for_match(
+        self,
+        guild_id: int | None,
+        team1_ids: list[int],
+        team2_ids: list[int],
+        original_winning_team: int,
+    ) -> None:
+        """Reverse pairings applied during original match recording."""
+        ...
+
+    @abstractmethod
+    def rebuild_all_pairings(self, guild_id: int | None) -> int:
         """Recalculate all pairings from match history. Returns count of pairings updated."""
         ...
 

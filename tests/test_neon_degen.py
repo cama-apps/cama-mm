@@ -392,6 +392,23 @@ class TestNeonDegenPersistence:
         svc2 = NeonDegenService(player_repo=player_repo, neon_event_repo=neon_event_repo2)
         assert await svc2.on_degen_milestone(123, 456, 95) is None
 
+    def test_guild_id_none_matches_zero_for_one_time_events(self, repo_db_path):
+        from repositories.neon_event_repository import NeonEventRepository
+
+        repo = NeonEventRepository(repo_db_path)
+        repo.persist_one_time_event(123, None, "registration", 1)
+        assert repo.check_one_time_event(123, 0, "registration") is True
+        assert repo.check_one_time_event(123, None, "registration") is True
+
+    def test_load_one_time_events_normalizes_guild_id_on_read(self, repo_db_path):
+        from repositories.neon_event_repository import NeonEventRepository
+
+        repo = NeonEventRepository(repo_db_path)
+        repo.persist_one_time_event(555, None, "legacy", 1)
+
+        events = repo.load_one_time_events()
+        assert (555, 0, "legacy") in events
+
     def test_persist_one_time_event_raises_on_write_failure(self, repo_db_path):
         """A failed one-time write must raise, not be silently swallowed.
 

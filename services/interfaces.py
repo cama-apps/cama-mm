@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from domain.models.lobby import Lobby
+    from domain.models.pending_match_state import PendingMatchState
     from domain.models.player import Player
     from services.bankruptcy_service import (
         BankruptcyDeclaration,
@@ -182,7 +183,7 @@ class IBettingService(ABC):
         discord_id: int,
         team: str,
         amount: int,
-        pending_state: dict[str, Any],
+        pending_state: "PendingMatchState",
         leverage: int = 1,
     ) -> None:
         """Place a bet on a team (raises on error)."""
@@ -194,7 +195,7 @@ class IBettingService(ABC):
         match_id: int,
         guild_id: int | None,
         winning_team: str,
-        pending_state: dict[str, Any],
+        pending_state: "PendingMatchState",
     ) -> dict[str, list[dict]]:
         """Settle all bets for a completed match."""
         ...
@@ -219,7 +220,7 @@ class IBettingService(ABC):
     def get_pot_odds(
         self,
         guild_id: int | None,
-        pending_state: dict[str, Any] | None = None,
+        pending_state: "PendingMatchState | None" = None,
     ) -> dict[str, int]:
         """Get current pot odds for pool betting."""
         ...
@@ -229,7 +230,7 @@ class IBettingService(ABC):
         self,
         guild_id: int | None,
         discord_id: int,
-        pending_state: dict[str, Any] | None = None,
+        pending_state: "PendingMatchState | None" = None,
     ) -> list[dict]:
         """Get pending bets for a user."""
         ...
@@ -238,7 +239,7 @@ class IBettingService(ABC):
     def refund_pending_bets(
         self,
         guild_id: int | None,
-        pending_state: dict[str, Any] | None,
+        pending_state: "PendingMatchState | None",
     ) -> int:
         """Refund all pending bets for an aborted match."""
         ...
