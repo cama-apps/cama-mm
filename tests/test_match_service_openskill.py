@@ -259,10 +259,13 @@ def test_openskill_prediction_uses_requested_guild_and_shared_probability_model(
         team1, team2, guild_id=other_guild
     )
 
-    expected = service.openskill_system.os_predict_win_probability(
+    expected_raw = service.openskill_system.os_predict_win_probability(
         [(60.0, 4.0)] * 5,
         [(35.0, 4.0)] * 5,
     )
-    assert target_prediction["team1_win_prob"] == expected
+    expected_calibrated = service.openskill_system.calibrate_win_probability(expected_raw)
+    assert target_prediction["raw_team1_win_prob"] == expected_raw
+    assert target_prediction["team1_win_prob"] == expected_calibrated
+    assert target_prediction["team1_win_prob"] < target_prediction["raw_team1_win_prob"]
     assert target_prediction["team1_win_prob"] > 0.5
     assert other_prediction["team1_win_prob"] < 0.5

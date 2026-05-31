@@ -367,8 +367,11 @@ class ShufflePendingMixin:
             (p.os_mu or self.openskill_system.DEFAULT_MU, p.os_sigma or self.openskill_system.DEFAULT_SIGMA)
             for p in dire_team.players
         ]
-        openskill_radiant_win_prob = self.openskill_system.os_predict_win_probability(
+        raw_openskill_radiant_win_prob = self.openskill_system.os_predict_win_probability(
             radiant_os_ratings, dire_os_ratings
+        )
+        openskill_radiant_win_prob = self.openskill_system.calibrate_win_probability(
+            raw_openskill_radiant_win_prob
         )
 
         # Update exclusion counts
@@ -454,6 +457,7 @@ class ShufflePendingMixin:
             "excluded_ids": excluded_ids,
             "glicko_radiant_win_prob": glicko_radiant_win_prob,
             "openskill_radiant_win_prob": openskill_radiant_win_prob,
+            "raw_openskill_radiant_win_prob": raw_openskill_radiant_win_prob,
             "balancing_rating_system": rating_system,
             "pending_match_id": shuffle_state.pending_match_id,
         }

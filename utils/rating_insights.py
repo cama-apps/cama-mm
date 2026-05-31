@@ -254,7 +254,7 @@ def _compute_openskill_prediction_quality(rating_history_entries: list[dict]) ->
             continue
 
         predictions.append({
-            "expected_radiant_win_prob": os_system.os_predict_win_probability(
+            "expected_radiant_win_prob": os_system.os_predict_calibrated_win_probability(
                 team1_ratings, team2_ratings
             ),
             "winning_team": 1 if team1_won else 2,
@@ -634,11 +634,11 @@ async def get_os_win_probability(
     if not (os_ratings["team1"] and os_ratings["team2"]):
         return None
     if team_number == 1:
-        return os_system.os_predict_win_probability(
+        return os_system.os_predict_calibrated_win_probability(
             os_ratings["team1"], os_ratings["team2"]
         )
     if team_number == 2:
-        return os_system.os_predict_win_probability(
+        return os_system.os_predict_calibrated_win_probability(
             os_ratings["team2"], os_ratings["team1"]
         )
     return None
