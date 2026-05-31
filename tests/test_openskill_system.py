@@ -9,6 +9,8 @@ Tests cover:
 """
 
 
+import pytest
+
 from openskill_rating_system import CamaOpenSkillSystem
 
 
@@ -288,6 +290,41 @@ class TestEqualWeightUpdate:
 
         # All losers should have same mu
         assert abs(results[3][0] - results[4][0]) < 0.01
+
+
+class TestWinProbabilityCalibration:
+    """Test post-hoc calibration of OpenSkill win probabilities."""
+
+    def test_calibration_preserves_coin_flip(self):
+        system = CamaOpenSkillSystem()
+
+        assert system.calibrate_win_probability(0.5) == pytest.approx(0.5)
+
+    def test_calibration_softens_extreme_favorite_without_flipping(self):
+        system = CamaOpenSkillSystem()
+
+        calibrated = system.calibrate_win_probability(0.9)
+
+        assert 0.5 < calibrated < 0.9
+
+    def test_calibration_is_symmetric(self):
+        system = CamaOpenSkillSystem()
+
+        favorite = system.calibrate_win_probability(0.85)
+        underdog = system.calibrate_win_probability(0.15)
+
+        assert favorite == pytest.approx(1.0 - underdog)
+
+    def test_calibrated_prediction_keeps_raw_probability_available(self):
+        system = CamaOpenSkillSystem()
+        team1 = [(60.0, 4.0)] * 5
+        team2 = [(35.0, 4.0)] * 5
+
+        raw = system.os_predict_win_probability(team1, team2)
+        calibrated = system.os_predict_calibrated_win_probability(team1, team2)
+
+        assert raw > 0.5
+        assert 0.5 < calibrated < raw
 
 
 class TestDisplayScaling:

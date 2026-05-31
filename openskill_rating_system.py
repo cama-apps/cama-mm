@@ -13,6 +13,7 @@ Key differences from Glicko-2:
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING
 
 from openskill.models import PlackettLuce
@@ -56,6 +57,12 @@ class CamaOpenSkillSystem:
 
     # Calibration threshold (sigma below this = calibrated)
     CALIBRATION_THRESHOLD = 4.0
+
+    # Raw OpenSkill predict_win() is directionally useful for this league but
+    # empirically too confident. This temperature softens probabilities toward
+    # 50/50 without changing favorite direction.
+    WIN_PROBABILITY_TEMPERATURE = 6.5
+    WIN_PROBABILITY_EPSILON = 1e-12
 
     # Weight blending: 10% FP-based, 90% equal weight
     # FP is a tiny nudge, not a significant factor
@@ -465,3 +472,36 @@ class CamaOpenSkillSystem:
         except Exception as e:
             logger.warning(f"OpenSkill predict_win failed: {e}")
             return 0.5
+
+    @classmethod
+    def calibrate_win_probability(
+        cls, probability: float, temperature: float | None = None
+    ) -> float:
+        """Apply post-hoc temperature scaling to raw OpenSkill win probability."""
+        actual_temperature = (
+            cls.WIN_PROBABILITY_TEMPERATURE if temperature is None else temperature
+        )
+        if actual_temperature <= 0:
+            raise ValueError("OpenSkill probability temperature must be positive")
+
+        p = max(
+            cls.WIN_PROBABILITY_EPSILON,
+            min(1.0 - cls.WIN_PROBABILITY_EPSILON, probability),
+        )
+        log_odds = math.log(p / (1.0 - p))
+        scaled_log_odds = log_odds / actual_temperature
+        if scaled_log_odds >= 0:
+            exp_neg = math.exp(-scaled_log_odds)
+            return 1.0 / (1.0 + exp_neg)
+        exp_pos = math.exp(scaled_log_odds)
+        return exp_pos / (1.0 + exp_pos)
+
+    def os_predict_calibrated_win_probability(
+        self,
+        team1_ratings: list[tuple[float, float]],
+        team2_ratings: list[tuple[float, float]],
+    ) -> float:
+        """Predict team1 win probability with league-calibrated confidence."""
+        return self.calibrate_win_probability(
+            self.os_predict_win_probability(team1_ratings, team2_ratings)
+        )

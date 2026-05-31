@@ -1,6 +1,7 @@
 import pytest
 
 from domain.models.player import Player
+from openskill_rating_system import CamaOpenSkillSystem
 from utils.rating_insights import compute_calibration_stats
 
 
@@ -112,7 +113,16 @@ def test_compute_calibration_stats_openskill_prediction_quality_from_history():
     )
 
     os_quality = stats["openskill_prediction_quality"]
+    os_system = CamaOpenSkillSystem()
+    raw_prob = os_system.os_predict_win_probability(
+        [(60.0, 4.0)] * 5,
+        [(35.0, 4.0)] * 5,
+    )
+    calibrated_prob = os_system.calibrate_win_probability(raw_prob)
+    expected_brier = ((calibrated_prob - 1.0) ** 2 + calibrated_prob**2) / 2
+
     assert os_quality["count"] == 2
-    assert os_quality["brier"] is not None
+    assert os_quality["brier"] == pytest.approx(expected_brier, rel=1e-6)
     assert os_quality["ece"] is not None
     assert os_quality["accuracy"] == pytest.approx(0.5, rel=1e-6)
+    assert calibrated_prob < raw_prob

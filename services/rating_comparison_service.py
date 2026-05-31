@@ -100,8 +100,11 @@ class RatingComparisonService:
                 or len(team2_os_ratings) != len(team2_ids)
             ):
                 continue
-            os_radiant_prob = self.openskill_system.os_predict_win_probability(
+            raw_os_radiant_prob = self.openskill_system.os_predict_win_probability(
                 team1_os_ratings, team2_os_ratings
+            )
+            os_radiant_prob = self.openskill_system.calibrate_win_probability(
+                raw_os_radiant_prob
             )
 
             match_data.append({
@@ -110,6 +113,7 @@ class RatingComparisonService:
                 "radiant_won": radiant_won,
                 "glicko_radiant_prob": glicko_radiant_prob,
                 "openskill_radiant_prob": os_radiant_prob,
+                "raw_openskill_radiant_prob": raw_os_radiant_prob,
                 "glicko_correct": (glicko_radiant_prob >= 0.5) == radiant_won,
                 "openskill_correct": (os_radiant_prob >= 0.5) == radiant_won,
             })

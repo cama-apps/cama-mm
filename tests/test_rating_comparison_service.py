@@ -332,3 +332,7 @@ def test_analyze_uses_historical_openskill_not_current_rating_lookup():
     assert result is not None
     assert fake_match_service.calls == []
     assert all(m["openskill_radiant_prob"] > 0.5 for m in result.match_data)
+    assert all(
+        m["raw_openskill_radiant_prob"] > m["openskill_radiant_prob"]
+        for m in result.match_data
+    )

@@ -442,7 +442,8 @@ class RatingUpdateMixin:
             team2_ids: Discord IDs for team 2 (Dire)
 
         Returns:
-            Dict with team1_win_prob, team1_ordinal, team2_ordinal
+            Dict with calibrated team1_win_prob, raw_team1_win_prob,
+            team1_ordinal, team2_ordinal.
         """
 
         # Get current ratings
@@ -472,12 +473,14 @@ class RatingUpdateMixin:
         team1_avg_ordinal = sum(team1_ordinals) / len(team1_ordinals) if team1_ordinals else 0
         team2_avg_ordinal = sum(team2_ordinals) / len(team2_ordinals) if team2_ordinals else 0
 
-        team1_win_prob = self.openskill_system.os_predict_win_probability(
+        raw_team1_win_prob = self.openskill_system.os_predict_win_probability(
             team1_ratings, team2_ratings
         )
+        team1_win_prob = self.openskill_system.calibrate_win_probability(raw_team1_win_prob)
 
         return {
             "team1_win_prob": team1_win_prob,
+            "raw_team1_win_prob": raw_team1_win_prob,
             "team1_avg_ordinal": team1_avg_ordinal,
             "team2_avg_ordinal": team2_avg_ordinal,
         }
