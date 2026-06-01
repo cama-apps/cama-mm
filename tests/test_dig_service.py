@@ -397,6 +397,30 @@ class TestMinerProfile:
         assert result["cooldown_remaining"] < FREE_DIG_COOLDOWN_SECONDS
         assert result["paid_dig_cost"] == 2
 
+    def test_overgrowth_does_not_bypass_dig_cooldown(
+        self, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        from repositories.buff_repository import BuffRepository
+        from services.buff_service import BuffService
+
+        buff_service = BuffService(BuffRepository(dig_repo.db_path))
+        service = DigService(dig_repo, player_repository, buff_service=buff_service)
+        monkeypatch.setattr(service, "_get_weather_effects", lambda guild_id, layer_name: {})
+        _register_player(player_repository, balance=100)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        first = service.dig(10001, guild_id)
+        assert first["success"]
+
+        buff_service.grant_overgrowth(10001, guild_id)
+        monkeypatch.setattr(time, "time", lambda: 1_000_060)
+
+        result = service.dig(10001, guild_id)
+
+        assert result["success"] is False
+        assert result["paid_dig_available"] is True
+        assert result["cooldown_remaining"] > 0
+
     def test_boss_first_clear_awards_stat_point_once(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):

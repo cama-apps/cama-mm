@@ -1747,6 +1747,31 @@ class BettingCommands(commands.Cog):
                     )
                     new_balance = current_balance - wheel_bankruptcy_penalty
 
+        buff_service = getattr(self.bot, "buff_service", None)
+        if buff_service is not None:
+            try:
+                current_balance = await asyncio.to_thread(
+                    self.player_service.get_balance, user_id, guild_id
+                )
+                gain = current_balance - balance_before_outcome
+                if gain > 0:
+                    skim = await asyncio.to_thread(
+                        buff_service.claim_blood_pact_skim, user_id, guild_id, gain
+                    )
+                    if skim:
+                        amount = int(skim["amount"])
+                        await asyncio.to_thread(
+                            self.player_repo.add_balance_many,
+                            {
+                                user_id: -amount,
+                                int(skim["skimmer_id"]): amount,
+                            },
+                            guild_id,
+                        )
+                        new_balance = current_balance - amount
+            except Exception:
+                logger.exception("Failed to apply Blood Pact skim to wheel payout")
+
         # Send final result embed
         await asyncio.sleep(0.5)  # Brief pause before result reveal
         # For extension slices, pass the new penalty total

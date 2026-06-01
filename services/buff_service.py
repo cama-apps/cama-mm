@@ -66,7 +66,11 @@ class BuffService:
         grant so concurrent re-purchases can't both leave a row alive.
         """
         return self.buff_repo.refresh_atomic(
-            discord_id, guild_id, BUFF_OVERGROWTH, self._expires(12)
+            discord_id,
+            guild_id,
+            BUFF_OVERGROWTH,
+            self._expires(12),
+            data={"charges_remaining": 10},
         )
 
     def grant_sanctuary(
@@ -84,14 +88,14 @@ class BuffService:
     def grant_blood_pact(
         self, caster_id: int, guild_id: int | None, target_id: int
     ) -> int:
-        """24h: caster skims 10% of target's earnings (cap 50 JC total)."""
+        """24h: caster skims 25% of target's earnings (cap 150 JC total)."""
         return self.buff_repo.grant(
             caster_id,
             guild_id,
             BUFF_BLOOD_PACT,
             self._expires(24),
             target_id=target_id,
-            data={"skimmed_total": 0, "cap": 50, "skim_rate": 0.10},
+            data={"skimmed_total": 0, "cap": 150, "skim_rate": 0.25},
         )
 
     def grant_dark_bargain_debt(
@@ -108,7 +112,12 @@ class BuffService:
             guild_id,
             BUFF_DARK_BARGAIN,
             self._expires(24 * due_in_days),
-            data={"amount_due": amount_due, "amount_paid": 0},
+            data={
+                "amount_due": amount_due,
+                "amount_paid": 0,
+                "default_penalty": 1600,
+                "default_penalty_games": 5,
+            },
         )
 
     def grant_first_aegis_today(
@@ -168,6 +177,11 @@ class BuffService:
     def has_overgrowth(self, discord_id: int, guild_id: int | None) -> bool:
         return self.buff_repo.has_active(discord_id, guild_id, BUFF_OVERGROWTH)
 
+    def consume_overgrowth_charge(self, discord_id: int, guild_id: int | None) -> bool:
+        return self.buff_repo.consume_data_charge_atomic(
+            discord_id, guild_id, BUFF_OVERGROWTH, "charges_remaining"
+        )
+
     def has_sanctuary_match_bonus(
         self, discord_id: int, guild_id: int | None
     ) -> bool:
@@ -199,12 +213,52 @@ class BuffService:
         data["skimmed_total"] = new_total
         self.buff_repo.update_data(buff_id, data)
 
+    def claim_blood_pact_skim(
+        self, target_id: int, guild_id: int | None, earning: int
+    ) -> dict | None:
+        """Claim the active Blood Pact skim for one positive earning event.
+
+        Returns ``{buff_id, skimmer_id, amount, new_total}`` for the caller to
+        transfer from the target to the skimmer. The transfer itself stays at
+        the earning source so it can share that source's balance transaction
+        rules.
+        """
+        if earning <= 0:
+            return None
+        pact = self.get_blood_pact_skimmer(target_id, guild_id)
+        if not pact:
+            return None
+        data = pact.get("data") or {}
+        cap = int(data.get("cap") or 0)
+        skimmed_total = int(data.get("skimmed_total") or 0)
+        remaining = cap - skimmed_total
+        if remaining <= 0:
+            return None
+        skim_rate = float(data.get("skim_rate") or 0)
+        amount = min(remaining, max(1, int(earning * skim_rate)))
+        if amount <= 0:
+            return None
+        new_total = skimmed_total + amount
+        self.record_blood_pact_skim(pact["id"], data, new_total)
+        return {
+            "buff_id": pact["id"],
+            "skimmer_id": pact["discord_id"],
+            "amount": amount,
+            "new_total": new_total,
+        }
+
     def has_dark_bargain_debt(
         self, discord_id: int, guild_id: int | None
     ) -> dict | None:
         """Return the active Dark Bargain debt row or None."""
         active = self.buff_repo.active_for(discord_id, guild_id, BUFF_DARK_BARGAIN)
         return active[0] if active else None
+
+    def settle_due_dark_bargains(self, *, player_repo, bankruptcy_repo) -> list[dict]:
+        _ = (player_repo, bankruptcy_repo)
+        return self.buff_repo.settle_due_dark_bargains(
+            now=int(time.time()),
+        )
 
     def cleanup_expired(self) -> int:
         return self.buff_repo.cleanup_expired()

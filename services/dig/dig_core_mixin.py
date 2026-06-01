@@ -623,6 +623,11 @@ class DigCoreMixin:
                     "depth_before": depth_before, "depth_after": new_depth,
                 }),
             )
+            if p.get("overgrowth_active") and self.buff_service is not None:
+                try:
+                    self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
+                except Exception:
+                    logger.exception("Failed to consume Overgrowth charge")
             return self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
@@ -749,7 +754,7 @@ class DigCoreMixin:
         # Mana variance + steady bonus on base loot only.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
         if p.get("overgrowth_active"):
-            jc_earned += 5
+            jc_earned += 10
 
         # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0
@@ -883,6 +888,22 @@ class DigCoreMixin:
                 "current_run_events": run_events_count,
             },
         )
+        if self.buff_service is not None and jc_earned > 0:
+            try:
+                skim = self.buff_service.claim_blood_pact_skim(
+                    discord_id, guild_id, jc_earned
+                )
+                if skim:
+                    self.player_repo.add_balance_many(
+                        {
+                            discord_id: -int(skim["amount"]),
+                            int(skim["skimmer_id"]): int(skim["amount"]),
+                        },
+                        guild_id,
+                    )
+                    jc_earned = max(0, jc_earned - int(skim["amount"]))
+            except Exception:
+                logger.exception("Failed to apply Blood Pact skim to dig payout")
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({
@@ -893,6 +914,11 @@ class DigCoreMixin:
                 "streak_charm_used": streak_charm_used,
             }),
         )
+        if p.get("overgrowth_active") and self.buff_service is not None:
+            try:
+                self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
+            except Exception:
+                logger.exception("Failed to consume Overgrowth charge")
 
         paid_dig_cost = p["paid_dig_cost"]
         return self._ok(
@@ -1063,6 +1089,11 @@ class DigCoreMixin:
                     "dm_mode": True,
                 }),
             )
+            if p.get("overgrowth_active") and self.buff_service is not None:
+                try:
+                    self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
+                except Exception:
+                    logger.exception("Failed to consume Overgrowth charge")
             result = self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
@@ -1249,6 +1280,23 @@ class DigCoreMixin:
                     "current_run_events": run_events_count,
                 },
             )
+            if self.buff_service is not None and jc_earned > 0:
+                try:
+                    skim = self.buff_service.claim_blood_pact_skim(
+                        discord_id, guild_id, jc_earned
+                    )
+                    if skim:
+                        self.player_repo.add_balance_many(
+                            {
+                                discord_id: -int(skim["amount"]),
+                                int(skim["skimmer_id"]): int(skim["amount"]),
+                            },
+                            guild_id,
+                        )
+                        jc_earned = max(0, jc_earned - int(skim["amount"]))
+                except Exception:
+                    logger.exception("Failed to apply Blood Pact skim to dig payout")
+
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
                 details=json.dumps({
@@ -1260,6 +1308,11 @@ class DigCoreMixin:
                     "streak_charm_used": streak_charm_used,
                 }),
             )
+            if p.get("overgrowth_active") and self.buff_service is not None:
+                try:
+                    self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
+                except Exception:
+                    logger.exception("Failed to consume Overgrowth charge")
 
             paid_dig_cost = p["paid_dig_cost"]
             result = self._ok(

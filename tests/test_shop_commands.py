@@ -645,7 +645,7 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
 
     Scenario: it is 4:30 AM PST and the player lost 1000 JC twelve hours earlier
     (≈4:30 PM PST yesterday) — within 24h but *before* today's 4 AM reset.
-    Regrowth should still credit 25%, capped at 200.
+    Regrowth should still credit 35%, capped at 120.
     """
     import datetime as dt
     import sqlite3
@@ -698,12 +698,37 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
         shop, interaction, SimpleNamespace(value="regrowth"), target=None,
     )
 
-    # 25% of the 1000 loss, capped at 200, credited back via adjust_balance.
+    # 35% of the 1000 loss, capped at 120, credited back via adjust_balance.
     recovery_calls = [
         c for c in player_service.adjust_balance.call_args_list
-        if c.args == (user_id, TEST_GUILD_ID, 200)
+        if c.args == (user_id, TEST_GUILD_ID, 120)
     ]
     assert recovery_calls, (
-        "Regrowth should credit 200 (25% of a 1000 loss from 12h ago); "
+        "Regrowth should credit 120 (35% of a 1000 loss from 12h ago, capped); "
         f"adjust_balance calls were {player_service.adjust_balance.call_args_list}"
     )
+
+
+@pytest.mark.asyncio
+async def test_dark_bargain_due_amount_matches_loan_principal():
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_mana_consumed_atomic.return_value = True
+    bot.buff_service = MagicMock()
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=1001)
+    player_service.get_balance.return_value = 1000
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="dark_bargain"), target=None,
+    )
+
+    bot.buff_service.grant_dark_bargain_debt.assert_called_once_with(
+        interaction.user.id, interaction.guild.id, amount_due=700, due_in_days=7,
+    )
+    assert "700 due in 7 days" in interaction.followup.send.call_args.args[0]
