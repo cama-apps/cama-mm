@@ -15,6 +15,7 @@ logger = logging.getLogger("cama_bot.services.buff")
 
 if TYPE_CHECKING:
     from repositories.buff_repository import BuffRepository
+    from repositories.player_repository import PlayerRepository
 
 # Buff type keys
 BUFF_COUNTERSPELL = "counterspell"
@@ -216,36 +217,52 @@ class BuffService:
     def claim_blood_pact_skim(
         self, target_id: int, guild_id: int | None, earning: int
     ) -> dict | None:
-        """Claim the active Blood Pact skim for one positive earning event.
+        """Atomically reserve a Blood Pact skim without transferring balances."""
+        return self.buff_repo.claim_blood_pact_skim_atomic(
+            target_id, guild_id, earning
+        )
 
-        Returns ``{buff_id, skimmer_id, amount, new_total}`` for the caller to
-        transfer from the target to the skimmer. The transfer itself stays at
-        the earning source so it can share that source's balance transaction
-        rules.
-        """
+    def apply_blood_pact_skim(
+        self,
+        target_id: int,
+        guild_id: int | None,
+        earning: int,
+        player_repo: "PlayerRepository",
+    ) -> int:
+        """Reserve, transfer, and roll back the skim counter on transfer failure."""
         if earning <= 0:
-            return None
-        pact = self.get_blood_pact_skimmer(target_id, guild_id)
-        if not pact:
-            return None
-        data = pact.get("data") or {}
-        cap = int(data.get("cap") or 0)
-        skimmed_total = int(data.get("skimmed_total") or 0)
-        remaining = cap - skimmed_total
-        if remaining <= 0:
-            return None
-        skim_rate = float(data.get("skim_rate") or 0)
-        amount = min(remaining, max(1, int(earning * skim_rate)))
-        if amount <= 0:
-            return None
-        new_total = skimmed_total + amount
-        self.record_blood_pact_skim(pact["id"], data, new_total)
-        return {
-            "buff_id": pact["id"],
-            "skimmer_id": pact["discord_id"],
-            "amount": amount,
-            "new_total": new_total,
-        }
+            return 0
+        try:
+            skim = self.buff_repo.claim_blood_pact_skim_atomic(
+                target_id, guild_id, earning
+            )
+        except Exception:
+            logger.exception(
+                "Failed to claim Blood Pact skim for player %d", target_id
+            )
+            return 0
+        if not skim:
+            return 0
+        amount = int(skim["amount"])
+        skimmer_id = int(skim["skimmer_id"])
+        buff_id = int(skim["buff_id"])
+        try:
+            player_repo.add_balance_many(
+                {target_id: -amount, skimmer_id: amount},
+                guild_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to transfer Blood Pact skim for player %d", target_id
+            )
+            try:
+                self.buff_repo.revert_blood_pact_skim(buff_id, amount)
+            except Exception:
+                logger.exception(
+                    "Failed to revert Blood Pact skim for buff %d", buff_id
+                )
+            return 0
+        return amount
 
     def has_dark_bargain_debt(
         self, discord_id: int, guild_id: int | None

@@ -117,7 +117,13 @@ class RecordingMixin:
             result[pid] = {"days": new_streak, "bonus": bonus}
             if bonus > 0:
                 self.player_repo.add_balance(pid, guild_id, bonus)
-                accumulate({pid: {"net": bonus}})
+                net_bonus = bonus
+                if self.betting_service:
+                    skimmed = self.betting_service._apply_blood_pact_skim(
+                        pid, guild_id, bonus
+                    )
+                    net_bonus = bonus - skimmed
+                accumulate({pid: {"net": net_bonus}})
         return result
 
     def _repay_outstanding_loans(

@@ -2152,6 +2152,8 @@ async def test_wheel_penalized_winner_is_debuffed(repo_db_path):
 
     bot = MagicMock()
     bot.bankruptcy_service = bk_service
+    bot.buff_service = None
+    bot.player_repo = player_repo
     bot.garnishment_service = None
     player_service = MagicMock()
     player_service.get_player.return_value = MagicMock(name="P")

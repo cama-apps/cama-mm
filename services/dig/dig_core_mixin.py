@@ -890,18 +890,11 @@ class DigCoreMixin:
         )
         if self.buff_service is not None and jc_earned > 0:
             try:
-                skim = self.buff_service.claim_blood_pact_skim(
-                    discord_id, guild_id, jc_earned
+                skimmed = self.buff_service.apply_blood_pact_skim(
+                    discord_id, guild_id, jc_earned, self.player_repo
                 )
-                if skim:
-                    self.player_repo.add_balance_many(
-                        {
-                            discord_id: -int(skim["amount"]),
-                            int(skim["skimmer_id"]): int(skim["amount"]),
-                        },
-                        guild_id,
-                    )
-                    jc_earned = max(0, jc_earned - int(skim["amount"]))
+                if skimmed:
+                    jc_earned = max(0, jc_earned - skimmed)
             except Exception:
                 logger.exception("Failed to apply Blood Pact skim to dig payout")
         self.dig_repo.log_action(
@@ -1282,18 +1275,11 @@ class DigCoreMixin:
             )
             if self.buff_service is not None and jc_earned > 0:
                 try:
-                    skim = self.buff_service.claim_blood_pact_skim(
-                        discord_id, guild_id, jc_earned
+                    skimmed = self.buff_service.apply_blood_pact_skim(
+                        discord_id, guild_id, jc_earned, self.player_repo
                     )
-                    if skim:
-                        self.player_repo.add_balance_many(
-                            {
-                                discord_id: -int(skim["amount"]),
-                                int(skim["skimmer_id"]): int(skim["amount"]),
-                            },
-                            guild_id,
-                        )
-                        jc_earned = max(0, jc_earned - int(skim["amount"]))
+                    if skimmed:
+                        jc_earned = max(0, jc_earned - skimmed)
                 except Exception:
                     logger.exception("Failed to apply Blood Pact skim to dig payout")
 
