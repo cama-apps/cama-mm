@@ -439,6 +439,12 @@ class SchemaManager:
                 "normalize_null_guild_id_pairings_and_neon",
                 self._migration_normalize_null_guild_id_pairings_and_neon,
             ),
+            # Repair tunnels created after the original gear migration, before
+            # create_tunnel started creating an equipped starter weapon row.
+            (
+                "backfill_missing_dig_weapon_gear",
+                self._migration_backfill_missing_dig_weapon_gear,
+            ),
         ]
 
     # --- Migrations ---
@@ -3181,6 +3187,44 @@ class SchemaManager:
                 COALESCE(last_dig_at, CAST(strftime('%s', 'now') AS INTEGER)),
                 'migration'
             FROM tunnels
+            """
+        )
+
+    def _migration_backfill_missing_dig_weapon_gear(self, cursor) -> None:
+        """Backfill a starter/current weapon row for tunnels with no weapon.
+
+        The original ``create_dig_gear_system`` migration only ran once. Any
+        tunnel created after that migration but before ``create_tunnel`` began
+        inserting starter weapon rows could have a legacy ``pickaxe_tier`` with
+        no matching ``dig_gear`` weapon row, leaving /dig gear's Weapon slot
+        empty even though digging still used the pickaxe tier fallback.
+        """
+        cursor.execute(
+            """
+            INSERT INTO dig_gear
+                (discord_id, guild_id, slot, tier, durability,
+                 equipped, acquired_at, source)
+            SELECT
+                t.discord_id,
+                COALESCE(t.guild_id, 0),
+                'weapon',
+                COALESCE(t.pickaxe_tier, 0),
+                20,
+                1,
+                COALESCE(
+                    t.last_dig_at,
+                    t.created_at,
+                    CAST(strftime('%s', 'now') AS INTEGER)
+                ),
+                'missing_weapon_backfill'
+            FROM tunnels t
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM dig_gear g
+                WHERE g.discord_id = t.discord_id
+                  AND g.guild_id = COALESCE(t.guild_id, 0)
+                  AND g.slot = 'weapon'
+            )
             """
         )
 

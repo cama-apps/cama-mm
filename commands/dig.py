@@ -1519,6 +1519,16 @@ class DigCommands(commands.Cog):
                 return
             name = getattr(result, "name", item)
             cost = getattr(result, "cost", 0)
+            if slot in ("weapon", "pickaxe"):
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"Upgraded your pickaxe to **{name}** for **{cost}** "
+                        f"{JOPACOIN_EMOTE}. It is equipped."
+                    ),
+                    ephemeral=True,
+                )
+                return
             await safe_followup(
                 interaction,
                 content=(

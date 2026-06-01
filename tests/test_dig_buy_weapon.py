@@ -57,6 +57,10 @@ class TestUpgradePickaxeToTier:
         _register(player_repository)
         dig_repo.create_tunnel(10001, guild_id, "TestTunnel")
         dig_repo.update_tunnel(10001, guild_id, depth=80, pickaxe_tier=2)
+        starter_weapon = dig_repo.get_equipped_gear(10001, guild_id)["weapon"]["id"]
+        dig_repo.unequip_gear(starter_weapon)
+        tier_two_weapon = dig_repo.add_gear(10001, guild_id, "weapon", 2)
+        dig_repo.equip_gear(tier_two_weapon, 10001, guild_id, "weapon")
 
         result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 2)
         assert not result["success"]
