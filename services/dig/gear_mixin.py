@@ -393,16 +393,12 @@ class GearMixin:
         return self._gear_repair_cost(slot, tier)
 
     def compute_repair_all_cost(self, discord_id: int, guild_id) -> int:
-        """Sum repair cost across every damaged EQUIPPED piece the player owns.
-
-        Mirrors ``repair_all_gear``'s equipped-only filter so the UI cost
-        estimate matches what would actually be debited.
-        """
+        """Sum repair cost across every damaged piece the player owns."""
         rows = self.dig_repo.get_gear(discord_id, guild_id)
         return sum(
             self._gear_repair_cost(r["slot"], int(r["tier"]))
             for r in rows
-            if int(r["durability"]) < GEAR_MAX_DURABILITY and int(r["equipped"]) == 1
+            if int(r["durability"]) < GEAR_MAX_DURABILITY
         )
 
     def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
@@ -436,12 +432,9 @@ class GearMixin:
         rows = self.dig_repo.get_gear(discord_id, guild_id)
         damaged = [
             r for r in rows
-            if int(r["durability"]) < GEAR_MAX_DURABILITY and int(r["equipped"]) == 1
+            if int(r["durability"]) < GEAR_MAX_DURABILITY
         ]
         if not damaged:
-            any_damaged = any(int(r["durability"]) < GEAR_MAX_DURABILITY for r in rows)
-            if any_damaged:
-                return self._error("No equipped gear needs repair.")
             return self._error("Nothing to repair.")
         total_cost = sum(self._gear_repair_cost(r["slot"], int(r["tier"])) for r in damaged)
         if total_cost > 0 and not self.player_repo.try_debit(discord_id, guild_id, total_cost):
@@ -804,4 +797,3 @@ class GearMixin:
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
-

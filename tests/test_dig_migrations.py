@@ -545,3 +545,47 @@ class TestDigGearMigration:
         finally:
             conn.close()
         assert n == 0  # not backfilled because migration ran before tunnel insert
+
+
+class TestMissingDigWeaponBackfillMigration:
+    """Covers _migration_backfill_missing_dig_weapon_gear."""
+
+    def test_backfills_only_tunnels_without_any_weapon_row(self, repo_db_path):
+        conn = sqlite3.connect(repo_db_path)
+        try:
+            conn.execute("DELETE FROM tunnels")
+            conn.execute("DELETE FROM dig_gear")
+            conn.execute(
+                "INSERT INTO tunnels (discord_id, guild_id, depth, pickaxe_tier) "
+                "VALUES (?, ?, ?, ?)",
+                (1, 0, 80, 3),
+            )
+            conn.execute(
+                "INSERT INTO tunnels (discord_id, guild_id, depth, pickaxe_tier) "
+                "VALUES (?, ?, ?, ?)",
+                (2, 0, 50, 2),
+            )
+            conn.execute(
+                """
+                INSERT INTO dig_gear
+                    (discord_id, guild_id, slot, tier, durability, equipped,
+                     acquired_at, source)
+                VALUES (?, ?, 'weapon', ?, 20, 0, 0, 'shop')
+                """,
+                (2, 0, 2),
+            )
+            conn.commit()
+            cursor = conn.cursor()
+            SchemaManager(repo_db_path)._migration_backfill_missing_dig_weapon_gear(cursor)
+            conn.commit()
+            rows = conn.execute(
+                "SELECT discord_id, slot, tier, equipped, source "
+                "FROM dig_gear ORDER BY discord_id, source"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert rows == [
+            (1, "weapon", 3, 1, "missing_weapon_backfill"),
+            (2, "weapon", 2, 0, "shop"),
+        ]

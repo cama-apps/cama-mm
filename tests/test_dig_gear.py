@@ -115,6 +115,18 @@ class TestDigGearDropPersists:
         )
 
 
+class TestDigGearStarterWeapon:
+    def test_create_tunnel_adds_equipped_starter_weapon(self, gear_repo):
+        gear_repo.create_tunnel(111, 0, "Starter")
+
+        equipped = gear_repo.get_equipped_gear(111, 0)
+
+        assert equipped["weapon"]["slot"] == "weapon"
+        assert equipped["weapon"]["tier"] == 0
+        assert equipped["weapon"]["durability"] == GEAR_MAX_DURABILITY
+        assert equipped["weapon"]["source"] == "starter"
+
+
 class TestDigGearDropRate:
     """Statistical sanity check on the drop rate via seeded RNG."""
 
@@ -373,7 +385,8 @@ class TestDigGearServiceEquipUnequip:
         svc.equip_gear(player, 0, r["gear_id"])
         un = svc.unequip_gear(player, 0, r["gear_id"])
         assert un["success"]
-        assert svc.dig_repo.get_equipped_gear(player, 0) == {}
+        equipped = svc.dig_repo.get_equipped_gear(player, 0)
+        assert "armor" not in equipped
 
 
 class TestDigGearServiceRepair:
@@ -418,10 +431,8 @@ class TestDigGearServiceRepair:
         result = svc.repair_all_gear(player, 0)
         assert not result["success"]
 
-    def test_repair_all_skips_damaged_unequipped_pieces(self, svc, player):
-        # Two pieces owned, both damaged, neither equipped — repair_all
-        # should refuse with the equipped-specific error message rather
-        # than blindly repairing them.
+    def test_repair_all_repairs_damaged_unequipped_pieces(self, svc, player):
+        # Broken gear is auto-unequipped, so Repair All must still catch it.
         a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]
         b = svc.buy_gear(player, 0, "boots", 1)["gear_id"]
         svc.dig_repo.repair_gear(a, 5)
@@ -430,17 +441,15 @@ class TestDigGearServiceRepair:
 
         result = svc.repair_all_gear(player, 0)
 
-        assert not result["success"]
-        assert "equipped" in result["error"].lower()
-        # Balance untouched.
-        assert svc.player_repo.get_balance(player, 0) == bal_before
-        # Gear still damaged.
-        assert svc.dig_repo.get_gear_by_id(a)["durability"] == 5
-        assert svc.dig_repo.get_gear_by_id(b)["durability"] == 5
+        assert result["success"]
+        assert result["repaired"] == 2
+        assert svc.player_repo.get_balance(player, 0) == bal_before - result["cost"]
+        assert svc.dig_repo.get_gear_by_id(a)["durability"] == GEAR_MAX_DURABILITY
+        assert svc.dig_repo.get_gear_by_id(b)["durability"] == GEAR_MAX_DURABILITY
 
     def test_compute_repair_all_cost_matches_actual_debit(self, svc, player):
         # The UI cost preview must match what repair_all_gear actually
-        # debits — both are equipped-only after this patch.
+        # debits, including damaged gear that is not currently equipped.
         a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]   # equipped target
         b = svc.buy_gear(player, 0, "boots", 1)["gear_id"]   # NOT equipped
         svc.equip_gear(player, 0, a)
@@ -731,6 +740,8 @@ class TestDigAmuletBuyAndEquip:
 class TestDigGearServiceActivePickaxeTier:
     def test_falls_back_to_legacy_column(self, svc, player):
         svc.dig_repo.update_tunnel(player, 0, pickaxe_tier=4)
+        weapon_id = svc.dig_repo.get_equipped_gear(player, 0)["weapon"]["id"]
+        svc.dig_repo.unequip_gear(weapon_id)
         tunnel = dict(svc.dig_repo.get_tunnel(player, 0))
         # No equipped weapon yet
         assert svc._get_active_pickaxe_tier(player, 0, tunnel) == 4

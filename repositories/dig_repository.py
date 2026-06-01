@@ -58,6 +58,7 @@ class DigRepository(BaseRepository, IDigRepository):
 
     def create_tunnel(self, discord_id: int, guild_id: int, tunnel_name: str = None, *, name: str = None) -> dict:
         """Create a new tunnel and return it."""
+        from services.dig_constants import GEAR_MAX_DURABILITY  # avoid import cycle at module load
         tunnel_name = tunnel_name or name or "Unnamed Tunnel"
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())
@@ -76,6 +77,15 @@ class DigRepository(BaseRepository, IDigRepository):
                     NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, ?, 0, 0, NULL)
                 """,
                 (discord_id, gid, tunnel_name, now),
+            )
+            cursor.execute(
+                """
+                INSERT INTO dig_gear
+                    (discord_id, guild_id, slot, tier, durability,
+                     equipped, acquired_at, source)
+                VALUES (?, ?, 'weapon', 0, ?, 1, ?, 'starter')
+                """,
+                (discord_id, gid, GEAR_MAX_DURABILITY, now),
             )
             # Return the newly created tunnel
             cursor.execute(

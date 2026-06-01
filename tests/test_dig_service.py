@@ -1525,6 +1525,10 @@ class TestPickaxe:
         monkeypatch.setattr(dig_service, "_get_weather_effects", lambda *a, **k: {})
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=10, pickaxe_tier=1)  # Stone pickaxe
+        starter_weapon = dig_repo.get_equipped_gear(10001, guild_id)["weapon"]["id"]
+        dig_repo.unequip_gear(starter_weapon)
+        stone_weapon = dig_repo.add_gear(10001, guild_id, "weapon", 1)
+        dig_repo.equip_gear(stone_weapon, 10001, guild_id, "weapon")
 
         # Dig with fixed advance
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
