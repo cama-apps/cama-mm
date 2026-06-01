@@ -157,6 +157,51 @@ def test_blood_pact_skim_calculation_respects_rate_and_cap(buff_service):
     assert buff_service.claim_blood_pact_skim(TARGET, TEST_GUILD_ID, 400) is None
 
 
+def test_blood_pact_skim_reverts_when_transfer_fails(
+    repo_db_path, buff_service, buff_repo, monkeypatch,
+):
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Skimmer", guild_id=TEST_GUILD_ID)
+    player_repo.add(discord_id=TARGET, discord_username="Target", guild_id=TEST_GUILD_ID)
+    player_repo.update_balance(TARGET, TEST_GUILD_ID, 500)
+    balance_before = player_repo.get_balance(TARGET, TEST_GUILD_ID)
+    buff_service.grant_blood_pact(USER, TEST_GUILD_ID, TARGET)
+
+    def _fail_transfer(*_args, **_kwargs):
+        raise RuntimeError("transfer failed")
+
+    monkeypatch.setattr(player_repo, "add_balance_many", _fail_transfer)
+
+    skimmed = buff_service.apply_blood_pact_skim(
+        TARGET, TEST_GUILD_ID, 400, player_repo
+    )
+    assert skimmed == 0
+    pact = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
+    assert pact["data"]["skimmed_total"] == 0
+    assert player_repo.get_balance(TARGET, TEST_GUILD_ID) == balance_before
+
+
+def test_blood_pact_apply_transfers_balances(repo_db_path, buff_service):
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Skimmer", guild_id=TEST_GUILD_ID)
+    player_repo.add(discord_id=TARGET, discord_username="Target", guild_id=TEST_GUILD_ID)
+    player_repo.update_balance(TARGET, TEST_GUILD_ID, 500)
+    skimmer_before = player_repo.get_balance(USER, TEST_GUILD_ID)
+    buff_service.grant_blood_pact(USER, TEST_GUILD_ID, TARGET)
+
+    skimmed = buff_service.apply_blood_pact_skim(
+        TARGET, TEST_GUILD_ID, 400, player_repo
+    )
+
+    assert skimmed == 100
+    assert player_repo.get_balance(TARGET, TEST_GUILD_ID) == 400
+    assert player_repo.get_balance(USER, TEST_GUILD_ID) == skimmer_before + 100
+
+
 def test_record_blood_pact_skim_preserves_stored_cap_and_rate(buff_repo, buff_service):
     """Recording a skim must not clobber the pact's stored cap / skim_rate —
     only skimmed_total should change."""
@@ -239,6 +284,71 @@ def test_settle_due_dark_bargain_default_adds_penalty(repo_db_path, buff_repo, b
     assert settled == [{"discord_id": USER, "guild_id": TEST_GUILD_ID, "status": "defaulted", "amount": 1600}]
     assert player_repo.get_balance(USER, TEST_GUILD_ID) == -1297
     assert bankruptcy_repo.get_penalty_games(USER, TEST_GUILD_ID) == 5
+
+
+def test_settle_due_dark_bargain_missing_player_keeps_debt_active(
+    repo_db_path, buff_repo, buff_service,
+):
+    import sqlite3
+
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    bankruptcy_repo = BankruptcyRepository(repo_db_path)
+    missing_user = 999999
+    buff_repo.grant(
+        missing_user,
+        TEST_GUILD_ID,
+        BUFF_DARK_BARGAIN,
+        int(time.time()) - 1,
+        data={"amount_due": 700, "default_penalty": 1600, "default_penalty_games": 5},
+    )
+
+    settled = buff_service.settle_due_dark_bargains(
+        player_repo=player_repo,
+        bankruptcy_repo=bankruptcy_repo,
+    )
+
+    assert settled == [{
+        "discord_id": missing_user,
+        "guild_id": TEST_GUILD_ID,
+        "status": "missing_player",
+        "amount": 0,
+    }]
+    with sqlite3.connect(repo_db_path) as conn:
+        triggered = conn.execute(
+            """
+            SELECT triggered FROM manashop_buffs
+            WHERE discord_id = ? AND guild_id = ? AND buff_type = ?
+            """,
+            (missing_user, TEST_GUILD_ID, BUFF_DARK_BARGAIN),
+        ).fetchone()[0]
+    assert triggered == 0
+
+
+def test_overgrowth_migration_backfills_missing_charges(repo_db_path, buff_repo):
+    import sqlite3
+    import time
+
+    from infrastructure.schema_manager import SchemaManager
+    from services.buff_service import BUFF_OVERGROWTH
+
+    future = int(time.time()) + 3600
+    buff_repo.grant(USER, TEST_GUILD_ID, BUFF_OVERGROWTH, future, data={})
+
+    mgr = SchemaManager(repo_db_path)
+    with sqlite3.connect(repo_db_path) as conn:
+        cursor = conn.cursor()
+        mgr._migration_backfill_overgrowth_charges_remaining(cursor)
+        conn.commit()
+        data_json = cursor.execute(
+            "SELECT data FROM manashop_buffs WHERE discord_id = ? AND buff_type = ?",
+            (USER, BUFF_OVERGROWTH),
+        ).fetchone()[0]
+
+    import json
+    assert json.loads(data_json)["charges_remaining"] == 10
 
 
 def test_overgrowth_active_for_user_only(buff_service):

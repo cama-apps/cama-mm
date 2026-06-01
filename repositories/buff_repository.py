@@ -159,6 +159,84 @@ class BuffRepository(BaseRepository):
                 (data_json, buff_id),
             )
 
+    def claim_blood_pact_skim_atomic(
+        self,
+        target_id: int,
+        guild_id: int | None,
+        earning: int,
+    ) -> dict | None:
+        """Atomically reserve a Blood Pact skim against ``target_id``'s earnings.
+
+        Returns ``{buff_id, skimmer_id, amount, new_total}`` when a skim was
+        reserved, else ``None``. Callers must transfer balances and call
+        ``revert_blood_pact_skim`` if the transfer fails.
+        """
+        if earning <= 0:
+            return None
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, discord_id, data
+                FROM manashop_buffs
+                WHERE target_id = ? AND guild_id = ? AND buff_type = 'blood_pact'
+                  AND triggered = 0 AND expires_at > ?
+                ORDER BY granted_at DESC
+                LIMIT 1
+                """,
+                (target_id, gid, now),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            data = safe_json_loads(row["data"], {}, context="manashop_buffs.data")
+            cap = int(data.get("cap") or 0)
+            skimmed_total = int(data.get("skimmed_total") or 0)
+            remaining = cap - skimmed_total
+            if remaining <= 0:
+                return None
+            skim_rate = float(data.get("skim_rate") or 0)
+            amount = min(remaining, max(1, int(earning * skim_rate)))
+            if amount <= 0:
+                return None
+
+            new_total = skimmed_total + amount
+            data["skimmed_total"] = new_total
+            cursor.execute(
+                "UPDATE manashop_buffs SET data = ? WHERE id = ?",
+                (json.dumps(data), row["id"]),
+            )
+            return {
+                "buff_id": int(row["id"]),
+                "skimmer_id": int(row["discord_id"]),
+                "amount": amount,
+                "new_total": new_total,
+            }
+
+    def revert_blood_pact_skim(self, buff_id: int, amount: int) -> None:
+        """Undo a reserved skim when the balance transfer could not complete."""
+        if amount <= 0:
+            return
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT data FROM manashop_buffs WHERE id = ?",
+                (buff_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return
+            data = safe_json_loads(row["data"], {}, context="manashop_buffs.data")
+            skimmed_total = int(data.get("skimmed_total") or 0)
+            data["skimmed_total"] = max(0, skimmed_total - amount)
+            cursor.execute(
+                "UPDATE manashop_buffs SET data = ? WHERE id = ?",
+                (json.dumps(data), buff_id),
+            )
+
     def consume_data_charge_atomic(
         self,
         discord_id: int,
@@ -252,10 +330,6 @@ class BuffRepository(BaseRepository):
                 )
                 row = cursor.fetchone()
                 if row is None:
-                    cursor.execute(
-                        "UPDATE manashop_buffs SET triggered = 1 WHERE id = ?",
-                        (debt["id"],),
-                    )
                     results.append({
                         "discord_id": discord_id,
                         "guild_id": guild_id,

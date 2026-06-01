@@ -5,6 +5,7 @@ Schema and migration management for SQLite database.
 import json
 import logging
 import sqlite3
+import time
 
 logger = logging.getLogger("cama_bot.schema")
 
@@ -444,6 +445,11 @@ class SchemaManager:
             (
                 "backfill_missing_dig_weapon_gear",
                 self._migration_backfill_missing_dig_weapon_gear,
+            ),
+            # Legacy Overgrowth rows predating charge-based digs.
+            (
+                "backfill_overgrowth_charges_remaining",
+                self._migration_backfill_overgrowth_charges_remaining,
             ),
         ]
 
@@ -2614,8 +2620,29 @@ class SchemaManager:
             if not missing:
                 continue
 
+            expected_points = 5 + (prestige_level * len(boss_boundaries)) + len(defeated)
+            current_points = int(stat_points or 5)
+            if current_points >= expected_points:
+                updated_awards = sorted(awarded | defeated)
+                cursor.execute(
+                    """
+                    UPDATE tunnels
+                    SET stat_boss_awards = ?
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (
+                        json.dumps({
+                            "prestige_level": prestige_level,
+                            "awards": updated_awards,
+                        }),
+                        discord_id,
+                        guild_id,
+                    ),
+                )
+                continue
+
             updated_awards = sorted(awarded | defeated)
-            updated_stat_points = max(5, int(stat_points or 5)) + len(missing)
+            updated_stat_points = max(5, current_points) + len(missing)
             cursor.execute(
                 """
                 UPDATE tunnels
@@ -3227,6 +3254,37 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_backfill_overgrowth_charges_remaining(self, cursor) -> None:
+        """Grant 10 dig charges to legacy Overgrowth buffs missing the field."""
+        now = int(time.time())
+        rows = cursor.execute(
+            """
+            SELECT id, data
+            FROM manashop_buffs
+            WHERE buff_type = 'overgrowth'
+              AND triggered = 0
+              AND expires_at > ?
+            """,
+            (now,),
+        ).fetchall()
+
+        for row in rows:
+            buff_id = row[0]
+            raw_data = row[1]
+            try:
+                data = json.loads(raw_data or "{}")
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            if "charges_remaining" in data:
+                continue
+            data["charges_remaining"] = 10
+            cursor.execute(
+                "UPDATE manashop_buffs SET data = ? WHERE id = ?",
+                (json.dumps(data), buff_id),
+            )
 
     def _migration_predictions_mini_split_v1(self, cursor) -> None:
         """10:1 stock split for prediction markets, fair-history table, banner sentinel.

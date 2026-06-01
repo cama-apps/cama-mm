@@ -61,24 +61,24 @@ class BettingService:
     ) -> int:
         if self.buff_service is None or earning <= 0:
             return 0
-        try:
-            skim = self.buff_service.claim_blood_pact_skim(earner_id, guild_id, earning)
-        except Exception:
-            logger.exception("Failed to claim Blood Pact skim for player %d", earner_id)
-            return 0
-        if not skim:
-            return 0
-        amount = int(skim["amount"])
-        skimmer_id = int(skim["skimmer_id"])
-        try:
-            self.player_repo.add_balance_many(
-                {earner_id: -amount, skimmer_id: amount},
-                guild_id,
-            )
-        except Exception:
-            logger.exception("Failed to transfer Blood Pact skim for player %d", earner_id)
-            return 0
-        return amount
+        return self.buff_service.apply_blood_pact_skim(
+            earner_id, guild_id, earning, self.player_repo
+        )
+
+    def _skim_blood_pact_from_awards(
+        self,
+        results: dict[int, dict[str, int]],
+        guild_id: int | None,
+        *,
+        earning_key: str = "gross",
+    ) -> None:
+        """Apply Blood Pact skims to a batch of award results."""
+        for pid, result in results.items():
+            earning = int(result.get(earning_key, 0))
+            skimmed = self._apply_blood_pact_skim(pid, guild_id, earning)
+            if skimmed:
+                result["blood_pact_skimmed"] = skimmed
+                result["net"] = int(result.get("net", 0)) - skimmed
 
     def _since_ts(self, pending_state: PendingMatchState | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
@@ -346,7 +346,9 @@ class BettingService:
 
         Mirrors win bonus processing so bankruptcy and garnishment rules still apply.
         """
-        return self._award_with_penalties(excluded_ids, JOPACOIN_EXCLUSION_REWARD, guild_id)
+        results = self._award_with_penalties(excluded_ids, JOPACOIN_EXCLUSION_REWARD, guild_id)
+        self._skim_blood_pact_from_awards(results, guild_id)
+        return results
 
     def award_exclusion_bonus_half(
         self, excluded_ids: list[int], guild_id: int | None = None
@@ -356,7 +358,11 @@ class BettingService:
 
         Same processing as award_exclusion_bonus but with JOPACOIN_EXCLUSION_REWARD // 2.
         """
-        return self._award_with_penalties(excluded_ids, JOPACOIN_EXCLUSION_REWARD // 2, guild_id)
+        results = self._award_with_penalties(
+            excluded_ids, JOPACOIN_EXCLUSION_REWARD // 2, guild_id
+        )
+        self._skim_blood_pact_from_awards(results, guild_id)
+        return results
 
     def award_streaming_bonus(
         self, player_ids: list[int], guild_id: int | None = None
@@ -367,7 +373,9 @@ class BettingService:
         Same processing as other awards so bankruptcy and garnishment rules still apply.
         """
         from config import STREAMING_BONUS
-        return self._award_with_penalties(player_ids, STREAMING_BONUS, guild_id)
+        results = self._award_with_penalties(player_ids, STREAMING_BONUS, guild_id)
+        self._skim_blood_pact_from_awards(results, guild_id)
+        return results
 
     def award_first_game_bonus(
         self, player_ids: list[int], guild_id: int | None = None
@@ -378,7 +386,9 @@ class BettingService:
         Same processing as other awards so bankruptcy and garnishment rules still apply.
         """
         from config import FIRST_GAME_BONUS
-        return self._award_with_penalties(player_ids, FIRST_GAME_BONUS, guild_id)
+        results = self._award_with_penalties(player_ids, FIRST_GAME_BONUS, guild_id)
+        self._skim_blood_pact_from_awards(results, guild_id)
+        return results
 
     def _award_with_penalties(
         self, player_ids: list[int], reward_amount: int, guild_id: int | None = None

@@ -877,16 +877,23 @@ class BettingCommands(commands.Cog):
                 await discover_msg.edit(embed=timeout_embed, view=None)
             result_value = result_wedge[1]
 
-        # Anchor for the bankruptcy debuff, captured AFTER any interactive
-        # TOWN_TRIAL/DISCOVER wait so a concurrent balance change during that
-        # window (a steal/tip/settlement landing on the spinner) isn't
-        # misattributed as wheel winnings. The net positive gain over this
-        # anchor is the spin's winnings (the wheel has no stake), debuffed once
-        # at the end. Only fetched when a penalty could apply — an unconditional
-        # extra get_balance call would change mock call counts in tests (and an
-        # exhausted mock raising StopIteration deadlocks asyncio.to_thread).
+        # Anchor for post-outcome gain tracking (bankruptcy debuff / Blood Pact skim),
+        # captured AFTER any interactive TOWN_TRIAL/DISCOVER wait so a concurrent
+        # balance change during that window (a steal/tip/settlement landing on the
+        # spinner) isn't misattributed as wheel winnings. Only fetched when a real
+        # service could consume the anchor — an unconditional extra get_balance call
+        # would change mock call counts in tests (and an exhausted mock raising
+        # StopIteration deadlocks asyncio.to_thread).
+        from services.buff_service import BuffService
+
+        buff_service = getattr(self.bot, "buff_service", None)
+        player_repo = getattr(self.bot, "player_repo", None)
+        track_wheel_gains = (
+            bankruptcy_service is not None
+            or isinstance(buff_service, BuffService)
+        )
         balance_before_outcome = None
-        if bankruptcy_service is not None:
+        if track_wheel_gains:
             balance_before_outcome = await asyncio.to_thread(
                 self.player_service.get_balance, user_id, guild_id
             )
@@ -1747,28 +1754,26 @@ class BettingCommands(commands.Cog):
                     )
                     new_balance = current_balance - wheel_bankruptcy_penalty
 
-        buff_service = getattr(self.bot, "buff_service", None)
-        if buff_service is not None:
+        if (
+            isinstance(buff_service, BuffService)
+            and player_repo is not None
+            and balance_before_outcome is not None
+        ):
             try:
                 current_balance = await asyncio.to_thread(
                     self.player_service.get_balance, user_id, guild_id
                 )
                 gain = current_balance - balance_before_outcome
                 if gain > 0:
-                    skim = await asyncio.to_thread(
-                        buff_service.claim_blood_pact_skim, user_id, guild_id, gain
+                    skimmed = await asyncio.to_thread(
+                        buff_service.apply_blood_pact_skim,
+                        user_id,
+                        guild_id,
+                        gain,
+                        player_repo,
                     )
-                    if skim:
-                        amount = int(skim["amount"])
-                        await asyncio.to_thread(
-                            self.player_repo.add_balance_many,
-                            {
-                                user_id: -amount,
-                                int(skim["skimmer_id"]): amount,
-                            },
-                            guild_id,
-                        )
-                        new_balance = current_balance - amount
+                    if skimmed:
+                        new_balance = current_balance - skimmed
             except Exception:
                 logger.exception("Failed to apply Blood Pact skim to wheel payout")
 

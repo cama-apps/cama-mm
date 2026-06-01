@@ -242,6 +242,33 @@ class TestReconcilePostPrestigeBossStatPoints:
             "awards": [25],
         }
 
+    def test_skips_point_grant_when_cumulative_total_already_correct(self, repo_db_path):
+        """Legacy list-format awards must not inflate stat_points when total is already synced."""
+        self._seed(
+            repo_db_path,
+            prestige_level=1,
+            stat_points=19,
+            stat_boss_awards=[25, 50, 75, 100, 150, 200, 275],
+            boss_progress={
+                "25": "defeated",
+                "50": "defeated",
+                "75": "defeated",
+                "100": "defeated",
+                "150": "defeated",
+                "200": "defeated",
+                "275": "defeated",
+            },
+        )
+
+        _run_reconcile_stat_points_migration(repo_db_path)
+
+        stat_points, awards_raw = _read_tunnel_stats(repo_db_path, 111, 222)
+        assert stat_points == 19
+        assert json.loads(awards_raw) == {
+            "prestige_level": 1,
+            "awards": [25, 50, 75, 100, 150, 200, 275],
+        }
+
     def test_idempotent_after_reconciliation(self, repo_db_path):
         self._seed(
             repo_db_path,
