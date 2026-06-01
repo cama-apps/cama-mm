@@ -11,6 +11,7 @@ from repositories.mana_repository import ManaRepository
 from repositories.slow_drip_repository import SlowDripRepository
 from services.buff_service import (
     BUFF_COUNTERSPELL,
+    BUFF_DARK_BARGAIN,
     BUFF_OVERGROWTH,
     BuffService,
 )
@@ -130,10 +131,30 @@ def test_blood_pact_skim_state_persists(buff_service):
     pact = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
     assert pact is not None
     assert pact["discord_id"] == USER
+    assert pact["data"]["cap"] == 150
+    assert pact["data"]["skim_rate"] == 0.25
     # Update the skim total — should round-trip via repo.
     buff_service.record_blood_pact_skim(pact["id"], pact["data"], 25)
     refreshed = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
     assert refreshed["data"]["skimmed_total"] == 25
+
+
+def test_blood_pact_skim_calculation_respects_rate_and_cap(buff_service):
+    buff_service.grant_blood_pact(USER, TEST_GUILD_ID, TARGET)
+
+    first = buff_service.claim_blood_pact_skim(TARGET, TEST_GUILD_ID, 400)
+    second = buff_service.claim_blood_pact_skim(TARGET, TEST_GUILD_ID, 400)
+
+    assert first["skimmer_id"] == USER
+    assert first["amount"] == 100
+    assert first["new_total"] == 100
+    assert second["buff_id"] == first["buff_id"]
+    assert second["skimmer_id"] == USER
+    assert second["amount"] == 50
+    assert second["new_total"] == 150
+    refreshed = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
+    assert refreshed["data"]["skimmed_total"] == 150
+    assert buff_service.claim_blood_pact_skim(TARGET, TEST_GUILD_ID, 400) is None
 
 
 def test_record_blood_pact_skim_preserves_stored_cap_and_rate(buff_repo, buff_service):
@@ -156,16 +177,87 @@ def test_record_blood_pact_skim_preserves_stored_cap_and_rate(buff_repo, buff_se
 
 
 def test_dark_bargain_debt_fetches(buff_service):
-    buff_service.grant_dark_bargain_debt(USER, TEST_GUILD_ID, amount_due=800)
+    buff_service.grant_dark_bargain_debt(USER, TEST_GUILD_ID, amount_due=700)
     debt = buff_service.has_dark_bargain_debt(USER, TEST_GUILD_ID)
     assert debt is not None
-    assert debt["data"]["amount_due"] == 800
+    assert debt["data"]["amount_due"] == 700
+    assert debt["data"]["default_penalty"] == 1600
+    assert debt["data"]["default_penalty_games"] == 5
+
+
+def test_settle_due_dark_bargain_paid_once(repo_db_path, buff_repo, buff_service):
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    bankruptcy_repo = BankruptcyRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Buyer", guild_id=TEST_GUILD_ID)
+    player_repo.add_balance(USER, TEST_GUILD_ID, 1100)
+    buff_repo.grant(
+        USER,
+        TEST_GUILD_ID,
+        BUFF_DARK_BARGAIN,
+        int(time.time()) - 1,
+        data={"amount_due": 700, "default_penalty": 1600, "default_penalty_games": 5},
+    )
+
+    first = buff_service.settle_due_dark_bargains(
+        player_repo=player_repo,
+        bankruptcy_repo=bankruptcy_repo,
+    )
+    second = buff_service.settle_due_dark_bargains(
+        player_repo=player_repo,
+        bankruptcy_repo=bankruptcy_repo,
+    )
+
+    assert first == [{"discord_id": USER, "guild_id": TEST_GUILD_ID, "status": "paid", "amount": 700}]
+    assert second == []
+    assert player_repo.get_balance(USER, TEST_GUILD_ID) == 403
+
+
+def test_settle_due_dark_bargain_default_adds_penalty(repo_db_path, buff_repo, buff_service):
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    bankruptcy_repo = BankruptcyRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Buyer", guild_id=TEST_GUILD_ID)
+    player_repo.add_balance(USER, TEST_GUILD_ID, 300)
+    buff_repo.grant(
+        USER,
+        TEST_GUILD_ID,
+        BUFF_DARK_BARGAIN,
+        int(time.time()) - 1,
+        data={"amount_due": 700, "default_penalty": 1600, "default_penalty_games": 5},
+    )
+
+    settled = buff_service.settle_due_dark_bargains(
+        player_repo=player_repo,
+        bankruptcy_repo=bankruptcy_repo,
+    )
+
+    assert settled == [{"discord_id": USER, "guild_id": TEST_GUILD_ID, "status": "defaulted", "amount": 1600}]
+    assert player_repo.get_balance(USER, TEST_GUILD_ID) == -1297
+    assert bankruptcy_repo.get_penalty_games(USER, TEST_GUILD_ID) == 5
 
 
 def test_overgrowth_active_for_user_only(buff_service):
     buff_service.grant_overgrowth(USER, TEST_GUILD_ID)
     assert buff_service.has_overgrowth(USER, TEST_GUILD_ID) is True
     assert buff_service.has_overgrowth(ALLY, TEST_GUILD_ID) is False
+
+
+def test_overgrowth_grants_ten_dig_charges(buff_service, buff_repo):
+    buff_service.grant_overgrowth(USER, TEST_GUILD_ID)
+
+    active = buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_OVERGROWTH)
+    assert active[0]["data"]["charges_remaining"] == 10
+
+    for _ in range(10):
+        assert buff_service.consume_overgrowth_charge(USER, TEST_GUILD_ID) is True
+
+    assert buff_service.consume_overgrowth_charge(USER, TEST_GUILD_ID) is False
+    assert buff_service.has_overgrowth(USER, TEST_GUILD_ID) is False
 
 
 def test_overgrowth_regrant_refreshes_not_extends(buff_service, buff_repo):

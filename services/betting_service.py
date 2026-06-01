@@ -56,6 +56,30 @@ class BettingService:
         self.bankruptcy_service = bankruptcy_service
         self.buff_service = buff_service
 
+    def _apply_blood_pact_skim(
+        self, earner_id: int, guild_id: int | None, earning: int
+    ) -> int:
+        if self.buff_service is None or earning <= 0:
+            return 0
+        try:
+            skim = self.buff_service.claim_blood_pact_skim(earner_id, guild_id, earning)
+        except Exception:
+            logger.exception("Failed to claim Blood Pact skim for player %d", earner_id)
+            return 0
+        if not skim:
+            return 0
+        amount = int(skim["amount"])
+        skimmer_id = int(skim["skimmer_id"])
+        try:
+            self.player_repo.add_balance_many(
+                {earner_id: -amount, skimmer_id: amount},
+                guild_id,
+            )
+        except Exception:
+            logger.exception("Failed to transfer Blood Pact skim for player %d", earner_id)
+            return 0
+        return amount
+
     def _since_ts(self, pending_state: PendingMatchState | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
         if not pending_state:
@@ -182,6 +206,10 @@ class BettingService:
                     pid, guild_id, total_reward, 0.0
                 )
             result["bomb_pot_bonus"] = bomb_pot_bonus
+            skimmed = self._apply_blood_pact_skim(pid, guild_id, total_reward)
+            if skimmed:
+                result["blood_pact_skimmed"] = skimmed
+                result["net"] = int(result.get("net", 0)) - skimmed
             results[pid] = result
         return results
 
@@ -231,6 +259,16 @@ class BettingService:
             )
             if penalties:
                 distributions["bankruptcy_penalties"] = penalties
+
+        if self.buff_service:
+            pact_skims: dict[int, int] = {}
+            for w in distributions.get("winners", []):
+                profit = int(w.get("payout", 0)) - int(w.get("effective_bet", w.get("amount", 0)))
+                skimmed = self._apply_blood_pact_skim(w["discord_id"], guild_id, profit)
+                if skimmed:
+                    pact_skims[w["discord_id"]] = pact_skims.get(w["discord_id"], 0) + skimmed
+            if pact_skims:
+                distributions["blood_pact_skims"] = pact_skims
 
         return distributions
 
@@ -289,6 +327,14 @@ class BettingService:
                         results[pid]["manashop_bonus"] = bonus
                     except Exception:
                         logger.exception("Failed to credit manashop win bonus %d to player %d", bonus, pid)
+
+        if self.buff_service:
+            for pid, result in results.items():
+                gross = int(result.get("gross", 0)) + int(result.get("manashop_bonus", 0))
+                skimmed = self._apply_blood_pact_skim(pid, guild_id, gross)
+                if skimmed:
+                    result["net"] = int(result.get("net", 0)) - skimmed
+                    result["blood_pact_skimmed"] = skimmed
 
         return results
 

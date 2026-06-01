@@ -159,6 +159,166 @@ class BuffRepository(BaseRepository):
                 (data_json, buff_id),
             )
 
+    def consume_data_charge_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        buff_type: str,
+        data_key: str,
+    ) -> bool:
+        """Atomically decrement a positive integer charge in a buff data blob.
+
+        Marks the buff triggered when the consumed charge was the last one.
+        Returns False when no active charged buff exists.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, data
+                FROM manashop_buffs
+                WHERE discord_id = ? AND guild_id = ? AND buff_type = ?
+                  AND triggered = 0 AND expires_at > ?
+                ORDER BY granted_at DESC
+                LIMIT 1
+                """,
+                (discord_id, gid, buff_type, now),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return False
+
+            data = safe_json_loads(row["data"], {}, context="manashop_buffs.data")
+            charges = int(data.get(data_key) or 0)
+            if charges <= 0:
+                cursor.execute(
+                    "UPDATE manashop_buffs SET triggered = 1 WHERE id = ?",
+                    (row["id"],),
+                )
+                return False
+
+            data[data_key] = charges - 1
+            if data[data_key] <= 0:
+                cursor.execute(
+                    "UPDATE manashop_buffs SET data = ?, triggered = 1 WHERE id = ?",
+                    (json.dumps(data), row["id"]),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE manashop_buffs SET data = ? WHERE id = ?",
+                    (json.dumps(data), row["id"]),
+                )
+            return True
+
+    def settle_due_dark_bargains(
+        self,
+        *,
+        now: int,
+    ) -> list[dict]:
+        """Settle expired Dark Bargain debts exactly once."""
+        results: list[dict] = []
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, discord_id, guild_id, data
+                FROM manashop_buffs
+                WHERE buff_type = 'dark_bargain'
+                  AND triggered = 0
+                  AND expires_at <= ?
+                ORDER BY expires_at ASC
+                """,
+                (now,),
+            )
+            debts = [dict(row) for row in cursor.fetchall()]
+
+            for debt in debts:
+                data = safe_json_loads(debt.get("data"), {}, context="manashop_buffs.data")
+                discord_id = int(debt["discord_id"])
+                guild_id = int(debt["guild_id"])
+                amount_due = int(data.get("amount_due") or 0)
+                default_penalty = int(data.get("default_penalty") or 1600)
+                default_penalty_games = int(data.get("default_penalty_games") or 5)
+
+                cursor.execute(
+                    """
+                    SELECT COALESCE(jopacoin_balance, 0) as balance
+                    FROM players
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (discord_id, guild_id),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    cursor.execute(
+                        "UPDATE manashop_buffs SET triggered = 1 WHERE id = ?",
+                        (debt["id"],),
+                    )
+                    results.append({
+                        "discord_id": discord_id,
+                        "guild_id": guild_id,
+                        "status": "missing_player",
+                        "amount": 0,
+                    })
+                    continue
+
+                if int(row["balance"]) >= amount_due:
+                    amount = amount_due
+                    status = "paid"
+                else:
+                    amount = default_penalty
+                    status = "defaulted"
+
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, discord_id, guild_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    (discord_id, guild_id),
+                )
+                if status == "defaulted":
+                    cursor.execute(
+                        """
+                        INSERT INTO bankruptcy_state (
+                            discord_id, guild_id, last_bankruptcy_at,
+                            penalty_games_remaining, bankruptcy_count, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                        ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                            last_bankruptcy_at = excluded.last_bankruptcy_at,
+                            penalty_games_remaining = bankruptcy_state.penalty_games_remaining
+                                + excluded.penalty_games_remaining,
+                            bankruptcy_count = COALESCE(bankruptcy_state.bankruptcy_count, 0) + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (discord_id, guild_id, now, default_penalty_games),
+                    )
+                cursor.execute(
+                    "UPDATE manashop_buffs SET triggered = 1 WHERE id = ?",
+                    (debt["id"],),
+                )
+                results.append({
+                    "discord_id": discord_id,
+                    "guild_id": guild_id,
+                    "status": status,
+                    "amount": amount,
+                })
+
+        return results
+
     def cleanup_expired(self, *, before: int | None = None) -> int:
         """Delete expired/triggered buff rows. Returns number of rows pruned.
 
@@ -169,7 +329,7 @@ class BuffRepository(BaseRepository):
             cursor = conn.cursor()
             cursor.execute(
                 "DELETE FROM manashop_buffs "
-                "WHERE triggered = 1 OR expires_at <= ?",
+                "WHERE triggered = 1 OR (expires_at <= ? AND buff_type != 'dark_bargain')",
                 (cutoff,),
             )
             return cursor.rowcount or 0

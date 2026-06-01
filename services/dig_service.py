@@ -323,8 +323,6 @@ class DigService(
             cooldown_remaining = self._apply_mana_cooldown_reduction(
                 discord_id, guild_id, self._get_cooldown_remaining(tunnel)
             )
-            if overgrowth_active:
-                cooldown_remaining = 0
             if cooldown_remaining > 0:
                 if not paid:
                     pd = tunnel.get("paid_dig_date")
@@ -792,6 +790,11 @@ class DigService(
                 },
                 log_action_type="dig",
             )
+            if overgrowth_active:
+                try:
+                    self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
+                except Exception:
+                    logger.exception("Failed to consume Overgrowth charge")
 
             return self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
@@ -933,7 +936,7 @@ class DigService(
         # milestone/streak from a Mountain "zero" roll.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
         if overgrowth_active:
-            jc_earned += 5
+            jc_earned += 10
 
         # 14. Check milestones (with ascension milestone multiplier).
         # Only award milestones that extend the tunnel's all-time high
@@ -1133,6 +1136,11 @@ class DigService(
             },
             log_action_type="dig",
         )
+        if overgrowth_active:
+            try:
+                self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
+            except Exception:
+                logger.exception("Failed to consume Overgrowth charge")
 
         # 22. Return result
         return self._ok(
@@ -1230,8 +1238,6 @@ class DigService(
             cooldown_remaining = self._apply_mana_cooldown_reduction(
                 discord_id, guild_id, self._get_cooldown_remaining(tunnel)
             )
-            if overgrowth_active:
-                cooldown_remaining = 0
             if cooldown_remaining > 0:
                 if not paid:
                     pd = tunnel.get("paid_dig_date")

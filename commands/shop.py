@@ -1597,23 +1597,23 @@ class ShopCommands(commands.Cog):
     )
     @app_commands.choices(item=[
         # Cheap (unlimited, 10s cd)
-        app_commands.Choice(name="Cheap • Pyroclasm (Red, 60 JC) — destroy JC from 3 random players", value="pyroclasm"),
-        app_commands.Choice(name="Cheap • Insight (Blue, 40 JC) — peek at any digger's stats", value="insight"),
-        app_commands.Choice(name="Cheap • Sapling (Green, 50 JC) — shave 15min off /dig cooldown", value="sapling"),
-        app_commands.Choice(name="Cheap • Communion (White, 50 JC) — donate to nonprofit, +10% next match win", value="communion"),
-        app_commands.Choice(name="Cheap • Soul Harvest (Black, 75 JC) — drain 1 JC from every positive player", value="soul_harvest"),
+        app_commands.Choice(name="Cheap • Pyroclasm (Red, 25 JC) — burn JC from 3 players, claim a bounty", value="pyroclasm"),
+        app_commands.Choice(name="Cheap • Insight (Blue, 10 JC) — peek at any digger's stats", value="insight"),
+        app_commands.Choice(name="Cheap • Sapling (Green, 10 JC) — shave 45min off /dig cooldown", value="sapling"),
+        app_commands.Choice(name="Cheap • Communion (White, 8 JC) — donate to nonprofit, +10% next match win", value="communion"),
+        app_commands.Choice(name="Cheap • Soul Harvest (Black, 25 JC) — drain 2 JC from every positive player", value="soul_harvest"),
         # Mid (1/day)
-        app_commands.Choice(name="Mid • Dynamite Cache (Red, 150 JC, 1/day) — next 3 digs +30% yield", value="dynamite_cache"),
-        app_commands.Choice(name="Mid • Mana Shield (Blue, 150 JC, 1/day) — refund 50% of largest 24h loss", value="mana_shield"),
-        app_commands.Choice(name="Mid • Regrowth (Green, 100 JC, 1/day) — recover 25% of last 24h losses", value="regrowth"),
-        app_commands.Choice(name="Mid • Aegis (White, 150 JC, 1/day) — absorb the next PvP attack", value="aegis"),
-        app_commands.Choice(name="Mid • Blood Pact (Black, 150 JC, 1/day) — skim 10% of target's earnings 24h", value="blood_pact"),
+        app_commands.Choice(name="Mid • Dynamite Cache (Red, 35 JC, 1/day) — next 3 digs +75% yield", value="dynamite_cache"),
+        app_commands.Choice(name="Mid • Mana Shield (Blue, 35 JC, 1/day) — refund 60% of largest 24h loss", value="mana_shield"),
+        app_commands.Choice(name="Mid • Regrowth (Green, 25 JC, 1/day) — recover 35% of last 24h losses", value="regrowth"),
+        app_commands.Choice(name="Mid • Aegis (White, 35 JC, 1/day) — absorb the next PvP attack", value="aegis"),
+        app_commands.Choice(name="Mid • Blood Pact (Black, 75 JC, 1/day) — skim 25% of target's earnings 24h", value="blood_pact"),
         # Ultimate (taps mana — consumes today's color)
-        app_commands.Choice(name="Ult • Wildfire (Red, 450 JC, taps mana) — drain JC from every positive player", value="wildfire"),
-        app_commands.Choice(name="Ult • Counterspell (Blue, 400 JC, taps mana) — 24h PvP immunity", value="counterspell"),
-        app_commands.Choice(name="Ult • Overgrowth (Green, 400 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
-        app_commands.Choice(name="Ult • Sanctuary (White, 400 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
-        app_commands.Choice(name="Ult • Dark Bargain (Black, 350 JC, taps mana) — 800 JC instant 0%-fee debt", value="dark_bargain"),
+        app_commands.Choice(name="Ult • Wildfire (Red, 150 JC, taps mana) — drain JC from every positive player", value="wildfire"),
+        app_commands.Choice(name="Ult • Counterspell (Blue, 75 JC, taps mana) — 24h PvP immunity", value="counterspell"),
+        app_commands.Choice(name="Ult • Overgrowth (Green, 90 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
+        app_commands.Choice(name="Ult • Sanctuary (White, 60 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
+        app_commands.Choice(name="Ult • Dark Bargain (Black, 150 JC, taps mana) — 800 JC now, 700 due later", value="dark_bargain"),
     ])
     @app_commands.checks.cooldown(1, 10)
     @require_guild
@@ -1668,23 +1668,23 @@ class ShopCommands(commands.Cog):
         # cost:    JC cost
         MANA_ITEMS: dict[str, dict] = {
             # Cheap
-            "pyroclasm": {"tier": "cheap", "color": "Red", "cost": 60, "name": "Pyroclasm"},
-            "insight": {"tier": "cheap", "color": "Blue", "cost": 40, "name": "Insight"},
-            "sapling": {"tier": "cheap", "color": "Green", "cost": 50, "name": "Sapling"},
-            "communion": {"tier": "cheap", "color": "White", "cost": 50, "name": "Communion"},
-            "soul_harvest": {"tier": "cheap", "color": "Black", "cost": 75, "name": "Soul Harvest"},
+            "pyroclasm": {"tier": "cheap", "color": "Red", "cost": 25, "name": "Pyroclasm"},
+            "insight": {"tier": "cheap", "color": "Blue", "cost": 10, "name": "Insight"},
+            "sapling": {"tier": "cheap", "color": "Green", "cost": 10, "name": "Sapling"},
+            "communion": {"tier": "cheap", "color": "White", "cost": 8, "name": "Communion"},
+            "soul_harvest": {"tier": "cheap", "color": "Black", "cost": 25, "name": "Soul Harvest"},
             # Mid
-            "dynamite_cache": {"tier": "mid", "color": "Red", "cost": 150, "name": "Dynamite Cache"},
-            "mana_shield": {"tier": "mid", "color": "Blue", "cost": 150, "name": "Mana Shield"},
-            "regrowth": {"tier": "mid", "color": "Green", "cost": 100, "name": "Regrowth"},
-            "aegis": {"tier": "mid", "color": "White", "cost": 150, "name": "Aegis"},
-            "blood_pact": {"tier": "mid", "color": "Black", "cost": 150, "name": "Blood Pact"},
+            "dynamite_cache": {"tier": "mid", "color": "Red", "cost": 35, "name": "Dynamite Cache"},
+            "mana_shield": {"tier": "mid", "color": "Blue", "cost": 35, "name": "Mana Shield"},
+            "regrowth": {"tier": "mid", "color": "Green", "cost": 25, "name": "Regrowth"},
+            "aegis": {"tier": "mid", "color": "White", "cost": 35, "name": "Aegis"},
+            "blood_pact": {"tier": "mid", "color": "Black", "cost": 75, "name": "Blood Pact"},
             # Ultimate (taps mana)
-            "wildfire": {"tier": "ult", "color": "Red", "cost": 450, "name": "Wildfire"},
-            "counterspell": {"tier": "ult", "color": "Blue", "cost": 400, "name": "Counterspell"},
-            "overgrowth": {"tier": "ult", "color": "Green", "cost": 400, "name": "Overgrowth"},
-            "sanctuary": {"tier": "ult", "color": "White", "cost": 400, "name": "Sanctuary"},
-            "dark_bargain": {"tier": "ult", "color": "Black", "cost": 350, "name": "Dark Bargain"},
+            "wildfire": {"tier": "ult", "color": "Red", "cost": 150, "name": "Wildfire"},
+            "counterspell": {"tier": "ult", "color": "Blue", "cost": 75, "name": "Counterspell"},
+            "overgrowth": {"tier": "ult", "color": "Green", "cost": 90, "name": "Overgrowth"},
+            "sanctuary": {"tier": "ult", "color": "White", "cost": 60, "name": "Sanctuary"},
+            "dark_bargain": {"tier": "ult", "color": "Black", "cost": 150, "name": "Dark Bargain"},
         }
 
         item_key = item.value
@@ -1811,17 +1811,22 @@ class ShopCommands(commands.Cog):
             total_destroyed = 0
             victim_lines = []
             for t in targets:
-                destroy_amt = random.randint(8, 20)
+                destroy_amt = random.randint(12, 24)
                 destroy_amt = min(destroy_amt, t.jopacoin_balance)
                 if destroy_amt > 0:
                     await asyncio.to_thread(self.player_service.adjust_balance, t.discord_id, guild_id, -destroy_amt)
                     total_destroyed += destroy_amt
                     victim_lines.append(f"  - {t.name}: -{destroy_amt} {JOPACOIN_EMOTE}")
+            bounty = min(35, total_destroyed // 2)
+            if bounty > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, bounty)
             victims_text = "\n".join(victim_lines) if victim_lines else "  No eligible targets."
             await interaction.followup.send(
                 f"⛰️🔥 **PYROCLASM** — {interaction.user.mention} unleashes chaos!\n"
                 f"{victims_text}\n"
-                f"**{total_destroyed} {JOPACOIN_EMOTE} destroyed** (cost: {cost} {JOPACOIN_EMOTE})"
+                f"**{total_destroyed} {JOPACOIN_EMOTE} burned**. "
+                f"You claim **{bounty} {JOPACOIN_EMOTE}** from the ash.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + bounty})"
             )
 
         elif item_key == "insight":
@@ -1864,7 +1869,7 @@ class ShopCommands(commands.Cog):
             if dig_service is not None:
                 try:
                     shaved_seconds = await asyncio.to_thread(
-                        dig_service.dig_repo.shave_cooldown, user_id, guild_id, 15 * 60,
+                        dig_service.dig_repo.shave_cooldown, user_id, guild_id, 45 * 60,
                     )
                 except AttributeError:
                     # Fallback: rewind last_dig_at on the tunnel directly.
@@ -1873,12 +1878,12 @@ class ShopCommands(commands.Cog):
                             dig_service.dig_repo.get_tunnel, user_id, guild_id,
                         )
                         if tunnel and tunnel.get("last_dig_at"):
-                            new_last = max(0, int(tunnel["last_dig_at"]) - 15 * 60)
+                            new_last = max(0, int(tunnel["last_dig_at"]) - 45 * 60)
                             await asyncio.to_thread(
                                 dig_service.dig_repo.update_tunnel,
                                 user_id, guild_id, last_dig_at=new_last,
                             )
-                            shaved_seconds = 15 * 60
+                            shaved_seconds = 45 * 60
                     except Exception:
                         shaved_seconds = 0
                 except Exception:
@@ -1921,13 +1926,14 @@ class ShopCommands(commands.Cog):
                 return
             total_drained = 0
             for p in eligible:
-                await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -1)
-                total_drained += 1
+                drain = min(2, p.jopacoin_balance)
+                await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -drain)
+                total_drained += drain
             if total_drained > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, total_drained)
             await interaction.followup.send(
                 f"🌿💀 **SOUL HARVEST** — {interaction.user.mention} drains the living!\n"
-                f"Drained **1 {JOPACOIN_EMOTE}** from **{total_drained}** players. "
+                f"Drained up to **2 {JOPACOIN_EMOTE}** from **{len(eligible)}** players. "
                 f"Gained **{total_drained} {JOPACOIN_EMOTE}**.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + total_drained})"
             )
@@ -1945,7 +1951,7 @@ class ShopCommands(commands.Cog):
                         "id": "dynamite_cache",
                         "name": "Dynamite Cache",
                         "duration_digs": 3,
-                        "effect": {"yield_multiplier": 1.30},
+                        "effect": {"yield_multiplier": 1.75},
                     },
                 )
             except Exception:
@@ -1954,7 +1960,7 @@ class ShopCommands(commands.Cog):
                 return
             await interaction.followup.send(
                 f"⛰️🧨 **DYNAMITE CACHE** — {interaction.user.mention} packs the next 3 digs hot.\n"
-                f"Yield +30% on your next 3 swings.\n"
+                f"Yield +75% on your next 3 swings.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
@@ -1964,12 +1970,12 @@ class ShopCommands(commands.Cog):
             largest_loss = await asyncio.to_thread(
                 self._compute_largest_recent_loss, user_id, guild_id, cutoff,
             )
-            refund = min(200, largest_loss // 2)
+            refund = min(120, int(largest_loss * 0.60))
             if refund > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, refund)
             await interaction.followup.send(
                 f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention} reclaims {refund} {JOPACOIN_EMOTE}.\n"
-                f"(50% of your largest loss in the past 24h, capped at 200. "
+                f"(60% of your largest loss in the past 24h, capped at 120. "
                 f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + refund})"
             )
 
@@ -1981,12 +1987,12 @@ class ShopCommands(commands.Cog):
             total_lost = await asyncio.to_thread(
                 self._compute_cumulative_recent_losses, user_id, guild_id, cutoff,
             )
-            recovery = min(200, total_lost // 4)
+            recovery = min(120, int(total_lost * 0.35))
             if recovery > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
             await interaction.followup.send(
                 f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
-                f"(25% of your last 24h losses, capped at 200. "
+                f"(35% of your last 24h losses, capped at 120. "
                 f"Cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + recovery})"
             )
 
@@ -2020,7 +2026,7 @@ class ShopCommands(commands.Cog):
                 return
             await interaction.followup.send(
                 f"🌿🩸 **BLOOD PACT** — {interaction.user.mention} marks {target.mention} for skim.\n"
-                f"For 24h, you receive 10% of {target.display_name}'s match/wheel/dig earnings (cap 50 JC).\n"
+                f"For 24h, you receive 25% of {target.display_name}'s match/wheel/dig earnings (cap 150 JC).\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
@@ -2036,7 +2042,7 @@ class ShopCommands(commands.Cog):
                 if drain > 0:
                     await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -drain)
                     total_drained += drain
-            user_gain = int(total_drained * 0.35)
+            user_gain = int(total_drained * 0.45)
             if user_gain > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, user_gain)
             await interaction.followup.send(
@@ -2075,7 +2081,7 @@ class ShopCommands(commands.Cog):
                 return
             await interaction.followup.send(
                 f"🌲🌳 **OVERGROWTH** — {interaction.user.mention} burns the day's mana into the soil.\n"
-                f"For 12h: every dig +5 JC, no /dig cooldown, cave-in chance halved.\n"
+                f"For 12h: your next 10 digs get +10 JC and cave-in chance halved.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
             )
 
@@ -2112,7 +2118,7 @@ class ShopCommands(commands.Cog):
             try:
                 await asyncio.to_thread(
                     buff_service.grant_dark_bargain_debt,
-                    user_id, guild_id, amount_due=800, due_in_days=7,
+                    user_id, guild_id, amount_due=700, due_in_days=7,
                 )
             except Exception:
                 logger.exception("Dark Bargain debt grant failed")
@@ -2131,7 +2137,7 @@ class ShopCommands(commands.Cog):
                 return
             await interaction.followup.send(
                 f"🌿💀 **DARK BARGAIN** — {interaction.user.mention} signs in red ink.\n"
-                f"+800 {JOPACOIN_EMOTE} now. 800 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n"
+                f"+800 {JOPACOIN_EMOTE} now. 700 due in 7 days. Default: -1600 + bankruptcy +5 matches.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + 800 + ult_refund})"
             )
 

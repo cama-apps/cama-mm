@@ -87,6 +87,7 @@ _lobby_ready_lock = asyncio.Lock()
 # Prediction market background task handles
 _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
+_manashop_debt_task: asyncio.Task | None = None
 
 
 def _log_task_exit(name: str):
@@ -231,6 +232,27 @@ async def _prediction_digest_loop() -> None:
         except Exception as ex:
             logger.exception("digest outer loop error: %s", ex)
             await asyncio.sleep(60)
+
+
+async def _manashop_debt_loop() -> None:
+    await bot.wait_until_ready()
+    logger.info("manashop debt loop started")
+    while not bot.is_closed():
+        try:
+            buff_service = getattr(bot, "buff_service", None)
+            player_repo = getattr(bot, "player_repo", None)
+            bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
+            if buff_service is not None and player_repo is not None and bankruptcy_repo is not None:
+                settled = await asyncio.to_thread(
+                    buff_service.settle_due_dark_bargains,
+                    player_repo=player_repo,
+                    bankruptcy_repo=bankruptcy_repo,
+                )
+                if settled:
+                    logger.info("settled %d due Dark Bargain debt(s): %s", len(settled), settled)
+        except Exception as ex:
+            logger.exception("manashop debt loop error: %s", ex)
+        await asyncio.sleep(3600)
 
 
 async def _post_daily_digest_all_guilds() -> None:
@@ -635,7 +657,7 @@ async def on_ready():
     # Both are wrapped in a supervisor that auto-restarts the body on a
     # crash, and a done-callback that surfaces an unexpected exit to the log
     # so we can never lose a feature to silent failure.
-    global _prediction_refresh_task, _prediction_digest_task
+    global _prediction_refresh_task, _prediction_digest_task, _manashop_debt_task
     if _prediction_refresh_task is None or _prediction_refresh_task.done():
         _prediction_refresh_task = bot.loop.create_task(
             _supervised_loop("prediction_refresh", _prediction_refresh_loop)
@@ -646,6 +668,11 @@ async def on_ready():
             _supervised_loop("prediction_digest", _prediction_digest_loop)
         )
         _prediction_digest_task.add_done_callback(_log_task_exit("prediction_digest"))
+    if _manashop_debt_task is None or _manashop_debt_task.done():
+        _manashop_debt_task = bot.loop.create_task(
+            _supervised_loop("manashop_debt", _manashop_debt_loop)
+        )
+        _manashop_debt_task.add_done_callback(_log_task_exit("manashop_debt"))
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:
