@@ -21,27 +21,27 @@ from services.dig_service import DigService
 EXPECTED_EVENTS = {
     "hungering_dark": {
         "rarity": "uncommon", "min_depth": 10, "strategy": "richest_n",
-        "victim_count": 2, "penalty_jc": 4, "payout": 5,
+        "victim_count": 2, "penalty_jc": 5, "payout": 5,
     },
     "deny_the_seam": {
         "rarity": "uncommon", "min_depth": 20, "strategy": "richest_n",
-        "victim_count": 2, "penalty_jc": 5, "payout": 6,
+        "victim_count": 2, "penalty_jc": 6, "payout": 6,
     },
     "turf_war": {
         "rarity": "uncommon", "min_depth": 35, "strategy": "active_diggers",
-        "victim_count": 3, "penalty_jc": 5, "payout": 8,
+        "victim_count": 3, "penalty_jc": 6, "payout": 8,
     },
     "smoke_ambush": {
         "rarity": "rare", "min_depth": 60, "strategy": "active_diggers",
-        "victim_count": 3, "penalty_jc": 6, "payout": 10,
+        "victim_count": 3, "penalty_jc": 7, "payout": 10,
     },
     "the_tear": {
         "rarity": "rare", "min_depth": 90, "strategy": "random_active",
-        "victim_count": 3, "penalty_jc": 7, "payout": 10,
+        "victim_count": 3, "penalty_jc": 8, "payout": 10,
     },
     "the_deep_hunter": {
         "rarity": "rare", "min_depth": 110, "strategy": "deepest_n",
-        "victim_count": 2, "penalty_jc": 10, "payout": 12,
+        "victim_count": 2, "penalty_jc": 12, "payout": 12,
     },
 }
 
@@ -167,19 +167,19 @@ class TestEncounterEndToEnd:
         assert result["splash"] is not None
         assert result["splash"]["mode"] == "burn"
 
-        # The two RICHEST others are burned 4 each; the third is untouched.
-        assert player_repository.get_balance(10002, guild_id) == 996
-        assert player_repository.get_balance(10003, guild_id) == 796
+        # The two RICHEST others are burned 5 each; the third is untouched.
+        assert player_repository.get_balance(10002, guild_id) == 995
+        assert player_repository.get_balance(10003, guild_id) == 795
         assert player_repository.get_balance(10004, guild_id) == 500
         # Digger keeps the +5 payout.
         assert player_repository.get_balance(digger, guild_id) == 55
 
-        # Globally deflationary: digger +5, burned 8 => net -3 across the guild.
+        # Globally deflationary: digger +5, burned 10 => net -5 across the guild.
         total_after = sum(
             player_repository.get_balance(pid, guild_id)
             for pid in (digger, 10002, 10003, 10004)
         )
-        assert total_after == total_before - 3
+        assert total_after == total_before - 5
 
     def test_empty_pool_pays_nothing(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -211,7 +211,7 @@ class TestEncounterEndToEnd:
         scales by the same ratio and the event stays net-deflationary."""
         digger = 10001
         _register(player_repository, digger, guild_id, 50)
-        # The only two other players are each too poor to cover the full 4 JC.
+        # The only two other players are each too poor to cover the full 5 JC.
         _register(player_repository, 10002, guild_id, 3)
         _register(player_repository, 10003, guild_id, 3)
         dig_repo.create_tunnel(digger, guild_id, "T")
@@ -225,17 +225,17 @@ class TestEncounterEndToEnd:
 
         result = dig_service.resolve_event(digger, guild_id, "hungering_dark", "risky")
 
-        # nominal burn 2*4=8; victims hold only 3 each -> burned 6; ratio 0.75;
-        # payout 5 -> round(5*0.75)=4.
-        assert result["jc_delta"] == 4
+        # nominal burn 2*5=10; victims hold only 3 each -> burned 6; ratio 0.60;
+        # payout 5 -> round(5*0.60)=3.
+        assert result["jc_delta"] == 3
         assert player_repository.get_balance(10002, guild_id) == 0
         assert player_repository.get_balance(10003, guild_id) == 0
-        assert player_repository.get_balance(digger, guild_id) == 54
+        assert player_repository.get_balance(digger, guild_id) == 53
         total_after = sum(
             player_repository.get_balance(p, guild_id) for p in (digger, 10002, 10003)
         )
-        # Net: digger +4, burned 6 => -2. Still deflationary despite the clamp.
-        assert total_after == total_before - 2
+        # Net: digger +3, burned 6 => -3. Still deflationary despite the clamp.
+        assert total_after == total_before - 3
 
     def test_failure_does_not_burn(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -261,7 +261,7 @@ class TestEncounterEndToEnd:
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
         """turf_war (active_diggers): three funded recent diggers each lose the
-        full 5 JC and the digger gets the full +8 since the burn lands whole."""
+        full 6 JC and the digger gets the full +8 since the burn lands whole."""
         digger = 10001
         _register(player_repository, digger, guild_id, 50)
         for vid in (10002, 10003, 10004):
@@ -282,18 +282,18 @@ class TestEncounterEndToEnd:
         assert result["succeeded"] is True
         assert result["jc_delta"] == 8
         for vid in (10002, 10003, 10004):
-            assert player_repository.get_balance(vid, guild_id) == 95
+            assert player_repository.get_balance(vid, guild_id) == 94
         assert player_repository.get_balance(digger, guild_id) == 58
         total_after = sum(
             player_repository.get_balance(p, guild_id)
             for p in (digger, 10002, 10003, 10004)
         )
-        assert total_after == total_before - 7   # +8 digger, -15 burned
+        assert total_after == total_before - 10   # +8 digger, -18 burned
 
     def test_random_active_burn_full_when_funded(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
-        """the_tear (random_active): three funded active players each lose 7 and
+        """the_tear (random_active): three funded active players each lose 8 and
         the digger gets the full +10."""
         import datetime
         digger = 10001
@@ -323,10 +323,10 @@ class TestEncounterEndToEnd:
         burned = sum(
             100 - player_repository.get_balance(v, guild_id) for v in (10002, 10003, 10004)
         )
-        assert burned == 21                       # 3 * 7
+        assert burned == 24                       # 3 * 8
         assert player_repository.get_balance(digger, guild_id) == 60
         total_after = sum(
             player_repository.get_balance(p, guild_id)
             for p in (digger, 10002, 10003, 10004)
         )
-        assert total_after == total_before - 11   # +10 digger, -21 burned
+        assert total_after == total_before - 14   # +10 digger, -24 burned
