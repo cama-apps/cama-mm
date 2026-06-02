@@ -168,16 +168,24 @@ ASCENSION_MODIFIERS: dict[int, AscensionModifier] = {
     ),
     2: AscensionModifier(
         level=2, name="Unstable Ground",
-        penalty="Cave-in chance +3%",
+        penalty="Cave-in chance +3%, dig JC -3%",
         reward="Event chance +20%",
-        effects={"cave_in_bonus": 0.03, "event_chance_multiplier": 0.20},
+        effects={
+            "cave_in_bonus": 0.03,
+            "event_chance_multiplier": 0.20,
+            "jc_layer_penalty": 0.03,
+        },
         gameplay=False,
     ),
     3: AscensionModifier(
         level=3, name="Hungry Darkness",
-        penalty="Luminosity drains 25% faster",
+        penalty="Luminosity drains 25% faster, dig JC -2%",
         reward="Rare events 50% more common",
-        effects={"luminosity_drain_multiplier": 0.25, "rare_event_multiplier": 0.50},
+        effects={
+            "luminosity_drain_multiplier": 0.25,
+            "rare_event_multiplier": 0.50,
+            "jc_layer_penalty": 0.02,
+        },
         gameplay=False,
     ),
     4: AscensionModifier(

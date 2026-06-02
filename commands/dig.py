@@ -82,6 +82,36 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.dig")
 
+
+def _append_sabotage_prediction_steal_line(embed: discord.Embed, result) -> None:
+    sabotage_hit = getattr(result, "sabotage_hit", True)
+    if isinstance(result, dict):
+        sabotage_hit = result.get("sabotage_hit", True)
+    if sabotage_hit is False:
+        return
+
+    steal = getattr(result, "prediction_contract_steal", None)
+    if isinstance(result, dict):
+        steal = result.get("prediction_contract_steal")
+    if not steal:
+        return
+
+    prediction_id = getattr(steal, "prediction_id", None)
+    side = getattr(steal, "side", None)
+    contracts = getattr(steal, "contracts", None)
+    if isinstance(steal, dict):
+        prediction_id = steal.get("prediction_id")
+        side = steal.get("side")
+        contracts = steal.get("contracts")
+    if prediction_id is None or not side or not contracts:
+        return
+
+    embed.description = (
+        f"{embed.description or ''}\n"
+        f"Stole **{contracts} {str(side).upper()}** prediction contracts from "
+        f"market **#{prediction_id}**."
+    )
+
 __all__ = [
     "DigCommands",
     "setup",
@@ -104,6 +134,7 @@ __all__ = [
     "_wrap",
     "_build_boss_fight_result_embed",
     "_build_gear_embed",
+    "_append_sabotage_prediction_steal_line",
     "_splash_aftermath_lines",
     "_reading_the_stone_hint",
     "_READING_HINTS",
@@ -949,11 +980,20 @@ class DigCommands(commands.Cog):
                     result_embed.color = 0xFF0000
                 else:
                     damage = getattr(result, "damage", 0)
-                    result_embed.title = "Sabotage Successful"
-                    result_embed.description = (
-                        f"You sabotaged **{user.display_name}**'s tunnel!\n"
-                        f"Damage dealt: **{damage}** blocks"
-                    )
+                    if getattr(result, "sabotage_hit", True) is False:
+                        result_embed.title = "Sabotage Missed"
+                        result_embed.description = (
+                            f"You tried to sabotage **{user.display_name}**'s tunnel, "
+                            "but the strike missed.\n"
+                            f"Damage dealt: **{damage}** blocks"
+                        )
+                    else:
+                        result_embed.title = "Sabotage Successful"
+                        result_embed.description = (
+                            f"You sabotaged **{user.display_name}**'s tunnel!\n"
+                            f"Damage dealt: **{damage}** blocks"
+                        )
+                        _append_sabotage_prediction_steal_line(result_embed, result)
                 await interaction.edit_original_response(embed=result_embed, view=None)
             except ValueError as e:
                 await interaction.edit_original_response(content=str(e), embed=None, view=None)

@@ -8,7 +8,9 @@ import time
 
 import pytest
 
+from commands.dig import _append_sabotage_prediction_steal_line
 from repositories.dig_repository import DigRepository
+from repositories.prediction_repository import PredictionRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
     BOSS_VICTORY_BASE_JC,
@@ -34,6 +36,7 @@ from services.dig_constants import (
     SABOTAGE_COST_DIVISOR,
     SABOTAGE_DAMAGE_MAX,
     SABOTAGE_DAMAGE_MIN,
+    SABOTAGE_SUCCESS_CHANCE,
     STREAKS,
 )
 from services.dig_service import DigService, _prestige_cave_in_multiplier
@@ -54,6 +57,11 @@ def dig_service(dig_repo, player_repository, monkeypatch):
     return svc
 
 
+@pytest.fixture
+def prediction_repo(repo_db_path):
+    return PredictionRepository(repo_db_path)
+
+
 def _register_player(player_repository, discord_id=10001, guild_id=12345, balance=100):
     """Helper to register a player with balance."""
     player_repository.add(
@@ -68,6 +76,37 @@ def _register_player(player_repository, discord_id=10001, guild_id=12345, balanc
     if balance != 3:  # default is 3
         player_repository.update_balance(discord_id, guild_id, balance)
     return discord_id
+
+
+def test_sabotage_embed_mentions_prediction_contract_steal():
+    embed = type("Embed", (), {"description": "Damage dealt: **6** blocks"})()
+    result = {
+        "prediction_contract_steal": {
+            "prediction_id": 42,
+            "side": "yes",
+            "contracts": 4,
+        }
+    }
+
+    _append_sabotage_prediction_steal_line(embed, result)
+
+    assert "Stole **4 YES** prediction contracts from market **#42**." in embed.description
+
+
+def test_sabotage_embed_ignores_prediction_contract_steal_on_miss():
+    embed = type("Embed", (), {"description": "The sabotage missed."})()
+    result = {
+        "sabotage_hit": False,
+        "prediction_contract_steal": {
+            "prediction_id": 42,
+            "side": "yes",
+            "contracts": 4,
+        },
+    }
+
+    _append_sabotage_prediction_steal_line(embed, result)
+
+    assert embed.description == "The sabotage missed."
 
 
 class TestDigConstants:
@@ -721,10 +760,10 @@ class TestMilestones:
 
 
 class TestHighPrestigeLayerPenalty:
-    """The P4+ jc_layer_penalty dampens the layer-roll path of normal dig.
+    """The P2+ jc_layer_penalty dampens the layer-roll path of normal dig.
 
-    P1 grants +18% loot at every prestige >= 1, so P3 and P4 share the same
-    jc_multiplier; only the P4 layer penalty (-5%) differs. Comparing the two
+    P1 grants +18% loot at every prestige >= 1, so prestige comparisons share
+    the same jc_multiplier; only layer penalties differ. Comparing them
     isolates the penalty end-to-end through dig() and guards the three
     jc_mult subtraction sites — the aggregator test alone can't catch a
     missing or mis-placed subtraction.
@@ -747,7 +786,7 @@ class TestHighPrestigeLayerPenalty:
         )
         return dig_service.dig(discord_id, guild_id)
 
-    def test_p4_layer_penalty_reduces_layer_payout(
+    def test_p2_layer_penalty_reduces_layer_payout(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -759,18 +798,40 @@ class TestHighPrestigeLayerPenalty:
             random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
         )
 
-        jc_p3 = self._dig_once(
-            dig_service, dig_repo, player_repository, guild_id, 30001, 3,
+        jc_p1 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30001, 1,
         )["jc_earned"]
-        jc_p4 = self._dig_once(
-            dig_service, dig_repo, player_repository, guild_id, 30002, 4,
+        jc_p2 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30002, 2,
         )["jc_earned"]
 
-        # P3: base 10000 x (1 + 0.18 P1 loot) = 11800, no penalty.
-        # P4: x (1 + 0.18 - 0.05) = 11300. abs=1 absorbs float truncation.
-        assert jc_p3 == pytest.approx(11800, abs=1)
-        assert jc_p4 == pytest.approx(11300, abs=1)
-        # The penalty must actually bite: P4 strictly below P3 by ~5% of base.
+        # P1: base 10000 x (1 + 0.18 P1 loot) = 11800, no penalty.
+        # P2: x (1 + 0.18 - 0.03) = 11500. abs=1 absorbs float truncation.
+        assert jc_p1 == pytest.approx(11800, abs=1)
+        assert jc_p2 == pytest.approx(11500, abs=1)
+        # The penalty must actually bite: P2 strictly below P1 by ~3% of base.
+        assert jc_p1 - jc_p2 == pytest.approx(300, abs=2)
+
+    def test_p4_layer_penalty_reduces_layer_payout(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
+        monkeypatch.setattr(
+            random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
+        )
+
+        jc_p3 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30005, 3,
+        )["jc_earned"]
+        jc_p4 = self._dig_once(
+            dig_service, dig_repo, player_repository, guild_id, 30006, 4,
+        )["jc_earned"]
+
+        # P3: base 10000 x (1 + 0.18 - 0.05) = 11300.
+        # P4: x (1 + 0.18 - 0.10) = 10800.
+        assert jc_p3 == pytest.approx(11300, abs=1)
+        assert jc_p4 == pytest.approx(10800, abs=1)
         assert jc_p3 - jc_p4 == pytest.approx(500, abs=2)
 
     def test_p5_layer_penalty_reduces_layer_payout(
@@ -789,10 +850,10 @@ class TestHighPrestigeLayerPenalty:
             dig_service, dig_repo, player_repository, guild_id, 30004, 5,
         )["jc_earned"]
 
-        # P4: base 10000 x (1 + 0.18 - 0.05) = 11300.
-        # P5: x (1 + 0.18 - 0.12) = 10600 (P5 Erosion slice 0.07).
-        assert jc_p4 == pytest.approx(11300, abs=1)
-        assert jc_p5 == pytest.approx(10600, abs=1)
+        # P4: base 10000 x (1 + 0.18 - 0.10) = 10800.
+        # P5: x (1 + 0.18 - 0.17) = 10100 (P5 Erosion slice 0.07).
+        assert jc_p4 == pytest.approx(10800, abs=1)
+        assert jc_p5 == pytest.approx(10100, abs=1)
         assert jc_p4 - jc_p5 == pytest.approx(700, abs=2)
 
 
@@ -978,6 +1039,7 @@ class TestSabotage:
         dig_service.dig(10001, guild_id)
         dig_service.dig(10002, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=30)
+        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
 
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
         assert result["success"]
@@ -995,6 +1057,7 @@ class TestSabotage:
         dig_service.dig(10001, guild_id)
         dig_service.dig(10002, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=50)
+        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
 
         balance_before = player_repository.get_balance(10002, guild_id)
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
@@ -1013,6 +1076,7 @@ class TestSabotage:
         dig_service.dig(10001, guild_id)
         dig_service.dig(10002, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=30)
+        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
 
         # First sabotage
         result1 = dig_service.sabotage_tunnel(10002, 10001, guild_id)
@@ -1025,9 +1089,37 @@ class TestSabotage:
 
         # After 12h should work
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + SABOTAGE_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
         dig_repo.update_tunnel(10001, guild_id, depth=30)  # restore depth
         result3 = dig_service.sabotage_tunnel(10002, 10001, guild_id)
         assert result3["success"]
+
+    def test_sabotage_miss_costs_jc_without_damage_or_reward(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A failed hit roll consumes the paid sabotage attempt without damage."""
+        _register_player(player_repository, discord_id=10001)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=50)
+        attacker_pre = dig_repo.get_tunnel(10002, guild_id)
+        balance_before = player_repository.get_balance(10002, guild_id)
+
+        result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
+
+        assert result["success"]
+        assert result["sabotage_hit"] is False
+        assert result["damage"] == 0
+        assert result["attacker_block_reward"] == 0
+        assert result["prediction_contract_steal"] is None
+        assert dig_repo.get_tunnel(10001, guild_id)["depth"] == 50
+        assert dig_repo.get_tunnel(10002, guild_id)["depth"] == attacker_pre["depth"]
+        expected_cost = max(SABOTAGE_BASE_COST, 50 // SABOTAGE_COST_DIVISOR)
+        assert balance_before - player_repository.get_balance(10002, guild_id) == expected_cost
 
     def test_sabotage_insufficient_funds(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Error when can't afford."""
@@ -1070,6 +1162,7 @@ class TestSabotage:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         _register_player(player_repository, discord_id=29999, balance=2000)
         dig_service.dig(29999, guild_id)
+        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
 
         for i, (victim_depth, expected_reward) in enumerate(
             [(50, 3), (150, 5), (300, 7)],
@@ -1085,6 +1178,60 @@ class TestSabotage:
             assert result.get("attacker_block_reward") == expected_reward
             attacker_post = dig_repo.get_tunnel(29999, guild_id)
             assert attacker_post["depth"] == attacker_pre["depth"] + expected_reward
+
+    def test_successful_sabotage_can_steal_prediction_contracts(
+        self,
+        dig_repo,
+        player_repository,
+        prediction_repo,
+        guild_id,
+        monkeypatch,
+    ):
+        """A successful sabotage can transfer a small open prediction position slice."""
+        dig_service = DigService(dig_repo, player_repository, prediction_repo=prediction_repo)
+        monkeypatch.setattr(dig_service, "_get_weather_effects", lambda guild_id, layer_name: {})
+        _register_player(player_repository, discord_id=10001, balance=100, guild_id=guild_id)
+        _register_player(player_repository, discord_id=10002, balance=500, guild_id=guild_id)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=50)
+        market_id = prediction_repo.create_orderbook_prediction(
+            guild_id=guild_id,
+            creator_id=999,
+            question="Will sabotage matter?",
+            initial_fair=50,
+        )
+        with prediction_repo.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO prediction_positions
+                    (prediction_id, discord_id, yes_contracts, yes_cost_basis_total)
+                VALUES (?, ?, 8, 24)
+                """,
+                (market_id, 10001),
+            )
+
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        monkeypatch.setattr(random, "randint", lambda a, b: 4)
+        monkeypatch.setattr(random, "choice", lambda seq: seq[0])
+
+        result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
+
+        assert result["success"]
+        assert result["prediction_contract_steal"] == {
+            "prediction_id": market_id,
+            "side": "yes",
+            "contracts": 4,
+        }
+        victim_position = prediction_repo.get_position(market_id, 10001)
+        attacker_position = prediction_repo.get_position(market_id, 10002)
+        assert victim_position["yes_contracts"] == 4
+        assert victim_position["yes_cost_basis_total"] == 12
+        assert attacker_position["yes_contracts"] == 4
+        assert attacker_position["yes_cost_basis_total"] == 12
 
     def test_blocked_sabotage_credits_victim_jc_tip(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -1190,6 +1337,7 @@ class TestInsurance:
 
         # Fixed damage seed for consistency
         random.seed(99)
+        monkeypatch.setattr(random, "random", lambda: SABOTAGE_SUCCESS_CHANCE - 0.01)
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
         assert result["success"]
         # With insurance, damage should be reduced

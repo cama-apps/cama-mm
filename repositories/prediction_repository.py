@@ -805,6 +805,97 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
             return [dict(r) for r in cursor.fetchall()]
 
+    def get_transferable_open_position_sides(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """Return open YES/NO position sides that can be transferred."""
+        positions = self.get_user_open_positions(discord_id, guild_id)
+        sides: list[dict] = []
+        for position in positions:
+            prediction_id = int(position["prediction_id"])
+            yes_contracts = int(position["yes_contracts"])
+            no_contracts = int(position["no_contracts"])
+            if yes_contracts > 0:
+                sides.append({
+                    "prediction_id": prediction_id,
+                    "side": "yes",
+                    "contracts": yes_contracts,
+                })
+            if no_contracts > 0:
+                sides.append({
+                    "prediction_id": prediction_id,
+                    "side": "no",
+                    "contracts": no_contracts,
+                })
+        return sides
+
+    def transfer_position_contracts(
+        self,
+        prediction_id: int,
+        from_discord_id: int,
+        to_discord_id: int,
+        side: str,
+        contracts: int,
+    ) -> dict | None:
+        """Transfer contracts and proportional cost basis between two holders."""
+        if side not in self.VALID_TRADE_SIDES:
+            raise ValueError("side must be 'yes' or 'no'")
+        if contracts <= 0:
+            raise ValueError("contracts must be positive")
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            prediction = cursor.fetchone()
+            if not prediction or prediction["status"] != "open":
+                return None
+
+            from_yes, from_yes_basis, from_no, from_no_basis = self._read_position(
+                cursor, prediction_id, from_discord_id
+            )
+            if side == "yes":
+                held = from_yes
+                basis = from_yes_basis
+            else:
+                held = from_no
+                basis = from_no_basis
+            if held <= 0:
+                return None
+
+            moved = min(contracts, held)
+            moved_basis = basis if moved == held else (basis * moved) // held
+
+            to_yes, to_yes_basis, to_no, to_no_basis = self._read_position(
+                cursor, prediction_id, to_discord_id
+            )
+            if side == "yes":
+                from_yes -= moved
+                from_yes_basis -= moved_basis
+                to_yes += moved
+                to_yes_basis += moved_basis
+            else:
+                from_no -= moved
+                from_no_basis -= moved_basis
+                to_no += moved
+                to_no_basis += moved_basis
+
+            self._write_position(
+                cursor, prediction_id, from_discord_id,
+                from_yes, from_yes_basis, from_no, from_no_basis,
+            )
+            self._write_position(
+                cursor, prediction_id, to_discord_id,
+                to_yes, to_yes_basis, to_no, to_no_basis,
+            )
+            return {
+                "prediction_id": prediction_id,
+                "side": side,
+                "contracts": moved,
+            }
+
     def get_user_orderbook_stats(
         self, discord_id: int, guild_id: int | None = None
     ) -> dict:

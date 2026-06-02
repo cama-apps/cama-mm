@@ -3992,14 +3992,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Sign the emissary's ledger",
-            success=EventOutcome("He smiles. The signature pays for itself somewhere down the line.", 2, 14, False),
+            success=EventOutcome("He smiles. The signature pays for itself somewhere down the line.", 2, 13, False),
             failure=EventOutcome("Your hand cramps on the page. Something is taken in the gap.", 0, -8, False),
             success_chance=0.62,
         ),
         rarity="uncommon",
         desperate_option=EventChoice(
             "Steal a page from the ledger",
-            success=EventOutcome("The page comes loose; another digger's name fades from a wall somewhere.", 3, 22, False),
+            success=EventOutcome("The page comes loose; another digger's name fades from a wall somewhere.", 3, 20, False),
             failure=EventOutcome("He catches your wrist. The ledger drinks from you in payment.", -3, -11, False),
             success_chance=0.40,
         ),
@@ -4022,14 +4022,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Banish what waits in the circle",
-            success=EventOutcome("Something thin slips out and out and out until it isn't.", 2, 14, False),
+            success=EventOutcome("Something thin slips out and out and out until it isn't.", 2, 13, False),
             failure=EventOutcome("Banishing requires conviction. You lacked it.", 0, 0, False, curse=TempCurse("hex_necro_s4", "Wrong-Name Hex", 3, {"advance_bonus": -3})),
             success_chance=0.62,
         ),
         rarity="uncommon",
         desperate_option=EventChoice(
             "Raise it and ask its name",
-            success=EventOutcome("It rises and gives a name. You write it where you'll find it again.", 3, 22, False),
+            success=EventOutcome("It rises and gives a name. You write it where you'll find it again.", 3, 20, False),
             failure=EventOutcome("What rises is not what was buried.", -3, 0, False, curse=TempCurse("hex_necro_s4", "Wrong-Name Hex", 3, {"advance_bonus": -4})),
             success_chance=0.40,
         ),
@@ -4051,14 +4051,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Offer service in exchange for safe passage",
-            success=EventOutcome("He accepts a small service. The room marks you as useful.", 2, 19, False),
+            success=EventOutcome("He accepts a small service. The room marks you as useful.", 2, 17, False),
             failure=EventOutcome("He laughs. The standing dead laugh with him.", 0, 0, False, curse=TempCurse("hex_necro_s5", "The Necromancer's Note", 4, {"jc_bonus": -5})),
             success_chance=0.56,
         ),
         rarity="rare",
         desperate_option=EventChoice(
             "Demand a token of his authority",
-            success=EventOutcome("He is delighted by the impertinence. He hands you a cloak from his own shoulders. It moves of its own accord.", 3, 30, False),
+            success=EventOutcome("He is delighted by the impertinence. He hands you a cloak from his own shoulders. It moves of its own accord.", 3, 27, False),
             failure=EventOutcome("Impertinence has a price. He extracts it from your bones.", -4, 0, False, curse=TempCurse("hex_necro_s5", "The Necromancer's Note", 4, {"jc_bonus": -8})),
             success_chance=0.40,
         ),
@@ -4226,7 +4226,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         rarity="uncommon",
         social=True,
-        splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=4, trigger="success", mode="burn"),
+        splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=5, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="deny_the_seam",
@@ -4250,7 +4250,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         rarity="uncommon",
         social=True,
-        splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=5, trigger="success", mode="burn"),
+        splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=6, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="turf_war",
@@ -4274,7 +4274,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         rarity="uncommon",
         social=True,
-        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=5, trigger="success", mode="burn"),
+        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=6, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="smoke_ambush",
@@ -4298,7 +4298,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         rarity="rare",
         social=True,
-        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=6, trigger="success", mode="burn"),
+        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=7, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="the_tear",
@@ -4322,7 +4322,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         rarity="rare",
         social=True,
-        splash=SplashConfig(strategy="random_active", victim_count=3, penalty_jc=7, trigger="success", mode="burn"),
+        splash=SplashConfig(strategy="random_active", victim_count=3, penalty_jc=8, trigger="success", mode="burn"),
     ),
     RandomEvent(
         id="the_deep_hunter",
@@ -4346,7 +4346,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         rarity="rare",
         social=True,
-        splash=SplashConfig(strategy="deepest_n", victim_count=2, penalty_jc=10, trigger="success", mode="burn"),
+        splash=SplashConfig(strategy="deepest_n", victim_count=2, penalty_jc=12, trigger="success", mode="burn"),
     ),
 ]
 

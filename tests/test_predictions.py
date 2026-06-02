@@ -73,6 +73,37 @@ def test_schema_has_orderbook_tables(prediction_repo):
     assert "prediction_trades" in tables
 
 
+def test_position_transfer_rejects_non_open_market(prediction_repo):
+    """Contract transfers must not mutate locked/resolved markets."""
+    market_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Will this market lock?",
+        initial_fair=50,
+    )
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total)
+            VALUES (?, ?, 8, 24)
+            """,
+            (market_id, 1001),
+        )
+    prediction_repo.update_prediction_status(market_id, "locked")
+
+    result = prediction_repo.transfer_position_contracts(
+        market_id, 1001, 1002, "yes", 4
+    )
+
+    assert result is None
+    victim_position = prediction_repo.get_position(market_id, 1001)
+    attacker_position = prediction_repo.get_position(market_id, 1002)
+    assert victim_position["yes_contracts"] == 8
+    assert victim_position["yes_cost_basis_total"] == 24
+    assert attacker_position is None
+
+
 def test_predictions_has_orderbook_columns(prediction_repo):
     with prediction_repo.connection() as conn:
         cursor = conn.cursor()
