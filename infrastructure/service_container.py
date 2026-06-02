@@ -423,6 +423,7 @@ class ServiceContainer:
             tunnel_naming_service=c["dig_tunnel_naming_service"],
             inventory_service=c["dig_inventory_service"],
             quest_service=c["dig_quest_service"],
+            prediction_repo=c.get("prediction_repo"),
         )
 
         # Cross-wire: quest finale JC needs the same Plains-tithe/Blue-tax

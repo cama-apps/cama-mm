@@ -38,6 +38,7 @@ DECAY_HELPER_MIN_MULTIPLIER: float = 0.25           # floor on helper reduction
 
 SABOTAGE_BASE_COST: int = 5
 SABOTAGE_COST_DIVISOR: int = 5             # cost = max(SABOTAGE_BASE_COST, target_depth // SABOTAGE_COST_DIVISOR)
+SABOTAGE_SUCCESS_CHANCE: float = 0.50
 SABOTAGE_DAMAGE_MIN: int = 3
 SABOTAGE_DAMAGE_MAX: int = 8
 SABOTAGE_COOLDOWN_SECONDS: int = 43_200    # 12 hours
@@ -252,4 +253,3 @@ PROGRESSIVE_TIPS: list[tuple[int, int | None, str]] = [
     (50, None, "Deeper layers have rarer artifacts. Keep exploring!"),
     (50, None, "Stack sabotage defenses: insurance + reinforcement + relics."),
 ]
-

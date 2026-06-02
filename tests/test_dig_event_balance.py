@@ -73,3 +73,38 @@ def test_every_risky_branch_is_genuinely_risky():
         if not (can_fail or threatening):
             offenders.append(f"{e['id']}: risky branch has no downside")
     assert not offenders, "risky branches with no downside:\n" + "\n".join(offenders)
+
+
+def test_high_p2_event_rewards_are_modestly_trimmed():
+    """Only the high-end P2 quest payouts get a small haircut."""
+    events_by_id = {e["id"]: e for e in EVENT_POOL}
+    expected = {
+        "necro_s3": {"risky": 13, "desperate": 20},
+        "necro_s4": {"risky": 13, "desperate": 20},
+        "necro_s5": {"risky": 17, "desperate": 27},
+    }
+    for event_id, payouts in expected.items():
+        event = events_by_id[event_id]
+        assert event["risky_option"]["success"]["jc"] == payouts["risky"]
+        assert event["desperate_option"]["success"]["jc"] == payouts["desperate"]
+
+
+def test_social_burn_events_are_real_global_sinks():
+    """The global deflation events must burn more JC than they grant the actor."""
+    expected_burns = {
+        "hungering_dark": 5,
+        "deny_the_seam": 6,
+        "turf_war": 6,
+        "smoke_ambush": 7,
+        "the_tear": 8,
+        "the_deep_hunter": 12,
+    }
+    events_by_id = {e["id"]: e for e in EVENT_POOL}
+    for event_id, penalty in expected_burns.items():
+        event = events_by_id[event_id]
+        splash = event["splash"]
+        assert splash["mode"] == "burn"
+        assert splash["penalty_jc"] == penalty
+        total_burn = splash["victim_count"] * splash["penalty_jc"]
+        actor_jc = event["risky_option"]["success"].get("jc", 0)
+        assert total_burn > actor_jc

@@ -38,6 +38,7 @@ from services.dig_constants import (
     PRESTIGE_PERK_STACK_CAP,
     PRESTIGE_PERK_VALUES,
     PRESTIGE_PERKS,
+    SABOTAGE_SUCCESS_CHANCE,
     WEATHER_BY_ID,
 )
 
@@ -1015,6 +1016,37 @@ class ProgressionMixin:
                 is_reveal=False,
             )
 
+        if random.random() >= SABOTAGE_SUCCESS_CHANCE:
+            self.dig_repo.atomic_sabotage(
+                actor_id=actor_id,
+                target_id=target_id,
+                guild_id=guild_id,
+                target_depth_delta=0,
+                actor_jc_cost=cost,
+                log_detail={
+                    "target_id": target_id,
+                    "damage": 0,
+                    "cost": cost,
+                    "trap_triggered": False,
+                    "sabotage_hit": False,
+                    "attacker_block_reward": 0,
+                },
+            )
+            return self._ok(
+                cost=cost,
+                damage=0,
+                target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
+                trap_triggered=False,
+                trapped=False,
+                sabotage_hit=False,
+                attacker_block_reward=0,
+                prediction_contract_steal=None,
+                clue=None,
+                is_reveal=False,
+                insurance_applied=False,
+                damage_reduced=False,
+            )
+
         # Calculate damage
         damage = random.randint(3, 8)
 
@@ -1096,6 +1128,10 @@ class ProgressionMixin:
             },
         )
 
+        prediction_contract_steal = self._maybe_steal_prediction_contracts(
+            actor_id, target_id, guild_id,
+        )
+
         # Mana: Black attackers also skim a slice of the victim's depth as
         # a JC bonus (steal_depth_pct). Settled separately so the audit log
         # already captured the base damage.
@@ -1147,6 +1183,7 @@ class ProgressionMixin:
             target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
             trap_triggered=False,
             trap_detail=None,
+            sabotage_hit=True,
             clue=clue,
             is_reveal=is_reveal,
             insurance_applied=total_reduction > 0,
@@ -1155,7 +1192,34 @@ class ProgressionMixin:
             attacker_block_reward=attacker_block_reward,
             vendetta_reflect=vendetta_reflect,
             vendetta_bonus=vendetta_bonus,
+            prediction_contract_steal=prediction_contract_steal,
         )
+
+    def _maybe_steal_prediction_contracts(
+        self, actor_id: int, target_id: int, guild_id
+    ) -> dict | None:
+        prediction_repo = getattr(self, "prediction_repo", None)
+        if prediction_repo is None:
+            return None
+        if random.random() >= 0.50:
+            return None
+        try:
+            sides = prediction_repo.get_transferable_open_position_sides(target_id, guild_id)
+            if not sides:
+                return None
+            position_side = random.choice(sides)
+            max_steal = min(5, int(position_side["contracts"]))
+            contracts = random.randint(1, max_steal)
+            return prediction_repo.transfer_position_contracts(
+                int(position_side["prediction_id"]),
+                target_id,
+                actor_id,
+                position_side["side"],
+                contracts,
+            )
+        except Exception:
+            logger.debug("Prediction contract sabotage steal failed", exc_info=True)
+            return None
 
     def _generate_clue(self, actor_id: int, guild_id, clue_type: str) -> dict:
         """Generate a clue about the saboteur."""

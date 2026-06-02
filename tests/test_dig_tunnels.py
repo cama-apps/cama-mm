@@ -342,14 +342,16 @@ class TestAscensionSystem:
         # Level 3 rare_event_multiplier=0.50
         assert effects["rare_event_multiplier"] == 0.50
 
-    def test_jc_layer_penalty_stacks_p4_p5_p6(self, dig_service):
-        """High-prestige layer JC penalty kicks in at P4 and stacks through P6."""
-        assert dig_service._get_ascension_effects(3).get("jc_layer_penalty", 0) == 0
-        assert dig_service._get_ascension_effects(4)["jc_layer_penalty"] == pytest.approx(0.05)
-        assert dig_service._get_ascension_effects(5)["jc_layer_penalty"] == pytest.approx(0.12)
-        assert dig_service._get_ascension_effects(6)["jc_layer_penalty"] == pytest.approx(0.17)
-        # Penalty does not grow past P6; P10 still totals 0.17.
-        assert dig_service._get_ascension_effects(10)["jc_layer_penalty"] == pytest.approx(0.17)
+    def test_jc_layer_penalty_stacks_from_p2_through_p6(self, dig_service):
+        """Prestige layer JC dampening starts small at P2 and stacks through P6."""
+        assert dig_service._get_ascension_effects(1).get("jc_layer_penalty", 0) == 0
+        assert dig_service._get_ascension_effects(2)["jc_layer_penalty"] == pytest.approx(0.03)
+        assert dig_service._get_ascension_effects(3)["jc_layer_penalty"] == pytest.approx(0.05)
+        assert dig_service._get_ascension_effects(4)["jc_layer_penalty"] == pytest.approx(0.10)
+        assert dig_service._get_ascension_effects(5)["jc_layer_penalty"] == pytest.approx(0.17)
+        assert dig_service._get_ascension_effects(6)["jc_layer_penalty"] == pytest.approx(0.22)
+        # Penalty does not grow past P6; P10 still totals 0.22.
+        assert dig_service._get_ascension_effects(10)["jc_layer_penalty"] == pytest.approx(0.22)
 
     def test_boss_phase2_at_prestige_2(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Boss fight at P2+ returns phase2_incoming on first win.
