@@ -430,18 +430,38 @@ class PredictionService:
 
         book = self.prediction_repo.get_book(prediction_id)
         old_price = int(pred.get("current_price") or PREDICTION_INITIAL_FAIR_DEFAULT)
+        prev_refresh = int(pred.get("last_refresh_at") or 0)
         asks = book["yes_asks"]
         bids = book["yes_bids"]
         if asks and bids:
             observed_mid = (asks[0][0] + bids[0][0]) / 2
         elif bids and not asks:
-            # Asks fully consumed → heavy YES buying. Fade UP from top bid.
-            observed_mid = bids[0][0] + PREDICTION_FADE_TICKS
+            # Asks fully consumed: anchor from the last lifted ask, if recorded.
+            last_lifted_ask = self.prediction_repo.get_last_fill_price_since(
+                prediction_id, ["buy_yes", "sell_no"], prev_refresh
+            )
+            observed_mid = (last_lifted_ask or bids[0][0]) + PREDICTION_FADE_TICKS
         elif asks and not bids:
-            # Bids fully consumed → heavy YES selling. Fade DOWN from top ask.
-            observed_mid = asks[0][0] - PREDICTION_FADE_TICKS
+            # Bids fully consumed: anchor from the last hit bid, if recorded.
+            last_hit_bid = self.prediction_repo.get_last_fill_price_since(
+                prediction_id, ["buy_no", "sell_yes"], prev_refresh
+            )
+            observed_mid = (last_hit_bid or asks[0][0]) - PREDICTION_FADE_TICKS
         else:
-            observed_mid = old_price
+            last_lifted_ask = self.prediction_repo.get_last_fill_price_since(
+                prediction_id, ["buy_yes", "sell_no"], prev_refresh
+            )
+            last_hit_bid = self.prediction_repo.get_last_fill_price_since(
+                prediction_id, ["buy_no", "sell_yes"], prev_refresh
+            )
+            if last_lifted_ask is not None and last_hit_bid is not None:
+                observed_mid = (last_lifted_ask + last_hit_bid) / 2
+            elif last_lifted_ask is not None:
+                observed_mid = last_lifted_ask + PREDICTION_FADE_TICKS
+            elif last_hit_bid is not None:
+                observed_mid = last_hit_bid - PREDICTION_FADE_TICKS
+            else:
+                observed_mid = old_price
 
         drift = random.randint(PREDICTION_DRIFT_MIN, PREDICTION_DRIFT_MAX)
         new_price = self.clamp_price(round(observed_mid) + drift)
@@ -458,7 +478,6 @@ class PredictionService:
         now = int(time.time())
         self.prediction_repo.apply_refresh(prediction_id, new_price, levels, now)
 
-        prev_refresh = int(pred.get("last_refresh_at") or 0)
         summary = self.prediction_repo.get_trade_summary_since(
             prediction_id, prev_refresh
         )
