@@ -896,6 +896,13 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
+    def get_last_fill_price_since(
+        self, prediction_id: int, actions: list[str], since_ts: int
+    ) -> int | None:
+        """Return the latest terminal fill price for any of ``actions`` since ``since_ts``."""
+        ...
+
+    @abstractmethod
     def get_markets_due_for_refresh(
         self, refresh_interval_seconds: int, now_ts: int
     ) -> list[dict]:

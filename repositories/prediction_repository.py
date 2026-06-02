@@ -535,14 +535,24 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 if contracts > 0
                 else 0
             )
+            last_fill_price = fills[-1][1]
             action = "buy_yes" if side == "yes" else "buy_no"
             cursor.execute(
                 """
                 INSERT INTO prediction_trades
-                    (prediction_id, discord_id, action, contracts, jopacoins, vwap_x100, trade_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (prediction_id, discord_id, action, contracts, jopacoins, vwap_x100, last_fill_price, trade_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (prediction_id, discord_id, action, contracts, total_cost, vwap_x100, now),
+                (
+                    prediction_id,
+                    discord_id,
+                    action,
+                    contracts,
+                    total_cost,
+                    vwap_x100,
+                    last_fill_price,
+                    now,
+                ),
             )
 
             cursor.execute(
@@ -682,14 +692,24 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 if contracts > 0
                 else 0
             )
+            last_fill_price = fills[-1][1]
             action = "sell_yes" if side == "yes" else "sell_no"
             cursor.execute(
                 """
                 INSERT INTO prediction_trades
-                    (prediction_id, discord_id, action, contracts, jopacoins, vwap_x100, trade_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (prediction_id, discord_id, action, contracts, jopacoins, vwap_x100, last_fill_price, trade_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (prediction_id, discord_id, action, contracts, -total_proceeds, vwap_x100, now),
+                (
+                    prediction_id,
+                    discord_id,
+                    action,
+                    contracts,
+                    -total_proceeds,
+                    vwap_x100,
+                    last_fill_price,
+                    now,
+                ),
             )
 
             cursor.execute(
@@ -1038,6 +1058,31 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 "no_volume": no_volume,
                 "biggest_trade": biggest,
             }
+
+    def get_last_fill_price_since(
+        self, prediction_id: int, actions: list[str], since_ts: int
+    ) -> int | None:
+        """Return the latest terminal fill price for any of ``actions`` since ``since_ts``."""
+        if not actions:
+            return None
+        placeholders = ", ".join("?" for _ in actions)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT last_fill_price
+                FROM prediction_trades
+                WHERE prediction_id = ?
+                  AND trade_time >= ?
+                  AND action IN ({placeholders})
+                  AND last_fill_price IS NOT NULL
+                ORDER BY trade_id DESC
+                LIMIT 1
+                """,
+                (prediction_id, since_ts, *actions),
+            )
+            row = cursor.fetchone()
+            return int(row["last_fill_price"]) if row else None
 
     def get_markets_due_for_refresh(
         self, refresh_interval_seconds: int, now_ts: int

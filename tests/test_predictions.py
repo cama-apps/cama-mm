@@ -113,6 +113,14 @@ def test_predictions_has_orderbook_columns(prediction_repo):
         assert col in cols, f"missing column: {col}"
 
 
+def test_prediction_trades_record_last_fill_price(prediction_repo):
+    with prediction_repo.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(prediction_trades)")
+        cols = {row["name"] for row in cursor.fetchall()}
+    assert "last_fill_price" in cols
+
+
 # --------------------------------------------------------------------------- #
 # Market creation: ladder population
 # --------------------------------------------------------------------------- #
@@ -444,10 +452,10 @@ def test_refresh_quiet_market_accumulates_depth(
         assert post[("yes_bid", price)] == outer
 
 
-def test_refresh_fades_up_when_asks_consumed(
+def test_refresh_fades_farther_up_when_asks_consumed(
     prediction_service, prediction_repo, player_repository, monkeypatch,
 ):
-    """Heavy YES buying drains all asks; refresh fades fair UP by FADE_TICKS."""
+    """Heavy YES buying drains all asks; refresh fades from the last lifted ask."""
     _add_player(player_repository, 1, balance=1_000_000)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mf?", initial_fair=50,
@@ -462,14 +470,14 @@ def test_refresh_fades_up_when_asks_consumed(
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     summary = prediction_service.refresh_market(pid)
-    # observed_mid = top_bid (49) + FADE_TICKS, drift 0
-    assert summary["new_price"] == 49 + PREDICTION_FADE_TICKS
+    # observed_mid = last lifted ask (53) + FADE_TICKS, drift 0.
+    assert summary["new_price"] == 53 + PREDICTION_FADE_TICKS
 
 
-def test_refresh_fades_down_when_bids_consumed(
+def test_refresh_fades_farther_down_when_bids_consumed(
     prediction_service, prediction_repo, player_repository, monkeypatch,
 ):
-    """Heavy YES selling (or NO buying) drains all bids; refresh fades fair DOWN."""
+    """Heavy YES selling (or NO buying) drains all bids; refresh fades from the last hit bid."""
     _add_player(player_repository, 1, balance=1_000_000)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mfd?", initial_fair=50,
@@ -483,8 +491,41 @@ def test_refresh_fades_down_when_bids_consumed(
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     summary = prediction_service.refresh_market(pid)
-    # observed_mid = top_ask (51) - FADE_TICKS, drift 0
-    assert summary["new_price"] == 51 - PREDICTION_FADE_TICKS
+    # observed_mid = last hit bid (47) - FADE_TICKS, drift 0.
+    assert summary["new_price"] == 47 - PREDICTION_FADE_TICKS
+
+
+def test_refresh_uses_terminal_fill_midpoint_when_both_sides_consumed(
+    prediction_service, prediction_repo, player_repository, monkeypatch,
+):
+    """If both sides are gone, refresh centers between the terminal fills."""
+    _add_player(player_repository, 1, balance=1_000_000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market both?", initial_fair=50,
+    )["prediction_id"]
+    prediction_repo.replace_levels(
+        pid,
+        levels=[
+            ("yes_ask", 70, 5),
+            ("yes_ask", 80, 5),
+            ("yes_bid", 40, 5),
+            ("yes_bid", 30, 5),
+        ],
+    )
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=10,
+    )
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="no", contracts=10,
+    )
+    book = prediction_repo.get_book(pid)
+    assert book["yes_asks"] == []
+    assert book["yes_bids"] == []
+
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
+    summary = prediction_service.refresh_market(pid)
+    # observed_mid = midpoint(last lifted ask 80, last hit bid 30), drift 0.
+    assert summary["new_price"] == 55
 
 
 def post_helper(book):

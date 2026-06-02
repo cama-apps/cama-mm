@@ -336,6 +336,7 @@ class SchemaManager:
             # Predictions: continuous-quote order-book rework
             ("predictions_orderbook_v1", self._migration_predictions_orderbook),
             ("predictions_prev_price_v1", self._migration_predictions_prev_price),
+            ("prediction_trades_last_fill_price", self._migration_prediction_trades_last_fill_price),
             # Dig boss-gear: persistent equipment with durability + relic equip wiring
             ("create_dig_gear_system", self._migration_create_dig_gear_system),
             # Persist betting_mode per match so /admin correctmatch can reverse
@@ -3138,6 +3139,7 @@ class SchemaManager:
                 contracts INTEGER NOT NULL,
                 jopacoins INTEGER NOT NULL,
                 vwap_x100 INTEGER NOT NULL,
+                last_fill_price INTEGER,
                 trade_time INTEGER NOT NULL,
                 FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id),
                 FOREIGN KEY (discord_id) REFERENCES players(discord_id)
@@ -3156,6 +3158,10 @@ class SchemaManager:
     def _migration_predictions_prev_price(self, cursor) -> None:
         """Add prev_price so the daily digest can show a price-change arrow."""
         self._add_column_if_not_exists(cursor, "predictions", "prev_price", "INTEGER")
+
+    def _migration_prediction_trades_last_fill_price(self, cursor) -> None:
+        """Record the terminal fill price for through-book refresh anchors."""
+        self._add_column_if_not_exists(cursor, "prediction_trades", "last_fill_price", "INTEGER")
 
     def _migration_create_dig_gear_system(self, cursor) -> None:
         """Per-player persistent boss-combat gear with durability.
