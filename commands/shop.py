@@ -52,6 +52,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.shop")
 
+SOUL_HARVEST_COST = 25
+SOUL_HARVEST_DRAIN_PER_TARGET = 2
+
 
 # Bounty Hunter theme
 BOUNTY_HUNTER_ID = 62
@@ -1596,24 +1599,26 @@ class ShopCommands(commands.Cog):
         target="Target player (Sanctuary, Blood Pact, Insight)",
     )
     @app_commands.choices(item=[
-        # Cheap (unlimited, 10s cd)
-        app_commands.Choice(name="Cheap • Pyroclasm (Red, 25 JC) — burn JC from 3 players, claim a bounty", value="pyroclasm"),
-        app_commands.Choice(name="Cheap • Insight (Blue, 10 JC) — peek at any digger's stats", value="insight"),
-        app_commands.Choice(name="Cheap • Sapling (Green, 10 JC) — shave 45min off /dig cooldown", value="sapling"),
-        app_commands.Choice(name="Cheap • Communion (White, 8 JC) — donate to nonprofit, +10% next match win", value="communion"),
-        app_commands.Choice(name="Cheap • Soul Harvest (Black, 25 JC) — drain 2 JC from every positive player", value="soul_harvest"),
-        # Mid (1/day)
-        app_commands.Choice(name="Mid • Dynamite Cache (Red, 35 JC, 1/day) — next 3 digs +75% yield", value="dynamite_cache"),
-        app_commands.Choice(name="Mid • Mana Shield (Blue, 35 JC, 1/day) — refund 60% of largest 24h loss", value="mana_shield"),
-        app_commands.Choice(name="Mid • Regrowth (Green, 25 JC, 1/day) — recover 35% of last 24h losses", value="regrowth"),
-        app_commands.Choice(name="Mid • Aegis (White, 35 JC, 1/day) — absorb the next PvP attack", value="aegis"),
-        app_commands.Choice(name="Mid • Blood Pact (Black, 75 JC, 1/day) — skim 25% of target's earnings 24h", value="blood_pact"),
-        # Ultimate (taps mana — consumes today's color)
-        app_commands.Choice(name="Ult • Wildfire (Red, 150 JC, taps mana) — drain JC from every positive player", value="wildfire"),
-        app_commands.Choice(name="Ult • Counterspell (Blue, 75 JC, taps mana) — 24h PvP immunity", value="counterspell"),
-        app_commands.Choice(name="Ult • Overgrowth (Green, 90 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
-        app_commands.Choice(name="Ult • Sanctuary (White, 60 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
-        app_commands.Choice(name="Ult • Dark Bargain (Black, 150 JC, taps mana) — 800 JC now, 700 due later", value="dark_bargain"),
+        # Red
+        app_commands.Choice(name="Red • Cheap • Pyroclasm (25 JC) — burn JC from 3 players, claim a bounty", value="pyroclasm"),
+        app_commands.Choice(name="Red • Mid • Dynamite Cache (35 JC) — next 3 digs +75% yield", value="dynamite_cache"),
+        app_commands.Choice(name="Red • Ult • Wildfire (150 JC, taps mana) — drain JC from every positive player", value="wildfire"),
+        # Blue
+        app_commands.Choice(name="Blue • Cheap • Insight (10 JC) — peek at any digger's stats", value="insight"),
+        app_commands.Choice(name="Blue • Mid • Mana Shield (35 JC) — refund 60% of largest 24h loss", value="mana_shield"),
+        app_commands.Choice(name="Blue • Ult • Counterspell (75 JC, taps mana) — 24h PvP immunity", value="counterspell"),
+        # Green
+        app_commands.Choice(name="Green • Cheap • Sapling (10 JC) — shave 45min off /dig cooldown", value="sapling"),
+        app_commands.Choice(name="Green • Mid • Regrowth (25 JC) — recover 35% of last 24h losses", value="regrowth"),
+        app_commands.Choice(name="Green • Ult • Overgrowth (90 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
+        # White
+        app_commands.Choice(name="White • Cheap • Communion (8 JC) — donate to nonprofit, +10% next match win", value="communion"),
+        app_commands.Choice(name="White • Mid • Aegis (35 JC) — absorb the next PvP attack", value="aegis"),
+        app_commands.Choice(name="White • Ult • Sanctuary (60 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
+        # Black
+        app_commands.Choice(name="Black • Cheap • Soul Harvest (25 JC) — drain 2 JC from every positive player", value="soul_harvest"),
+        app_commands.Choice(name="Black • Mid • Blood Pact (75 JC) — skim 25% of target's earnings 24h", value="blood_pact"),
+        app_commands.Choice(name="Black • Ult • Dark Bargain (150 JC, taps mana) — 800 JC now, 700 due later", value="dark_bargain"),
     ])
     @app_commands.checks.cooldown(1, 10)
     @require_guild
@@ -1672,7 +1677,7 @@ class ShopCommands(commands.Cog):
             "insight": {"tier": "cheap", "color": "Blue", "cost": 10, "name": "Insight"},
             "sapling": {"tier": "cheap", "color": "Green", "cost": 10, "name": "Sapling"},
             "communion": {"tier": "cheap", "color": "White", "cost": 8, "name": "Communion"},
-            "soul_harvest": {"tier": "cheap", "color": "Black", "cost": 25, "name": "Soul Harvest"},
+            "soul_harvest": {"tier": "cheap", "color": "Black", "cost": SOUL_HARVEST_COST, "name": "Soul Harvest"},
             # Mid
             "dynamite_cache": {"tier": "mid", "color": "Red", "cost": 35, "name": "Dynamite Cache"},
             "mana_shield": {"tier": "mid", "color": "Blue", "cost": 35, "name": "Mana Shield"},
@@ -1737,26 +1742,31 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Tier-specific atomic claim BEFORE charging so concurrent calls
-        # don't briefly deduct then refund. ``mark_*_atomic`` returns False
-        # if another caller already won the claim.
+        # Item claim BEFORE charging so every manashop item is once-per-day and
+        # concurrent calls don't briefly deduct then refund.
         from services.mana_service import get_today_pst as _today_pst
         today = _today_pst()
-        if tier == "mid":
-            claimed = await asyncio.to_thread(
-                mana_repo.mark_item_used_atomic, user_id, guild_id, item_key, today,
+        claimed = await asyncio.to_thread(
+            mana_repo.mark_item_used_atomic, user_id, guild_id, item_key, today,
+        )
+        if not claimed:
+            await interaction.followup.send(
+                f"**{display_name}** is once-per-day. Already used today.",
+                ephemeral=True,
             )
-            if not claimed:
-                await interaction.followup.send(
-                    f"**{display_name}** is once-per-day. Already used today.",
-                    ephemeral=True,
-                )
-                return
-        elif tier == "ult":
+            return
+
+        if tier == "ult":
             tapped_now = await asyncio.to_thread(
                 mana_repo.mark_mana_consumed_atomic, user_id, guild_id,
             )
             if not tapped_now:
+                try:
+                    await asyncio.to_thread(
+                        mana_repo.unmark_item_used, user_id, guild_id, item_key, today,
+                    )
+                except Exception:
+                    logger.exception("Failed to release daily-use slot for %s", item_key)
                 await interaction.followup.send(
                     "Your mana was already tapped this turn. Try again tomorrow.",
                     ephemeral=True,
@@ -1770,13 +1780,12 @@ class ShopCommands(commands.Cog):
         async def _refund(reason: str) -> None:
             await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
             # Release the daily-use slot so the player can retry after the failure.
-            if tier == "mid":
-                try:
-                    await asyncio.to_thread(
-                        mana_repo.unmark_item_used, user_id, guild_id, item_key, today,
-                    )
-                except Exception:
-                    logger.exception("Failed to release daily-use slot for %s", item_key)
+            try:
+                await asyncio.to_thread(
+                    mana_repo.unmark_item_used, user_id, guild_id, item_key, today,
+                )
+            except Exception:
+                logger.exception("Failed to release daily-use slot for %s", item_key)
             await interaction.followup.send(reason, ephemeral=True)
 
         # Mana Conduit relic: refund 25% of tap-mana ultimate cost.
@@ -1926,7 +1935,7 @@ class ShopCommands(commands.Cog):
                 return
             total_drained = 0
             for p in eligible:
-                drain = min(2, p.jopacoin_balance)
+                drain = min(SOUL_HARVEST_DRAIN_PER_TARGET, p.jopacoin_balance)
                 await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -drain)
                 total_drained += drain
             if total_drained > 0:
