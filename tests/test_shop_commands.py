@@ -3,7 +3,7 @@ Tests for shop commands.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -706,6 +706,97 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
     assert recovery_calls, (
         "Regrowth should credit 120 (35% of a 1000 loss from 12h ago, capped); "
         f"adjust_balance calls were {player_service.adjust_balance.call_args_list}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    guild_id = 9001
+    positive_players = [
+        SimpleNamespace(discord_id=5000 + idx, name=f"Target {idx}", jopacoin_balance=100)
+        for idx in range(3)
+    ]
+    zero_player = SimpleNamespace(discord_id=7777, name="Flat", jopacoin_balance=0)
+    bankrupt_player = SimpleNamespace(discord_id=8888, name="Bankrupt", jopacoin_balance=-10)
+
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = [
+        *positive_players,
+        zero_player,
+        bankrupt_player,
+    ]
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="soul_harvest"), target=None,
+    )
+
+    calls = [c.args for c in player_service.adjust_balance.call_args_list]
+    assert calls[0] == (buyer_id, guild_id, -25)
+    assert calls[-1] == (buyer_id, guild_id, 6)
+    assert not any(c[0] == zero_player.discord_id for c in calls)
+    assert not any(c[0] == bankrupt_player.discord_id for c in calls)
+
+    victim_debits = [c for c in calls if c[0] != buyer_id and c[2] < 0]
+    assert len(victim_debits) == len(positive_players)
+    assert sum(-delta for _, _, delta in victim_debits) == 6
+    assert all(delta == -2 for _, _, delta in victim_debits)
+
+    message = interaction.followup.send.call_args.args[0]
+    assert "drains the living" in message.lower()
+    assert "balance: 481" in message
+    bot.mana_repo.mark_item_used_atomic.assert_called_once_with(
+        buyer_id, guild_id, "soul_harvest", ANY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_targets(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    guild_id = 9001
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = [
+        SimpleNamespace(discord_id=7777, name="Flat A", jopacoin_balance=0),
+        SimpleNamespace(discord_id=8888, name="Flat", jopacoin_balance=0),
+        SimpleNamespace(discord_id=9999, name="Bankrupt", jopacoin_balance=-100),
+    ]
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="soul_harvest"), target=None,
+    )
+
+    assert [c.args for c in player_service.adjust_balance.call_args_list] == [
+        (buyer_id, guild_id, -25),
+        (buyer_id, guild_id, 25),
+    ]
+    message = interaction.followup.send.call_args.args[0]
+    assert "No living souls" in message
+    bot.mana_repo.unmark_item_used.assert_called_once_with(
+        buyer_id, guild_id, "soul_harvest", ANY,
     )
 
 
