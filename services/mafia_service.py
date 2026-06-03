@@ -56,9 +56,13 @@ ELIGIBILITY_WINDOW_S = 24 * 3600
 # Auto-skip: if a player's last N games all show acted=0, exclude from auto-roster.
 AUTO_SKIP_THRESHOLD = 3
 
-# Payouts.
-PAYOUT_BASE = 40
-PAYOUT_PER_EXTRA = 8
+# Economy. Each rostered player is charged ENTRY_FEE at game start; the fees
+# pool into a single pot distributed among the winning faction at day
+# resolution. Because roles are assigned uniformly at random, the per-player
+# expectation of the pot share equals exactly ENTRY_FEE regardless of the
+# (unknown) faction win-rate distribution — so EV per game = 0 by construction.
+# MVP_BONUS is now drawn from the pot rather than minted.
+ENTRY_FEE = 30
 MVP_BONUS = 20
 
 TITLES: dict[str, callable] = {
@@ -70,8 +74,8 @@ TITLES: dict[str, callable] = {
 }
 
 
-def _payout_for_roster(roster_size: int) -> int:
-    return PAYOUT_BASE + PAYOUT_PER_EXTRA * max(0, roster_size - MIN_ROSTER)
+def _pot_for_roster(roster_size: int) -> int:
+    return roster_size * ENTRY_FEE
 
 
 def _allowed_action_for_role(role: MafiaRole) -> MafiaActionType | None:
@@ -140,10 +144,18 @@ class MafiaService:
             started_at=started_at,
             roster_size=roster_size,
             twist_event=twist,
+            entry_fee=ENTRY_FEE,
         )
 
         players = self._assign_roles(game_id, guild_id, eligible)
         self.repo.add_players(game_id, players)
+
+        # Debit the entry fee from every rostered player. Negative balances are
+        # allowed — consistent with how the bankruptcy/loan system handles JC
+        # sinks elsewhere — and skipping under-balance players would skew the
+        # EV=0 symmetry argument.
+        for pid in eligible:
+            self.player_repo.add_balance(pid, guild_id, -ENTRY_FEE)
 
         game = self.repo.get_game_by_id(game_id)
         if game is not None:
@@ -277,15 +289,35 @@ class MafiaService:
                 # One-day cadence: don't loop. Mafia wins by attrition if not pinned.
                 winner = MafiaWinner.MAFIA if alive_mafia > 0 else MafiaWinner.TOWN
 
-        payout = _payout_for_roster(game.roster_size)
+        pot_total = _pot_for_roster(game.roster_size)
         winning_ids = self._winners_for(all_players, winner)
         mvp_id = self._compute_mvp(
             game, all_players, winner, lynched_id, valid_votes
         )
 
-        deltas: dict[int, int] = dict.fromkeys(winning_ids, payout)
-        if mvp_id is not None and mvp_id in deltas:
-            deltas[mvp_id] += MVP_BONUS
+        # Split the pot among winners. MVP_BONUS + integer-division remainder
+        # ride on top of the winning faction's MVP share — within-faction
+        # redistribution conserves the faction total, so EV per random role
+        # assignment stays exactly zero. The dust must always be allocated to
+        # some winner (otherwise zero-sum leaks).
+        deltas: dict[int, int] = {}
+        if winning_ids:
+            mvp_in_winners = mvp_id is not None and mvp_id in winning_ids
+            mvp_share = MVP_BONUS if mvp_in_winners else 0
+            remainder_pot = pot_total - mvp_share
+            base_payout = remainder_pot // len(winning_ids)
+            dust = remainder_pot - base_payout * len(winning_ids)
+            for wid in winning_ids:
+                deltas[wid] = base_payout
+            # Bonus + rounding dust go to the MVP if there is one; otherwise
+            # the dust falls to the first winner (deterministic, faction-local).
+            if mvp_in_winners:
+                deltas[mvp_id] += mvp_share + dust
+            elif dust:
+                deltas[winning_ids[0]] += dust
+            payout_per_winner = base_payout
+        else:
+            payout_per_winner = 0
 
         for pid, amount in deltas.items():
             self.player_repo.add_balance(pid, game.guild_id, amount)
@@ -293,7 +325,7 @@ class MafiaService:
         self.repo.finalize_game(
             game.game_id,
             winner=winner,
-            payout_per_winner=payout,
+            payout_per_winner=payout_per_winner,
             mvp_id=mvp_id,
         )
 
@@ -303,7 +335,9 @@ class MafiaService:
             "winner": winner.value,
             "lynched_id": lynched_id,
             "mvp_id": mvp_id,
-            "payout_per_winner": payout,
+            "payout_per_winner": payout_per_winner,
+            "pot_total": pot_total,
+            "entry_fee": ENTRY_FEE,
             "winning_ids": list(winning_ids),
             "vote_breakdown": self._vote_breakdown(valid_votes),
             "twist": game.twist_event.value if game.twist_event else None,

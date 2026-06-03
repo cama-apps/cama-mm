@@ -77,6 +77,7 @@ class MafiaGame:
     night_ended_at: int | None = None
     day_ended_at: int | None = None
     winner: MafiaWinner | None = None
+    entry_fee: int = 0
     payout_per_winner: int = 0
     mvp_id: int | None = None
     mafia_thread_id: int | None = None

@@ -454,6 +454,8 @@ class SchemaManager:
             ),
             # Daily Mafia subgame
             ("create_mafia_tables", self._migration_create_mafia_tables),
+            # Entry-fee economy: pot-funded payouts so per-game EV = 0.
+            ("add_mafia_entry_fee_column", self._migration_add_mafia_entry_fee_column),
         ]
 
     # --- Migrations ---
@@ -3646,6 +3648,7 @@ class SchemaManager:
                 night_ended_at       INTEGER,
                 day_ended_at         INTEGER,
                 winner               TEXT,
+                entry_fee            INTEGER NOT NULL DEFAULT 0,
                 payout_per_winner    INTEGER NOT NULL DEFAULT 0,
                 mvp_id               INTEGER,
                 roster_size          INTEGER NOT NULL,
@@ -3714,4 +3717,13 @@ class SchemaManager:
                 PRIMARY KEY (discord_id, guild_id)
             )
             """
+        )
+
+    def _migration_add_mafia_entry_fee_column(self, cursor) -> None:
+        """Persist the entry fee charged per mafia game so audits can reconstruct
+        the pot used to compute payouts. Idempotent for fresh installs where the
+        column already appears in _migration_create_mafia_tables.
+        """
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "entry_fee", "INTEGER NOT NULL DEFAULT 0"
         )

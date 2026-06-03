@@ -18,13 +18,11 @@ from domain.models.mafia import (
 from repositories.mafia_repository import MafiaRepository
 from repositories.player_repository import PlayerRepository
 from services.mafia_service import (
-    MIN_ROSTER,
+    ENTRY_FEE,
     MVP_BONUS,
-    PAYOUT_BASE,
-    PAYOUT_PER_EXTRA,
     ROLE_TABLE,
     MafiaService,
-    _payout_for_roster,
+    _pot_for_roster,
 )
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
@@ -475,14 +473,17 @@ def test_town_hall_blocks_lynch(mafia_service, mafia_repo):
 
 
 def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
-    # Roster of 7 → payout = 40 + 8*2 = 56
+    # Roster of 7 → pot = 210. resolve_day only redistributes the pot; it does
+    # not debit fees (that happens in start_daily_game). To check post-resolution
+    # net delta, we simulate the fee debit ourselves so this test exercises the
+    # full end-to-end balance change.
     ids = [101, 102, 103, 104, 105, 106, 107]
     for pid in ids:
         _seed_player(player_repo, pid, balance=0)
-    # Snapshot starting balances (default jopacoin_balance is non-zero)
     starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
+    for pid in ids:
+        player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
 
-    # Build a game with majority town and one mafia
     gid = _new_game(
         mafia_repo,
         [
@@ -495,38 +496,113 @@ def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
             (107, MafiaRole.TOWNIE, False),
         ],
     )
-    # Force roster_size to 7 so payout calculation is correct
     with mafia_repo.connection() as conn:
         conn.cursor().execute(
             "UPDATE mafia_games SET roster_size = 7 WHERE game_id = ?", (gid,)
         )
     _force_phase(mafia_repo, MafiaPhase.DAY)
 
-    # All non-mafia vote for the mafia
     for voter in (102, 103, 104, 105, 106, 107):
         mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 101)
 
     summary = mafia_service.resolve_day(TEST_GUILD_ID)
     assert summary["winner"] == MafiaWinner.TOWN.value
-    expected = PAYOUT_BASE + PAYOUT_PER_EXTRA * (7 - MIN_ROSTER)
-    assert summary["payout_per_winner"] == expected
 
-    # Each non-MVP winner has +expected; MVP has +expected+MVP_BONUS
+    pot = _pot_for_roster(7)
+    assert summary["pot_total"] == pot
+    assert summary["entry_fee"] == ENTRY_FEE
+
+    # Town has 6 winners. MVP gets (pot - MVP_BONUS) // 6 base + MVP_BONUS +
+    # rounding dust; the other 5 winners each get the base.
+    base = (pot - MVP_BONUS) // 6
+    dust = (pot - MVP_BONUS) - base * 6
+    assert summary["payout_per_winner"] == base
+
     mvp_id = summary["mvp_id"]
     for pid in [102, 103, 104, 105, 106, 107]:
         delta = player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid]
         if pid == mvp_id:
-            assert delta == expected + MVP_BONUS
+            assert delta == base + MVP_BONUS + dust - ENTRY_FEE
         else:
-            assert delta == expected
-    # Mafia got nothing
-    assert player_repo.get_balance(101, TEST_GUILD_ID) == starting[101]
+            assert delta == base - ENTRY_FEE
+
+    # Mafia paid the fee and got nothing back.
+    assert (
+        player_repo.get_balance(101, TEST_GUILD_ID) - starting[101] == -ENTRY_FEE
+    )
+
+    # Zero-sum invariant: the sum of all balance deltas across the roster is
+    # exactly zero. This is the property that makes EV per game = 0.
+    total_delta = sum(
+        player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
+    )
+    assert total_delta == 0
 
 
-def test_payout_for_roster_helper():
-    assert _payout_for_roster(5) == 40
-    assert _payout_for_roster(10) == 80
-    assert _payout_for_roster(15) == 120
+def test_pot_for_roster_helper():
+    assert _pot_for_roster(5) == 5 * ENTRY_FEE
+    assert _pot_for_roster(10) == 10 * ENTRY_FEE
+    assert _pot_for_roster(15) == 15 * ENTRY_FEE
+
+
+def test_zero_sum_across_outcomes(mafia_service, mafia_repo, player_repo):
+    """The pot mechanic conserves JC for every win outcome — net delta is 0."""
+    scenarios = [
+        # (roles, voters_target, expected_winner)
+        # Town wins (4 town vs 1 mafia after lynch).
+        (
+            [
+                (201, MafiaRole.MAFIA, True),
+                (202, MafiaRole.TOWNIE, False),
+                (203, MafiaRole.DOCTOR, False),
+                (204, MafiaRole.DETECTIVE, False),
+                (205, MafiaRole.TOWNIE, False),
+            ],
+            {(202, 201), (203, 201), (204, 201), (205, 201)},
+            MafiaWinner.TOWN,
+        ),
+        # Jester wins by being lynched.
+        (
+            [
+                (301, MafiaRole.MAFIA, True),
+                (302, MafiaRole.MAFIA, False),
+                (303, MafiaRole.JESTER, False),
+                (304, MafiaRole.TOWNIE, False),
+                (305, MafiaRole.DETECTIVE, False),
+            ],
+            {(301, 303), (302, 303), (304, 303), (305, 303)},
+            MafiaWinner.JESTER,
+        ),
+    ]
+
+    for i, (roles, votes, expected_winner) in enumerate(scenarios):
+        ids = [pid for pid, _, _ in roles]
+        for pid in ids:
+            _seed_player(player_repo, pid, balance=0)
+        starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
+        for pid in ids:
+            player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
+
+        gid = _new_game(mafia_repo, roles, date=f"2026-04-{24 + i:02d}")
+        with mafia_repo.connection() as conn:
+            conn.cursor().execute(
+                "UPDATE mafia_games SET roster_size = ? WHERE game_id = ?",
+                (len(roles), gid),
+            )
+        _force_phase(mafia_repo, MafiaPhase.DAY)
+
+        for actor, target in votes:
+            mafia_service.submit_day_vote(TEST_GUILD_ID, actor, target)
+
+        summary = mafia_service.resolve_day(TEST_GUILD_ID)
+        assert summary["winner"] == expected_winner.value
+
+        total_delta = sum(
+            player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
+        )
+        assert total_delta == 0, (
+            f"scenario {i} ({expected_winner.value}): non-zero net delta {total_delta}"
+        )
 
 
 # ── Auto-skip ─────────────────────────────────────────────────────────────

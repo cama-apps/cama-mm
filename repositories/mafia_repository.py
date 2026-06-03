@@ -26,6 +26,7 @@ def _row_to_game(row) -> MafiaGame:
         night_ended_at=row["night_ended_at"],
         day_ended_at=row["day_ended_at"],
         winner=MafiaWinner(row["winner"]) if row["winner"] else None,
+        entry_fee=row["entry_fee"] or 0,
         payout_per_winner=row["payout_per_winner"] or 0,
         mvp_id=row["mvp_id"],
         mafia_thread_id=row["mafia_thread_id"],
@@ -96,6 +97,7 @@ class MafiaRepository(BaseRepository):
         started_at: int,
         roster_size: int,
         twist_event: MafiaTwist | None,
+        entry_fee: int = 0,
     ) -> int:
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -103,8 +105,9 @@ class MafiaRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO mafia_games (
-                    guild_id, game_date, phase, started_at, roster_size, twist_event
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    guild_id, game_date, phase, started_at, roster_size,
+                    twist_event, entry_fee
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     gid,
@@ -113,6 +116,7 @@ class MafiaRepository(BaseRepository):
                     started_at,
                     roster_size,
                     twist_event.value if twist_event else None,
+                    entry_fee,
                 ),
             )
             return cursor.lastrowid

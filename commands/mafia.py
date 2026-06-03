@@ -20,6 +20,8 @@ from domain.models.mafia import (
 )
 from services.mafia_service import (
     DAY_DURATION_S,
+    ENTRY_FEE,
+    MVP_BONUS,
     NIGHT_DURATION_S,
     PHASE_REMINDER_LEAD_S,
 )
@@ -289,7 +291,7 @@ class MafiaCommands(commands.Cog):
                 "**Phases**\n"
                 "• Night (6h): Mafia/Doctor/Detective/Vigilante submit `/mafia act`.\n"
                 "• Day (13h): Living players vote with `/mafia vote`. Tallies hidden.\n"
-                "• Resolution: Winners paid, MVP gets a bonus.\n\n"
+                "• Resolution: Winners split the pot, MVP gets a bonus from it.\n\n"
                 "**Roles**\n"
                 f"{ROLE_EMOJI[MafiaRole.MAFIA]} Mafia — kill at night.\n"
                 f"{ROLE_EMOJI[MafiaRole.DOCTOR]} Doctor — protect one player at night.\n"
@@ -298,7 +300,9 @@ class MafiaCommands(commands.Cog):
                 f"{ROLE_EMOJI[MafiaRole.TOWNIE]} Townie — vote during the day.\n"
                 f"{ROLE_EMOJI[MafiaRole.JESTER]} Jester — wins solo if lynched (rare).\n"
                 f"{GODFATHER_EMOJI} Godfather — a mafia who reads as Town to the detective.\n\n"
-                "**Payouts**: 40 jc base, +8 per extra player above 5. MVP +20.\n\n"
+                f"**Stakes**: every rostered player pays {ENTRY_FEE} {JOPACOIN_EMOTE} entry. "
+                f"The pot (`roster × {ENTRY_FEE}`) is split among the winning faction; "
+                f"MVP gets +{MVP_BONUS} from the pot. Long-run EV is 0 — play to win.\n\n"
                 "Use `/mafia optout` to skip auto-roster."
             ),
             color=0x5865F2,
@@ -421,11 +425,14 @@ class MafiaCommands(commands.Cog):
         if game.twist_event:
             twist_line = f"\n**Twist:** {TWIST_LABEL[game.twist_event]}"
 
+        pot_total = game.roster_size * ENTRY_FEE
         embed = discord.Embed(
             title=f"🌑 Cama Mafia #{game.game_id} — Night begins",
             description=(
                 f"{narration}\n\n"
                 f"**Roster ({game.roster_size}):** {roster}\n"
+                f"**Stakes:** −{ENTRY_FEE} {JOPACOIN_EMOTE} each → "
+                f"pot **{pot_total}** {JOPACOIN_EMOTE} for the winning faction.\n"
                 f"Use `/mafia role` to learn yours.\n"
                 f"Mafia/Doctor/Detective/Vigilante: `/mafia act target:@x`.\n"
                 f"Night ends <t:{ends_at}:R>."
@@ -589,6 +596,7 @@ class MafiaCommands(commands.Cog):
 
         body_lines.append("")
         payout = summary.get("payout_per_winner", 0)
+        pot_total = summary.get("pot_total", 0)
         winning_ids = summary.get("winning_ids", [])
         mvp_id = summary.get("mvp_id")
 
@@ -596,11 +604,12 @@ class MafiaCommands(commands.Cog):
             mention_list = ", ".join(f"<@{wid}>" for wid in winning_ids[:15])
             extra = "" if len(winning_ids) <= 15 else f" (+{len(winning_ids) - 15} more)"
             body_lines.append(
-                f"**Payout:** {payout} {JOPACOIN_EMOTE} each → {mention_list}{extra}"
+                f"**Pot:** {pot_total} {JOPACOIN_EMOTE} → "
+                f"{payout} each to {mention_list}{extra}"
             )
         if mvp_id is not None:
             body_lines.append(
-                f"**MVP:** <@{mvp_id}> (+{20} {JOPACOIN_EMOTE})"
+                f"**MVP:** <@{mvp_id}> (+{MVP_BONUS} {JOPACOIN_EMOTE})"
             )
 
         breakdown = summary.get("vote_breakdown") or {}
