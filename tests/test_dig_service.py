@@ -5,6 +5,7 @@ import json
 import random
 import sqlite3
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from repositories.prediction_repository import PredictionRepository
 from services.dig_constants import (
     BOSS_BOUNDARIES,
     BOSS_VICTORY_BASE_JC,
+    BASE_DIG_JC_PAYOUT_CAP,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CHEER_COOLDOWN_SECONDS,
@@ -198,6 +200,44 @@ class TestCoreDig:
         result = dig_service.dig(10001, guild_id)
         assert result["success"]
         assert result["jc_earned"] >= 0
+
+    def test_base_dig_payout_is_capped_at_20(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Normal dig base loot is capped before milestone and streak bonuses."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25)
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["milestone_bonus"] == 0
+        assert result["streak_bonus"] == 0
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
+
+    def test_overgrowth_bonus_is_added_after_base_payout_cap(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """Overgrowth's flat bonus is separate from the base dig payout cap."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
+        dig_service.buff_service = SimpleNamespace(
+            has_overgrowth=lambda did, gid: True,
+            consume_overgrowth_charge=lambda did, gid: True,
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25)
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["milestone_bonus"] == 0
+        assert result["streak_bonus"] == 0
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP + 10
 
     def test_dig_increments_total_digs(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """total_digs counter increases."""
@@ -791,11 +831,11 @@ class TestHighPrestigeLayerPenalty:
     ):
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
-        # Inflate ONLY the JC roll (Abyss range 1..4) to a large base so the
-        # multiplier difference dwarfs int() truncation noise; advance (1..2)
-        # stays at its minimum so no milestone/boundary is crossed.
+        # Inflate ONLY the JC roll (Abyss range 1..4) near the payout cap so
+        # layer penalties still have visible effect before capping; advance
+        # (1..2) stays at its minimum so no milestone/boundary is crossed.
         monkeypatch.setattr(
-            random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
+            random, "randint", lambda a, b: 17 if (a, b) == (1, 4) else a,
         )
 
         jc_p1 = self._dig_once(
@@ -805,12 +845,10 @@ class TestHighPrestigeLayerPenalty:
             dig_service, dig_repo, player_repository, guild_id, 30002, 2,
         )["jc_earned"]
 
-        # P1: base 10000 x (1 + 0.18 P1 loot) = 11800, no penalty.
-        # P2: x (1 + 0.18 - 0.03) = 11500. abs=1 absorbs float truncation.
-        assert jc_p1 == pytest.approx(11800, abs=1)
-        assert jc_p2 == pytest.approx(11500, abs=1)
-        # The penalty must actually bite: P2 strictly below P1 by ~3% of base.
-        assert jc_p1 - jc_p2 == pytest.approx(300, abs=2)
+        # P1: int(17 x 1.18) = 20. P2: int(17 x 1.15) = 19.
+        assert jc_p1 == BASE_DIG_JC_PAYOUT_CAP
+        assert jc_p2 == 19
+        assert jc_p1 > jc_p2
 
     def test_p4_layer_penalty_reduces_layer_payout(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -818,7 +856,7 @@ class TestHighPrestigeLayerPenalty:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
         monkeypatch.setattr(
-            random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
+            random, "randint", lambda a, b: 17 if (a, b) == (1, 4) else a,
         )
 
         jc_p3 = self._dig_once(
@@ -828,11 +866,11 @@ class TestHighPrestigeLayerPenalty:
             dig_service, dig_repo, player_repository, guild_id, 30006, 4,
         )["jc_earned"]
 
-        # P3: base 10000 x (1 + 0.18 - 0.05) = 11300.
-        # P4: x (1 + 0.18 - 0.10) = 10800.
-        assert jc_p3 == pytest.approx(11300, abs=1)
-        assert jc_p4 == pytest.approx(10800, abs=1)
-        assert jc_p3 - jc_p4 == pytest.approx(500, abs=2)
+        # P3: int(17 x 1.13) = 19. P4: int(17 x 1.08) = 18.
+        assert jc_p3 == 19
+        assert jc_p4 == 18
+        # The penalty must actually bite before the base-payout cap is applied.
+        assert jc_p3 > jc_p4
 
     def test_p5_layer_penalty_reduces_layer_payout(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -840,7 +878,7 @@ class TestHighPrestigeLayerPenalty:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in/events
         monkeypatch.setattr(
-            random, "randint", lambda a, b: 10000 if (a, b) == (1, 4) else a,
+            random, "randint", lambda a, b: 17 if (a, b) == (1, 4) else a,
         )
 
         jc_p4 = self._dig_once(
@@ -850,11 +888,10 @@ class TestHighPrestigeLayerPenalty:
             dig_service, dig_repo, player_repository, guild_id, 30004, 5,
         )["jc_earned"]
 
-        # P4: base 10000 x (1 + 0.18 - 0.10) = 10800.
-        # P5: x (1 + 0.18 - 0.17) = 10100 (P5 Erosion slice 0.07).
-        assert jc_p4 == pytest.approx(10800, abs=1)
-        assert jc_p5 == pytest.approx(10100, abs=1)
-        assert jc_p4 - jc_p5 == pytest.approx(700, abs=2)
+        # P4: int(17 x 1.08) = 18. P5: int(17 x 1.01) = 17.
+        assert jc_p4 == 18
+        assert jc_p5 == 17
+        assert jc_p4 > jc_p5
 
 
 class TestDecay:
@@ -2683,6 +2720,42 @@ class TestApplyDigOutcomeSecondaryPaths:
             f"helltide tax not applied on DM path: got +{balance_after - balance_before}"
         )
 
+    def test_base_dig_payout_cap_applies_on_dm_path(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        uid = 20105
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        balance_before = player_repository.get_balance(uid, guild_id)
+
+        result = dig_service.apply_dig_outcome(
+            p, {"advance": 1, "jc_earned": 25, "cave_in": False, "event_id": ""}
+        )
+
+        balance_after = player_repository.get_balance(uid, guild_id)
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
+        assert balance_after == balance_before + BASE_DIG_JC_PAYOUT_CAP
+
+    def test_base_dig_payout_cap_applies_after_dm_weather_combo(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+        uid = 20106
+        p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
+        fake_mana = MagicMock()
+        fake_mana.get_weather_combo_modifiers.return_value = {"yield_mult": 2.0}
+        monkeypatch.setattr(dig_service, "mana_effects_service", fake_mana)
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
+        balance_before = player_repository.get_balance(uid, guild_id)
+
+        result = dig_service.apply_dig_outcome(
+            p, {"advance": 1, "jc_earned": 20, "cave_in": False, "event_id": ""}
+        )
+
+        balance_after = player_repository.get_balance(uid, guild_id)
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
+        assert balance_after == balance_before + BASE_DIG_JC_PAYOUT_CAP
+
     def test_weather_combo_applied_on_dm_path(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Fix #2: the Sunny+White weather-combo yield bonus applies on the DM path.
 
@@ -2690,7 +2763,7 @@ class TestApplyDigOutcomeSecondaryPaths:
         apply_dig_outcome must apply it to match dig()/_execute_deterministic_outcome.
         """
         from unittest.mock import MagicMock
-        uid = 20105
+        uid = 20107
         # Build preconditions with the original (None) mana service so the jc
         # range is unaffected, then swap in a 2x-combo service for the apply step.
         p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
