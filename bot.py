@@ -351,6 +351,7 @@ EXTENSIONS = [
     "commands.mana",
     "commands.roll",
     "commands.dig",
+    "commands.mafia",
     "commands.russianroulette",
     "commands.reminders",
 ]
