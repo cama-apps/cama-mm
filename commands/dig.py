@@ -112,6 +112,13 @@ def _append_sabotage_prediction_steal_line(embed: discord.Embed, result) -> None
         f"market **#{prediction_id}**."
     )
 
+
+def _format_auto_buy_settings(settings: dict | None) -> str:
+    settings = settings or {}
+    torch = "ON" if settings.get("torch") else "OFF"
+    hard_hat = "ON" if settings.get("hard_hat") else "OFF"
+    return f"Torch: **{torch}**\nHard Hat: **{hard_hat}**"
+
 __all__ = [
     "DigCommands",
     "setup",
@@ -2228,11 +2235,11 @@ class DigCommands(commands.Cog):
         )
 
     # ------------------------------------------------------------------
-    # 18. /dig profile/about/build — Miner customization
+    # 18. /dig miner profile/about/build/autobuy — Miner customization
     # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
-    # /dig miner subgroup — profile, about, build
+    # /dig miner subgroup — profile, about, build, autobuy
     # ------------------------------------------------------------------
     miner = app_commands.Group(name="miner", description="Miner profile and S stats", parent=dig)
 
@@ -2267,6 +2274,11 @@ class DigCommands(commands.Cog):
         embed.add_field(
             name="S Stats",
             value=_format_s_stats(result.get("stats", {}), result.get("effects", {})),
+            inline=False,
+        )
+        embed.add_field(
+            name="Auto-Buy",
+            value=_format_auto_buy_settings(result.get("auto_buy", {})),
             inline=False,
         )
         embed.set_footer(text="Backstory locks after you set it. Boss first clears grant one extra S point.")
@@ -2350,6 +2362,60 @@ class DigCommands(commands.Cog):
             description=_format_s_stats(result.get("stats", {}), result.get("effects", {})),
             color=0x5865F2,
         )
+        await safe_followup(interaction, embed=embed, ephemeral=True)
+
+    @miner.command(name="autobuy", description="Auto-buy Torch and/or Hard Hat for each dig")
+    @app_commands.describe(
+        item="Which auto-buy setting to update",
+        enabled="Whether to auto-buy this item on each real dig",
+    )
+    @app_commands.choices(item=[
+        app_commands.Choice(name="Torch", value="torch"),
+        app_commands.Choice(name="Hard Hat", value="hard_hat"),
+        app_commands.Choice(name="Both", value="both"),
+    ])
+    @require_guild
+    async def dig_autobuy(
+        self,
+        interaction: discord.Interaction,
+        item: str,
+        enabled: bool,
+    ):
+        if not await require_dig_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        updates = {
+            "torch": enabled if item in ("torch", "both") else None,
+            "hard_hat": enabled if item in ("hard_hat", "both") else None,
+        }
+        result = await asyncio.to_thread(
+            self.dig_service.set_miner_auto_buy,
+            interaction.user.id,
+            guild_id,
+            **updates,
+        )
+        if not result.get("success"):
+            await safe_followup(
+                interaction,
+                content=result.get("error", "Auto-buy update failed."),
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Dig Auto-Buy Updated",
+            description=_format_auto_buy_settings(result.get("auto_buy", {})),
+            color=0x5865F2,
+        )
+        embed.set_footer(text="Auto-buy spends JC only when an actual dig starts.")
         await safe_followup(interaction, embed=embed, ephemeral=True)
 
     # ------------------------------------------------------------------
@@ -2583,6 +2649,29 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     if items_used:
         item_names = ", ".join(str(i) for i in items_used)
         embed.add_field(name="Items Used", value=item_names, inline=True)
+
+    auto_purchases = getattr(result, "auto_purchases", None) or []
+    auto_lines = []
+    for entry in auto_purchases:
+        data = entry if isinstance(entry, dict) else (
+            entry._d if hasattr(entry, "_d") else {}
+        )
+        status = data.get("status")
+        item = data.get("item", data.get("type", "Item"))
+        if status == "purchased":
+            auto_lines.append(
+                f"{item}: bought ({data.get('cost', 0)} {JOPACOIN_EMOTE})"
+            )
+        elif status == "queued_from_inventory":
+            auto_lines.append(f"{item}: from inventory")
+        elif status == "skipped_insufficient_balance":
+            auto_lines.append(f"{item}: skipped (need {data.get('cost', 0)} JC)")
+        elif status == "skipped_inventory_full":
+            auto_lines.append(f"{item}: skipped (inventory full)")
+        elif status == "skipped_error":
+            auto_lines.append(f"{item}: skipped")
+    if auto_lines:
+        embed.add_field(name="Auto-Buy", value="\n".join(auto_lines), inline=True)
 
     # Luminosity bar (only shown when draining / below max)
     lum_info = getattr(result, "luminosity_info", None)

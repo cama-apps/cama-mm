@@ -371,6 +371,115 @@ class TestMinerProfile:
         assert profile["stats"]["strength"] == 2
         assert profile["stats"]["smarts"] == 2
         assert profile["stats"]["stamina"] == 1
+        assert profile["auto_buy"] == {"torch": False, "hard_hat": False}
+
+    def test_set_miner_auto_buy_settings(self, dig_service, player_repository, guild_id):
+        _register_player(player_repository)
+
+        result = dig_service.set_miner_auto_buy(
+            10001, guild_id, torch=True, hard_hat=True,
+        )
+
+        assert result["success"]
+        assert result["auto_buy"] == {"torch": True, "hard_hat": True}
+        profile = dig_service.get_miner_profile(10001, guild_id)
+        assert profile["auto_buy"] == {"torch": True, "hard_hat": True}
+
+        result = dig_service.set_miner_auto_buy(
+            10001, guild_id, torch=False,
+        )
+
+        assert result["success"]
+        assert result["auto_buy"] == {"torch": False, "hard_hat": True}
+
+    def test_auto_buy_purchases_and_applies_selected_items(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=100)
+        dig_service.set_miner_auto_buy(
+            10001, guild_id, torch=True, hard_hat=True,
+        )
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        first = dig_service.dig(10001, guild_id)
+        assert first["is_first_dig"] is True
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        monkeypatch.setattr(
+            time, "time",
+            lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert set(result["items_used"]) == {"Hard Hat", "Torch"}
+        purchased = {
+            item["type"]: item for item in result["auto_purchases"]
+            if item["status"] == "purchased"
+        }
+        assert set(purchased) == {"hard_hat", "torch"}
+        assert player_repository.get_balance(10001, guild_id) == (
+            balance_before - 14 + result["jc_earned"]
+        )
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["hard_hat_charges"] == 2
+        assert dig_repo.get_inventory(10001, guild_id) == []
+
+    def test_auto_buy_uses_reserve_inventory_before_purchase(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=100)
+        dig_service.set_miner_auto_buy(10001, guild_id, torch=True)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.add_item(10001, guild_id, "torch")
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        monkeypatch.setattr(
+            time, "time",
+            lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["items_used"] == ["Torch"]
+        assert result["auto_purchases"] == [{
+            "type": "torch",
+            "item": "Torch",
+            "status": "queued_from_inventory",
+            "cost": 0,
+        }]
+        assert player_repository.get_balance(10001, guild_id) == (
+            balance_before + result["jc_earned"]
+        )
+
+    def test_auto_buy_insufficient_balance_does_not_block_dig(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=100)
+        dig_service.set_miner_auto_buy(10001, guild_id, hard_hat=True)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        player_repository.update_balance(10001, guild_id, 7)
+
+        monkeypatch.setattr(
+            time, "time",
+            lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["items_used"] == []
+        assert result["auto_purchases"] == [{
+            "type": "hard_hat",
+            "item": "Hard Hat",
+            "status": "skipped_insufficient_balance",
+            "cost": 8,
+        }]
+        assert dig_repo.get_inventory(10001, guild_id) == []
 
     def test_backstory_can_only_be_set_once(self, dig_service, player_repository, guild_id):
         _register_player(player_repository)
@@ -2662,6 +2771,29 @@ def _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, *
 
 class TestApplyDigOutcomeSecondaryPaths:
     """Bug-catching tests for apply_dig_outcome (DM-decided path)."""
+
+    def test_auto_buy_runs_before_dm_preconditions(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        uid = 20100
+        _register_player(player_repository, discord_id=uid, guild_id=guild_id, balance=100)
+        dig_repo.create_tunnel(uid, guild_id, "TestTunnel")
+        dig_repo.update_tunnel(
+            uid, guild_id,
+            depth=10,
+            max_depth=10,
+            last_dig_at=0,
+            total_digs=1,
+            auto_buy_torch=1,
+        )
+        balance_before = player_repository.get_balance(uid, guild_id)
+
+        terminal, preconditions = dig_service.dig_with_preconditions(uid, guild_id)
+
+        assert terminal is None
+        assert preconditions["items_used"] == ["Torch"]
+        assert preconditions["auto_purchases"][0]["status"] == "purchased"
+        assert player_repository.get_balance(uid, guild_id) == balance_before - 6
 
     def test_max_depth_advances_on_dm_dig(self, dig_service, dig_repo, player_repository, guild_id):
         """Finding 1: DM-decided advance must update max_depth in the DB."""

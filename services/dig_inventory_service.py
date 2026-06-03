@@ -157,6 +157,88 @@ class DigInventoryService:
             balance_after=balance - price,
         )
 
+    def ensure_auto_buy_items(
+        self, discord_id: int, guild_id, item_types: list[str] | tuple[str, ...]
+    ) -> list[dict]:
+        """Ensure selected auto-buy items are queued for the imminent dig.
+
+        Existing reserve inventory is queued first. Only if no reserve exists do
+        we buy a new copy. Failures are reported but do not block the dig.
+        """
+        results: list[dict] = []
+        for item_type in item_types:
+            if item_type not in AUTO_QUEUE_ON_BUY:
+                continue
+
+            item_name = CONSUMABLE_ITEMS[item_type]["name"]
+            queued = _get_queued_items_for_tunnel(self.dig_repo, discord_id, guild_id)
+            if any(q.get("type") == item_type for q in queued):
+                results.append({
+                    "type": item_type,
+                    "item": item_name,
+                    "status": "already_queued",
+                    "cost": 0,
+                })
+                continue
+
+            inventory = self.dig_repo.get_inventory(discord_id, guild_id)
+            reserve = next(
+                (
+                    item for item in inventory
+                    if item.get("item_type") == item_type and not item.get("queued")
+                ),
+                None,
+            )
+            if reserve is not None:
+                self.dig_repo.queue_item(reserve["id"])
+                results.append({
+                    "type": item_type,
+                    "item": item_name,
+                    "status": "queued_from_inventory",
+                    "cost": 0,
+                })
+                continue
+
+            if len(inventory) >= MAX_INVENTORY_SIZE:
+                results.append({
+                    "type": item_type,
+                    "item": item_name,
+                    "status": "skipped_inventory_full",
+                    "cost": 0,
+                })
+                continue
+
+            price = ITEM_PRICES[item_type]
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            if balance < price:
+                results.append({
+                    "type": item_type,
+                    "item": item_name,
+                    "status": "skipped_insufficient_balance",
+                    "cost": price,
+                })
+                continue
+
+            purchased = self.buy_item(discord_id, guild_id, item_type)
+            if purchased.get("success"):
+                results.append({
+                    "type": item_type,
+                    "item": item_name,
+                    "status": "purchased",
+                    "cost": price,
+                    "item_id": purchased.get("item_id"),
+                })
+            else:
+                results.append({
+                    "type": item_type,
+                    "item": item_name,
+                    "status": "skipped_error",
+                    "cost": price,
+                    "error": purchased.get("error"),
+                })
+
+        return results
+
     def get_inventory(self, discord_id: int, guild_id) -> list[dict]:
         """Return inventory items with names and queued status."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
