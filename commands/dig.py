@@ -1470,7 +1470,7 @@ class DigCommands(commands.Cog):
         embed.set_footer(
             text=(
                 f"Your inventory: {inv_count}/{MAX_INVENTORY_SLOTS} items | "
-                "Use /dig buy <item> to purchase, /dig use <item> to queue active items"
+                "Hard Hat/Torch auto-queue; use /dig use <item> for other active items"
             )
         )
 
@@ -1599,16 +1599,19 @@ class DigCommands(commands.Cog):
         item_name = getattr(result, "item", item)
         cost = getattr(result, "cost", 0)
         balance_after = getattr(result, "balance_after", "?")
+        auto_queued = bool(getattr(result, "queued", False))
+        if item == "streak_charm":
+            item_hint = "This charm is passive and triggers automatically."
+        elif auto_queued:
+            item_hint = "Queued automatically for your next dig."
+        else:
+            item_hint = f"Use `/dig use {item}` to queue it."
         buy_embed = discord.Embed(
             title=f"Purchased: {item_name}",
             description=(
                 f"Cost: **{cost}** {JOPACOIN_EMOTE}\n"
                 f"Balance: **{balance_after}** {JOPACOIN_EMOTE}\n\n"
-                + (
-                    "This charm is passive and triggers automatically."
-                    if item == "streak_charm"
-                    else f"Use `/dig use {item}` to queue it."
-                )
+                + item_hint
             ),
             color=0xD4AF37,
         )

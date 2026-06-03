@@ -46,6 +46,9 @@ def _get_game_date() -> str:
     return get_game_date()
 
 
+AUTO_QUEUE_ON_BUY = frozenset({"hard_hat", "torch"})
+
+
 def _get_queued_items_for_tunnel(
     dig_repo: DigRepository, discord_id: int, guild_id
 ) -> list[dict]:
@@ -123,6 +126,12 @@ class DigInventoryService:
         if len(inventory) >= MAX_INVENTORY_SIZE:
             return _error(f"Inventory full ({MAX_INVENTORY_SIZE} items max).")
 
+        queued = _get_queued_items_for_tunnel(self.dig_repo, discord_id, guild_id)
+        auto_queue = (
+            item_type in AUTO_QUEUE_ON_BUY
+            and not any(q.get("type") == item_type for q in queued)
+        )
+
         price = ITEM_PRICES[item_type]
         balance = self.player_repo.get_balance(discord_id, guild_id)
         if balance < price:
@@ -135,12 +144,15 @@ class DigInventoryService:
             balance_delta=-price,
             add_inventory_item=item_type,
         )
+        if auto_queue and item_id is not None:
+            self.dig_repo.queue_item(item_id)
 
         item_name = CONSUMABLE_ITEMS.get(item_type, {}).get("name", item_type)
 
         return _ok(
             item=item_name,
             item_id=item_id,
+            queued=auto_queue,
             cost=price,
             balance_after=balance - price,
         )

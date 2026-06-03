@@ -501,6 +501,9 @@ class TestNewItemsAndArtifacts:
         result = dig_service.buy_item(10001, guild_id, "torch")
         assert result["success"]
         assert result["cost"] == 6
+        assert result["queued"] is True
+        queued = dig_repo.get_queued_items(10001, guild_id)
+        assert [q["id"] for q in queued] == [result["item_id"]]
 
 
 class TestNewEventMechanics:

@@ -73,8 +73,57 @@ class TestBuyItem:
         inventory = dig_repo.get_inventory(10001, guild_id)
         assert len(inventory) == 1
         assert inventory[0]["item_type"] == "dynamite"
+        assert inventory[0]["queued"] == 0
+        assert result["queued"] is False
         # The returned item_id must point at the row that was actually inserted.
         assert result["item_id"] == inventory[0]["id"]
+
+    def test_buy_hard_hat_auto_queues(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        """Hard Hat is active on the next dig without a separate /dig use."""
+        _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        result = inv_service.buy_item(10001, guild_id, "hard_hat")
+
+        assert result["success"]
+        assert result["queued"] is True
+        queued = dig_repo.get_queued_items(10001, guild_id)
+        assert [q["id"] for q in queued] == [result["item_id"]]
+        assert queued[0]["item_type"] == "hard_hat"
+
+    def test_buy_torch_auto_queues(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        """Torch is active on the next dig without a separate /dig use."""
+        _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        result = inv_service.buy_item(10001, guild_id, "torch")
+
+        assert result["success"]
+        assert result["queued"] is True
+        queued = dig_repo.get_queued_items(10001, guild_id)
+        assert [q["id"] for q in queued] == [result["item_id"]]
+        assert queued[0]["item_type"] == "torch"
+
+    def test_buy_duplicate_auto_queue_item_stores_reserve(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        """A second Hard Hat is not queued while one is already queued."""
+        _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        first = inv_service.buy_item(10001, guild_id, "hard_hat")
+        assert first["queued"] is True
+
+        second = inv_service.buy_item(10001, guild_id, "hard_hat")
+
+        assert second["success"]
+        assert second["queued"] is False
+        queued = dig_repo.get_queued_items(10001, guild_id)
+        assert [q["id"] for q in queued] == [first["item_id"]]
+        assert len(dig_repo.get_inventory(10001, guild_id)) == 2
 
     def test_buy_streak_charm_adds_passive_item(
         self, inv_service, dig_repo, player_repository, guild_id
@@ -90,6 +139,7 @@ class TestBuyItem:
         inventory = dig_repo.get_inventory(10001, guild_id)
         assert len(inventory) == 1
         assert inventory[0]["item_type"] == "streak_charm"
+        assert result["queued"] is False
 
     def test_buy_item_unknown_type_rejected(self, inv_service, player_repository, guild_id):
         """An item type not in the price list is rejected before any charge."""
