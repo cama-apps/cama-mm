@@ -28,6 +28,7 @@ from services.dig_constants import (
     CAVE_IN_STUN_DIGS_BY_BAND,
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
+    BASE_DIG_JC_PAYOUT_CAP,
     MILESTONES,
     STREAKS,
     cave_in_band,
@@ -753,6 +754,7 @@ class DigCoreMixin:
 
         # Mana variance + steady bonus on base loot only.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
+        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
         if p.get("overgrowth_active"):
             jc_earned += 10
 
@@ -1120,6 +1122,21 @@ class DigCoreMixin:
 
             jc_earned = outcome.get("jc_earned", 0)
 
+            # Mana/weather combo affects base yield only, matching dig().
+            weather_combo_yield = 1.0
+            if self.mana_effects_service is not None:
+                try:
+                    _wc = self.mana_effects_service.get_weather_combo_modifiers(
+                        discord_id, guild_id,
+                        self._get_weather_code(guild_id, p["layer_name"]),
+                    )
+                    weather_combo_yield = _wc["yield_mult"]
+                except Exception:
+                    weather_combo_yield = 1.0
+            if weather_combo_yield != 1.0:
+                jc_earned = int(jc_earned * weather_combo_yield)
+            jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
+
             # Milestones (anti-farm: only award on depths that extend all-time high,
             # same as main dig() / _execute_deterministic_outcome).
             milestone_bonus = 0
@@ -1225,22 +1242,6 @@ class DigCoreMixin:
                 )
 
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
-
-            # Mana × weather combo (Sunny + White) boosts yield. The DM range
-            # (jc_min/jc_max) is computed without this combo, so apply it here to
-            # match dig() / _execute_deterministic_outcome before taxes.
-            weather_combo_yield = 1.0
-            if self.mana_effects_service is not None:
-                try:
-                    _wc = self.mana_effects_service.get_weather_combo_modifiers(
-                        discord_id, guild_id,
-                        self._get_weather_code(guild_id, p["layer_name"]),
-                    )
-                    weather_combo_yield = _wc["yield_mult"]
-                except Exception:
-                    weather_combo_yield = 1.0
-            if weather_combo_yield != 1.0:
-                jc_earned = int(jc_earned * weather_combo_yield)
 
             # Plains tithe / Blue tax apply to the full payout.
             jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)

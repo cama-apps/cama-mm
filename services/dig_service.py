@@ -31,6 +31,7 @@ from services.dig.prestige_mixin import PrestigeMixin
 from services.dig.progression_mixin import ProgressionMixin
 from services.dig_constants import (
     BOSS_BOUNDARIES,
+    BASE_DIG_JC_PAYOUT_CAP,
     CAVE_IN_BLOCK_LOSS_RANGES,
     EVENT_POOL,
     LAYERS,
@@ -937,6 +938,7 @@ class DigService(
         # Mana variance + steady bonus on base loot only — protects deterministic
         # milestone/streak from a Mountain "zero" roll.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
+        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
         if overgrowth_active:
             jc_earned += 10
 
