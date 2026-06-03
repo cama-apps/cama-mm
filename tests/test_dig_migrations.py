@@ -4,6 +4,7 @@ import json
 import sqlite3
 
 from infrastructure.schema_manager import SchemaManager
+from repositories.dig_repository import DigRepository
 
 
 def _seed_tunnel(db_path: str, discord_id: int, guild_id: int, boss_progress: str) -> None:
@@ -79,6 +80,20 @@ def _read_tunnel_stats(db_path: str, discord_id: int, guild_id: int) -> tuple[in
         return row[0], row[1]
     finally:
         conn.close()
+
+
+class TestDigAutoBuySettingsMigration:
+    def test_auto_buy_columns_default_and_update(self, repo_db_path):
+        repo = DigRepository(repo_db_path)
+        tunnel = repo.create_tunnel(10001, 12345, "Auto")
+
+        assert tunnel["auto_buy_torch"] == 0
+        assert tunnel["auto_buy_hard_hat"] == 0
+
+        repo.update_tunnel(10001, 12345, auto_buy_torch=1, auto_buy_hard_hat=1)
+        updated = repo.get_tunnel(10001, 12345)
+        assert updated["auto_buy_torch"] == 1
+        assert updated["auto_buy_hard_hat"] == 1
 
 
 class TestClearActiveBossIdsMigration:

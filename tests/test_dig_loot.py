@@ -644,6 +644,46 @@ class TestDigEmbed:
             for field in embed.fields
         )
 
+    def test_auto_buy_outcomes_are_visible(self):
+        from commands.dig import _build_dig_embed
+
+        result = SimpleNamespace(
+            depth=10,
+            depth_after=10,
+            tunnel_name="T",
+            pickaxe_tier=0,
+            cave_in=False,
+            advance=1,
+            jc_earned=1,
+            milestone_bonus=0,
+            streak_bonus=0,
+            artifact=None,
+            event=None,
+            sonar_skipped=False,
+            event_preview=None,
+            boss_scout=None,
+            items_used=["Torch"],
+            auto_purchases=[
+                {"item": "Torch", "status": "purchased", "cost": 6},
+                {"item": "Hard Hat", "status": "skipped_insufficient_balance", "cost": 8},
+            ],
+            luminosity_info=None,
+            corruption=None,
+            mutations=None,
+            tip="tip",
+            streak_charm_used=False,
+        )
+        user = SimpleNamespace(
+            display_name="Tester",
+            display_avatar=SimpleNamespace(url=""),
+        )
+
+        embed, _, _, _ = _build_dig_embed(result, user)
+
+        auto_buy = next(field for field in embed.fields if field.name == "Auto-Buy")
+        assert "Torch: bought" in auto_buy.value
+        assert "Hard Hat: skipped (need 8 JC)" in auto_buy.value
+
 
 class TestEventPoolInvariants:
     """Invariants on the EVENT_POOL itself, independent of the service."""

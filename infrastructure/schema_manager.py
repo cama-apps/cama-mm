@@ -452,6 +452,8 @@ class SchemaManager:
                 "backfill_overgrowth_charges_remaining",
                 self._migration_backfill_overgrowth_charges_remaining,
             ),
+            # Per-miner opt-in auto-buy settings for common dig consumables.
+            ("add_dig_auto_buy_settings", self._migration_add_dig_auto_buy_settings),
         ]
 
     # --- Migrations ---
@@ -3583,6 +3585,15 @@ class SchemaManager:
                 ) WHERE rn > 6
             )
             """
+        )
+
+    def _migration_add_dig_auto_buy_settings(self, cursor) -> None:
+        """Add per-miner auto-buy toggles for common dig consumables."""
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "auto_buy_torch", "INTEGER NOT NULL DEFAULT 0",
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "auto_buy_hard_hat", "INTEGER NOT NULL DEFAULT 0",
         )
 
     def _migration_create_protected_hero_purchases_table(self, cursor) -> None:

@@ -229,6 +229,21 @@ class DigService(
             result["depth"] = result["depth_after"]
         return result
 
+    def _apply_auto_buy_for_dig(
+        self, discord_id: int, guild_id, tunnel: dict
+    ) -> list[dict]:
+        """Queue/purchase opted-in consumables for an actual imminent dig."""
+        item_types = []
+        if int(tunnel.get("auto_buy_hard_hat") or 0):
+            item_types.append("hard_hat")
+        if int(tunnel.get("auto_buy_torch") or 0):
+            item_types.append("torch")
+        if not item_types:
+            return []
+        return self.inventory_service.ensure_auto_buy_items(
+            discord_id, guild_id, item_types,
+        )
+
     # ------------------------------------------------------------------
     # Tunnel Name Generation
     # ------------------------------------------------------------------
@@ -379,6 +394,8 @@ class DigService(
             return self._execute_first_dig(
                 discord_id, guild_id, tunnel, depth_before, now, today, decay_info
             )
+
+        auto_purchases = self._apply_auto_buy_for_dig(discord_id, guild_id, tunnel)
 
         # 5. Check injury state
         injury = None
@@ -817,6 +834,7 @@ class DigService(
                 is_first_dig=False,
                 items_used=items_used,
                 items_used_ids=items_used_ids,
+                auto_purchases=auto_purchases,
                 pickaxe_tier=pickaxe_tier,
                 tip=self._pick_tip(new_depth),
                 decay_info=decay_info,
@@ -1166,6 +1184,7 @@ class DigService(
             is_first_dig=False,
             items_used=items_used,
             items_used_ids=items_used_ids,
+            auto_purchases=auto_purchases,
             pickaxe_tier=pickaxe_tier,
             tip=self._pick_tip(new_depth),
             decay_info=decay_info,
@@ -1288,6 +1307,8 @@ class DigService(
             return self._execute_first_dig(
                 discord_id, guild_id, tunnel, depth_before, now, today, decay_info,
             ), None
+
+        auto_purchases = self._apply_auto_buy_for_dig(discord_id, guild_id, tunnel)
 
         # Injury state
         injury_advance_mod = 1.0
@@ -1673,6 +1694,7 @@ class DigService(
             "injury_advance_mod": injury_advance_mod,
             "items_used": items_used,
             "items_used_ids": items_used_ids,
+            "auto_purchases": auto_purchases,
             "has_dynamite": has_dynamite,
             "has_hard_hat": has_hard_hat,
             "has_lantern": has_lantern,

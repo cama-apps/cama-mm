@@ -428,6 +428,12 @@ class ProgressionMixin:
             "awards": sorted(set(awards)),
         })
 
+    def _get_auto_buy_settings(self, tunnel: dict) -> dict[str, bool]:
+        return {
+            "torch": bool(int(tunnel.get("auto_buy_torch") or 0)),
+            "hard_hat": bool(int(tunnel.get("auto_buy_hard_hat") or 0)),
+        }
+
     def _boss_stat_point_award_updates(self, tunnel: dict, boundary: int) -> dict | None:
         """Return tunnel column updates for a first-clear S point, if any."""
         awarded = self._get_stat_boss_awards(tunnel)
@@ -470,7 +476,32 @@ class ProgressionMixin:
             stats=stats,
             effects=effects,
             awarded_bosses=self._get_stat_boss_awards(tunnel),
+            auto_buy=self._get_auto_buy_settings(tunnel),
         )
+
+    def set_miner_auto_buy(
+        self,
+        discord_id: int,
+        guild_id,
+        *,
+        torch: bool | None = None,
+        hard_hat: bool | None = None,
+    ) -> dict:
+        """Set the player's auto-buy preferences for common dig consumables."""
+        if not self.player_repo.exists(discord_id, guild_id):
+            return self._error("You need to register first. Use /player register.")
+        tunnel = self._ensure_tunnel_for_profile(discord_id, guild_id)
+        updates = {}
+        if torch is not None:
+            updates["auto_buy_torch"] = 1 if torch else 0
+        if hard_hat is not None:
+            updates["auto_buy_hard_hat"] = 1 if hard_hat else 0
+        if not updates:
+            return self._error("Choose at least one auto-buy setting to update.")
+
+        self.dig_repo.update_tunnel(discord_id, guild_id, **updates)
+        tunnel.update(updates)
+        return self._ok(auto_buy=self._get_auto_buy_settings(tunnel))
 
     def set_miner_profile(
         self,

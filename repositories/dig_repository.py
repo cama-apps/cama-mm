@@ -29,6 +29,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "pinnacle_last_engaged_at",
         # relic_loadout_cap_and_streak migration
         "cavein_free_streak", "relic_trim_notice",
+        # add_dig_auto_buy_settings migration
+        "auto_buy_torch", "auto_buy_hard_hat",
     })
 
     @staticmethod
@@ -134,6 +136,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "temp_curses",
         # relic_loadout_cap_and_streak migration
         "cavein_free_streak", "relic_trim_notice",
+        # add_dig_auto_buy_settings migration
+        "auto_buy_torch", "auto_buy_hard_hat",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
