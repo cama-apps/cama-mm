@@ -30,8 +30,8 @@ from services.dig.pinnacle_mixin import PinnacleMixin
 from services.dig.prestige_mixin import PrestigeMixin
 from services.dig.progression_mixin import ProgressionMixin
 from services.dig_constants import (
-    BOSS_BOUNDARIES,
     BASE_DIG_JC_PAYOUT_CAP,
+    BOSS_BOUNDARIES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     EVENT_POOL,
     LAYERS,

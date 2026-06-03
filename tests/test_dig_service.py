@@ -13,9 +13,9 @@ from commands.dig import _append_sabotage_prediction_steal_line
 from repositories.dig_repository import DigRepository
 from repositories.prediction_repository import PredictionRepository
 from services.dig_constants import (
+    BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
     BOSS_VICTORY_BASE_JC,
-    BASE_DIG_JC_PAYOUT_CAP,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CHEER_COOLDOWN_SECONDS,

@@ -17,6 +17,7 @@ from services.dig._common import (
     logger,
 )
 from services.dig_constants import (
+    BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CAVE_IN_CATASTROPHIC_GEAR_TICKS,
@@ -28,7 +29,6 @@ from services.dig_constants import (
     CAVE_IN_STUN_DIGS_BY_BAND,
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
-    BASE_DIG_JC_PAYOUT_CAP,
     MILESTONES,
     STREAKS,
     cave_in_band,
