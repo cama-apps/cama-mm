@@ -50,6 +50,37 @@ class TestAIService:
         assert result.tool_args["explanation"] == "Get all players"
 
     @pytest.mark.asyncio
+    async def test_groq_tool_calls_disable_reasoning(self):
+        """Groq/Qwen tool calls are brittle when reasoning emits tool JSON."""
+        ai_service = AIService(
+            model="groq/qwen/qwen3-32b",
+            api_key="test-api-key",
+            timeout=30.0,
+            max_tokens=500,
+        )
+        mock_response = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "execute_sql_query"
+        mock_tool_call.function.arguments = json.dumps({
+            "sql": "SELECT discord_username FROM players LIMIT 1",
+            "explanation": "Get one player",
+        })
+        mock_response.choices = [MagicMock(message=MagicMock(tool_calls=[mock_tool_call]))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            result = await ai_service.call_with_tools(
+                messages=[{"role": "user", "content": "test"}],
+                tools=[SQL_TOOL],
+            )
+
+        call_kwargs = mock_completion.call_args.kwargs
+        assert result.tool_name == "execute_sql_query"
+        assert call_kwargs["reasoning_format"] == "parsed"
+        assert call_kwargs["reasoning_effort"] == "none"
+        assert call_kwargs["parallel_tool_calls"] is False
+
+    @pytest.mark.asyncio
     async def test_generate_sql_returns_sql_and_explanation(self, ai_service):
         """Test that generate_sql returns structured SQL output."""
         mock_response = MagicMock()

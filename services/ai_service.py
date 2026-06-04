@@ -231,9 +231,13 @@ class AIService:
             }
             if temperature is not None:
                 kwargs["temperature"] = temperature
-            # Groq requires parsed/hidden reasoning_format with tool calls
+            # Qwen reasoning frequently corrupts forced tool-call JSON on Groq.
+            # This path only needs short structured output, so disable reasoning
+            # and parallel tool calls to keep the emitted arguments valid.
             if self._is_groq:
                 kwargs["reasoning_format"] = "parsed"
+                kwargs["reasoning_effort"] = "none"
+                kwargs["parallel_tool_calls"] = False
             response = await asyncio.wait_for(
                 acompletion(**kwargs),
                 timeout=self.timeout,
