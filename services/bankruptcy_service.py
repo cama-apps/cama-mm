@@ -299,7 +299,7 @@ class BankruptcyService(IBankruptcyService):
                 guild_id=guild_id,
                 fresh_start_balance=BANKRUPTCY_FRESH_START_BALANCE,
                 cooldown_seconds=self.cooldown_seconds,
-                penalty_games=max(1, 2 * self.penalty_games - 1),
+                penalty_games=2 * self.penalty_games,
                 now=now,
             )
         except ValueError as e:
@@ -322,7 +322,7 @@ class BankruptcyService(IBankruptcyService):
         return Result.ok(
             BankruptcyDeclaration(
                 debt_cleared=debt_cleared,
-                penalty_games=max(1, 2 * self.penalty_games - 1),
+                penalty_games=2 * self.penalty_games,
                 penalty_rate=self.penalty_rate,
                 new_balance=BANKRUPTCY_FRESH_START_BALANCE,
             )

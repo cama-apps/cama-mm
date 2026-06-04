@@ -2766,15 +2766,15 @@ class SchemaManager:
         """Convert existing penalty counters from X-wins to the 2X-1 scale.
 
         Old system: counter starts at X, each win decrements by 1.
-        New system: counter starts at 2X-1, wins decrement by 2, losses by 1.
+        New system: counter starts at 2X, wins decrement by 2, losses by 1.
 
-        Formula MAX(0, old * 2 - 1) preserves the number of wins required to
-        clear for each existing player (e.g. 3 remaining → 5 → cleared in 3 wins).
+        Formula old * 2 preserves the number of wins required to clear for
+        each existing player (e.g. 3 remaining → 6 → cleared in 3 wins).
         """
         cursor.execute(
             """
             UPDATE bankruptcy_state
-            SET penalty_games_remaining = MAX(0, penalty_games_remaining * 2 - 1),
+            SET penalty_games_remaining = penalty_games_remaining * 2,
                 updated_at = CURRENT_TIMESTAMP
             WHERE penalty_games_remaining > 0
             """
