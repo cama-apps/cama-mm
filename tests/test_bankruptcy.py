@@ -164,9 +164,9 @@ class TestBankruptcyDeclaration:
 
         result = bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
-        assert result.value.penalty_games == 5
+        assert result.value.penalty_games == 9  # 2*5-1
         state = bankruptcy_service.get_state(pid, TEST_GUILD_ID)
-        assert state.penalty_games_remaining == 5
+        assert state.penalty_games_remaining == 9  # 2*5-1
 
 
 class TestBankruptcyPenalty:
@@ -204,13 +204,13 @@ class TestBankruptcyPenalty:
         pid = create_test_player(player_repo, 1001, balance=-300)
 
         bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 9  # 2*5-1
 
-        # Win 3 games
+        # Win 3 games (each counts as 2)
         for _ in range(3):
             bankruptcy_service.on_game_won(pid, TEST_GUILD_ID)
 
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 2
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 3  # 9 - 3*2
 
     def test_penalty_expires_after_wins(self, db_and_repos, bankruptcy_service):
         """Penalty stops applying after all penalty wins are achieved."""
@@ -294,14 +294,14 @@ class TestBettingServiceIntegration:
         expected_penalty = JOPACOIN_WIN_REWARD - expected_net
         assert results[pid]["bankruptcy_penalty"] == expected_penalty
         assert results[pid]["net"] == expected_net
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 0
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 0  # 2*1-1=1, win clears it
         assert (
             player_repo.get_balance(pid, TEST_GUILD_ID)
             == BANKRUPTCY_FRESH_START_BALANCE + expected_net
         )
 
     def test_participation_does_not_decrement_penalty(self, db_and_repos):
-        """Participation (playing) does NOT decrement bankruptcy penalty - only wins count."""
+        """Participation (playing) does NOT decrement bankruptcy penalty - only wins/losses count."""
         player_repo = db_and_repos["player_repo"]
         bankruptcy_repo = db_and_repos["bankruptcy_repo"]
         bet_repo = db_and_repos["bet_repo"]
@@ -324,13 +324,13 @@ class TestBettingServiceIntegration:
         pid = create_test_player(player_repo, 1001, balance=-200)
         bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 9  # 2*5-1
 
         # Award participation (playing a game, not winning)
         betting_service.award_participation([pid], TEST_GUILD_ID)
 
-        # Penalty games should NOT be decremented - only wins count
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
+        # Penalty games should NOT be decremented by participation
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 9  # 2*5-1
 
     def test_win_bonus_decrements_penalty(self, db_and_repos):
         """Win bonuses decrement bankruptcy penalty - only wins clear bankruptcy."""
@@ -356,13 +356,13 @@ class TestBettingServiceIntegration:
         pid = create_test_player(player_repo, 1001, balance=-200)
         bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 9  # 2*5-1
 
         # Award win bonus (this is what clears bankruptcy)
         betting_service.award_win_bonus([pid], TEST_GUILD_ID)
 
-        # Penalty games should be decremented after winning
-        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 4
+        # Penalty games should be decremented by 2 after winning
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 7  # 9-2
 
 
 class TestBankruptcyState:
@@ -394,7 +394,7 @@ class TestBankruptcyState:
         assert state.discord_id == pid
         assert state.last_bankruptcy_at is not None
         assert state.last_bankruptcy_at >= now
-        assert state.penalty_games_remaining == 5
+        assert state.penalty_games_remaining == 9  # 2*5-1
         assert state.is_on_cooldown is True
         assert state.cooldown_ends_at is not None
 
@@ -508,7 +508,7 @@ class TestBulkBankruptcyState:
 
         assert len(states) == 1
         assert states[pid].discord_id == pid
-        assert states[pid].penalty_games_remaining == 5
+        assert states[pid].penalty_games_remaining == 9  # 2*5-1
         assert states[pid].is_on_cooldown is True
         assert states[pid].last_bankruptcy_at is not None
 
@@ -531,7 +531,7 @@ class TestBulkBankruptcyState:
         assert len(states) == 3
 
         # User 1: has bankruptcy
-        assert states[pid1].penalty_games_remaining == 5
+        assert states[pid1].penalty_games_remaining == 9  # 2*5-1
         assert states[pid1].is_on_cooldown is True
 
         # User 2: no bankruptcy
@@ -614,4 +614,4 @@ class TestBulkBankruptcyState:
 
         # Should still return just one entry
         assert len(states) == 1
-        assert states[pid].penalty_games_remaining == 5
+        assert states[pid].penalty_games_remaining == 9  # 2*5-1

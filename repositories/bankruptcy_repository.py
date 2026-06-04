@@ -197,9 +197,9 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
             row = cursor.fetchone()
             return row["penalty_games_remaining"] if row else max(delta, 0)
 
-    def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
+    def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None, delta: int = 1) -> int:
         """
-        Decrement penalty games remaining by 1 if > 0.
+        Decrement penalty games remaining by ``delta`` (clamped to >= 0).
 
         Returns the new count. Runs under BEGIN IMMEDIATE so the SELECT after
         UPDATE observes exactly this call's decrement.
@@ -210,11 +210,11 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
             cursor.execute(
                 """
                 UPDATE bankruptcy_state
-                SET penalty_games_remaining = MAX(0, penalty_games_remaining - 1),
+                SET penalty_games_remaining = MAX(0, penalty_games_remaining - ?),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
                 """,
-                (discord_id, normalized_id),
+                (delta, discord_id, normalized_id),
             )
             cursor.execute(
                 "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",

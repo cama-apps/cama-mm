@@ -208,14 +208,19 @@ class BankruptcyService(IBankruptcyService):
 
     def on_game_won(self, discord_id: int, guild_id: int | None = None) -> int:
         """
-        Called when a player wins a game. Decrements their penalty counter.
-
-        Only wins count toward clearing bankruptcy (like Dota 2 low priority).
-        Losses do not decrement the counter.
+        Called when a player wins a game. Counts as 2 penalty games cleared.
 
         Returns the remaining penalty games.
         """
-        return self.bankruptcy_repo.decrement_penalty_games(discord_id, guild_id)
+        return self.bankruptcy_repo.decrement_penalty_games(discord_id, guild_id, delta=2)
+
+    def on_game_lost(self, discord_id: int, guild_id: int | None = None) -> int:
+        """
+        Called when a player loses a game. Counts as 1 penalty game cleared.
+
+        Returns the remaining penalty games.
+        """
+        return self.bankruptcy_repo.decrement_penalty_games(discord_id, guild_id, delta=1)
 
     def add_penalty_games(self, discord_id: int, guild_id: int | None, games: int) -> int:
         """
@@ -294,7 +299,7 @@ class BankruptcyService(IBankruptcyService):
                 guild_id=guild_id,
                 fresh_start_balance=BANKRUPTCY_FRESH_START_BALANCE,
                 cooldown_seconds=self.cooldown_seconds,
-                penalty_games=self.penalty_games,
+                penalty_games=max(1, 2 * self.penalty_games - 1),
                 now=now,
             )
         except ValueError as e:
@@ -317,7 +322,7 @@ class BankruptcyService(IBankruptcyService):
         return Result.ok(
             BankruptcyDeclaration(
                 debt_cleared=debt_cleared,
-                penalty_games=self.penalty_games,
+                penalty_games=max(1, 2 * self.penalty_games - 1),
                 penalty_rate=self.penalty_rate,
                 new_balance=BANKRUPTCY_FRESH_START_BALANCE,
             )

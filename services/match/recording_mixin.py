@@ -65,6 +65,7 @@ class RecordingMixin:
             match_id, guild_id, winning_team, pending_state=last_shuffle
         )
         _accumulate(self.betting_service.award_win_bonus(winning_ids, guild_id))
+        self.betting_service.award_loss_tick(losing_ids, guild_id)
         if excluded_player_ids:
             _accumulate(
                 self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
