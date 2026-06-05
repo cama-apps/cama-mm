@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from services.monitoring_service import (
@@ -55,6 +56,27 @@ def test_monitoring_snapshot_reports_ok_db_and_runtime_fields(repo_db_path):
     assert snapshot.discord_latency_ms == 123
     assert snapshot.usage.command_total == 1
     assert "1h" in snapshot.uptime
+
+
+def test_monitoring_service_prefers_git_sha_env(monkeypatch):
+    monkeypatch.setenv("GIT_SHA", "abcdef1234567890")
+
+    with patch("services.monitoring_service.subprocess.run") as run:
+        service = MonitoringService(":memory:")
+
+    assert service.git_sha == "abcdef123456"
+    run.assert_not_called()
+
+
+def test_monitoring_service_uses_git_command_when_env_missing(monkeypatch):
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    completed = SimpleNamespace(stdout="123456789abc\n")
+
+    with patch("services.monitoring_service.subprocess.run", return_value=completed) as run:
+        service = MonitoringService(":memory:")
+
+    assert service.git_sha == "123456789abc"
+    run.assert_called_once()
 
 
 def test_monitoring_snapshot_degrades_on_db_failure(tmp_path):

@@ -25,7 +25,10 @@ jobs:
           username: cama
           key: ${{ secrets.SSH_KEY }}
           script: |
+            set -eu
+            DEPLOY_SHA="${{ github.event.workflow_run.head_sha }}"
             cd ~/cama-mm
-            git pull origin main
-            docker compose build
+            git fetch origin main
+            git checkout --force "$DEPLOY_SHA"
+            GIT_SHA="$DEPLOY_SHA" docker compose build
             docker compose up -d

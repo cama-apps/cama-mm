@@ -24,6 +24,10 @@ def _utc_now() -> datetime:
 
 
 def _short_git_sha() -> str:
+    env_sha = os.getenv("GIT_SHA", "").strip()
+    if env_sha:
+        return env_sha[:12]
+
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short=12", "HEAD"],

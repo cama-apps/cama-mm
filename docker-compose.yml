@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     restart: "always"
     env_file: .env
     volumes:

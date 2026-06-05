@@ -23,5 +23,10 @@ RUN uv sync --frozen --no-dev
 # Copy application code
 COPY --chown=appuser:appuser . .
 
+# Bake deploy metadata late so a new SHA does not invalidate dependency layers.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision=${GIT_SHA}
+
 # Run the bot
 CMD ["uv", "run", "--no-sync", "python", "bot.py"]
