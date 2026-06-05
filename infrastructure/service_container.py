@@ -88,6 +88,7 @@ class ServiceContainer:
         self._init_rebellion_service()
         self._init_mana_service()
         self._init_dig_service()
+        self._init_mafia_service()
         self._init_extras()
         self._init_reminder_service()
 
@@ -116,6 +117,7 @@ class ServiceContainer:
         from repositories.guild_config_repository import GuildConfigRepository
         from repositories.loan_repository import LoanRepository
         from repositories.lobby_repository import LobbyRepository
+        from repositories.mafia_repository import MafiaRepository
         from repositories.mana_repository import ManaRepository
         from repositories.match_repository import MatchRepository
         from repositories.neon_event_repository import NeonEventRepository
@@ -161,6 +163,7 @@ class ServiceContainer:
             "curse_repo": CurseRepository(p),
             "dig_guild_modifier_repo": DigGuildModifierRepository(p),
             "dig_quest_repo": DigQuestRepository(p),
+            "mafia_repo": MafiaRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -468,6 +471,25 @@ class ServiceContainer:
         else:
             c["dig_flavor_service"] = None
 
+    def _init_mafia_service(self) -> None:
+        """Daily Mafia subgame services."""
+        from services.hero_provider import HeroProvider
+        from services.mafia_flavor_service import MafiaFlavorService
+        from services.mafia_service import MafiaService
+
+        c = self._components
+        c["mafia_flavor_service"] = MafiaFlavorService(
+            ai_service=c.get("ai_service"),
+            flavor_text_service=c.get("flavor_text_service"),
+        )
+        c["mafia_service"] = MafiaService(
+            mafia_repo=c["mafia_repo"],
+            player_repo=c["player_repo"],
+            dig_service=c["dig_service"],
+            flavor_service=c["mafia_flavor_service"],
+            hero_provider=HeroProvider(),
+        )
+
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
         from services.neon_degen_service import NeonDegenService
@@ -577,6 +599,9 @@ class ServiceContainer:
         bot.dig_guild_modifier_repo = c["dig_guild_modifier_repo"]
         bot.dig_quest_service = c["dig_quest_service"]
         bot.dig_quest_repo = c["dig_quest_repo"]
+        bot.mafia_service = c["mafia_service"]
+        bot.mafia_repo = c["mafia_repo"]
+        bot.mafia_flavor_service = c["mafia_flavor_service"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]
