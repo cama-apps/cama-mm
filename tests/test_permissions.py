@@ -4,7 +4,12 @@ Tests for permission helpers.
 
 from types import SimpleNamespace
 
-from services.permissions import has_admin_permission, has_allowlisted_admin
+from services.permissions import (
+    has_admin_permission,
+    has_allowlisted_admin,
+    has_allowlisted_tax_man,
+    has_tax_man_permission,
+)
 
 
 def test_has_allowlisted_admin(monkeypatch):
@@ -46,3 +51,34 @@ def test_has_admin_permission_false(monkeypatch):
     interaction = SimpleNamespace(user=SimpleNamespace(id=505), guild=None)
 
     assert has_admin_permission(interaction) is False
+
+
+def test_has_allowlisted_tax_man(monkeypatch):
+    monkeypatch.setattr("services.permissions.TAX_MAN_USER_IDS", [606])
+    interaction = SimpleNamespace(user=SimpleNamespace(id=606))
+
+    assert has_allowlisted_tax_man(interaction) is True
+
+
+def test_has_tax_man_permission_defaults_to_admin(monkeypatch):
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [707])
+    monkeypatch.setattr("services.permissions.TAX_MAN_USER_IDS", [])
+    interaction = SimpleNamespace(user=SimpleNamespace(id=707), guild=None)
+
+    assert has_tax_man_permission(interaction) is True
+
+
+def test_has_tax_man_permission_allowlist(monkeypatch):
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [])
+    monkeypatch.setattr("services.permissions.TAX_MAN_USER_IDS", [808])
+    interaction = SimpleNamespace(user=SimpleNamespace(id=808), guild=None)
+
+    assert has_tax_man_permission(interaction) is True
+
+
+def test_has_tax_man_permission_false(monkeypatch):
+    monkeypatch.setattr("services.permissions.ADMIN_USER_IDS", [])
+    monkeypatch.setattr("services.permissions.TAX_MAN_USER_IDS", [])
+    interaction = SimpleNamespace(user=SimpleNamespace(id=909), guild=None)
+
+    assert has_tax_man_permission(interaction) is False

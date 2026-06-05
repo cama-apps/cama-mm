@@ -454,6 +454,12 @@ class SchemaManager:
             ),
             # Per-miner opt-in auto-buy settings for common dig consumables.
             ("add_dig_auto_buy_settings", self._migration_add_dig_auto_buy_settings),
+            # Central economy ledger.
+            ("create_economy_ledger_tables", self._migration_create_economy_ledger_tables),
+            (
+                "backfill_economy_ledger_opening_balances",
+                self._migration_backfill_economy_ledger_opening_balances,
+            ),
         ]
 
     # --- Migrations ---
@@ -3594,6 +3600,290 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "tunnels", "auto_buy_hard_hat", "INTEGER NOT NULL DEFAULT 0",
+        )
+
+    def _migration_create_economy_ledger_tables(self, cursor) -> None:
+        """Create central money-movement ledger and balance-change triggers."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS economy_ledger_entries (
+                ledger_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                account_type TEXT NOT NULL CHECK(account_type IN ('player', 'nonprofit')),
+                account_id INTEGER,
+                delta INTEGER NOT NULL,
+                balance_before INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT 'balance_update',
+                actor_id INTEGER,
+                related_type TEXT,
+                related_id TEXT,
+                reason TEXT,
+                metadata TEXT,
+                created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS economy_ledger_context (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                source TEXT,
+                actor_id INTEGER,
+                related_type TEXT,
+                related_id TEXT,
+                reason TEXT,
+                metadata TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_economy_ledger_guild_created
+            ON economy_ledger_entries(guild_id, created_at DESC, ledger_id DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_economy_ledger_account
+            ON economy_ledger_entries(guild_id, account_type, account_id, created_at DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_economy_ledger_source
+            ON economy_ledger_entries(guild_id, source, created_at DESC)
+            """
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO economy_ledger_entries (
+                guild_id, account_type, account_id, delta,
+                balance_before, balance_after, source, reason
+            )
+            SELECT COALESCE(p.guild_id, 0), 'player', p.discord_id,
+                   COALESCE(p.jopacoin_balance, 0), 0,
+                   COALESCE(p.jopacoin_balance, 0),
+                   'ledger_backfill', 'opening balance at ledger creation'
+            FROM players p
+            WHERE COALESCE(p.jopacoin_balance, 0) != 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM economy_ledger_entries e
+                  WHERE e.guild_id = COALESCE(p.guild_id, 0)
+                    AND e.account_type = 'player'
+                    AND e.account_id = p.discord_id
+              )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO economy_ledger_entries (
+                guild_id, account_type, account_id, delta,
+                balance_before, balance_after, source, reason
+            )
+            SELECT COALESCE(n.guild_id, 0), 'nonprofit', COALESCE(n.guild_id, 0),
+                   COALESCE(n.total_collected, 0), 0,
+                   COALESCE(n.total_collected, 0),
+                   'ledger_backfill', 'opening nonprofit fund at ledger creation'
+            FROM nonprofit_fund n
+            WHERE COALESCE(n.total_collected, 0) != 0
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM economy_ledger_entries e
+                  WHERE e.guild_id = COALESCE(n.guild_id, 0)
+                    AND e.account_type = 'nonprofit'
+                    AND e.account_id = COALESCE(n.guild_id, 0)
+              )
+            """
+        )
+
+        cursor.execute("DROP TRIGGER IF EXISTS trg_economy_ledger_players_insert")
+        cursor.execute(
+            """
+            CREATE TRIGGER trg_economy_ledger_players_insert
+            AFTER INSERT ON players
+            WHEN COALESCE(NEW.jopacoin_balance, 0) != 0
+            BEGIN
+                INSERT INTO economy_ledger_entries (
+                    guild_id, account_type, account_id, delta,
+                    balance_before, balance_after, source, actor_id,
+                    related_type, related_id, reason, metadata
+                )
+                VALUES (
+                    COALESCE(NEW.guild_id, 0), 'player', NEW.discord_id,
+                    COALESCE(NEW.jopacoin_balance, 0), 0,
+                    COALESCE(NEW.jopacoin_balance, 0),
+                    COALESCE((SELECT source FROM economy_ledger_context WHERE id = 1), 'player_insert'),
+                    (SELECT actor_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_type FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT reason FROM economy_ledger_context WHERE id = 1),
+                    (SELECT metadata FROM economy_ledger_context WHERE id = 1)
+                );
+            END
+            """
+        )
+
+        cursor.execute("DROP TRIGGER IF EXISTS trg_economy_ledger_players_update")
+        cursor.execute(
+            """
+            CREATE TRIGGER trg_economy_ledger_players_update
+            AFTER UPDATE OF jopacoin_balance ON players
+            WHEN COALESCE(OLD.jopacoin_balance, 0) != COALESCE(NEW.jopacoin_balance, 0)
+            BEGIN
+                INSERT INTO economy_ledger_entries (
+                    guild_id, account_type, account_id, delta,
+                    balance_before, balance_after, source, actor_id,
+                    related_type, related_id, reason, metadata
+                )
+                VALUES (
+                    COALESCE(NEW.guild_id, 0), 'player', NEW.discord_id,
+                    COALESCE(NEW.jopacoin_balance, 0) - COALESCE(OLD.jopacoin_balance, 0),
+                    COALESCE(OLD.jopacoin_balance, 0),
+                    COALESCE(NEW.jopacoin_balance, 0),
+                    COALESCE((SELECT source FROM economy_ledger_context WHERE id = 1), 'balance_update'),
+                    (SELECT actor_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_type FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT reason FROM economy_ledger_context WHERE id = 1),
+                    (SELECT metadata FROM economy_ledger_context WHERE id = 1)
+                );
+            END
+            """
+        )
+
+        cursor.execute("DROP TRIGGER IF EXISTS trg_economy_ledger_nonprofit_insert")
+        cursor.execute(
+            """
+            CREATE TRIGGER trg_economy_ledger_nonprofit_insert
+            AFTER INSERT ON nonprofit_fund
+            WHEN COALESCE(NEW.total_collected, 0) != 0
+            BEGIN
+                INSERT INTO economy_ledger_entries (
+                    guild_id, account_type, account_id, delta,
+                    balance_before, balance_after, source, actor_id,
+                    related_type, related_id, reason, metadata
+                )
+                VALUES (
+                    COALESCE(NEW.guild_id, 0), 'nonprofit', COALESCE(NEW.guild_id, 0),
+                    COALESCE(NEW.total_collected, 0), 0,
+                    COALESCE(NEW.total_collected, 0),
+                    COALESCE((SELECT source FROM economy_ledger_context WHERE id = 1), 'nonprofit_insert'),
+                    (SELECT actor_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_type FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT reason FROM economy_ledger_context WHERE id = 1),
+                    (SELECT metadata FROM economy_ledger_context WHERE id = 1)
+                );
+            END
+            """
+        )
+
+        cursor.execute("DROP TRIGGER IF EXISTS trg_economy_ledger_nonprofit_update")
+        cursor.execute(
+            """
+            CREATE TRIGGER trg_economy_ledger_nonprofit_update
+            AFTER UPDATE OF total_collected ON nonprofit_fund
+            WHEN COALESCE(OLD.total_collected, 0) != COALESCE(NEW.total_collected, 0)
+            BEGIN
+                INSERT INTO economy_ledger_entries (
+                    guild_id, account_type, account_id, delta,
+                    balance_before, balance_after, source, actor_id,
+                    related_type, related_id, reason, metadata
+                )
+                VALUES (
+                    COALESCE(NEW.guild_id, 0), 'nonprofit', COALESCE(NEW.guild_id, 0),
+                    COALESCE(NEW.total_collected, 0) - COALESCE(OLD.total_collected, 0),
+                    COALESCE(OLD.total_collected, 0),
+                    COALESCE(NEW.total_collected, 0),
+                    COALESCE((SELECT source FROM economy_ledger_context WHERE id = 1), 'nonprofit_update'),
+                    (SELECT actor_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_type FROM economy_ledger_context WHERE id = 1),
+                    (SELECT related_id FROM economy_ledger_context WHERE id = 1),
+                    (SELECT reason FROM economy_ledger_context WHERE id = 1),
+                    (SELECT metadata FROM economy_ledger_context WHERE id = 1)
+                );
+            END
+            """
+        )
+
+    def _migration_backfill_economy_ledger_opening_balances(self, cursor) -> None:
+        """Backfill opening balances for DBs that already ran ledger creation."""
+        cursor.execute(
+            """
+            WITH existing AS (
+                SELECT guild_id, account_id, COALESCE(SUM(delta), 0) AS logged_delta
+                FROM economy_ledger_entries
+                WHERE account_type = 'player'
+                GROUP BY guild_id, account_id
+            ),
+            openings AS (
+                SELECT COALESCE(p.guild_id, 0) AS guild_id,
+                       p.discord_id AS account_id,
+                       COALESCE(p.jopacoin_balance, 0)
+                           - COALESCE(e.logged_delta, 0) AS opening_balance
+                FROM players p
+                LEFT JOIN existing e
+                  ON e.guild_id = COALESCE(p.guild_id, 0)
+                 AND e.account_id = p.discord_id
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM economy_ledger_entries le
+                    WHERE le.guild_id = COALESCE(p.guild_id, 0)
+                      AND le.account_type = 'player'
+                      AND le.account_id = p.discord_id
+                      AND le.source = 'ledger_backfill'
+                )
+            )
+            INSERT INTO economy_ledger_entries (
+                guild_id, account_type, account_id, delta,
+                balance_before, balance_after, source, reason
+            )
+            SELECT guild_id, 'player', account_id, opening_balance,
+                   0, opening_balance, 'ledger_backfill',
+                   'opening balance at ledger creation'
+            FROM openings
+            WHERE opening_balance != 0
+            """
+        )
+        cursor.execute(
+            """
+            WITH existing AS (
+                SELECT guild_id, account_id, COALESCE(SUM(delta), 0) AS logged_delta
+                FROM economy_ledger_entries
+                WHERE account_type = 'nonprofit'
+                GROUP BY guild_id, account_id
+            ),
+            openings AS (
+                SELECT COALESCE(n.guild_id, 0) AS guild_id,
+                       COALESCE(n.guild_id, 0) AS account_id,
+                       COALESCE(n.total_collected, 0)
+                           - COALESCE(e.logged_delta, 0) AS opening_balance
+                FROM nonprofit_fund n
+                LEFT JOIN existing e
+                  ON e.guild_id = COALESCE(n.guild_id, 0)
+                 AND e.account_id = COALESCE(n.guild_id, 0)
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM economy_ledger_entries le
+                    WHERE le.guild_id = COALESCE(n.guild_id, 0)
+                      AND le.account_type = 'nonprofit'
+                      AND le.account_id = COALESCE(n.guild_id, 0)
+                      AND le.source = 'ledger_backfill'
+                )
+            )
+            INSERT INTO economy_ledger_entries (
+                guild_id, account_type, account_id, delta,
+                balance_before, balance_after, source, reason
+            )
+            SELECT guild_id, 'nonprofit', account_id, opening_balance,
+                   0, opening_balance, 'ledger_backfill',
+                   'opening nonprofit fund at ledger creation'
+            FROM openings
+            WHERE opening_balance != 0
+            """
         )
 
     def _migration_create_protected_hero_purchases_table(self, cursor) -> None:
