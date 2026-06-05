@@ -13,6 +13,11 @@ from services.dig_constants import (
     BOSS_ARCHETYPE_BY_ID,
     BOSS_ARCHETYPES,
     BOSS_DUEL_STATS,
+    BOSS_LOSS_EXTRA_COOLDOWN_SECONDS,
+    BOSS_LOSS_EXTRA_GEAR_TICKS,
+    BOSS_LOSS_KNOCKBACK_MAX,
+    BOSS_LOSS_KNOCKBACK_MIN,
+    BOSS_LOSS_REPAIR_BILL,
     BOSS_PAYOUTS,
     BOSS_PRESTIGE_BONUS,
     BOSS_TIER_BONUS,
@@ -91,7 +96,7 @@ class TestDuelDeterministicOutcomes:
         monkeypatch.setattr(random, "random", lambda: 0.999)
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
-        assert 8 <= result["knockback"] <= 16
+        assert BOSS_LOSS_KNOCKBACK_MIN <= result["knockback"] <= BOSS_LOSS_KNOCKBACK_MAX
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before_fight - 10
 
     def test_player_first_one_shot_boss_never_swings(self, dig_service, dig_repo, player_repository, monkeypatch):
@@ -295,9 +300,39 @@ class TestDuelPayout:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
         knockback = result["knockback"]
-        assert 8 <= knockback <= 16
+        assert BOSS_LOSS_KNOCKBACK_MIN <= knockback <= BOSS_LOSS_KNOCKBACK_MAX
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         assert tunnel["depth"] == 99 - knockback
+
+    def test_loss_takes_extra_gear_tick_and_extends_cooldown(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A boss loss is harsher than a win: gear takes an extra durability tick
+        beyond the per-fight tick, and the next-dig cooldown is pushed forward."""
+        _register(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        bp_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated"})
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=99, boss_progress=bp_defeated)
+        gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        dig_repo.equip_gear(gid, 10001, TEST_GUILD_ID, "armor")
+        dur_before = dig_repo.get_gear_by_id(gid)["durability"]
+
+        fight_time = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: fight_time)
+        monkeypatch.setattr(random, "random", lambda: 0.999)  # guaranteed loss
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["won"] is False
+
+        # One per-fight tick + BOSS_LOSS_EXTRA_GEAR_TICKS on the loss.
+        dur_after = dig_repo.get_gear_by_id(gid)["durability"]
+        assert dur_before - dur_after == 1 + BOSS_LOSS_EXTRA_GEAR_TICKS
+        # The legacy path applies no stinger, so the cooldown is exactly the
+        # flat post-loss extension on top of the fight timestamp.
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        assert tunnel["last_dig_at"] == fight_time + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 
     def test_loss_surfaces_soften_line_when_chip_damage_done(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -939,10 +974,11 @@ class TestLiveDuelPathWagerAtomicity:
             "no knockback on duel loss"
         )
 
-    def test_loss_with_no_wager_does_not_change_balance(
+    def test_loss_with_no_wager_charges_repair_bill(
         self, dig_service, dig_repo, player_repository, monkeypatch
     ):
-        """A wager-free loss must not alter the player's balance."""
+        """A wager-free loss is no longer free: it charges a flat repair bill so
+        losing a boss always costs something."""
         uid = _at_boss_for_duel(dig_service, dig_repo, player_repository, monkeypatch, uid=30003, balance=200)
         balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
         monkeypatch.setattr(random, "random", lambda: 0.999)
@@ -953,6 +989,7 @@ class TestLiveDuelPathWagerAtomicity:
         assert result["won"] is False
 
         balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
-        assert balance_after == balance_before, (
-            "zero-wager loss changed balance"
+        assert balance_after == balance_before - BOSS_LOSS_REPAIR_BILL, (
+            "zero-wager loss should charge the flat repair bill"
         )
+        assert result["jc_delta"] == -BOSS_LOSS_REPAIR_BILL

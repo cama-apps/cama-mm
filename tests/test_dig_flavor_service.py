@@ -548,32 +548,141 @@ class TestDigFlavorServiceFlavor:
         await svc.flavor(result, uid, TEST_GUILD_ID)
         assert "llm_narrative" not in result
 
-    @pytest.mark.asyncio
-    async def test_flavor_bonus_credits_balance_when_within_cap(
-        self, dig_repo, player_repository,
-    ):
-        uid = _register_player(player_repository, balance=100)
-        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
-
-        svc = self._make_service(
+    def _bonus_service(self, dig_repo, player_repo, pct):
+        """A flavor service whose LLM always returns a fixed flavor_bonus_pct."""
+        return self._make_service(
             dig_repo,
-            player_repository,
+            player_repo,
             tool_result=_MockToolCallResult(
                 tool_name="narrate_dig",
                 tool_args={
                     "narrative": "Pickaxe sings against the seam.",
                     "tone": "industrial_grim",
-                    "flavor_bonus_pct": 4.0,
+                    "flavor_bonus_pct": pct,
                 },
             ),
         )
-        result = {"advance": 1, "jc_earned": 100, "depth_after": 5, "success": True}
-        # Force the small-cap tier to keep the bonus deterministic at ±5%.
-        import random as _r
-        rng = _r.Random(0)  # 0 → roll() returns ~0.84, well above the 0.10 big-cap chance
-        await svc.flavor(result, uid, TEST_GUILD_ID, rng=rng)
 
-        # 4% of 100 = 4 JC delta added.
+    @staticmethod
+    def _small_cap_rng():
+        # rng(0) → roll() ~0.84, above the 0.10 big-cap chance, so the bonus cap
+        # stays at the ±5% small tier and the delta is deterministic.
+        import random as _r
+        return _r.Random(0)
+
+    @pytest.mark.asyncio
+    async def test_flavor_bonus_credits_balance_when_within_cap(
+        self, dig_repo, player_repository,
+    ):
+        """With non-streak headroom below the cap, a positive flavor nudge is
+        credited (clamped to the headroom, never past BASE_DIG_JC_PAYOUT_CAP)."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, 4.0)
+        # nonstreak = 15 (no milestone/streak) → headroom = 20 - 15 = 5.
+        result = {"advance": 1, "jc_earned": 15, "depth_after": 5, "success": True}
+        await svc.flavor(result, uid, TEST_GUILD_ID, rng=self._small_cap_rng())
+
+        # 4% of 15 ≈ 1 JC, within the 5 JC headroom → applied.
+        assert result.get("llm_jc_delta") == 1
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) == 101
+
+    @pytest.mark.asyncio
+    async def test_flavor_positive_bonus_clamped_at_nonstreak_cap(
+        self, dig_repo, player_repository,
+    ):
+        """A non-streak dig already at the 20 cap gets zero positive nudge — the
+        LLM bonus can no longer push a base dig past the cap."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, 4.0)
+        # nonstreak = 20 = cap → headroom 0.
+        result = {"advance": 1, "jc_earned": 20, "depth_after": 5, "success": True}
+        await svc.flavor(result, uid, TEST_GUILD_ID, rng=self._small_cap_rng())
+
+        assert "llm_jc_delta" not in result
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) == 100
+
+    @pytest.mark.asyncio
+    async def test_flavor_headroom_ignores_milestone_and_streak(
+        self, dig_repo, player_repository,
+    ):
+        """Milestone and streak buckets are excluded from the non-streak cap, so
+        a high total with a small non-streak portion still leaves headroom."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, 4.0)
+        # total 100, but nonstreak = 100 - 85 - 5 = 10 → headroom 10.
+        result = {
+            "advance": 1, "jc_earned": 100, "milestone_bonus": 85,
+            "streak_bonus": 5, "depth_after": 5, "success": True,
+        }
+        await svc.flavor(result, uid, TEST_GUILD_ID, rng=self._small_cap_rng())
+
+        # 4% of 100 = 4, within the 10 headroom → applied in full.
+        assert result.get("llm_jc_delta") == 4
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) == 104
+
+    @pytest.mark.asyncio
+    async def test_flavor_clamp_uses_pretax_nonstreak_basis(
+        self, dig_repo, player_repository,
+    ):
+        """The clamp honors the pipeline's pre-tax non-streak basis, so an active
+        tax on a big-milestone dig can't open phantom headroom for the nudge."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, 4.0)
+        # Non-streak already at the cap (20); total is post-tax (180 -> 162), so
+        # the naive total-minus-buckets math would wrongly see 18 of headroom.
+        result = {
+            "advance": 1, "jc_earned": 162, "nonstreak_jc": 20,
+            "milestone_bonus": 150, "streak_bonus": 10,
+            "depth_after": 5, "success": True,
+        }
+        await svc.flavor(result, uid, TEST_GUILD_ID, rng=self._small_cap_rng())
+
+        assert "llm_jc_delta" not in result
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) == 100
+
+    @pytest.mark.asyncio
+    async def test_flavor_negative_bonus_applies_past_cap(
+        self, dig_repo, player_repository,
+    ):
+        """A negative flavor nudge always applies, even at the cap — the clamp
+        only restricts positive deltas."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, -4.0)
+        result = {"advance": 1, "jc_earned": 20, "depth_after": 5, "success": True}
+        await svc.flavor(result, uid, TEST_GUILD_ID, rng=self._small_cap_rng())
+
+        # -4% of 20 ≈ -1, applied despite nonstreak being at the cap.
+        assert result.get("llm_jc_delta") == -1
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) == 99
+
+    @pytest.mark.asyncio
+    async def test_flavor_bonus_not_clamped_for_boss(
+        self, dig_repo, player_repository,
+    ):
+        """Boss payouts have no 20-JC cap, so the flavor nudge is not clamped on
+        the boss path."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, 4.0)
+        result = {
+            "won": True, "jc_earned": 100, "boss_name": "Test Boss",
+            "boundary": 25, "risk_tier": "cautious", "win_chance": 0.5,
+            "depth_after": 30, "success": True,
+        }
+        await svc.flavor(result, uid, TEST_GUILD_ID, is_boss=True, rng=self._small_cap_rng())
+
+        # 4% of 100 = 4, applied in full (no non-streak cap on bosses).
         assert result.get("llm_jc_delta") == 4
         assert player_repository.get_balance(uid, TEST_GUILD_ID) == 104
 

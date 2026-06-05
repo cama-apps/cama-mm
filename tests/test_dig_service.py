@@ -292,6 +292,38 @@ class TestCoreDig:
         assert result["streak_bonus"] == 0
         assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
 
+    def test_prospectors_streak_relic_is_included_in_base_payout_cap(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """The Prospector's Streak relic is folded into the non-streak total, so
+        a high cave-in-free streak can no longer push a base dig past the cap."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        # A near-max cave-in-free streak: +1 this dig -> relic would add +20.
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=10, max_depth=10, cavein_free_streak=19,
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        # Only the Prospector's Streak relic is equipped.
+        monkeypatch.setattr(
+            dig_service, "_has_relic",
+            lambda did, gid, rid: rid == "prospectors_streak",
+        )
+        # Base loot lands at 15 — under the cap on its own, so a +20 relic add
+        # would blow past 20 unless it is folded into the capped non-streak total.
+        monkeypatch.setattr(
+            dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 15,
+        )
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["milestone_bonus"] == 0
+        assert result["streak_bonus"] == 0
+        # 15 base + 20 relic folded, then capped -> 20 (not 35).
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
+
     def test_streak_bonus_is_capped_after_perk_multiplier(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
     ):
@@ -1712,7 +1744,7 @@ class TestBoss:
         assert result["success"]
         assert not result.get("won")
         assert player_repository.get_balance(10001, guild_id) == balance_before - 10
-        assert 8 <= result.get("knockback", 0) <= 16
+        assert 11 <= result.get("knockback", 0) <= 20
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] < 24
 

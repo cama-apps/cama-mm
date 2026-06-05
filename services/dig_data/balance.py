@@ -148,6 +148,14 @@ CAVE_IN_CATASTROPHIC_STUN_DIGS_RANGE: tuple[int, int] = (3, 5)
 CAVE_IN_CATASTROPHIC_GEAR_TICKS: int = 3
 CAVE_IN_CATASTROPHIC_MILESTONE_STEP: int = 25  # roll back to floor((depth-1)/step)*step
 
+# Negative-event tuning: central scalars so risky/desperate failures bite a bit
+# harder without editing every authored event. Applied at resolution time in
+# events_mixin. Only negative JC and negative curse effects are scaled —
+# positive payouts and cave-in medical bills are untouched.
+NEGATIVE_EVENT_JC_MULTIPLIER: float = 1.3   # scales flat JC *losses* on failures
+CURSE_STRENGTH_MULT: float = 1.3            # scales negative curse effect magnitudes
+CURSE_DURATION_BONUS_DIGS: int = 1          # +N digs on every applied curse
+
 # Helltide bell: marquee guild-wide modifier set by an event. While active,
 # every dig in the guild burns this many JC from its yield (pure deflation,
 # coins are destroyed not transferred).

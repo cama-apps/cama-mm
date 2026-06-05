@@ -310,8 +310,10 @@ class TestCurseThreat:
         curse = dig_service._get_active_curse(dict(tunnel))
         assert curse is not None
         assert curse["id"] == "test_slow_hex"
-        assert curse["digs_remaining"] == 2
-        assert curse["effect"] == {"advance_bonus": -3}
+        # Curse strengthening: duration gains CURSE_DURATION_BONUS_DIGS (+1) and
+        # the effect magnitude scales by CURSE_STRENGTH_MULT (-3 -> -4).
+        assert curse["digs_remaining"] == 3
+        assert curse["effect"] == {"advance_bonus": -4}
 
     def test_curse_does_not_clobber_active_buff(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
@@ -505,7 +507,8 @@ class TestCurseThreat:
         curse = dig_service._get_active_curse(dict(tunnel))
         assert curse is not None
         assert curse["id"] == "test_slow_hex"
-        assert curse["digs_remaining"] == 2
+        # Curse strengthening adds CURSE_DURATION_BONUS_DIGS (+1) to the duration.
+        assert curse["digs_remaining"] == 3
 
     def test_desperate_failure_applies_streak_loss(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
@@ -601,8 +604,9 @@ class TestCurseThreat:
         active = dig_service._get_active_curse(dict(dig_repo.get_tunnel(10001, 12345)))
         assert active is not None
         assert active["id"] == "short_hex"
-        assert active["digs_remaining"] == 1
-        assert active["effect"] == {"jc_bonus": -5}
+        # Curse strengthening: short_hex duration 1 -> 2 (+1), jc_bonus -5 -> -6.
+        assert active["digs_remaining"] == 2
+        assert active["effect"] == {"jc_bonus": -6}
 
 
 # ---------------------------------------------------------------------------
@@ -637,10 +641,11 @@ class TestJcThreat:
 
         result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
         assert result["success"]
-        assert result["jc_delta"] == -200
+        # Negative-event tuning scales the authored loss: -200 * 1.3 -> -260.
+        assert result["jc_delta"] == -260
         # The balance went negative — into the debt system, no floor at 0.
         balance = player_repository.get_balance(10001, 12345)
-        assert balance == balance_before - 200
+        assert balance == balance_before - 260
         assert balance < 0
         # resolve_event surfaces the negative resulting balance for the embed.
         assert result.get("balance_after") == balance
