@@ -49,6 +49,15 @@ def _parse_int_list(env_var: str, default: list[int]) -> list[int]:
         return default
 
 
+def _parse_int_list_raw(raw: str | None, default: list[int]) -> list[int]:
+    if raw is None:
+        return default
+    try:
+        return [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return default
+
+
 DB_PATH = os.getenv("DB_PATH", "cama_shuffle.db")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ADMIN_USER_IDS: list[int] = []
@@ -59,6 +68,11 @@ if _admin_env:
         ADMIN_USER_IDS = [int(uid.strip()) for uid in _admin_env.split(",") if uid.strip()]
     except ValueError:
         ADMIN_USER_IDS = []
+
+TAX_MAN_USER_IDS = _parse_int_list_raw(
+    os.getenv("TAX_MAN_USER_IDS", os.getenv("TAX_MEN_USER_IDS")),
+    [],
+)
 
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
 LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 20)

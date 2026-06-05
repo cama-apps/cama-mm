@@ -112,6 +112,7 @@ class ServiceContainer:
         from repositories.dig_quest_repository import DigQuestRepository
         from repositories.dig_repository import DigRepository
         from repositories.disburse_repository import DisburseRepository
+        from repositories.economy_ledger_repository import EconomyLedgerRepository
         from repositories.guild_config_repository import GuildConfigRepository
         from repositories.loan_repository import LoanRepository
         from repositories.lobby_repository import LobbyRepository
@@ -127,6 +128,7 @@ class ServiceContainer:
         from repositories.recalibration_repository import RecalibrationRepository
         from repositories.slow_drip_repository import SlowDripRepository
         from repositories.soft_avoid_repository import SoftAvoidRepository
+        from repositories.tax_repository import TaxRepository
         from repositories.tip_repository import TipRepository
         from repositories.wrapped_repository import WrappedRepository
 
@@ -142,6 +144,8 @@ class ServiceContainer:
             "disburse_repo": DisburseRepository(p),
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
+            "economy_ledger_repo": EconomyLedgerRepository(p),
+            "tax_repo": TaxRepository(p),
             "recalibration_repo": RecalibrationRepository(p),
             "soft_avoid_repo": SoftAvoidRepository(p),
             "package_deal_repo": PackageDealRepository(p),
@@ -199,6 +203,7 @@ class ServiceContainer:
         from services.disburse_service import DisburseService
         from services.gambling_stats_service import GamblingStatsService
         from services.prediction_service import PredictionService
+        from services.tax_service import TaxService
 
         c = self._components
         c["betting_service"] = BettingService(
@@ -235,6 +240,13 @@ class ServiceContainer:
             disburse_repo=c["disburse_repo"],
             tip_repo=c["tip_repo"],
             dig_repo=c["dig_repo"],
+        )
+        c["tax_service"] = TaxService(
+            tax_repo=c["tax_repo"],
+            ledger_repo=c["economy_ledger_repo"],
+            player_repo=c["player_repo"],
+            loan_repo=c["loan_repo"],
+            bankruptcy_repo=c["bankruptcy_repo"],
         )
 
     def _init_match_services(self) -> None:
@@ -519,6 +531,8 @@ class ServiceContainer:
         bot.soft_avoid_repo = c["soft_avoid_repo"]
         bot.package_deal_repo = c["package_deal_repo"]
         bot.tip_repository = c["tip_repo"]
+        bot.economy_ledger_repo = c["economy_ledger_repo"]
+        bot.tax_repo = c["tax_repo"]
 
         # Services
         bot.player_service = c["player_service"]
@@ -534,6 +548,7 @@ class ServiceContainer:
         bot.guild_config_service = c["guild_config_service"]
         bot.recalibration_service = c["recalibration_service"]
         bot.disburse_service = c["disburse_service"]
+        bot.tax_service = c["tax_service"]
         bot.match_enrichment_service = c["match_enrichment_service"]
         bot.match_discovery_service = c["match_discovery_service"]
         bot.pairings_service = c["pairings_service"]
