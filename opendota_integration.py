@@ -12,6 +12,7 @@ import time
 import requests
 
 from config import ENRICHMENT_RETRY_DELAYS
+from services.monitoring_service import get_global_usage_monitor
 from utils.http_safety import DEFAULT_MAX_BYTES as _MAX_RESPONSE_BYTES
 from utils.http_safety import parse_json_bounded, retry_after_seconds
 
@@ -130,7 +131,6 @@ class OpenDotaAPI:
         if not OpenDotaAPI._rate_limiter.acquire(timeout=30.0):
             logger.warning("OpenDota API rate limit exceeded, request timed out")
             return None
-
         # Add API key if available
         if self.api_key:
             params = params or {}
@@ -141,6 +141,9 @@ class OpenDotaAPI:
         last_response: requests.Response | None = None
         for attempt in range(len(delays) + 1):
             try:
+                monitor = get_global_usage_monitor()
+                if monitor is not None:
+                    monitor.record_api_request("opendota")
                 response = self.session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
             except requests.exceptions.RequestException as e:
                 # Connection-level failure (timeout, DNS, etc.) — retry if we

@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES
+from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS, format_betting_display
 from utils.interaction_safety import safe_defer, safe_followup
@@ -54,6 +55,36 @@ class AdminCommands(commands.Cog):
         self.bankruptcy_service = bankruptcy_service
         self.recalibration_service = recalibration_service
         self.match_service = match_service
+
+    @admin.command(name="health", description="Show bot health and since-startup usage (Admin only)")
+    async def health(self, interaction: discord.Interaction):
+        can_respond = await safe_defer(interaction, ephemeral=True)
+        if not has_admin_permission(interaction):
+            if can_respond:
+                await safe_followup(
+                    interaction,
+                    content="❌ Admin only! You need Administrator or Manage Server permissions.",
+                    ephemeral=True,
+                )
+            return
+
+        monitoring_service = getattr(self.bot, "monitoring_service", None)
+        if monitoring_service is None:
+            if can_respond:
+                await safe_followup(
+                    interaction,
+                    content="❌ Monitoring service is not initialized.",
+                    ephemeral=True,
+                )
+            return
+
+        snapshot = await asyncio.to_thread(monitoring_service.snapshot, self.bot)
+        if can_respond:
+            await safe_followup(
+                interaction,
+                content=format_health_snapshot(snapshot),
+                ephemeral=True,
+            )
 
     @admin.command(
         name="addfake", description="Add fake users to lobby for testing (Admin only)"
@@ -1739,6 +1770,7 @@ async def setup(bot: commands.Bot):
         if cmd.name
         in [
             "admin",
+            "health",
             "addfake",
             "resetuser",
             "registeruser",

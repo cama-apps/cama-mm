@@ -57,6 +57,7 @@ from config import (
     USE_GLICKO,
 )
 from infrastructure.service_container import ServiceContainer
+from services.monitoring_service import MonitoringService, UsageMonitor, set_global_usage_monitor
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 
@@ -68,6 +69,8 @@ intents.members = True
 intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+usage_monitor = UsageMonitor()
+set_global_usage_monitor(usage_monitor)
 
 # Lazy-initialized service container
 _container: ServiceContainer | None = None
@@ -325,6 +328,7 @@ def _init_services():
     )
     _container.initialize()
     _container.expose_to_bot(bot)
+    bot.monitoring_service = MonitoringService(DB_PATH, usage_monitor=usage_monitor)
 
 
 
@@ -684,6 +688,7 @@ async def on_ready():
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     """Global error handler for app commands - prevents infinite 'thinking...' state."""
+    usage_monitor.record_command_failure()
     logger.error(f"App command error in '{interaction.command.name if interaction.command else 'unknown'}': {error}", exc_info=error)
 
     # Handle TransformerError (e.g., typing a username instead of selecting from Discord's picker)
@@ -706,6 +711,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
             await interaction.response.send_message(content=f"❌ {error_msg}", ephemeral=True)
     except Exception as followup_error:
         logger.error(f"Failed to send error message to user: {followup_error}")
+
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    """Track slash command usage for health reporting."""
+    if interaction.type != discord.InteractionType.application_command:
+        return
+    command = interaction.command
+    usage_monitor.record_command(getattr(command, "qualified_name", None) or getattr(command, "name", None))
 
 
 def _is_sword_emoji(emoji) -> bool:

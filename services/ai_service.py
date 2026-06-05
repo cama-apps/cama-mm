@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Any
 import litellm
 from litellm import acompletion
 
+from services.monitoring_service import get_global_usage_monitor
+
 if TYPE_CHECKING:
     from services.flavor_personas import FlavorPersona
 
@@ -165,6 +167,9 @@ class AIService:
         try:
             import asyncio
 
+            monitor = get_global_usage_monitor()
+            if monitor is not None:
+                monitor.record_api_request("ai")
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
@@ -220,6 +225,9 @@ class AIService:
         try:
             import asyncio
 
+            monitor = get_global_usage_monitor()
+            if monitor is not None:
+                monitor.record_api_request("ai")
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,

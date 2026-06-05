@@ -11,6 +11,7 @@ import time
 import requests
 
 from config import ENRICHMENT_RETRY_DELAYS
+from services.monitoring_service import get_global_usage_monitor
 from utils.http_safety import DEFAULT_MAX_BYTES as _MAX_RESPONSE_BYTES
 from utils.http_safety import parse_json_bounded, retry_after_seconds
 
@@ -107,6 +108,9 @@ class SteamAPI:
         delays = list(ENRICHMENT_RETRY_DELAYS) or [0]
         for attempt in range(len(delays) + 1):
             try:
+                monitor = get_global_usage_monitor()
+                if monitor is not None:
+                    monitor.record_api_request("valve")
                 response = self.session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
             except requests.exceptions.RequestException as e:
                 if attempt >= len(delays):
