@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
+import math
 
 import discord
 
 from utils.formatting import JOPACOIN_EMOTE
+
+DISBURSE_VOTES_PAGE_SIZE = 15
 
 
 def build_disburse_embed(proposal) -> discord.Embed:
@@ -89,17 +91,29 @@ def build_disburse_embed(proposal) -> discord.Embed:
     return embed
 
 
-async def build_disburse_votes_embed(proposal, disburse_service) -> discord.Embed:
-    """Create admin-only embed showing detailed voter information."""
+def build_disburse_votes_embed(
+    proposal,
+    disburse_service,
+    individual_votes: list[dict],
+    *,
+    page: int = 0,
+    page_size: int = DISBURSE_VOTES_PAGE_SIZE,
+) -> discord.Embed:
+    """Create Tax Man embed showing detailed voter information."""
     votes = proposal.votes
     total_votes = proposal.total_votes
     quorum = proposal.quorum_required
     progress = proposal.quorum_progress
+    total_pages = max(1, math.ceil(len(individual_votes) / page_size))
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+    page_votes = individual_votes[start:end]
 
     embed = discord.Embed(
-        title="🔍 Disbursement Vote Details (Admin Only)",
+        title="🔍 Disbursement Vote Details (Tax Man)",
         description=f"Fund Amount: **{proposal.fund_amount}** {JOPACOIN_EMOTE}",
-        color=0x9C27B0,  # Purple (admin color)
+        color=0x9C27B0,
     )
 
     # Proposal info
@@ -126,15 +140,9 @@ async def build_disburse_votes_embed(proposal, disburse_service) -> discord.Embe
         inline=False,
     )
 
-    # Individual votes
-    guild_id = proposal.guild_id if proposal.guild_id != 0 else None
-    individual_votes = await asyncio.to_thread(
-        disburse_service.get_individual_votes, guild_id
-    )
-
-    if individual_votes:
+    if page_votes:
         voter_lines = []
-        for vote in individual_votes:
+        for vote in page_votes:
             discord_id = vote["discord_id"]
             method = vote["vote_method"]
             method_label = disburse_service.METHOD_LABELS.get(method, method)
@@ -144,16 +152,21 @@ async def build_disburse_votes_embed(proposal, disburse_service) -> discord.Embe
     else:
         voters_text = "*No votes yet*"
 
-    # Truncate if too long (Discord field limit is 1024 chars)
-    if len(voters_text) > 1024:
-        voters_text = voters_text[:1021] + "..."
-
+    if individual_votes:
+        field_name = (
+            f"👥 Individual Votes ({start + 1}-{min(end, len(individual_votes))} "
+            f"of {len(individual_votes)})"
+        )
+    else:
+        field_name = "👥 Individual Votes"
     embed.add_field(
-        name="👥 Individual Votes",
+        name=field_name,
         value=voters_text,
         inline=False,
     )
 
-    embed.set_footer(text="This information is only visible to you")
+    embed.set_footer(
+        text=f"Tax Man audit only | Page {page + 1}/{total_pages}"
+    )
 
     return embed

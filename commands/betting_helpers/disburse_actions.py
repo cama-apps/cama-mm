@@ -12,12 +12,9 @@ from typing import TYPE_CHECKING
 
 import discord
 
-from commands.betting_helpers.disburse_embeds import (
-    build_disburse_embed,
-    build_disburse_votes_embed,
-)
-from commands.betting_helpers.disburse_views import DisburseVoteView
-from services.permissions import has_admin_permission
+from commands.betting_helpers.disburse_embeds import build_disburse_embed
+from commands.betting_helpers.disburse_views import DisburseVotesView, DisburseVoteView
+from services.permissions import has_tax_man_permission
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer
 
@@ -118,11 +115,10 @@ async def disburse_status(
 async def disburse_reset(
     cog: BettingCommands, interaction: discord.Interaction, guild_id: int | None
 ) -> None:
-    """Reset (cancel) the active proposal. Admin only."""
-    # Check admin
-    if interaction.user.id not in cog.bot.ADMIN_USER_IDS:
+    """Reset (cancel) the active proposal. Tax Man only."""
+    if not has_tax_man_permission(interaction):
         await interaction.response.send_message(
-            "Only admins can reset disbursement proposals.", ephemeral=True
+            "Only Tax Men can reset disbursement proposals.", ephemeral=True
         )
         return
 
@@ -140,11 +136,10 @@ async def disburse_reset(
 async def disburse_votes(
     cog: BettingCommands, interaction: discord.Interaction, guild_id: int | None
 ) -> None:
-    """Show detailed voting information with voter identities. Admin only."""
-    # Check admin
-    if not has_admin_permission(interaction):
+    """Show detailed voting information with voter identities. Tax Man only."""
+    if not has_tax_man_permission(interaction):
         await interaction.response.send_message(
-            "Only admins can view detailed voting information.", ephemeral=True
+            "Only Tax Men can view detailed voting information.", ephemeral=True
         )
         return
 
@@ -156,18 +151,31 @@ async def disburse_votes(
         )
         return
 
-    # Create admin-only embed with voter details
-    embed = await build_disburse_votes_embed(proposal, cog.disburse_service)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    guild_key = proposal.guild_id if proposal.guild_id != 0 else None
+    individual_votes = await asyncio.to_thread(
+        cog.disburse_service.get_individual_votes, guild_key
+    )
+    view = DisburseVotesView(
+        proposal=proposal,
+        disburse_service=cog.disburse_service,
+        individual_votes=individual_votes,
+        requester_id=interaction.user.id,
+    )
+    embed = view.build_embed()
+    await interaction.response.send_message(
+        embed=embed,
+        view=view if view.total_pages > 1 else None,
+        ephemeral=True,
+    )
 
 
 async def disburse_execute(
     cog: BettingCommands, interaction: discord.Interaction, guild_id: int | None
 ) -> None:
-    """Force-execute the active proposal using the current leading method. Admin only."""
-    if interaction.user.id not in cog.bot.ADMIN_USER_IDS:
+    """Force-execute the active proposal using the current leading method. Tax Man only."""
+    if not has_tax_man_permission(interaction):
         await interaction.response.send_message(
-            "Only admins can force-execute disbursement proposals.", ephemeral=True
+            "Only Tax Men can force-execute disbursement proposals.", ephemeral=True
         )
         return
 
@@ -195,14 +203,14 @@ async def disburse_execute(
     # Handle cancel
     if disbursement.get("cancelled"):
         embed = discord.Embed(
-            title="❌ Proposal Cancelled (Admin)",
+            title="❌ Proposal Cancelled (Tax Man)",
             description=disbursement.get("message", "Proposal cancelled."),
             color=0xFF6B6B,
         )
         await interaction.followup.send(embed=embed)
     elif disbursement["total_disbursed"] == 0:
         embed = discord.Embed(
-            title="💝 Disbursement Complete (Admin)",
+            title="💝 Disbursement Complete (Tax Man)",
             description=disbursement.get("message", "No funds were distributed."),
             color=0x00FF00,
         )
@@ -223,11 +231,11 @@ async def disburse_execute(
         )
 
         embed = discord.Embed(
-            title="💝 Disbursement Complete (Admin)",
+            title="💝 Disbursement Complete (Tax Man)",
             description=result_msg,
             color=0x00FF00,
         )
-        embed.set_footer(text=f"Force-executed by {interaction.user.display_name}")
+        embed.set_footer(text=f"Resolved by {interaction.user.display_name}")
         await interaction.followup.send(embed=embed)
 
     # Disable buttons on the original voting message

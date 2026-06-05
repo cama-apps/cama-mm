@@ -8,6 +8,10 @@ from typing import TYPE_CHECKING
 
 import discord
 
+from commands.betting_helpers.disburse_embeds import (
+    DISBURSE_VOTES_PAGE_SIZE,
+    build_disburse_votes_embed,
+)
 from utils.formatting import JOPACOIN_EMOTE
 
 if TYPE_CHECKING:
@@ -15,6 +19,70 @@ if TYPE_CHECKING:
     from services.disburse_service import DisburseService
 
 logger = logging.getLogger("cama_bot.commands.betting")
+
+
+class DisburseVotesView(discord.ui.View):
+    """Ephemeral pagination for Tax Man disbursement vote audits."""
+
+    def __init__(
+        self,
+        *,
+        proposal,
+        disburse_service: DisburseService,
+        individual_votes: list[dict],
+        requester_id: int,
+        page_size: int = DISBURSE_VOTES_PAGE_SIZE,
+    ):
+        super().__init__(timeout=300)
+        self.proposal = proposal
+        self.disburse_service = disburse_service
+        self.individual_votes = individual_votes
+        self.requester_id = requester_id
+        self.page_size = page_size
+        self.current_page = 0
+        self.total_pages = max(
+            1,
+            (len(individual_votes) + page_size - 1) // page_size,
+        )
+        self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "This vote audit view belongs to another Tax Man.",
+            ephemeral=True,
+        )
+        return False
+
+    def build_embed(self) -> discord.Embed:
+        return build_disburse_votes_embed(
+            self.proposal,
+            self.disburse_service,
+            self.individual_votes,
+            page=self.current_page,
+            page_size=self.page_size,
+        )
+
+    def _sync_buttons(self) -> None:
+        self.previous_page.disabled = self.current_page <= 0
+        self.next_page.disabled = self.current_page >= self.total_pages - 1
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.current_page = max(0, self.current_page - 1)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        self.current_page = min(self.total_pages - 1, self.current_page + 1)
+        self._sync_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
 
 class DisburseVoteView(discord.ui.View):

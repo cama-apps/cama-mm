@@ -341,7 +341,7 @@ class DisburseService:
                 "distributions": [],
                 "cancelled": True,
                 "message": (
-                    "Proposal cancelled by admin. Funds returned to nonprofit."
+                    "Proposal cancelled by override. Funds returned to nonprofit."
                     if forced
                     else "Proposal cancelled by vote. Funds returned to nonprofit."
                 ),
@@ -456,12 +456,12 @@ class DisburseService:
 
     def force_execute(self, guild_id: int | None) -> dict:
         """
-        Admin-only: force-execute the active proposal using the current leading method.
+        Force-execute the active proposal using the current leading method.
 
         Bypasses quorum requirement. Requires at least one vote.
 
         Serialized per-guild (shares the lock with ``execute_disbursement`` and
-        ``reset_proposal``) so admin force-execute cannot race vote-triggered
+        ``reset_proposal``) so manual force-execute cannot race vote-triggered
         execution on the same proposal.
 
         Returns:
