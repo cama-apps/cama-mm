@@ -254,7 +254,8 @@ class TestEncounterEndToEnd:
         result = dig_service.resolve_event(digger, guild_id, "hungering_dark", "risky")
         assert result["succeeded"] is False
         assert result["splash"] is None
-        assert result["jc_delta"] == -5                       # authored failure jc
+        # authored failure jc -5, scaled by NEGATIVE_EVENT_JC_MULTIPLIER -> -6
+        assert result["jc_delta"] == -6
         assert player_repository.get_balance(10002, guild_id) == 1000  # untouched
 
     def test_active_diggers_burn_full_when_funded(

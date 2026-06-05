@@ -17,12 +17,15 @@ from services.dig._common import (
     logger,
 )
 from services.dig_constants import (
+    CURSE_DURATION_BONUS_DIGS,
+    CURSE_STRENGTH_MULT,
     EVENT_CHAIN_CHANCE,
     LUMINOSITY_DARK_RISKY_PENALTY,
     LUMINOSITY_DIM,
     LUMINOSITY_MAX,
     LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_FORCE_RISKY,
+    NEGATIVE_EVENT_JC_MULTIPLIER,
 )
 
 
@@ -382,6 +385,10 @@ class EventsMixin:
 
         advance = result.get("advance", 0)
         jc = result.get("jc", 0)
+        # Negative-event tuning: flat JC losses on a failure bite a bit harder.
+        # Positive payouts are untouched (their own bonuses are applied below).
+        if jc < 0:
+            jc = int(round(jc * NEGATIVE_EVENT_JC_MULTIPLIER))
         cave_in = result.get("cave_in", False)
         streak_loss = result.get("streak_loss", 0) or 0
         curse = result.get("curse")
@@ -464,11 +471,20 @@ class EventsMixin:
         # it never clobbers an active temp buff.
         curse_applied = None
         if isinstance(curse, dict):
+            # Curses bite harder: scale the harmful effect magnitudes (every
+            # value in a curse is a penalty, so sign is preserved) and extend
+            # the duration. Build a fresh effect dict so the shared event
+            # definition isn't mutated across fires.
+            base_effect = curse.get("effect", {})
+            scaled_effect = {
+                k: (int(round(v * CURSE_STRENGTH_MULT)) if isinstance(v, (int, float)) else v)
+                for k, v in base_effect.items()
+            }
             curse_payload = {
                 "id": curse.get("id", "unknown"),
                 "name": curse.get("name", "Unknown Curse"),
-                "digs_remaining": curse.get("duration_digs", 1),
-                "effect": curse.get("effect", {}),
+                "digs_remaining": curse.get("duration_digs", 1) + CURSE_DURATION_BONUS_DIGS,
+                "effect": scaled_effect,
             }
             tunnel_updates["temp_curses"] = json.dumps(curse_payload)
             curse_applied = curse
