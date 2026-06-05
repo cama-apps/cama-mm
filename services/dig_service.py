@@ -33,6 +33,7 @@ from services.dig_constants import (
     BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
     CAVE_IN_BLOCK_LOSS_RANGES,
+    DIG_STREAK_JC_PAYOUT_CAP,
     EVENT_POOL,
     LAYERS,
     LUMINOSITY_BRIGHT,
@@ -956,9 +957,9 @@ class DigService(
         # Mana variance + steady bonus on base loot only — protects deterministic
         # milestone/streak from a Mountain "zero" roll.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
-        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
         if overgrowth_active:
             jc_earned += 10
+        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
 
         # 14. Check milestones (with ascension milestone multiplier).
         # Only award milestones that extend the tunnel's all-time high
@@ -986,6 +987,7 @@ class DigService(
 
         # Perk: patient_step boosts streak JC
         streak_bonus = int(streak_bonus * (1.0 + perk_fx.get("streak_bonus_multiplier", 0.0)))
+        streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
 
         jc_earned += streak_bonus
 
@@ -1662,6 +1664,9 @@ class DigService(
         if help_given:
             help_jc_bonus = 1
             jc_min += help_jc_bonus
+
+        jc_min = min(jc_min, BASE_DIG_JC_PAYOUT_CAP)
+        jc_max = min(jc_max, BASE_DIG_JC_PAYOUT_CAP)
 
         # Sabotaged someone recently → +3% cave-in per sabotage (max +9%)
         sabotage_karma = min(len(sabotage_given), 3) * 0.03

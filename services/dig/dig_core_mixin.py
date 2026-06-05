@@ -27,6 +27,7 @@ from services.dig_constants import (
     CAVE_IN_INJURY_DIGS_BY_BAND,
     CAVE_IN_MEDICAL_BILL_RANGES,
     CAVE_IN_STUN_DIGS_BY_BAND,
+    DIG_STREAK_JC_PAYOUT_CAP,
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
     MILESTONES,
@@ -755,9 +756,9 @@ class DigCoreMixin:
 
         # Mana variance + steady bonus on base loot only.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
-        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
         if p.get("overgrowth_active"):
             jc_earned += 10
+        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
 
         # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0
@@ -782,6 +783,7 @@ class DigCoreMixin:
         streak_bonus = int(
             streak_bonus * (1.0 + p.get("perk_fx", {}).get("streak_bonus_multiplier", 0.0))
         )
+        streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
         jc_earned += streak_bonus
 
         # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
@@ -1160,6 +1162,7 @@ class DigCoreMixin:
                 if streak >= threshold:
                     streak_bonus = STREAKS[threshold]
                     break
+            streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
             jc_earned += streak_bonus
 
             # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig

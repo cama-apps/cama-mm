@@ -217,10 +217,63 @@ class TestCoreDig:
         assert result["streak_bonus"] == 0
         assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
 
-    def test_overgrowth_bonus_is_added_after_base_payout_cap(
+    def test_stacked_base_dig_bonuses_are_capped_after_modifiers(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
     ):
-        """Overgrowth's flat bonus is separate from the base dig payout cap."""
+        """Additive and multiplicative base-loot bonuses cannot exceed the cap."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: b)
+        monkeypatch.setattr(
+            dig_service,
+            "_get_weather_effects",
+            lambda gid, layer_name: {"jc_multiplier": 4.0, "jc_bonus": 30},
+        )
+        monkeypatch.setattr(
+            dig_service,
+            "_relic_jc_yield_multiplier",
+            lambda did, gid, **kwargs: 2.0,
+        )
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["milestone_bonus"] == 0
+        assert result["streak_bonus"] == 0
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
+
+    def test_precondition_base_dig_range_is_capped_after_modifiers(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """DM-mode base-loot range cannot advertise more than the payout cap."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(
+            dig_service,
+            "_get_weather_effects",
+            lambda gid, layer_name: {"jc_multiplier": 4.0, "jc_bonus": 30},
+        )
+        monkeypatch.setattr(
+            dig_service,
+            "_relic_jc_yield_multiplier",
+            lambda did, gid, **kwargs: 2.0,
+        )
+
+        terminal, preconditions = dig_service.dig_with_preconditions(10001, guild_id)
+
+        assert terminal is None
+        assert preconditions["jc_min"] <= BASE_DIG_JC_PAYOUT_CAP
+        assert preconditions["jc_max"] <= BASE_DIG_JC_PAYOUT_CAP
+
+    def test_overgrowth_bonus_is_included_in_base_payout_cap(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """Overgrowth's flat bonus cannot push base dig payout above the cap."""
         _register_player(player_repository)
         dig_repo.create_tunnel(10001, guild_id, "T")
         dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
@@ -237,7 +290,31 @@ class TestCoreDig:
         assert result["success"]
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == 0
-        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP + 10
+        assert result["jc_earned"] == BASE_DIG_JC_PAYOUT_CAP
+
+    def test_streak_bonus_is_capped_after_perk_multiplier(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """Patient Step cannot push dig streak JC above the streak cap."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 1)
+        monkeypatch.setattr(dig_service, "_calculate_daily_streak", lambda did, gid, tunnel, today: (30, False))
+        monkeypatch.setattr(
+            dig_service,
+            "_aggregate_perk_effects",
+            lambda perks: {"streak_bonus_multiplier": 1.0},
+        )
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["milestone_bonus"] == 0
+        assert result["streak_bonus"] == STREAKS[30]
+        assert result["jc_earned"] == 1 + STREAKS[30]
 
     def test_dig_increments_total_digs(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """total_digs counter increases."""
