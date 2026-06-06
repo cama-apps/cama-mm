@@ -439,6 +439,18 @@ class MatchCommands(commands.Cog):
             )
             return None
 
+        user_id = interaction.user.id
+        is_in_lobby = (
+            user_id in getattr(lobby, "players", set())
+            or user_id in getattr(lobby, "conditional_players", set())
+        )
+        if not is_in_lobby and not has_admin_permission(interaction):
+            await interaction.followup.send(
+                "❌ Only admins or players in the current lobby can shuffle.",
+                ephemeral=True,
+            )
+            return None
+
         regular_count = lobby.get_player_count()
         conditional_count = lobby.get_conditional_count()
         total_count = lobby.get_total_count()
