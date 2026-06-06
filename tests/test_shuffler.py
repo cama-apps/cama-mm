@@ -8,6 +8,7 @@ from domain.models.player import Player
 from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
 from shuffler import BalancedShuffler
+from utils.region import region_split_mismatches, resolve_region
 
 
 class TestPlayer:
@@ -320,6 +321,46 @@ class TestShuffler:
         assert team2.role_assignments is not None
         assert len(team1.role_assignments) == 5
         assert len(team2.role_assignments) == 5
+
+    def test_region_split_mode_separates_usw_and_use(self):
+        """Region mode should prefer a clean US West vs US East split."""
+        players = []
+        all_roles = ["1", "2", "3", "4", "5"]
+        for i in range(5):
+            players.append(
+                Player(
+                    name=f"USW{i}",
+                    mmr=1500,
+                    preferred_roles=all_roles,
+                    preferred_region="USW",
+                )
+            )
+            players.append(
+                Player(
+                    name=f"USE{i}",
+                    mmr=1500,
+                    preferred_roles=all_roles,
+                    preferred_region="USE",
+                )
+            )
+
+        shuffler = BalancedShuffler(
+            use_glicko=False,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=0.0,
+            rd_priority_weight=0.0,
+            region_split=True,
+            region_split_penalty=1000.0,
+        )
+
+        team1, team2 = shuffler.shuffle(players)
+
+        assert region_split_mismatches(team1.players, team2.players) == 0
+        team_region_sets = {
+            frozenset(resolve_region(player) for player in team.players)
+            for team in (team1, team2)
+        }
+        assert team_region_sets == {frozenset({"USW"}), frozenset({"USE"})}
 
     def test_shuffle_from_pool(self):
         """Test shuffling from a pool of more than 10 players."""

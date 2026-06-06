@@ -106,6 +106,7 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 420.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.19),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 70.0),
+    "region_split_penalty": _parse_float("REGION_SPLIT_PENALTY", 500.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
     # Hardcoded default - not configurable via env var (silent operation)

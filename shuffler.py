@@ -20,6 +20,7 @@ from config import (
 )
 from domain.models.player import Player
 from domain.models.team import Team
+from utils.region import region_split_mismatches
 from utils.role_assignment_cache import get_cached_role_assignments
 
 logger = logging.getLogger("cama_bot.shuffler")
@@ -69,6 +70,8 @@ class BalancedShuffler:
         package_deal_penalty: float | None = None,
         package_deal_split_penalty: float | None = None,
         rating_spread_divisor: float | None = None,
+        region_split: bool = False,
+        region_split_penalty: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -87,6 +90,8 @@ class BalancedShuffler:
             package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 100.0)
             package_deal_split_penalty: Penalty added when one of the pair is excluded from the match (default 100.0)
             rating_spread_divisor: Divisor for (max_rating - min_rating) pool spread penalty (default 10.0)
+            region_split: Whether to prefer US West vs US East teams.
+            region_split_penalty: Penalty per region mismatch in region split mode.
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
@@ -142,6 +147,12 @@ class BalancedShuffler:
             rating_spread_divisor
             if rating_spread_divisor is not None
             else RATING_SPREAD_DIVISOR
+        )
+        self.region_split = region_split
+        self.region_split_penalty = (
+            region_split_penalty
+            if region_split_penalty is not None
+            else settings["region_split_penalty"]
         )
 
     def _calculate_rating_spread_penalty(self, player_values: list[float]) -> float:
@@ -201,6 +212,16 @@ class BalancedShuffler:
 
         # Return the sum of all five deltas
         return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
+
+    def _calculate_region_split_penalty(
+        self,
+        team1_players: list[Player],
+        team2_players: list[Player],
+    ) -> float:
+        """Penalty for teams that do not cleanly split resolved USE/USW players."""
+        if not self.region_split or self.region_split_penalty <= 0:
+            return 0.0
+        return region_split_mismatches(team1_players, team2_players) * self.region_split_penalty
 
     def _calculate_rd_priority(self, players: Iterable[Player]) -> float:
         """Compute the RD-based bonus for a group of players."""
@@ -538,6 +559,7 @@ class BalancedShuffler:
         team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
         avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
 
         # Try all combinations of valid role assignments
         for t1_roles in team1_assignments:
@@ -561,7 +583,10 @@ class BalancedShuffler:
 
                 weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
                 rd_priority = self._calculate_rd_priority(team1_players + team2_players)
-                total_score = value_diff + off_role_penalty + weighted_role_delta - rd_priority + avoid_penalty + deal_penalty
+                total_score = (
+                    value_diff + off_role_penalty + weighted_role_delta - rd_priority
+                    + avoid_penalty + deal_penalty + region_penalty
+                )
 
                 if total_score < best_score:
                     best_score = total_score

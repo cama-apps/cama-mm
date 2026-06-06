@@ -18,6 +18,7 @@ from domain.models.player import Player
 from domain.models.team import Team
 from rating_system import CamaRatingSystem
 from shuffler import BalancedShuffler
+from utils.region import region_split_mismatches
 
 
 class ShufflePendingMixin:
@@ -135,6 +136,7 @@ class ShufflePendingMixin:
         guild_id: int | None = None,
         betting_mode: str = "pool",
         rating_system: str = "glicko",
+        shuffle_mode: str = "balanced",
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -144,6 +146,7 @@ class ShufflePendingMixin:
             guild_id: Guild ID for multi-guild support
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
             rating_system: "glicko" or "openskill" - determines which rating system is used for balancing
+            shuffle_mode: "balanced" or "region" - determines team-shape preference
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
@@ -151,6 +154,8 @@ class ShufflePendingMixin:
             raise ValueError("betting_mode must be 'house' or 'pool'")
         if rating_system not in ("glicko", "openskill", "jopacoin"):
             raise ValueError("rating_system must be 'glicko', 'openskill', or 'jopacoin'")
+        if shuffle_mode not in ("balanced", "region"):
+            raise ValueError("shuffle_mode must be 'balanced' or 'region'")
         players = self.player_repo.get_by_ids(player_ids, guild_id)
         if len(players) != len(player_ids):
             raise ValueError(
@@ -206,6 +211,7 @@ class ShufflePendingMixin:
             use_glicko=self.use_glicko,
             use_openskill=use_openskill,
             use_jopacoin=use_jopacoin,
+            region_split=shuffle_mode == "region",
         )
 
         # Load active soft avoids for these players
@@ -319,6 +325,13 @@ class ShufflePendingMixin:
                 if on_opposite:
                     package_deal_penalty += shuffler.package_deal_penalty
 
+        region_split_penalty = 0.0
+        if shuffle_mode == "region":
+            region_split_penalty = (
+                region_split_mismatches(radiant_team.players, dire_team.players)
+                * shuffler.region_split_penalty
+            )
+
         # Rating spread penalty: penalizes wide skill gaps among selected players
         selected_players_list = team1.players + team2.players
         selected_values = [
@@ -330,7 +343,7 @@ class ShufflePendingMixin:
         goodness_score = (
             value_diff + off_role_penalty + weighted_role_matchup_delta
             + excluded_penalty + recent_match_penalty + soft_avoid_penalty
-            + package_deal_penalty + rating_spread_penalty
+            + package_deal_penalty + region_split_penalty + rating_spread_penalty
         )
 
         # Calculate Glicko-2 win probability for Radiant
@@ -459,5 +472,7 @@ class ShufflePendingMixin:
             "openskill_radiant_win_prob": openskill_radiant_win_prob,
             "raw_openskill_radiant_win_prob": raw_openskill_radiant_win_prob,
             "balancing_rating_system": rating_system,
+            "shuffle_mode": shuffle_mode,
+            "region_split_penalty": region_split_penalty,
             "pending_match_id": shuffle_state.pending_match_id,
         }

@@ -43,7 +43,7 @@ from utils.neon_helpers import _delete_after as _neon_delete_after
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.region import summarize_region
+from utils.region import REGION_NAMES, resolve_region, summarize_region
 from utils.streaming import get_streaming_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
@@ -237,6 +237,21 @@ class MatchCommands(commands.Cog):
                 lines.append(f"{role_emoji} {name_part} ({role_name}) [{rating}]{warn}")
         return lines
 
+    def _format_region_mix(self, label: str, team) -> str:
+        """Return a compact region summary for one shuffled side."""
+        votes = [resolve_region(player) for player in team.players]
+        use = votes.count("USE")
+        usw = votes.count("USW")
+        unset = len(votes) - use - usw
+        parts = []
+        if usw:
+            parts.append(f"{REGION_NAMES['USW']}: {usw}")
+        if use:
+            parts.append(f"{REGION_NAMES['USE']}: {use}")
+        if unset:
+            parts.append(f"Unset: {unset}")
+        return f"**{label}:** " + (", ".join(parts) if parts else REGION_NAMES["USW"])
+
     def _get_notable_winner(
         self,
         match_id: int,
@@ -304,9 +319,14 @@ class MatchCommands(commands.Cog):
 
     @app_commands.command(name="shuffle", description="Create balanced teams from lobby")
     @app_commands.describe(
+        mode="Team-shuffle mode",
         rating_system="Rating system for team balancing (experimental)",
     )
     @app_commands.choices(
+        mode=[
+            app_commands.Choice(name="Balanced (default)", value="balanced"),
+            app_commands.Choice(name="Region Split (US West vs US East)", value="region"),
+        ],
         rating_system=[
             app_commands.Choice(name="Glicko-2 (default)", value="glicko"),
             app_commands.Choice(name="OpenSkill (experimental)", value="openskill"),
@@ -316,6 +336,7 @@ class MatchCommands(commands.Cog):
     async def shuffle(
         self,
         interaction: discord.Interaction,
+        mode: app_commands.Choice[str] | None = None,
         rating_system: app_commands.Choice[str] | None = None,
     ):
         logger.info(f"Shuffle command: User {interaction.user.id} ({interaction.user})")
@@ -358,7 +379,7 @@ class MatchCommands(commands.Cog):
 
         await asyncio.to_thread(lobby_manager.record_lock_acquired, guild_id)
         try:
-            await self._execute_shuffle(interaction, guild, guild_id, rating_system)
+            await self._execute_shuffle(interaction, guild, guild_id, rating_system, mode)
         finally:
             await asyncio.to_thread(lobby_manager.clear_lock_time, guild_id)
             shuffle_lock.release()
@@ -477,6 +498,7 @@ class MatchCommands(commands.Cog):
         guild: discord.Guild | None,
         guild_id: int | None,
         rating_system: app_commands.Choice[str] | None,
+        shuffle_mode: app_commands.Choice[str] | None = None,
     ):
         """Execute the shuffle logic. Called within the shuffle lock."""
         lobby = await self._validate_shuffle_preconditions(interaction, guild_id)
@@ -545,6 +567,7 @@ class MatchCommands(commands.Cog):
 
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # house mode retired; new matches always use pool betting
+        team_mode = shuffle_mode.value if shuffle_mode else "balanced"
         rs = rating_system.value if rating_system else "glicko"
         if rating_system is None and random.random() < OPENSKILL_SHUFFLE_CHANCE:
             rs = "openskill"
@@ -554,7 +577,8 @@ class MatchCommands(commands.Cog):
         try:
             result = await asyncio.to_thread(
                 functools.partial(self.match_service.shuffle_players,
-                    player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs)
+                    player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs,
+                    shuffle_mode=team_mode)
             )
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
@@ -720,10 +744,12 @@ class MatchCommands(commands.Cog):
         # Build embed title with match ID and bomb pot banner if applicable
         match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
         if is_bomb_pot:
-            embed_title = f"💣 BOMB POT 💣 {match_label}Balanced Team Shuffle"
+            title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
+            embed_title = f"💣 BOMB POT 💣 {match_label}{title_mode}"
             embed_color = discord.Color.orange()
         else:
-            embed_title = f"{match_label}Balanced Team Shuffle"
+            title_mode = "Region Team Shuffle" if team_mode == "region" else "Balanced Team Shuffle"
+            embed_title = f"{match_label}{title_mode}"
             embed_color = discord.Color.blue()
 
         embed = discord.Embed(title=embed_title, color=embed_color)
@@ -741,6 +767,16 @@ class MatchCommands(commands.Cog):
             inline=False,
         )
 
+        if team_mode == "region":
+            embed.add_field(
+                name="🌎 Region Split",
+                value=(
+                    f"{self._format_region_mix('Radiant', radiant_team)}\n"
+                    f"{self._format_region_mix('Dire', dire_team)}"
+                ),
+                inline=False,
+            )
+
         radiant_off = radiant_team.get_off_role_count()
         dire_off = dire_team.get_off_role_count()
         goodness_display = f"{goodness_score:.1f}" if goodness_score is not None else "N/A"
@@ -755,6 +791,7 @@ class MatchCommands(commands.Cog):
             rating_system_display = "📊 Glicko-2"
 
         balance_info = (
+            f"**Shuffle mode:** {'Region Split' if team_mode == 'region' else 'Balanced'}\n"
             f"**Balanced with:** {rating_system_display}\n"
             f"**Goodness score:** {goodness_display} (lower = better)\n"
             f"**Value diff:** {value_diff:.0f}\n"
