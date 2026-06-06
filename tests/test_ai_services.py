@@ -4,12 +4,17 @@ Tests for AI services: AIService, SQLQueryService, FlavorTextService, AIQueryRep
 
 import json
 import sqlite3
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from repositories.ai_query_repository import AIQueryRepository
-from services.ai_service import SQL_TOOL, AIService
+from services.ai_service import (
+    SQL_TOOL,
+    AIService,
+    _suppress_litellm_pydantic_warnings,
+)
 from services.flavor_text_service import FlavorEvent, FlavorTextService, PlayerContext
 from services.sql_query_service import BLOCKED_COLUMNS, BLOCKED_TABLES, SQLQueryService
 
@@ -25,6 +30,26 @@ class TestAIService:
             timeout=30.0,
             max_tokens=500,
         )
+
+    def test_litellm_pydantic_serializer_warning_is_suppressed(self):
+        """LiteLLM 1.80.x can emit noisy Pydantic serialization warnings."""
+        message = (
+            "Pydantic serializer warnings:\n"
+            "  PydanticSerializationUnexpectedValue(Expected 10 fields but got 5: "
+            "Expected `Message` - serialized value may not be as expected)"
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            _suppress_litellm_pydantic_warnings()
+            warnings.warn_explicit(
+                message,
+                category=UserWarning,
+                filename="pydantic/main.py",
+                lineno=464,
+                module="pydantic.main",
+            )
+
+        assert caught == []
 
     @pytest.mark.asyncio
     async def test_call_with_tools_returns_tool_args(self, ai_service):

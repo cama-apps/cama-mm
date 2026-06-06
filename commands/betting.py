@@ -170,6 +170,29 @@ class BettingCommands(commands.Cog):
         """Get the NeonDegenService from the bot, or None if unavailable."""
         return get_neon_service(self.bot)
 
+    def _adjust_gamba_balance(
+        self,
+        actor_id: int,
+        target_id: int,
+        guild_id: int,
+        delta: int,
+        reason: str,
+        outcome: str,
+        metadata: dict | None = None,
+    ) -> int:
+        """Adjust a wheel balance with central-ledger context."""
+        return self.player_service.adjust_balance(
+            target_id,
+            guild_id,
+            delta,
+            source="gamba",
+            actor_id=actor_id,
+            related_type="wheel_spin",
+            related_id=outcome,
+            reason=reason,
+            metadata=metadata,
+        )
+
     async def match_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[int]]:
@@ -421,13 +444,35 @@ class BettingCommands(commands.Cog):
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 result = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, explosion_reward, guild_id
+                    garnishment_service.add_income,
+                    user_id,
+                    explosion_reward,
+                    guild_id,
+                    source="gamba",
+                    actor_id=user_id,
+                    related_type="wheel_spin",
+                    related_id="EXPLOSION",
+                    reason="gamba wheel explosion reward",
+                    metadata={
+                        "gross_reward": WHEEL_EXPLOSION_REWARD,
+                        "bankruptcy_penalty": explosion_penalty,
+                    },
                 )
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + explosion_reward)
             else:
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, explosion_reward
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    explosion_reward,
+                    "gamba wheel explosion reward",
+                    "EXPLOSION",
+                    {
+                        "gross_reward": WHEEL_EXPLOSION_REWARD,
+                        "bankruptcy_penalty": explosion_penalty,
+                    },
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
@@ -955,7 +1000,13 @@ class BettingCommands(commands.Cog):
                 )
             if _spinner_is_attacker:
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, -REBELLION_RETRIBUTION_STEAL
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    -REBELLION_RETRIBUTION_STEAL,
+                    "gamba retribution attacker cost",
+                    "RETRIBUTION",
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
             else:
@@ -995,20 +1046,43 @@ class BettingCommands(commands.Cog):
                     garnishment_service_chain = getattr(self.bot, "garnishment_service", None)
                     if garnishment_service_chain and new_balance < 0:
                         result_chain = await asyncio.to_thread(
-                            garnishment_service_chain.add_income, user_id, chain_value, guild_id
+                            garnishment_service_chain.add_income,
+                            user_id,
+                            chain_value,
+                            guild_id,
+                            source="gamba",
+                            actor_id=user_id,
+                            related_type="wheel_spin",
+                            related_id="CHAIN_REACTION",
+                            reason="gamba chain reaction credit",
+                            metadata={"copied_spin_user_id": chained_uid},
                         )
                         garnished_amount = result_chain.get("garnished", 0)
                         new_balance = result_chain.get("new_balance", new_balance + chain_value)
                     else:
                         await asyncio.to_thread(
-                            self.player_service.adjust_balance, user_id, guild_id, chain_value
+                            self._adjust_gamba_balance,
+                            user_id,
+                            user_id,
+                            guild_id,
+                            chain_value,
+                            "gamba chain reaction credit",
+                            "CHAIN_REACTION",
+                            {"copied_spin_user_id": chained_uid},
                         )
                         new_balance = await asyncio.to_thread(
                             self.player_service.get_balance, user_id, guild_id
                         )
                 elif isinstance(chain_value, int) and chain_value < 0:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance, user_id, guild_id, chain_value
+                        self._adjust_gamba_balance,
+                        user_id,
+                        user_id,
+                        guild_id,
+                        chain_value,
+                        "gamba chain reaction debit",
+                        "CHAIN_REACTION",
+                        {"copied_spin_user_id": chained_uid},
                     )
                     new_balance = await asyncio.to_thread(
                         self.player_service.get_balance, user_id, guild_id
@@ -1024,7 +1098,13 @@ class BettingCommands(commands.Cog):
                 if p.jopacoin_balance > 0:
                     loss = min(p.jopacoin_balance, 20)
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance, p.discord_id, guild_id, -loss
+                        self._adjust_gamba_balance,
+                        user_id,
+                        p.discord_id,
+                        guild_id,
+                        -loss,
+                        "gamba emergency tax",
+                        "EMERGENCY",
                     )
                     emergency_total += loss
                     emergency_count += 1
@@ -1039,7 +1119,13 @@ class BettingCommands(commands.Cog):
             for p in all_players_cm:
                 if p.discord_id != user_id and p.jopacoin_balance > 0:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance, p.discord_id, guild_id, -1
+                        self._adjust_gamba_balance,
+                        user_id,
+                        p.discord_id,
+                        guild_id,
+                        -1,
+                        "gamba commune donation",
+                        "COMMUNE",
                     )
                     commune_total += 1
                     commune_count += 1
@@ -1047,13 +1133,27 @@ class BettingCommands(commands.Cog):
                 garnishment_service_cm = getattr(self.bot, "garnishment_service", None)
                 if garnishment_service_cm and new_balance < 0:
                     result_cm = await asyncio.to_thread(
-                        garnishment_service_cm.add_income, user_id, commune_total, guild_id
+                        garnishment_service_cm.add_income,
+                        user_id,
+                        commune_total,
+                        guild_id,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="COMMUNE",
+                        reason="gamba commune collected donations",
                     )
                     garnished_amount = result_cm.get("garnished", 0)
                     new_balance = result_cm.get("new_balance", new_balance + commune_total)
                 else:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance, user_id, guild_id, commune_total
+                        self._adjust_gamba_balance,
+                        user_id,
+                        user_id,
+                        guild_id,
+                        commune_total,
+                        "gamba commune collected donations",
+                        "COMMUNE",
                     )
                     new_balance = await asyncio.to_thread(
                         self.player_service.get_balance, user_id, guild_id
@@ -1080,13 +1180,29 @@ class BettingCommands(commands.Cog):
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 _res = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, eruption_amount, guild_id
+                    garnishment_service.add_income,
+                    user_id,
+                    eruption_amount,
+                    guild_id,
+                    source="gamba",
+                    actor_id=user_id,
+                    related_type="wheel_spin",
+                    related_id="ERUPTION",
+                    reason="gamba eruption credit",
+                    metadata={"last_spin": last_spin},
                 )
                 garnished_amount = _res.get("garnished", 0)
                 new_balance = _res.get("new_balance", new_balance + eruption_amount)
             else:
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, eruption_amount
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    eruption_amount,
+                    "gamba eruption credit",
+                    "ERUPTION",
+                    {"last_spin": last_spin},
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
@@ -1113,13 +1229,29 @@ class BettingCommands(commands.Cog):
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 _res = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, overgrowth_amount, guild_id
+                    garnishment_service.add_income,
+                    user_id,
+                    overgrowth_amount,
+                    guild_id,
+                    source="gamba",
+                    actor_id=user_id,
+                    related_type="wheel_spin",
+                    related_id="OVERGROWTH",
+                    reason="gamba overgrowth credit",
+                    metadata={"games_this_week": games_this_week},
                 )
                 garnished_amount = _res.get("garnished", 0)
                 new_balance = _res.get("new_balance", new_balance + overgrowth_amount)
             else:
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, overgrowth_amount
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    overgrowth_amount,
+                    "gamba overgrowth credit",
+                    "OVERGROWTH",
+                    {"games_this_week": games_this_week},
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
@@ -1136,22 +1268,44 @@ class BettingCommands(commands.Cog):
                 loss = min(loss, max(0, p.jopacoin_balance))
                 if loss > 0:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance, p.discord_id, guild_id, -loss
+                        self._adjust_gamba_balance,
+                        user_id,
+                        p.discord_id,
+                        guild_id,
+                        -loss,
+                        "gamba decay tax",
+                        "DECAY",
                     )
                     decay_total += loss
             if decay_total > 0:
                 garnishment_service = getattr(self.bot, "garnishment_service", None)
                 if garnishment_service and new_balance < 0:
                     _res = await asyncio.to_thread(
-                        garnishment_service.add_income, user_id, decay_total, guild_id
+                        garnishment_service.add_income,
+                        user_id,
+                        decay_total,
+                        guild_id,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="DECAY",
+                        reason="gamba decay collected taxes",
                     )
                     garnished_amount = _res.get("garnished", 0)
                     new_balance = _res.get("new_balance", new_balance + decay_total)
                 else:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance, user_id, guild_id, decay_total
+                        self._adjust_gamba_balance,
+                        user_id,
+                        user_id,
+                        guild_id,
+                        decay_total,
+                        "gamba decay collected taxes",
+                        "DECAY",
                     )
-                    new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+                    new_balance = await asyncio.to_thread(
+                        self.player_service.get_balance, user_id, guild_id
+                    )
 
         elif result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 2-7% of balance from player ranked above
@@ -1171,6 +1325,11 @@ class BettingCommands(commands.Cog):
                         victim_discord_id=player_above.discord_id,
                         guild_id=guild_id,
                         amount=shell_amount,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="RED_SHELL",
+                        reason="gamba red shell steal",
                     )
                 )
                 shell_victim_new_balance = steal_result["victim_new_balance"]
@@ -1196,7 +1355,13 @@ class BettingCommands(commands.Cog):
                 flat_amount = random.randint(4, 20)
                 shell_amount = max(pct_amount, flat_amount)
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, -shell_amount
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    -shell_amount,
+                    "gamba blue shell self-hit",
+                    "BLUE_SHELL",
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
                 # Credit nonprofit fund with the self-hit loss
@@ -1218,6 +1383,11 @@ class BettingCommands(commands.Cog):
                         victim_discord_id=richest.discord_id,
                         guild_id=guild_id,
                         amount=shell_amount,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="BLUE_SHELL",
+                        reason="gamba blue shell steal",
                     )
                 )
                 shell_victim_new_balance = steal_result["victim_new_balance"]
@@ -1244,7 +1414,14 @@ class BettingCommands(commands.Cog):
                     continue
                 tax = max(LIGHTNING_BOLT_MIN_TAX, int(p.jopacoin_balance * lightning_pct))
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, p.discord_id, guild_id, -tax
+                    self._adjust_gamba_balance,
+                    user_id,
+                    p.discord_id,
+                    guild_id,
+                    -tax,
+                    "gamba lightning bolt tax",
+                    "LIGHTNING_BOLT",
+                    {"tax_pct": lightning_pct},
                 )
                 lightning_total += tax
                 lightning_count += 1
@@ -1280,8 +1457,13 @@ class BettingCommands(commands.Cog):
                 banana_victim_loss = min(raw_loss, below.jopacoin_balance)
                 try:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance,
-                        below.discord_id, guild_id, -banana_victim_loss
+                        self._adjust_gamba_balance,
+                        user_id,
+                        below.discord_id,
+                        guild_id,
+                        -banana_victim_loss,
+                        "gamba banana peel burn",
+                        "BANANA_PEEL",
                     )
                 except Exception as exc:
                     logger.warning(
@@ -1334,6 +1516,11 @@ class BettingCommands(commands.Cog):
                                 victim_discord_id=victim_p.discord_id,
                                 guild_id=guild_id,
                                 amount=green_shell_amount,
+                                source="gamba",
+                                actor_id=user_id,
+                                related_type="wheel_spin",
+                                related_id="GREEN_SHELL",
+                                reason="gamba green shell steal",
                             )
                         )
                         new_balance = steal_res["thief_new_balance"]
@@ -1381,8 +1568,13 @@ class BettingCommands(commands.Cog):
                         continue
                     try:
                         await asyncio.to_thread(
-                            self.player_service.adjust_balance,
-                            vp.discord_id, guild_id, -loss
+                            self._adjust_gamba_balance,
+                            user_id,
+                            vp.discord_id,
+                            guild_id,
+                            -loss,
+                            "gamba bomb-omb burn",
+                            "BOMB_OMB",
                         )
                         bomb_omb_victims.append((vp.name, loss, vp.discord_id))
                         bomb_omb_burn_total += loss
@@ -1419,6 +1611,11 @@ class BettingCommands(commands.Cog):
                             victim_discord_id=victim.discord_id,
                             guild_id=guild_id,
                             amount=steal_amt,
+                            source="gamba",
+                            actor_id=user_id,
+                            related_type="wheel_spin",
+                            related_id="HEIST",
+                            reason="gamba heist steal",
                         )
                     )
                     heist_total += steal_amt
@@ -1428,7 +1625,15 @@ class BettingCommands(commands.Cog):
             if heist_count == 0:
                 # Fallback: no eligible victims
                 heist_total = 20
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 20)
+                await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    20,
+                    "gamba heist fallback credit",
+                    "HEIST",
+                )
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "MARKET_CRASH":
@@ -1449,6 +1654,11 @@ class BettingCommands(commands.Cog):
                             victim_discord_id=victim.discord_id,
                             guild_id=guild_id,
                             amount=tax_amt,
+                            source="gamba",
+                            actor_id=user_id,
+                            related_type="wheel_spin",
+                            related_id="MARKET_CRASH",
+                            reason="gamba market crash tax",
                         )
                     )
                     market_crash_total += tax_amt
@@ -1458,7 +1668,15 @@ class BettingCommands(commands.Cog):
             if market_crash_count == 0:
                 # Fallback: spinner is only top-3 player
                 market_crash_total = 25
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 25)
+                await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    25,
+                    "gamba market crash fallback credit",
+                    "MARKET_CRASH",
+                )
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "COMPOUND_INTEREST":
@@ -1467,12 +1685,28 @@ class BettingCommands(commands.Cog):
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 result = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, compound_amount, guild_id
+                    garnishment_service.add_income,
+                    user_id,
+                    compound_amount,
+                    guild_id,
+                    source="gamba",
+                    actor_id=user_id,
+                    related_type="wheel_spin",
+                    related_id="COMPOUND_INTEREST",
+                    reason="gamba compound interest credit",
                 )
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + compound_amount)
             else:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, compound_amount)
+                await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    compound_amount,
+                    "gamba compound interest credit",
+                    "COMPOUND_INTEREST",
+                )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "TRICKLE_DOWN":
@@ -1487,19 +1721,44 @@ class BettingCommands(commands.Cog):
                 if p.discord_id == user_id or p.jopacoin_balance <= 0:
                     continue
                 tax = max(1, int(p.jopacoin_balance * trickle_pct))
-                await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -tax)
+                await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    p.discord_id,
+                    guild_id,
+                    -tax,
+                    "gamba trickle down tax",
+                    "TRICKLE_DOWN",
+                    {"tax_pct": trickle_pct},
+                )
                 trickle_total += tax
                 trickle_count += 1
             if trickle_total > 0:
                 garnishment_service = getattr(self.bot, "garnishment_service", None)
                 if garnishment_service and new_balance < 0:
                     result = await asyncio.to_thread(
-                        garnishment_service.add_income, user_id, trickle_total, guild_id
+                        garnishment_service.add_income,
+                        user_id,
+                        trickle_total,
+                        guild_id,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="TRICKLE_DOWN",
+                        reason="gamba trickle down collected taxes",
                     )
                     garnished_amount = result.get("garnished", 0)
                     new_balance = result.get("new_balance", new_balance + trickle_total)
                 else:
-                    await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, trickle_total)
+                    await asyncio.to_thread(
+                        self._adjust_gamba_balance,
+                        user_id,
+                        user_id,
+                        guild_id,
+                        trickle_total,
+                        "gamba trickle down collected taxes",
+                        "TRICKLE_DOWN",
+                    )
                     new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "DIVIDEND":
@@ -1511,12 +1770,30 @@ class BettingCommands(commands.Cog):
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 result = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, dividend_amount, guild_id
+                    garnishment_service.add_income,
+                    user_id,
+                    dividend_amount,
+                    guild_id,
+                    source="gamba",
+                    actor_id=user_id,
+                    related_type="wheel_spin",
+                    related_id="DIVIDEND",
+                    reason="gamba dividend credit",
+                    metadata={"total_positive_balance": total_guild_wealth},
                 )
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + dividend_amount)
             else:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, dividend_amount)
+                await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    dividend_amount,
+                    "gamba dividend credit",
+                    "DIVIDEND",
+                    {"total_positive_balance": total_guild_wealth},
+                )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "HOSTILE_TAKEOVER":
@@ -1538,6 +1815,11 @@ class BettingCommands(commands.Cog):
                             victim_discord_id=rank4.discord_id,
                             guild_id=guild_id,
                             amount=takeover_amount,
+                            source="gamba",
+                            actor_id=user_id,
+                            related_type="wheel_spin",
+                            related_id="HOSTILE_TAKEOVER",
+                            reason="gamba hostile takeover steal",
                         )
                     )
                     new_balance = steal_result["thief_new_balance"]
@@ -1551,7 +1833,15 @@ class BettingCommands(commands.Cog):
                 # No rank 4 or rank 4 is in debt
                 takeover_missed = True
                 takeover_amount = 40
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 40)
+                await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    40,
+                    "gamba hostile takeover fallback credit",
+                    "HOSTILE_TAKEOVER",
+                )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "RECESSION":
@@ -1588,7 +1878,14 @@ class BettingCommands(commands.Cog):
                 if loss <= 0:
                     continue
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, p.discord_id, guild_id, -loss
+                    self._adjust_gamba_balance,
+                    user_id,
+                    p.discord_id,
+                    guild_id,
+                    -loss,
+                    "gamba recession tax",
+                    "RECESSION",
+                    {"rank_index": rank_idx},
                 )
                 recession_total += loss
                 recession_count += 1
@@ -1629,14 +1926,28 @@ class BettingCommands(commands.Cog):
             if garnishment_service and new_balance < 0:
                 # Player is in debt, apply garnishment
                 result = await asyncio.to_thread(
-                    garnishment_service.add_income, user_id, result_value, guild_id
+                    garnishment_service.add_income,
+                    user_id,
+                    result_value,
+                    guild_id,
+                    source="gamba",
+                    actor_id=user_id,
+                    related_type="wheel_spin",
+                    related_id=str(result_wedge[0]),
+                    reason="gamba wheel payout",
                 )
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + result_value)
             else:
                 # Not in debt, add directly
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, result_value
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    result_value,
+                    "gamba wheel payout",
+                    str(result_wedge[0]),
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         elif isinstance(result_value, int) and result_value < 0:
@@ -1655,7 +1966,13 @@ class BettingCommands(commands.Cog):
             if not pardon_consumed:
                 # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
                 await asyncio.to_thread(
-                    self.player_service.adjust_balance, user_id, guild_id, result_value
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    result_value,
+                    "gamba wheel loss",
+                    str(result_wedge[0]),
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
                 # Add losses to nonprofit fund
@@ -1749,8 +2066,14 @@ class BettingCommands(commands.Cog):
                 wheel_bankruptcy_penalty = _pen_info["penalty_applied"]
                 if wheel_bankruptcy_penalty > 0:
                     await asyncio.to_thread(
-                        self.player_service.adjust_balance,
-                        user_id, guild_id, -wheel_bankruptcy_penalty,
+                        self._adjust_gamba_balance,
+                        user_id,
+                        user_id,
+                        guild_id,
+                        -wheel_bankruptcy_penalty,
+                        "gamba bankruptcy penalty",
+                        str(result_wedge[0]),
+                        {"wheel_gain": gain},
                     )
                     new_balance = current_balance - wheel_bankruptcy_penalty
 

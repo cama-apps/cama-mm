@@ -42,6 +42,41 @@ class DigRepository(BaseRepository, IDigRepository):
                 row[col] = int(val)
         return row
 
+    @staticmethod
+    def _ledger_related_id(detail: dict | None) -> str | int | None:
+        if not isinstance(detail, dict):
+            return None
+        for key in ("event_id", "boss_id", "artifact_id", "item_type", "item", "depth"):
+            value = detail.get(key)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _ledger_balance_reason(action_type: str, delta: int) -> str:
+        if action_type == "dig_action":
+            if delta > 0:
+                return "dig payout"
+            if delta < 0:
+                return "dig cost or penalty"
+            return "dig balance change"
+
+        action_label = {
+            "dig": "dig",
+            "event": "dig event",
+            "boss_fight": "dig boss fight",
+            "boss_retreat": "dig boss retreat",
+            "abandon": "dig abandon",
+            "sabotage": "dig sabotage",
+            "help": "dig help",
+        }.get(action_type, action_type.replace("_", " "))
+
+        if delta > 0:
+            return f"{action_label} credit"
+        if delta < 0:
+            return f"{action_label} debit"
+        return f"{action_label} balance change"
+
     # ── Tunnel CRUD ──────────────────────────────────────────────────────
 
     def get_tunnel(self, discord_id: int, guild_id: int) -> dict | None:
@@ -846,14 +881,26 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
 
             if balance_delta != 0:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (balance_delta, discord_id, gid),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=discord_id,
+                    related_type=log_action_type,
+                    related_id=self._ledger_related_id(log_detail),
+                    reason=self._ledger_balance_reason(log_action_type, balance_delta),
+                    metadata=log_detail,
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (balance_delta, discord_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             if tunnel_updates:
                 set_clauses = ", ".join(f"{col} = ?" for col in tunnel_updates)
@@ -931,14 +978,26 @@ class DigRepository(BaseRepository, IDigRepository):
                 )
 
             if jc_delta != 0:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (jc_delta, discord_id, gid),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=discord_id,
+                    related_type="boss_fight",
+                    related_id=boss_echo_boss_id,
+                    reason=self._ledger_balance_reason("boss_fight", jc_delta),
+                    metadata=log_detail,
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (jc_delta, discord_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             cursor.execute(
                 """
@@ -989,14 +1048,26 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
 
             if cost != 0:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (cost, cheerer_id, gid),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=cheerer_id,
+                    related_type="boss_cheer",
+                    related_id=target_id,
+                    reason="dig boss cheer cost",
+                    metadata={"target_id": target_id, "cost": cost},
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (cost, cheerer_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             if create_cheerer_tunnel_name is not None:
                 cursor.execute(
@@ -1079,14 +1150,26 @@ class DigRepository(BaseRepository, IDigRepository):
             )
 
             if helper_reward != 0:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (helper_reward, helper_id, gid),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=helper_id,
+                    related_type="help",
+                    related_id=target_id,
+                    reason=self._ledger_balance_reason("help", helper_reward),
+                    metadata=log_detail,
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (helper_reward, helper_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             cursor.execute(
                 """
@@ -1176,16 +1259,40 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
 
             if actor_jc_cost > 0:
-                cursor.execute(
-                    "UPDATE players SET jopacoin_balance = jopacoin_balance - ? WHERE discord_id = ? AND guild_id = ?",
-                    (actor_jc_cost, actor_id, gid),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=actor_id,
+                    related_type=log_action_type,
+                    related_id=target_id,
+                    reason="dig sabotage cost",
+                    metadata=log_detail,
                 )
+                try:
+                    cursor.execute(
+                        "UPDATE players SET jopacoin_balance = jopacoin_balance - ? WHERE discord_id = ? AND guild_id = ?",
+                        (actor_jc_cost, actor_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             if target_jc_credit > 0:
-                cursor.execute(
-                    "UPDATE players SET jopacoin_balance = jopacoin_balance + ? WHERE discord_id = ? AND guild_id = ?",
-                    (target_jc_credit, target_id, gid),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=actor_id,
+                    related_type=log_action_type,
+                    related_id=target_id,
+                    reason="dig sabotage target credit",
+                    metadata=log_detail,
                 )
+                try:
+                    cursor.execute(
+                        "UPDATE players SET jopacoin_balance = jopacoin_balance + ? WHERE discord_id = ? AND guild_id = ?",
+                        (target_jc_credit, target_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             if target_depth_delta != 0:
                 cursor.execute(

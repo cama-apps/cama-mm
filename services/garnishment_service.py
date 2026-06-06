@@ -25,6 +25,13 @@ class GarnishmentService:
         amount: int,
         guild_id: int | None = None,
         bankruptcy_penalty_rate: float = 0.0,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
     ) -> dict[str, int]:
         """
         Add income to a player, applying garnishment if they have debt.
@@ -61,4 +68,10 @@ class GarnishmentService:
             amount,
             self.garnishment_rate,
             bankruptcy_penalty_rate=bankruptcy_penalty_rate,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
         )

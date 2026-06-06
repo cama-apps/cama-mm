@@ -12,6 +12,7 @@ from discord.ext import commands
 from commands.checks import require_guild
 from services.permissions import has_tax_man_permission
 from services.tax_service import TaxService
+from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -254,9 +255,10 @@ def _build_player_embed(
         value=_format_prediction_positions(snapshot["prediction_exposure"]),
         inline=False,
     )
-    embed.add_field(
-        name="Recent Ledger",
-        value=_format_ledger_rows(snapshot["recent_ledger"]),
+    add_lines_field(
+        embed,
+        "Recent Ledger",
+        _format_ledger_lines(snapshot["recent_ledger"]),
         inline=False,
     )
     embed.set_footer(text="Tax Man audit only")
@@ -268,7 +270,10 @@ def _build_ledger_embed(rows: list[dict], *, user: discord.User | None) -> disco
     if user is not None:
         title = f"Central Economy Ledger - {getattr(user, 'display_name', user.name)}"
     embed = discord.Embed(title=title, color=discord.Color.blurple())
-    embed.description = _format_ledger_rows(rows)
+    embed.description = truncate_field(
+        _format_ledger_rows(rows),
+        max_len=EMBED_LIMITS["description"],
+    )
     return embed
 
 
@@ -349,11 +354,37 @@ def _format_source_totals(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_ledger_rows(rows: list[dict]) -> str:
+def _format_ledger_detail(row: dict) -> str:
+    reason = " ".join(str(row.get("reason") or "").split())
+    if reason:
+        return reason
+
+    source = str(row.get("source") or "balance_update")
+    source_labels = {
+        "balance_update": "balance adjustment",
+        "player_insert": "registration starting balance",
+        "nonprofit_insert": "nonprofit fund created",
+        "nonprofit_update": "nonprofit fund update",
+        "ledger_backfill": "opening balance backfill",
+        "dig": "dig balance change",
+        "gamba": "gamba wheel balance change",
+    }
+    label = source_labels.get(source, source.replace("_", " "))
+
+    related_type = " ".join(str(row.get("related_type") or "").split())
+    related_id = " ".join(str(row.get("related_id") or "").split())
+    if related_type and related_id:
+        return f"{label} ({related_type} #{related_id})"
+    if related_type:
+        return f"{label} ({related_type})"
+    return label
+
+
+def _format_ledger_lines(rows: list[dict], *, limit: int = 25) -> list[str]:
     if not rows:
-        return "No ledger entries yet."
+        return ["No ledger entries yet."]
     lines = []
-    for row in rows[:25]:
+    for row in rows[:limit]:
         account = (
             "nonprofit"
             if row["account_type"] == "nonprofit"
@@ -361,10 +392,14 @@ def _format_ledger_rows(rows: list[dict]) -> str:
         )
         lines.append(
             f"<t:{int(row['created_at'])}:R> - {account}: "
-            f"{_format_signed_jc(int(row['delta']))} via `{row['source']}` "
+            f"{_format_signed_jc(int(row['delta']))} - {_format_ledger_detail(row)} "
             f"-> {_format_jc(int(row['balance_after']))}"
         )
-    return "\n".join(lines)
+    return lines
+
+
+def _format_ledger_rows(rows: list[dict]) -> str:
+    return "\n".join(_format_ledger_lines(rows))
 
 
 async def setup(bot: commands.Bot):

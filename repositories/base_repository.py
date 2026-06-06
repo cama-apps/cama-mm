@@ -81,6 +81,43 @@ class BaseRepository(ABC):
         """
         return guild_id if guild_id is not None else 0
 
+    def _set_economy_ledger_context(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: Any | None = None,
+    ) -> None:
+        """Set trigger context for subsequent balance ledger entries."""
+        metadata_json = None
+        if metadata is not None:
+            metadata_json = metadata if isinstance(metadata, str) else json.dumps(metadata)
+        cursor.execute("DELETE FROM economy_ledger_context")
+        cursor.execute(
+            """
+            INSERT INTO economy_ledger_context (
+                id, source, actor_id, related_type, related_id, reason, metadata
+            )
+            VALUES (1, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source,
+                actor_id,
+                related_type,
+                str(related_id) if related_id is not None else None,
+                reason,
+                metadata_json,
+            ),
+        )
+
+    def _clear_economy_ledger_context(self, cursor: sqlite3.Cursor) -> None:
+        """Clear trigger context after contextual ledger writes."""
+        cursor.execute("DELETE FROM economy_ledger_context")
+
     def get_connection(self) -> sqlite3.Connection:
         """Get database connection with row factory enabled."""
         conn = sqlite3.connect(self.db_path)

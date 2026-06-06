@@ -71,10 +71,34 @@ class IPlayerRepository(ABC):
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
 
     @abstractmethod
-    def update_balance(self, discord_id: int, guild_id: int, amount: int) -> None: ...
+    def update_balance(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None: ...
 
     @abstractmethod
-    def add_balance(self, discord_id: int, guild_id: int, amount: int) -> None: ...
+    def add_balance(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None: ...
 
     @abstractmethod
     def increment_wins(self, discord_id: int, guild_id: int) -> None: ...
@@ -184,6 +208,13 @@ class IPlayerRepository(ABC):
         victim_discord_id: int,
         guild_id: int,
         amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
     ) -> dict[str, int]:
         """Atomically transfer jopacoin from victim to thief (shell mechanic).
 
@@ -195,7 +226,18 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
-    def add_balance_many(self, deltas_by_discord_id: dict[int, int], guild_id: int) -> None:
+    def add_balance_many(
+        self,
+        deltas_by_discord_id: dict[int, int],
+        guild_id: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None:
         """Apply multiple balance deltas in a single transaction."""
         ...
 
