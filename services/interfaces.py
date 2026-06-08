@@ -324,7 +324,12 @@ class IBankruptcyService(ABC):
 
     @abstractmethod
     def on_game_won(self, discord_id: int) -> int:
-        """Decrement penalty games after winning (only wins count)."""
+        """Decrement penalty games by 2 after winning."""
+        ...
+
+    @abstractmethod
+    def on_game_lost(self, discord_id: int) -> int:
+        """Decrement penalty games by 1 after losing."""
         ...
 
     # Result-returning methods (new API)

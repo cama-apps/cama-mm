@@ -338,6 +338,18 @@ class BettingService:
 
         return results
 
+    def award_loss_tick(
+        self, losing_ids: list[int], guild_id: int | None = None
+    ) -> None:
+        """
+        Tick bankruptcy penalty for losers (counts as 1 game toward clearing).
+
+        Wins count as 2 games (via on_game_won); losses count as 1.
+        """
+        if self.bankruptcy_service and losing_ids:
+            for pid in losing_ids:
+                self.bankruptcy_service.on_game_lost(pid, guild_id)
+
     def award_exclusion_bonus(
         self, excluded_ids: list[int], guild_id: int | None = None
     ) -> dict[int, dict[str, int]]:

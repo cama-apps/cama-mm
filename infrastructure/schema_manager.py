@@ -460,6 +460,12 @@ class SchemaManager:
                 "backfill_economy_ledger_opening_balances",
                 self._migration_backfill_economy_ledger_opening_balances,
             ),
+            # Bankruptcy penalty rework: 2x counter, wins=-2, losses=-1.
+            # Convert existing counters so current players' remaining wins are preserved.
+            (
+                "bankruptcy_penalty_games_rework",
+                self._migration_bankruptcy_penalty_games_rework,
+            ),
         ]
 
     # --- Migrations ---
@@ -2755,6 +2761,24 @@ class SchemaManager:
                     guild_id,
                 ),
             )
+
+    def _migration_bankruptcy_penalty_games_rework(self, cursor) -> None:
+        """Convert existing penalty counters from X-wins to the 2X-1 scale.
+
+        Old system: counter starts at X, each win decrements by 1.
+        New system: counter starts at 2X, wins decrement by 2, losses by 1.
+
+        Formula old * 2 preserves the number of wins required to clear for
+        each existing player (e.g. 3 remaining → 6 → cleared in 3 wins).
+        """
+        cursor.execute(
+            """
+            UPDATE bankruptcy_state
+            SET penalty_games_remaining = penalty_games_remaining * 2,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE penalty_games_remaining > 0
+            """
+        )
 
     def _migration_create_dig_boss_echoes(self, cursor) -> None:
         """Per-guild, per-boss 'echo' window.
