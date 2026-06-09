@@ -17,6 +17,8 @@ import random
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from utils.fonts import get_font
+
 # ---------------------------------------------------------------------------
 # Neon color palette
 # ---------------------------------------------------------------------------
@@ -40,26 +42,9 @@ WITCH_BG = (8, 6, 12)
 WIDTH = 400
 HEIGHT = 300
 
-# Font cache
-_FONT_CACHE: dict[str, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
-
-
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Get a cached monospace font."""
-    key = f"{'bold' if bold else 'regular'}_{size}"
-    if key not in _FONT_CACHE:
-        try:
-            name = "DejaVuSansMono-Bold.ttf" if bold else "DejaVuSansMono.ttf"
-            path = f"/usr/share/fonts/truetype/dejavu/{name}"
-            _FONT_CACHE[key] = ImageFont.truetype(path, size)
-        except OSError:
-            try:
-                name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-                path = f"/usr/share/fonts/truetype/dejavu/{name}"
-                _FONT_CACHE[key] = ImageFont.truetype(path, size)
-            except OSError:
-                _FONT_CACHE[key] = ImageFont.load_default()
-    return _FONT_CACHE[key]
+    return get_font(size, bold=bold, mono=True)
 
 
 # ---------------------------------------------------------------------------

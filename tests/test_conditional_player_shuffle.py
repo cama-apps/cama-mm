@@ -11,25 +11,8 @@ Tests the real production function from commands/match.py.
 """
 
 
-from commands.match import select_players_for_shuffle as _select_players_for_shuffle
+from commands.match import select_players_for_shuffle
 from domain.models.player import Player
-
-
-def select_players_for_shuffle(
-    regular_player_ids: list[int],
-    regular_players: list[Player],
-    conditional_player_ids: list[int],
-    conditional_players: list[Player],
-) -> tuple[list[int], list[Player], list[int], list[int]]:
-    """Call the production selection function, deriving regular_count the way
-    the command does (count of regular lobby members)."""
-    return _select_players_for_shuffle(
-        regular_player_ids,
-        regular_players,
-        conditional_player_ids,
-        conditional_players,
-        len(regular_player_ids),
-    )
 
 
 def make_player(name: str, rating: float | None = 1500.0, rd: float | None = 350.0) -> Player:

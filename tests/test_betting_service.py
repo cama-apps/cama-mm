@@ -845,9 +845,10 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
     """A consumed Communion Blessing must still pay out if the sanctuary
     buff check raises.
 
-    consume_atomic destroys the one-shot blessing charge; if an unrelated
-    exception then zeroed the accumulated bonus, the player would burn the
-    charge without ever receiving the payout.
+    consume_and_credit_atomic destroys the one-shot blessing charge and
+    credits the payout in the same transaction; an unrelated exception in
+    the sanctuary check must not prevent the consumed charge from being
+    reflected in the results bookkeeping.
     """
     from unittest.mock import MagicMock
 
@@ -865,17 +866,23 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
     )
     player_repo.update_balance(pid, TEST_GUILD_ID, 0)
 
+    def fake_consume_and_credit(buff_id, discord_id, guild_id, amount):
+        # Mimic the real atomic repo method: consume succeeds and the
+        # credit commits with it.
+        player_repo.add_balance(discord_id, guild_id, amount)
+        return True
+
     buff_service = MagicMock()
     buff_service.has_sanctuary_match_bonus.side_effect = RuntimeError("boom")
     buff_service.buff_repo.active_for.return_value = [{"id": 1}]
-    buff_service.buff_repo.consume_atomic.return_value = True
+    buff_service.buff_repo.consume_and_credit_atomic.side_effect = fake_consume_and_credit
     buff_service.apply_blood_pact_skim.return_value = 0
     betting_service.buff_service = buff_service
 
     results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
 
     blessing_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.10))
-    assert buff_service.buff_repo.consume_atomic.called, (
+    assert buff_service.buff_repo.consume_and_credit_atomic.called, (
         "Precondition: the blessing charge must actually be consumed"
     )
     assert results[pid]["manashop_bonus"] == blessing_bonus, (
@@ -885,3 +892,39 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
         player_repo.get_balance(pid, TEST_GUILD_ID)
         == JOPACOIN_WIN_REWARD + blessing_bonus
     )
+
+
+def test_consume_and_credit_atomic_pays_once(repo_db_path):
+    """The blessing charge pays exactly once under concurrent-style double
+    consumption.
+
+    The first consume_and_credit_atomic call claims the charge and credits
+    the balance in the same transaction; a second call against the already
+    consumed row must return False and leave the balance untouched (no
+    double-pay, no burned charge without payout).
+    """
+    from repositories.buff_repository import BuffRepository
+    from services.buff_service import BUFF_COMMUNION_BLESSING
+
+    player_repo = PlayerRepository(repo_db_path)
+    buff_repo = BuffRepository(repo_db_path)
+
+    pid = 7272
+    bonus = 25
+    player_repo.add(
+        discord_id=pid,
+        discord_username="DoubleConsumer",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.update_balance(pid, TEST_GUILD_ID, 0)
+    buff_id = buff_repo.grant(
+        pid, TEST_GUILD_ID, BUFF_COMMUNION_BLESSING, int(time.time()) + 3600
+    )
+
+    assert buff_repo.consume_and_credit_atomic(buff_id, pid, TEST_GUILD_ID, bonus) is True
+    assert player_repo.get_balance(pid, TEST_GUILD_ID) == bonus
+
+    # Second (concurrent-style) caller loses the claim: no credit.
+    assert buff_repo.consume_and_credit_atomic(buff_id, pid, TEST_GUILD_ID, bonus) is False
+    assert player_repo.get_balance(pid, TEST_GUILD_ID) == bonus

@@ -8,22 +8,13 @@ import random
 from PIL import Image, ImageDraw, ImageFont
 
 from config import WHEEL_BANKRUPT_TARGET_EV, WHEEL_GOLDEN_TARGET_EV, WHEEL_TARGET_EV
-
-# Cached fonts for performance (loaded once, not per frame)
-_CACHED_FONTS: dict[str, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
+from utils.fonts import get_font
 
 
 def _get_cached_font(size: int, font_key: str, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Get a cached font, loading it only on first access."""
-    cache_key = f"{font_key}_{size}_{'bold' if bold else 'regular'}"
-    if cache_key not in _CACHED_FONTS:
-        try:
-            font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-            font_path = f"/usr/share/fonts/truetype/dejavu/{font_name}"
-            _CACHED_FONTS[cache_key] = ImageFont.truetype(font_path, size)
-        except OSError:
-            _CACHED_FONTS[cache_key] = ImageFont.load_default()
-    return _CACHED_FONTS[cache_key]
+    del font_key  # Legacy namespacing; the shared cache keys on (size, bold).
+    return get_font(size, bold=bold)
 
 
 # Cached static overlay (pointer, center circle, center text) - drawn once per size

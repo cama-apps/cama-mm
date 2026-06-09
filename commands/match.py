@@ -62,7 +62,6 @@ def select_players_for_shuffle(
     regular_players: list,
     conditional_player_ids: list[int],
     conditional_players: list,
-    regular_count: int,
 ) -> tuple[list[int], list, list[int], list[int]]:
     """Pick the shuffle roster, filling from the conditional queue (highest
     priority first) when the regular queue is short of 10.
@@ -75,6 +74,7 @@ def select_players_for_shuffle(
     included_conditional_ids: list[int] = []
     excluded_conditional_ids: list[int] = []
 
+    regular_count = len(regular_player_ids)
     if regular_count < 10:
         conditional_pairs = list(zip(conditional_player_ids, conditional_players))
         conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
@@ -528,7 +528,6 @@ class MatchCommands(commands.Cog):
             players,
             all_conditional_ids,
             all_conditional_players,
-            lobby.get_player_count(),
         )
 
     async def _execute_shuffle(
