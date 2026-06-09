@@ -462,10 +462,18 @@ class RebellionService:
         """
         defender_stake_pool = len(defend_discord_ids) * REBELLION_DEFENDER_STAKE
         # The inciter is paid inciter_flat_reward (not a per-attacker share), so
-        # the defender pool is split only among the non-inciter attackers — divide
-        # by that count so the full pool is distributed (no orphaned share).
+        # the defender pool is split only among the non-inciter attackers. Any
+        # integer-division remainder — or the whole pool when the inciter is
+        # the sole attacker — folds into the inciter's reward so the full pool
+        # is always conserved instead of being destroyed.
         stake_recipients = [did for did in attack_discord_ids if did != inciter_id]
-        stake_share = defender_stake_pool // len(stake_recipients) if stake_recipients else 0
+        inciter_reward = REBELLION_INCITER_FLAT_REWARD
+        if stake_recipients:
+            stake_share = defender_stake_pool // len(stake_recipients)
+            inciter_reward += defender_stake_pool - stake_share * len(stake_recipients)
+        else:
+            stake_share = 0
+            inciter_reward += defender_stake_pool
         war_scar_label = self._pick_war_scar_wedge()
         celebration_expires = now + REBELLION_CELEBRATION_SPIN_WINDOW
 
@@ -475,7 +483,7 @@ class RebellionService:
             inciter_id=inciter_id,
             attacker_ids=attack_discord_ids,
             per_attacker_credit=REBELLION_ATTACKER_FLAT_REWARD + stake_share,
-            inciter_flat_reward=REBELLION_INCITER_FLAT_REWARD,
+            inciter_flat_reward=inciter_reward,
             battle_roll=battle_roll,
             victory_threshold=victory_threshold,
             wheel_effect_spins=REBELLION_WHEEL_EFFECT_SPINS,
@@ -486,7 +494,7 @@ class RebellionService:
         )
 
         return {
-            "inciter_reward": REBELLION_INCITER_FLAT_REWARD,
+            "inciter_reward": inciter_reward,
             "inciter_penalty_before": penalty_info["inciter_penalty_before"],
             "inciter_penalty_after": penalty_info["inciter_penalty_after"],
             "attacker_flat_reward": REBELLION_ATTACKER_FLAT_REWARD,

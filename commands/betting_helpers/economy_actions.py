@@ -30,7 +30,7 @@ from config import (
 )
 from services.flavor_text_service import FlavorEvent
 from utils.formatting import JOPACOIN_EMOTE
-from utils.interaction_safety import safe_defer
+from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import send_neon_result
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -284,6 +284,22 @@ async def paydebt_action(
     if not rl.allowed:
         await interaction.response.send_message(
             f"Please wait {rl.retry_after_seconds}s before using `/paydebt` again.",
+            ephemeral=True,
+        )
+        return
+
+    # Validate amount
+    if amount <= 0:
+        await interaction.response.send_message(
+            "Amount must be positive.",
+            ephemeral=True,
+        )
+        return
+
+    # Check if paying their own debt
+    if player.id == interaction.user.id:
+        await interaction.response.send_message(
+            "You cannot pay your own debt.",
             ephemeral=True,
         )
         return
@@ -784,6 +800,9 @@ async def nonprofit_action(
         )
         return
 
+    if not await safe_defer(interaction, ephemeral=False):
+        return
+
     guild_id = interaction.guild.id if interaction.guild else None
     total = await asyncio.to_thread(cog.loan_service.get_nonprofit_fund, guild_id)
 
@@ -881,7 +900,7 @@ async def nonprofit_action(
 
     embed.set_footer(text="Use /disburse propose to start a distribution vote!")
 
-    await interaction.response.send_message(embed=embed)
+    await safe_followup(interaction, embed=embed)
 
 
 

@@ -101,6 +101,12 @@ if _dig_channel_raw:
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
 
+# OpenSkill display constants, mirrored here so domain models can use them
+# without importing infrastructure. Canonical values (with full rationale)
+# live on CamaOpenSkillSystem in openskill_rating_system.py — keep in sync.
+OPENSKILL_MIN_MU = 25.0  # mu floor (display rating 0)
+OPENSKILL_DISPLAY_SCALE = 50.0  # (mu - MIN_MU) * scale = 0-3000 display rating
+
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 420.0),

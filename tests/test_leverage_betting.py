@@ -6,7 +6,6 @@ import time
 
 import pytest
 
-from infrastructure.schema_manager import SchemaManager
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
@@ -15,22 +14,13 @@ from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture
-def temp_db(tmp_path):
-    """Create a temporary database with schema."""
-    db_path = str(tmp_path / "test.db")
-    schema = SchemaManager(db_path)
-    schema.initialize()
-    return db_path
+def player_repo(repo_db_path):
+    return PlayerRepository(repo_db_path)
 
 
 @pytest.fixture
-def player_repo(temp_db):
-    return PlayerRepository(temp_db)
-
-
-@pytest.fixture
-def bet_repo(temp_db):
-    return BetRepository(temp_db)
+def bet_repo(repo_db_path):
+    return BetRepository(repo_db_path)
 
 
 @pytest.fixture

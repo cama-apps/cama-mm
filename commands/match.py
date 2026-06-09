@@ -49,6 +49,49 @@ from utils.streaming import get_streaming_player_ids
 logger = logging.getLogger("cama_bot.commands.match")
 
 
+def priority_key(player) -> tuple[float, float]:
+    """Priority key for conditional player selection: higher rating first,
+    then lower RD."""
+    rating = player.glicko_rating if player.glicko_rating else 1500.0
+    rd = player.glicko_rd if player.glicko_rd else 350.0
+    return (rating, -rd)
+
+
+def select_players_for_shuffle(
+    regular_player_ids: list[int],
+    regular_players: list,
+    conditional_player_ids: list[int],
+    conditional_players: list,
+    regular_count: int,
+) -> tuple[list[int], list, list[int], list[int]]:
+    """Pick the shuffle roster, filling from the conditional queue (highest
+    priority first) when the regular queue is short of 10.
+
+    Returns ``(player_ids, players, included_conditional_ids,
+    excluded_conditional_ids)``.
+    """
+    player_ids = list(regular_player_ids)
+    players = list(regular_players)
+    included_conditional_ids: list[int] = []
+    excluded_conditional_ids: list[int] = []
+
+    if regular_count < 10:
+        conditional_pairs = list(zip(conditional_player_ids, conditional_players))
+        conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
+
+        slots_available = 10 - regular_count
+        for cid, cplayer in conditional_pairs[:slots_available]:
+            player_ids.append(cid)
+            players.append(cplayer)
+            included_conditional_ids.append(cid)
+
+        excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
+    else:
+        excluded_conditional_ids = list(conditional_player_ids)
+
+    return player_ids, players, included_conditional_ids, excluded_conditional_ids
+
+
 class MatchCommands(commands.Cog):
     """Slash commands for shuffling teams and recording results."""
 
@@ -473,8 +516,6 @@ class MatchCommands(commands.Cog):
         player_ids, players = await asyncio.to_thread(
             self.lobby_service.get_lobby_players, lobby, guild_id
         )
-        conditional_player_ids_included: list[int] = []
-        excluded_conditional_ids: list[int] = []
 
         all_conditional_ids, all_conditional_players = await asyncio.to_thread(
             self.lobby_service.get_conditional_players,
@@ -482,27 +523,13 @@ class MatchCommands(commands.Cog):
             guild_id,
         )
 
-        regular_count = lobby.get_player_count()
-        if regular_count < 10:
-            def priority_key(player):
-                rating = player.glicko_rating if player.glicko_rating else 1500.0
-                rd = player.glicko_rd if player.glicko_rd else 350.0
-                return (rating, -rd)
-
-            conditional_pairs = list(zip(all_conditional_ids, all_conditional_players))
-            conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
-
-            slots_available = 10 - regular_count
-            for cid, cplayer in conditional_pairs[:slots_available]:
-                player_ids.append(cid)
-                players.append(cplayer)
-                conditional_player_ids_included.append(cid)
-
-            excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
-        else:
-            excluded_conditional_ids = list(all_conditional_ids)
-
-        return player_ids, players, conditional_player_ids_included, excluded_conditional_ids
+        return select_players_for_shuffle(
+            player_ids,
+            players,
+            all_conditional_ids,
+            all_conditional_players,
+            lobby.get_player_count(),
+        )
 
     async def _execute_shuffle(
         self,

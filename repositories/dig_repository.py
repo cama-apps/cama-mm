@@ -31,6 +31,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "cavein_free_streak", "relic_trim_notice",
         # add_dig_auto_buy_settings migration
         "auto_buy_torch", "auto_buy_hard_hat",
+        # add_last_cheer_at_to_tunnels migration
+        "last_cheer_at",
     })
 
     @staticmethod
@@ -173,6 +175,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "cavein_free_streak", "relic_trim_notice",
         # add_dig_auto_buy_settings migration
         "auto_buy_torch", "auto_buy_hard_hat",
+        # add_last_cheer_at_to_tunnels migration
+        "last_cheer_at",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:

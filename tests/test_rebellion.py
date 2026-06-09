@@ -540,6 +540,104 @@ class TestWarFlow:
             f"{defender_stake_pool - distributed} coins were orphaned."
         )
 
+    def test_attacker_win_solo_inciter_receives_defender_pool(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """When the inciter is the sole attacker there are no non-inciter
+        recipients for the defender stake pool, so the full pool folds into
+        the inciter's reward instead of being destroyed (defenders paid real
+        JC into the pool at vote time).
+        """
+        from config import REBELLION_DEFENDER_STAKE, REBELLION_INCITER_FLAT_REWARD
+        guild_id = TEST_GUILD_ID
+        inciter_id = 5980
+        war_id = self._setup_war_with_votes(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service,
+            inciter_id=inciter_id, n_attackers=1, n_defenders=2, guild_id=guild_id,
+        )
+        war = rebellion_repo.get_war(war_id)
+        attack_voters = json.loads(war["attack_voter_ids"])
+        defend_voters = json.loads(war["defend_voter_ids"])
+        assert [v["discord_id"] for v in attack_voters] == [inciter_id], (
+            "Precondition: inciter must be the sole attacker"
+        )
+
+        # Balances captured post-vote (defender stakes already debited).
+        participants = [inciter_id] + list(defend_voters)
+        bal_before = {did: player_repo.get_balance(did, guild_id) for did in participants}
+
+        result = rebellion_service.resolve_battle(
+            war_id, guild_id, battle_roll=1, victory_threshold=50
+        )
+        assert result["outcome"] == "attackers_win"
+
+        pool = len(defend_voters) * REBELLION_DEFENDER_STAKE
+        expected_reward = REBELLION_INCITER_FLAT_REWARD + pool
+        assert result["inciter_reward"] == expected_reward
+        inciter_gain = player_repo.get_balance(inciter_id, guild_id) - bal_before[inciter_id]
+        assert inciter_gain == expected_reward, (
+            f"Solo inciter gained {inciter_gain}, expected flat reward "
+            f"{REBELLION_INCITER_FLAT_REWARD} + full defender pool {pool}"
+        )
+
+        # Conservation: the only minted coins are the flat reward; the staked
+        # pool is fully re-credited (to the inciter), not destroyed.
+        total_delta = sum(
+            player_repo.get_balance(did, guild_id) - bal_before[did]
+            for did in participants
+        )
+        assert total_delta == REBELLION_INCITER_FLAT_REWARD + pool
+
+    def test_attacker_win_division_remainder_goes_to_inciter(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """When the defender pool does not divide evenly among the non-inciter
+        attackers, the integer-division remainder folds into the inciter's
+        reward instead of being destroyed.
+        """
+        from config import (
+            REBELLION_ATTACKER_FLAT_REWARD,
+            REBELLION_DEFENDER_STAKE,
+            REBELLION_INCITER_FLAT_REWARD,
+        )
+        guild_id = TEST_GUILD_ID
+        inciter_id = 5990
+        # 5 attackers (incl. inciter) + 3 defenders → pool 30 split among 4
+        # recipients → 7 each, remainder 2 to the inciter.
+        war_id = self._setup_war_with_votes(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service,
+            inciter_id=inciter_id, n_attackers=5, n_defenders=3, guild_id=guild_id,
+        )
+        war = rebellion_repo.get_war(war_id)
+        attack_voters = json.loads(war["attack_voter_ids"])
+        defend_voters = json.loads(war["defend_voter_ids"])
+        attacker_ids = [v["discord_id"] for v in attack_voters]
+        non_inciter = [did for did in attacker_ids if did != inciter_id]
+        pool = len(defend_voters) * REBELLION_DEFENDER_STAKE
+        share, remainder = divmod(pool, len(non_inciter))
+        assert remainder > 0, "Precondition: pool must not divide evenly"
+
+        bal_before = {did: player_repo.get_balance(did, guild_id) for did in attacker_ids}
+
+        result = rebellion_service.resolve_battle(
+            war_id, guild_id, battle_roll=1, victory_threshold=50
+        )
+        assert result["outcome"] == "attackers_win"
+
+        inciter_gain = player_repo.get_balance(inciter_id, guild_id) - bal_before[inciter_id]
+        assert inciter_gain == REBELLION_INCITER_FLAT_REWARD + remainder
+        for did in non_inciter:
+            gain = player_repo.get_balance(did, guild_id) - bal_before[did]
+            assert gain == REBELLION_ATTACKER_FLAT_REWARD + share
+
+        # Conservation: flat rewards minted + the full staked pool re-credited.
+        total_delta = sum(
+            player_repo.get_balance(did, guild_id) - bal_before[did]
+            for did in attacker_ids
+        )
+        minted = REBELLION_INCITER_FLAT_REWARD + REBELLION_ATTACKER_FLAT_REWARD * len(non_inciter)
+        assert total_delta == minted + pool
+
     def test_attacker_win_wheel_effects(self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo):
         """Attacker win sets WAR_SCAR and BANKRUPT_WEAKEN effects."""
         guild_id = TEST_GUILD_ID

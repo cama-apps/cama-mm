@@ -543,6 +543,32 @@ class TestShuffler:
             f"Expected lower-count player to be excluded, got {excluded_name} with count {excluded_count}"
         )
 
+    def test_greedy_shuffle_excludes_lowest_effective_exclusion_count(self):
+        """Regression: the greedy path must exclude the players with the
+        LOWEST effective exclusion counts, not simply the lowest-rated ones."""
+        players = []
+        exclusion_counts = {}
+        for i in range(12):
+            player = Player(
+                name=f"Player{i}", mmr=1000 + i * 200, preferred_roles=[str(i % 5 + 1)]
+            )
+            players.append(player)
+            exclusion_counts[player.name] = 5  # sat out often -> protected
+
+        # Two mid/high-rated players have never sat out (count 0); the greedy
+        # path should exclude them instead of the lowest-rated players.
+        exclusion_counts["Player8"] = 0  # mmr 2600
+        exclusion_counts["Player9"] = 0  # mmr 2800
+
+        shuffler = BalancedShuffler(
+            use_glicko=False, off_role_flat_penalty=50.0, exclusion_penalty_weight=5.0
+        )
+        team1, team2, excluded, _score = shuffler._greedy_shuffle(players, exclusion_counts)
+
+        assert {p.name for p in excluded} == {"Player8", "Player9"}
+        assert len(team1.players) == 5
+        assert len(team2.players) == 5
+
     def test_exclusion_penalty_weight_parameter(self):
         """Test that exclusion_penalty_weight parameter is stored correctly."""
         # Test default value

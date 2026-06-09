@@ -378,8 +378,9 @@ class BalancedShuffler:
         # For >10 players, exclude those with lowest exclusion counts first (greedily)
         # Recent match participants get lower effective count (more likely to be excluded)
         if len(players) > 10:
-            # Sort excluded candidates by effective exclusion count
-            # Recent match participants have their count reduced to prefer excluding them
+            # Effective exclusion count over ALL players: high count means the
+            # player sat out often and should be protected (included);
+            # recent match participants have their count reduced to prefer excluding them
             def effective_exclusion_count(p: Player) -> float:
                 base_count = exclusion_counts.get(p.name, 0)
                 # Reduce count for recent participants (makes them more likely to be excluded)
@@ -387,18 +388,20 @@ class BalancedShuffler:
                     return base_count - (self.recent_match_penalty_weight / self.exclusion_penalty_weight)
                 return base_count
 
-            excluded_candidates = sorted(
-                sorted_players[10:],
-                key=effective_exclusion_count,
+            # Exclude the players with the lowest effective counts; break ties
+            # by rating ascending so lower-rated players sit out first.
+            exclusion_order = sorted(
+                sorted_players,
+                key=lambda p: (
+                    effective_exclusion_count(p),
+                    p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin),
+                ),
             )
-            selected = sorted_players[:10]
-            excluded = list(excluded_candidates[: len(players) - 10])
-            # Re-sort selected by rating
-            selected = sorted(
-                selected,
-                key=lambda p: p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin),
-                reverse=True,
-            )
+            excluded = exclusion_order[: len(players) - 10]
+            excluded_ids = {id(p) for p in excluded}
+            # sorted_players is already rating-descending, so filtering keeps
+            # the selected players sorted by rating for the snake draft.
+            selected = [p for p in sorted_players if id(p) not in excluded_ids]
         else:
             selected = sorted_players
             excluded = []

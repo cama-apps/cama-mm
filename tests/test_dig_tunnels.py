@@ -291,6 +291,20 @@ class TestTunnelNormalization:
         assert normalized["tunnel_name"] == "Test Tunnel"
         assert normalized["boss_progress"] == '{"50": "active"}'
 
+    def test_update_tunnel_accepts_last_cheer_at(self, dig_repo, guild_id):
+        """last_cheer_at is in the update whitelist and round-trips as an int.
+
+        Regression guard for the whitelist gap: the column exists in the schema
+        (add_last_cheer_at_to_tunnels migration) but was missing from
+        _TUNNEL_UPDATABLE_COLUMNS, so any update_tunnel call passing it raised
+        ValueError.
+        """
+        dig_repo.create_tunnel(10001, guild_id, "Test Tunnel")
+        dig_repo.update_tunnel(10001, guild_id, last_cheer_at=1_234_567)
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["last_cheer_at"] == 1_234_567
+        assert isinstance(tunnel["last_cheer_at"], int)
+
     def test_normalize_tunnel_handles_none_values(self, dig_repo):
         """_normalize_tunnel leaves None values as None."""
         raw = {"depth": 10, "last_dig_at": None, "luminosity": None}

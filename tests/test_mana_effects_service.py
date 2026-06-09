@@ -190,8 +190,7 @@ def _make_mana_service(mana_repo, player_repo):
     """Create a ManaService with mocked non-repo dependencies."""
     gambling_stats = MagicMock()
     gambling_stats.calculate_degen_score.return_value = MagicMock(total=0)
-    gambling_stats.bet_repo = MagicMock()
-    gambling_stats.bet_repo.get_player_bet_history.return_value = []
+    gambling_stats.get_player_bet_outcomes.return_value = []
 
     bankruptcy_service = MagicMock()
     bankruptcy_service.get_state.return_value = MagicMock(
