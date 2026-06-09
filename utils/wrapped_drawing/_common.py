@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from PIL import ImageDraw, ImageFont
 
+from utils.fonts import get_font
+
 # ─── Palette ────────────────────────────────────────────────────────────────
 
 BG_GRADIENT_START = (30, 30, 35)
@@ -52,11 +54,7 @@ NA_COLOR = (80, 80, 90)
 
 def _get_font(size: int = 16, bold: bool = False) -> ImageFont.FreeTypeFont:
     """Return a DejaVu font at ``size``, falling back to PIL's default."""
-    try:
-        font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
-        return ImageFont.truetype(f"/usr/share/fonts/truetype/dejavu/{font_name}", size)
-    except OSError:
-        return ImageFont.load_default()
+    return get_font(size, bold=bold)
 
 
 def _draw_gradient_background(

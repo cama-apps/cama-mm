@@ -101,11 +101,17 @@ if _dig_channel_raw:
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
 
-# OpenSkill display constants, mirrored here so domain models can use them
-# without importing infrastructure. Canonical values (with full rationale)
-# live on CamaOpenSkillSystem in openskill_rating_system.py — keep in sync.
+# OpenSkill display constants. These are canonical: CamaOpenSkillSystem in
+# openskill_rating_system.py reads its MIN_MU / DISPLAY_SCALE class attributes
+# from here, and domain models use them without importing infrastructure.
 OPENSKILL_MIN_MU = 25.0  # mu floor (display rating 0)
-OPENSKILL_DISPLAY_SCALE = 50.0  # (mu - MIN_MU) * scale = 0-3000 display rating
+# Display scale factor: (mu - MIN_MU) * DISPLAY_SCALE = display rating.
+# Chosen so that mmr_to_os_mu(MMR_MAX) produces display == Glicko-2 RATING_MAX.
+# With mmr_to_os_mu(mmr) = 25 + mmr/200 and MMR_MAX=12000 → mu=85, and
+# Glicko-2 RATING_MAX=3000, we need factor = 3000 / (85 - 25) = 50.
+# This keeps OpenSkill and Glicko-2 display ratings on the same 0-3000 scale
+# so team-value computations do not inflate OpenSkill-rated players.
+OPENSKILL_DISPLAY_SCALE = 50.0
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),

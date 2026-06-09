@@ -70,8 +70,8 @@ class Player:
         if use_openskill:
             if self.os_mu is not None:
                 # Convert OpenSkill mu to a display rating on the same 0-3000
-                # scale as Glicko-2. Canonical constants live on
-                # CamaOpenSkillSystem; config mirrors them for domain use.
+                # scale as Glicko-2. Canonical constants live in config;
+                # CamaOpenSkillSystem reads them from there too.
                 return max(
                     0.0,
                     (self.os_mu - OPENSKILL_MIN_MU) * OPENSKILL_DISPLAY_SCALE,

@@ -298,16 +298,27 @@ class BettingService:
         if self.buff_service and winning_ids:
             from services.buff_service import BUFF_COMMUNION_BLESSING
             for pid in winning_ids:
-                bonus = 0
+                credited = 0
+                sanctuary_bonus = 0
                 try:
                     if self.buff_service.has_sanctuary_match_bonus(pid, guild_id):
-                        bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.15))
+                        sanctuary_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.15))
                 except Exception:
-                    bonus = 0
-                # The blessing is handled outside the try above: consume_atomic
-                # destroys the one-shot charge, so once it returns True the
-                # bonus must not be zeroed by an unrelated exception (burned
-                # charge with no payout).
+                    sanctuary_bonus = 0
+                if sanctuary_bonus > 0:
+                    try:
+                        self.player_repo.add_balance(pid, guild_id, sanctuary_bonus)
+                        credited += sanctuary_bonus
+                    except Exception:
+                        logger.exception(
+                            "Failed to credit manashop win bonus %d to player %d",
+                            sanctuary_bonus, pid,
+                        )
+                # The blessing's one-shot charge is consumed and credited in a
+                # single repository transaction, so a consumed charge can never
+                # burn without its payout. Only the caller that wins the
+                # conditional UPDATE gets True; a second concurrent match
+                # finalization observes False and skips.
                 blessing = None
                 try:
                     blessing = self.buff_service.buff_repo.active_for(
@@ -316,25 +327,23 @@ class BettingService:
                 except Exception:
                     blessing = None
                 if blessing:
-                    # Only the caller that wins consume_atomic gets to add
-                    # the bonus; the second concurrent caller observes
-                    # rowcount==0 and skips.
+                    blessing_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.10))
                     try:
-                        consumed = self.buff_service.buff_repo.consume_atomic(
-                            blessing[0]["id"]
+                        consumed = self.buff_service.buff_repo.consume_and_credit_atomic(
+                            blessing[0]["id"], pid, guild_id, blessing_bonus
                         )
                     except Exception:
+                        logger.exception(
+                            "Failed to consume+credit blessing bonus %d for player %d",
+                            blessing_bonus, pid,
+                        )
                         consumed = False
                     if consumed:
-                        bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.10))
-                if bonus > 0:
-                    try:
-                        self.player_repo.add_balance(pid, guild_id, bonus)
-                        results.setdefault(pid, {"gross": 0, "garnished": 0, "net": 0, "bankruptcy_penalty": 0})
-                        results[pid]["net"] = int(results[pid].get("net", 0)) + bonus
-                        results[pid]["manashop_bonus"] = bonus
-                    except Exception:
-                        logger.exception("Failed to credit manashop win bonus %d to player %d", bonus, pid)
+                        credited += blessing_bonus
+                if credited > 0:
+                    results.setdefault(pid, {"gross": 0, "garnished": 0, "net": 0, "bankruptcy_penalty": 0})
+                    results[pid]["net"] = int(results[pid].get("net", 0)) + credited
+                    results[pid]["manashop_bonus"] = credited
 
         if self.buff_service:
             for pid, result in results.items():

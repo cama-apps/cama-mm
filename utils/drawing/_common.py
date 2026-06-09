@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 from PIL import ImageDraw, ImageFont
 
+from utils.fonts import get_font
+
 # ─── Discord-like dark theme colors ────────────────────────────────────────
 
 DISCORD_BG = "#36393F"
@@ -57,22 +59,9 @@ POSITION_COLORS = {
 
 # ─── Font + size helpers ───────────────────────────────────────────────────
 
-_CACHED_FONTS: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
-
-
 def _get_font(size: int = 16) -> ImageFont.FreeTypeFont:
     """Get a font, falling back to default if custom fonts unavailable."""
-    if size not in _CACHED_FONTS:
-        try:
-            _CACHED_FONTS[size] = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size
-            )
-        except OSError:
-            try:
-                _CACHED_FONTS[size] = ImageFont.truetype("arial.ttf", size)
-            except OSError:
-                _CACHED_FONTS[size] = ImageFont.load_default()
-    return _CACHED_FONTS[size]
+    return get_font(size)
 
 
 def _get_text_size(font: ImageFont.FreeTypeFont, text: str) -> tuple[int, int]:
