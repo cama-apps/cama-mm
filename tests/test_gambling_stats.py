@@ -80,23 +80,21 @@ def _place_and_settle_bet(
     leverage=1,
     guild_id=0,
 ):
-    """Helper to place and settle a bet."""
+    """Helper to place and settle a bet through the production atomic path."""
     now = int(time.time())
     since_ts = now - 100
 
-    # Debit balance
-    effective = amount * leverage
-    player_repo.add_balance(discord_id, guild_id, -effective)
-
-    # Place bet
-    bet_repo.create_bet(guild_id, discord_id, team, amount, now)
-    # Update leverage manually since create_bet doesn't support it
-    with bet_repo.connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE bets SET leverage = ? WHERE discord_id = ? AND match_id IS NULL",
-            (leverage, discord_id),
-        )
+    # Place bet via the real atomic path (debits effective amount, stores leverage)
+    bet_repo.place_bet_atomic(
+        guild_id=guild_id,
+        discord_id=discord_id,
+        team=team,
+        amount=amount,
+        bet_time=now,
+        since_ts=since_ts,
+        leverage=leverage,
+        max_debt=500,
+    )
 
     # Record match
     match_id = match_repo.record_match(
@@ -191,6 +189,25 @@ class TestBetHistory:
         assert history[0]["leverage"] == 2
         assert history[0]["effective_bet"] == 20
         assert history[0]["profit"] == 20  # effective_bet profit on win
+
+    def test_bet_history_guild_isolation(self, repositories):
+        """A bet placed in guild A does not appear in guild B's history."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+
+        guild_a, guild_b = 111, 222
+        discord_id = _setup_player(player_repo, balance=100, guild_id=guild_a)
+        _setup_player(player_repo, balance=100, guild_id=guild_b)
+
+        _place_and_settle_bet(
+            bet_repo, match_repo, player_repo,
+            discord_id, 10, "radiant", "radiant", guild_id=guild_a,
+        )
+
+        history_a = bet_repo.get_player_bet_history(discord_id, guild_id=guild_a)
+        assert len(history_a) == 1
+        assert bet_repo.get_player_bet_history(discord_id, guild_id=guild_b) == []
 
 
 class TestGambaStats:

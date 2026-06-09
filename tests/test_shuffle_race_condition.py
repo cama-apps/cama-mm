@@ -225,8 +225,11 @@ class TestConcurrentShuffleScenario:
 
             lobby_manager.record_lock_acquired(guild_id)
             try:
-                # Simulate shuffle work
-                await asyncio.sleep(0.1)
+                # Simulate shuffle work. sleep(0) yields the event loop while
+                # the lock is held (acquire completes synchronously on a free
+                # lock, before this yield), so the second shuffle still
+                # observes the contention without wall-clock cost.
+                await asyncio.sleep(0)
                 results.append(f"shuffle_{shuffle_id}_success")
             finally:
                 lobby_manager.clear_lock_time(guild_id)

@@ -325,43 +325,65 @@ def test_participants_table_has_correct_side_and_won_flags(test_db_with_schema, 
 class TestRadiantDireMapping:
     """Test the Radiant/Dire mapping fix for match recording."""
 
-    def test_radiant_dire_team_mapping(self):
-        """Test that Radiant/Dire teams are correctly mapped to team1/team2."""
-        # Simulate the shuffle output structure
-        # After shuffle, teams are randomly assigned Radiant/Dire
-        # We need to ensure wins/losses are recorded correctly
+    def test_radiant_dire_team_mapping(self, test_db):
+        """Round-trip test: radiant/dire win results are persisted correctly.
 
-        # Scenario: Team 1 (original) becomes Radiant, Team 2 becomes Dire
-        # If Radiant wins, team1_ids should win
-        # If Dire wins, team2_ids should win
+        Records one match where Radiant wins and one where Dire wins, then
+        verifies the persisted match_participants rows mark the correct side
+        as winners in each case.
+        """
+        player_ids = list(range(3001, 3011))
+        for pid in player_ids:
+            test_db.add_player(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
 
-        radiant_team_num = 1
-        dire_team_num = 2
+        radiant = player_ids[:5]
+        dire = player_ids[5:]
 
-        # If Radiant won
-        if radiant_team_num == 1:
-            # Radiant is team 1, so team 1 wins
-            winning_team_for_db = 1
-        else:
-            # Radiant is team 2, so team 2 wins
-            winning_team_for_db = 2
+        def fetch_participants(match_id):
+            conn = test_db.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT discord_id, side, won FROM match_participants WHERE match_id = ?",
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+            conn.close()
+            return rows
 
-        # Verify logic
-        assert winning_team_for_db == 1  # In this scenario
+        # Match 1: Radiant wins
+        match_id = test_db.record_match(
+            radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant"
+        )
+        rows = fetch_participants(match_id)
+        assert len(rows) == 10
+        for row in rows:
+            if row["discord_id"] in radiant:
+                assert row["side"] == "radiant"
+                assert row["won"] == 1, f"Radiant player {row['discord_id']} should be a winner"
+            else:
+                assert row["side"] == "dire"
+                assert row["won"] == 0, f"Dire player {row['discord_id']} should be a loser"
 
-        # Scenario: Team 1 becomes Dire, Team 2 becomes Radiant
-        radiant_team_num = 2
-        dire_team_num = 1
-
-        # If Dire won
-        if dire_team_num == 1:
-            # Dire is team 1, so team 1 wins
-            winning_team_for_db = 1
-        else:
-            # Dire is team 2, so team 2 wins
-            winning_team_for_db = 2
-
-        assert winning_team_for_db == 1  # In this scenario
+        # Match 2: Dire wins - the inverse must hold
+        match_id = test_db.record_match(
+            radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire"
+        )
+        rows = fetch_participants(match_id)
+        assert len(rows) == 10
+        for row in rows:
+            if row["discord_id"] in radiant:
+                assert row["side"] == "radiant"
+                assert row["won"] == 0, f"Radiant player {row['discord_id']} should be a loser"
+            else:
+                assert row["side"] == "dire"
+                assert row["won"] == 1, f"Dire player {row['discord_id']} should be a winner"
 
     @pytest.fixture
     def test_db(self, repo_db_path):
@@ -774,6 +796,77 @@ class TestRadiantDireBugFixRecording:
             player = test_db.get_player(pid)
             # These were originally team2 (Dire), but got swapped to team1, so they won
             assert player.wins == 1, f"Player {pid} should have 1 win"
+
+
+class TestGlickoRatingPersistence:
+    """Verify Glicko-2 ratings are actually persisted after record_match.
+
+    The rating math is unit-tested elsewhere; this guards against a dropped
+    write between MatchService.record_match and the players table.
+    """
+
+    @pytest.fixture
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
+
+    def test_glicko_ratings_persisted_after_record_match(self, test_db):
+        player_repo = PlayerRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+        )
+
+        player_ids = list(range(7001, 7011))
+        _seed_repo_players(player_repo, player_ids)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        winners = list(pending.radiant_team_ids)
+        losers = list(pending.dire_team_ids)
+
+        ratings_before = {
+            pid: player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating
+            for pid in player_ids
+        }
+        assert all(rating == 1500.0 for rating in ratings_before.values())
+
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        # Winners' stored ratings increased; losers' decreased.
+        for pid in winners:
+            after = player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating
+            assert after > ratings_before[pid], (
+                f"Winner {pid} glicko_rating should increase: {ratings_before[pid]} -> {after}"
+            )
+        for pid in losers:
+            after = player_repo.get_by_id(pid, TEST_GUILD_ID).glicko_rating
+            assert after < ratings_before[pid], (
+                f"Loser {pid} glicko_rating should decrease: {ratings_before[pid]} -> {after}"
+            )
+
+        # rating_history rows exist for all 10 participants and agree on won flag.
+        conn = test_db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT discord_id, rating, rating_before, won FROM rating_history WHERE match_id = ?",
+            (match_id,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        assert len(rows) == 10
+        for row in rows:
+            assert row["rating_before"] == 1500.0
+            if row["discord_id"] in winners:
+                assert row["won"] == 1
+                assert row["rating"] > row["rating_before"]
+            else:
+                assert row["won"] == 0
+                assert row["rating"] < row["rating_before"]
 
 
 # =============================================================================

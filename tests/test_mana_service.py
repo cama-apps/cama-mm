@@ -101,8 +101,7 @@ def _make_service(
     gambling_stats = MagicMock()
     gambling_stats.calculate_degen_score.return_value = degen or _make_degen()
     # Stub bet history for streak calculation (empty → streak 0)
-    gambling_stats.bet_repo = MagicMock()
-    gambling_stats.bet_repo.get_player_bet_history.return_value = []
+    gambling_stats.get_player_bet_outcomes.return_value = []
 
     bankruptcy_service = MagicMock()
     bankruptcy_service.get_state.return_value = bk_state or _make_bk_state()
@@ -346,8 +345,7 @@ class TestLandWeights:
 
         gambling_stats = MagicMock()
         gambling_stats.calculate_degen_score.return_value = _make_degen()
-        gambling_stats.bet_repo = MagicMock()
-        gambling_stats.bet_repo.get_player_bet_history.return_value = []
+        gambling_stats.get_player_bet_outcomes.return_value = []
 
         bankruptcy_service = MagicMock()
         bankruptcy_service.get_state.return_value = _make_bk_state()

@@ -1759,6 +1759,11 @@ class IDigRepository(ABC):
     def get_player_rank(self, discord_id: int, guild_id: int) -> int: ...
 
     @abstractmethod
+    def get_top_tunnels(self, guild_id: int, limit: int = 10) -> list[dict]:
+        """Top tunnels for the user-facing leaderboard surface (deterministic order)."""
+        ...
+
+    @abstractmethod
     def get_all_tunnels(self, guild_id: int) -> list[dict]: ...
 
     @abstractmethod
@@ -1792,6 +1797,19 @@ class IDigRepository(ABC):
 
     @abstractmethod
     def get_helper_actions(self, target_id: int, guild_id: int, since_ts: int) -> list[dict]: ...
+
+    @abstractmethod
+    def count_recent_boss_kills(self, guild_id: int, hours: int = 24) -> int:
+        """Count successful boss-fight actions in the guild over the recent window."""
+        ...
+
+    @abstractmethod
+    def get_player_jc_events(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """Every dig action where the player is actor or target, oldest first,
+        for balance-history reconstruction."""
+        ...
 
     # Inventory
     @abstractmethod
@@ -2000,6 +2018,13 @@ class IDigRepository(ABC):
     def clear_active_duel(
         self, discord_id: int, guild_id: int | None,
     ) -> None: ...
+
+    @abstractmethod
+    def claim_active_duel(
+        self, discord_id: int, guild_id: int | None,
+    ) -> dict | None:
+        """Atomically read-and-delete the paused duel row; ``None`` if already claimed."""
+        ...
 
     @abstractmethod
     def has_great_lantern(

@@ -58,15 +58,14 @@ class AdminCommands(commands.Cog):
 
     @admin.command(name="health", description="Show bot health and since-startup usage (Admin only)")
     async def health(self, interaction: discord.Interaction):
-        can_respond = await safe_defer(interaction, ephemeral=True)
         if not has_admin_permission(interaction):
-            if can_respond:
-                await safe_followup(
-                    interaction,
-                    content="❌ Admin only! You need Administrator or Manage Server permissions.",
-                    ephemeral=True,
-                )
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
             return
+
+        can_respond = await safe_defer(interaction, ephemeral=True)
 
         monitoring_service = getattr(self.bot, "monitoring_service", None)
         if monitoring_service is None:

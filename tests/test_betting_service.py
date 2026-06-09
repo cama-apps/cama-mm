@@ -839,3 +839,49 @@ class TestPendingMatchPersistence:
         pending_state.balancing_rating_system = "jopacoin"
         payload = match_service._build_pending_match_payload(pending_state)
         assert payload["balancing_rating_system"] == "jopacoin"
+
+
+def test_blessing_bonus_survives_sanctuary_exception(services):
+    """A consumed Communion Blessing must still pay out if the sanctuary
+    buff check raises.
+
+    consume_atomic destroys the one-shot blessing charge; if an unrelated
+    exception then zeroed the accumulated bonus, the player would burn the
+    charge without ever receiving the payout.
+    """
+    from unittest.mock import MagicMock
+
+    from config import JOPACOIN_WIN_REWARD
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+
+    pid = 7171
+    player_repo.add(
+        discord_id=pid,
+        discord_username="BlessedWinner",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.update_balance(pid, TEST_GUILD_ID, 0)
+
+    buff_service = MagicMock()
+    buff_service.has_sanctuary_match_bonus.side_effect = RuntimeError("boom")
+    buff_service.buff_repo.active_for.return_value = [{"id": 1}]
+    buff_service.buff_repo.consume_atomic.return_value = True
+    buff_service.apply_blood_pact_skim.return_value = 0
+    betting_service.buff_service = buff_service
+
+    results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
+
+    blessing_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.10))
+    assert buff_service.buff_repo.consume_atomic.called, (
+        "Precondition: the blessing charge must actually be consumed"
+    )
+    assert results[pid]["manashop_bonus"] == blessing_bonus, (
+        "Consumed blessing charge must be paid even when the sanctuary check raises"
+    )
+    assert (
+        player_repo.get_balance(pid, TEST_GUILD_ID)
+        == JOPACOIN_WIN_REWARD + blessing_bonus
+    )

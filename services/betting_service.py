@@ -302,23 +302,31 @@ class BettingService:
                 try:
                     if self.buff_service.has_sanctuary_match_bonus(pid, guild_id):
                         bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.15))
+                except Exception:
+                    bonus = 0
+                # The blessing is handled outside the try above: consume_atomic
+                # destroys the one-shot charge, so once it returns True the
+                # bonus must not be zeroed by an unrelated exception (burned
+                # charge with no payout).
+                blessing = None
+                try:
                     blessing = self.buff_service.buff_repo.active_for(
                         pid, guild_id, BUFF_COMMUNION_BLESSING,
                     )
-                    if blessing:
-                        # Only the caller that wins consume_atomic gets to add
-                        # the bonus; the second concurrent caller observes
-                        # rowcount==0 and skips.
-                        try:
-                            consumed = self.buff_service.buff_repo.consume_atomic(
-                                blessing[0]["id"]
-                            )
-                        except Exception:
-                            consumed = False
-                        if consumed:
-                            bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.10))
                 except Exception:
-                    bonus = 0
+                    blessing = None
+                if blessing:
+                    # Only the caller that wins consume_atomic gets to add
+                    # the bonus; the second concurrent caller observes
+                    # rowcount==0 and skips.
+                    try:
+                        consumed = self.buff_service.buff_repo.consume_atomic(
+                            blessing[0]["id"]
+                        )
+                    except Exception:
+                        consumed = False
+                    if consumed:
+                        bonus += max(1, int(JOPACOIN_WIN_REWARD * 0.10))
                 if bonus > 0:
                     try:
                         self.player_repo.add_balance(pid, guild_id, bonus)

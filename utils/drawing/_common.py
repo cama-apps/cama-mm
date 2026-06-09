@@ -57,15 +57,22 @@ POSITION_COLORS = {
 
 # ─── Font + size helpers ───────────────────────────────────────────────────
 
+_CACHED_FONTS: dict[int, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
+
+
 def _get_font(size: int = 16) -> ImageFont.FreeTypeFont:
     """Get a font, falling back to default if custom fonts unavailable."""
-    try:
-        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-    except OSError:
+    if size not in _CACHED_FONTS:
         try:
-            return ImageFont.truetype("arial.ttf", size)
+            _CACHED_FONTS[size] = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size
+            )
         except OSError:
-            return ImageFont.load_default()
+            try:
+                _CACHED_FONTS[size] = ImageFont.truetype("arial.ttf", size)
+            except OSError:
+                _CACHED_FONTS[size] = ImageFont.load_default()
+    return _CACHED_FONTS[size]
 
 
 def _get_text_size(font: ImageFont.FreeTypeFont, text: str) -> tuple[int, int]:

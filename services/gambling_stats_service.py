@@ -894,6 +894,19 @@ class GamblingStatsService:
 
     # --- Convenience methods to avoid repository access from commands ---
 
+    def get_player_bet_outcomes(self, discord_id: int, guild_id: int | None = None) -> list[str]:
+        """Get a player's bet outcomes in chronological order.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID (None for DMs)
+
+        Returns:
+            List of outcomes ("won"/"lost"), oldest first
+        """
+        history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
+        return [b["outcome"] for b in history]
+
     def get_player_bankruptcy_count(self, discord_id: int, guild_id: int | None = None) -> int:
         """Get number of bankruptcies for a player.
 
