@@ -35,11 +35,25 @@ class TaxService:
         guild_id: int | None,
         *,
         limit: int = 20,
+        offset: int = 0,
         user_id: int | None = None,
     ) -> list[dict]:
         return self.ledger_repo.get_recent_entries(
             guild_id,
             limit=limit,
+            offset=offset,
+            account_type="player" if user_id is not None else None,
+            account_id=user_id,
+        )
+
+    def count_ledger_entries(
+        self,
+        guild_id: int | None,
+        *,
+        user_id: int | None = None,
+    ) -> int:
+        return self.ledger_repo.count_entries(
+            guild_id,
             account_type="player" if user_id is not None else None,
             account_id=user_id,
         )

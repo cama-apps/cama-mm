@@ -13,11 +13,13 @@ class EconomyLedgerRepository(BaseRepository):
         guild_id: int | None,
         *,
         limit: int = 20,
+        offset: int = 0,
         account_type: str | None = None,
         account_id: int | None = None,
     ) -> list[dict]:
         gid = self.normalize_guild_id(guild_id)
         limit = max(1, min(int(limit), 100))
+        offset = max(0, int(offset))
         clauses = ["guild_id = ?"]
         params: list[object] = [gid]
         if account_type is not None:
@@ -26,7 +28,7 @@ class EconomyLedgerRepository(BaseRepository):
         if account_id is not None:
             clauses.append("account_id = ?")
             params.append(account_id)
-        params.append(limit)
+        params.extend([limit, offset])
         where = " AND ".join(clauses)
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -38,11 +40,40 @@ class EconomyLedgerRepository(BaseRepository):
                 FROM economy_ledger_entries
                 WHERE {where}
                 ORDER BY created_at DESC, ledger_id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
                 params,
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def count_entries(
+        self,
+        guild_id: int | None,
+        *,
+        account_type: str | None = None,
+        account_id: int | None = None,
+    ) -> int:
+        gid = self.normalize_guild_id(guild_id)
+        clauses = ["guild_id = ?"]
+        params: list[object] = [gid]
+        if account_type is not None:
+            clauses.append("account_type = ?")
+            params.append(account_type)
+        if account_id is not None:
+            clauses.append("account_id = ?")
+            params.append(account_id)
+        where = " AND ".join(clauses)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM economy_ledger_entries
+                WHERE {where}
+                """,
+                params,
+            )
+            return int(cursor.fetchone()[0] or 0)
 
     def get_source_totals(self, guild_id: int | None, *, limit: int = 20) -> list[dict]:
         gid = self.normalize_guild_id(guild_id)
