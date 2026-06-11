@@ -488,6 +488,8 @@ class ServiceContainer:
             dig_service=c["dig_service"],
             flavor_service=c["mafia_flavor_service"],
             hero_provider=HeroProvider(),
+            max_debt=self.max_debt,
+            bankruptcy_penalty_rate=c["bankruptcy_service"].penalty_rate,
         )
 
     def _init_extras(self) -> None:

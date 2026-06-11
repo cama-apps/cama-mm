@@ -16,6 +16,7 @@ from domain.models.mafia import (
     MafiaWinner,
 )
 from repositories.mafia_repository import MafiaRepository
+from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
@@ -24,7 +25,26 @@ def mafia_repo(repo_db_path):
     return MafiaRepository(repo_db_path)
 
 
-def _seed_wheel_spin(repo, *, discord_id: int, guild_id: int, ts: int) -> None:
+def _seed_registered_player(
+    repo, *, discord_id: int, guild_id: int, balance: int = 100
+) -> None:
+    player_repo = PlayerRepository(repo.db_path)
+    try:
+        player_repo.add(
+            discord_id=discord_id,
+            discord_username=f"user_{discord_id}",
+            guild_id=guild_id,
+        )
+    except ValueError:
+        pass
+    player_repo.update_balance(discord_id, guild_id, balance)
+
+
+def _seed_wheel_spin(
+    repo, *, discord_id: int, guild_id: int, ts: int, registered: bool = True
+) -> None:
+    if registered:
+        _seed_registered_player(repo, discord_id=discord_id, guild_id=guild_id)
     with repo.connection() as conn:
         conn.cursor().execute(
             """
@@ -35,7 +55,11 @@ def _seed_wheel_spin(repo, *, discord_id: int, guild_id: int, ts: int) -> None:
         )
 
 
-def _seed_dig_action(repo, *, actor_id: int, guild_id: int, ts: int) -> None:
+def _seed_dig_action(
+    repo, *, actor_id: int, guild_id: int, ts: int, registered: bool = True
+) -> None:
+    if registered:
+        _seed_registered_player(repo, discord_id=actor_id, guild_id=guild_id)
     with repo.connection() as conn:
         conn.cursor().execute(
             """
@@ -229,6 +253,36 @@ def test_eligibility_dedup_across_sources(mafia_repo):
 
     ids = mafia_repo.get_eligible_player_ids(TEST_GUILD_ID, since=now - 86400)
     assert ids == [100]
+
+
+def test_eligibility_excludes_unregistered_activity(mafia_repo):
+    now = int(time.time())
+    _seed_dig_action(
+        mafia_repo,
+        actor_id=100,
+        guild_id=TEST_GUILD_ID,
+        ts=now - 100,
+        registered=False,
+    )
+
+    ids = mafia_repo.get_eligible_player_ids(TEST_GUILD_ID, since=now - 86400)
+    assert ids == []
+
+
+def test_eligibility_excludes_players_past_entry_fee_debt_floor(mafia_repo):
+    now = int(time.time())
+    _seed_dig_action(mafia_repo, actor_id=100, guild_id=TEST_GUILD_ID, ts=now - 100)
+    _seed_registered_player(
+        mafia_repo, discord_id=100, guild_id=TEST_GUILD_ID, balance=-480
+    )
+
+    ids = mafia_repo.get_eligible_player_ids(
+        TEST_GUILD_ID,
+        since=now - 86400,
+        entry_fee=30,
+        max_debt=500,
+    )
+    assert ids == []
 
 
 # ── Optout ────────────────────────────────────────────────────────────────

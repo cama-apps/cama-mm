@@ -1,6 +1,7 @@
 """Repository for Daily Mafia subgame data access."""
 
 import time
+from typing import Any
 
 from domain.models.mafia import (
     MafiaActionType,
@@ -121,6 +122,112 @@ class MafiaRepository(BaseRepository):
             )
             return cursor.lastrowid
 
+    def create_game_with_players_and_entry_fees(
+        self,
+        *,
+        guild_id: int | None,
+        game_date: str,
+        phase: MafiaPhase,
+        started_at: int,
+        roster_size: int,
+        twist_event: MafiaTwist | None,
+        entry_fee: int,
+        players: list[MafiaPlayer],
+        max_debt: int,
+    ) -> int:
+        """Create a game, roster players, and collect entry fees atomically."""
+        if not players:
+            raise ValueError("no_players")
+
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO mafia_games (
+                    guild_id, game_date, phase, started_at, roster_size,
+                    twist_event, entry_fee
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    gid,
+                    game_date,
+                    phase.value,
+                    started_at,
+                    roster_size,
+                    twist_event.value if twist_event else None,
+                    entry_fee,
+                ),
+            )
+            game_id = cursor.lastrowid
+
+            player_rows = [
+                (
+                    game_id,
+                    p.discord_id,
+                    gid,
+                    p.role.value,
+                    1 if p.is_godfather else 0,
+                    p.hero_name,
+                    1 if p.is_alive else 0,
+                    p.eliminated_phase.value if p.eliminated_phase else None,
+                    p.eliminated_at,
+                    1 if p.acted else 0,
+                )
+                for p in players
+            ]
+            cursor.executemany(
+                """
+                INSERT INTO mafia_players (
+                    game_id, discord_id, guild_id, role, is_godfather, hero_name,
+                    is_alive, eliminated_phase, eliminated_at, acted
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                player_rows,
+            )
+
+            self._set_economy_ledger_context(
+                cursor,
+                source="mafia_entry_fee",
+                related_type="mafia_game",
+                related_id=game_id,
+                reason="mafia entry fee",
+                metadata={
+                    "game_date": game_date,
+                    "entry_fee": entry_fee,
+                    "roster_size": roster_size,
+                },
+            )
+            try:
+                for player in players:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                          AND COALESCE(jopacoin_balance, 0) - ? >= ?
+                        """,
+                        (entry_fee, player.discord_id, gid, entry_fee, -max_debt),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ValueError("entry_fee_debit_failed")
+                player_ids = [p.discord_id for p in players]
+                placeholders = ",".join("?" * len(player_ids))
+                cursor.execute(
+                    f"""
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id IN ({placeholders}) AND guild_id = ?
+                      AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    player_ids + [gid],
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
+            return game_id
+
     def set_phase(
         self,
         game_id: int,
@@ -195,6 +302,167 @@ class MafiaRepository(BaseRepository):
                     game_id,
                 ),
             )
+
+    def apply_night_resolution(
+        self, game_id: int, killed_ids: list[int], *, ended_at: int | None = None
+    ) -> bool:
+        """Atomically apply night deaths and advance NIGHT -> DAY once."""
+        ended = ended_at if ended_at is not None else int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE mafia_games
+                SET phase = ?, night_ended_at = ?
+                WHERE game_id = ? AND phase = ?
+                """,
+                (MafiaPhase.DAY.value, ended, game_id, MafiaPhase.NIGHT.value),
+            )
+            if cursor.rowcount != 1:
+                return False
+
+            for discord_id in killed_ids:
+                cursor.execute(
+                    """
+                    UPDATE mafia_players
+                    SET is_alive = 0, eliminated_phase = ?, eliminated_at = ?
+                    WHERE game_id = ? AND discord_id = ? AND is_alive = 1
+                    """,
+                    (MafiaPhase.NIGHT.value, ended, game_id, discord_id),
+                )
+            return True
+
+    def finalize_day_resolution(
+        self,
+        *,
+        game_id: int,
+        winner: MafiaWinner,
+        payout_per_winner: int,
+        mvp_id: int | None,
+        lynched_id: int | None,
+        payout_deltas: dict[int, int],
+        entry_fee: int,
+        bankruptcy_penalty_rate: float | None = None,
+        ended_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Atomically apply lynch, payouts, bankruptcy sinks, and DAY -> RESOLVED."""
+        ended = ended_at if ended_at is not None else int(time.time())
+        penalties: dict[int, int] = {}
+        gid: int | None = None
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT guild_id FROM mafia_games WHERE game_id = ?", (game_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return {"applied": False, "reason": "game_not_found"}
+            gid = row["guild_id"]
+
+            cursor.execute(
+                """
+                UPDATE mafia_games
+                SET phase = ?, winner = ?, payout_per_winner = ?, mvp_id = ?, day_ended_at = ?
+                WHERE game_id = ? AND phase = ?
+                """,
+                (
+                    MafiaPhase.RESOLVED.value,
+                    winner.value,
+                    payout_per_winner,
+                    mvp_id,
+                    ended,
+                    game_id,
+                    MafiaPhase.DAY.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return {"applied": False, "reason": "already_resolved"}
+
+            if lynched_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE mafia_players
+                    SET is_alive = 0, eliminated_phase = ?, eliminated_at = ?
+                    WHERE game_id = ? AND discord_id = ? AND is_alive = 1
+                    """,
+                    (MafiaPhase.DAY.value, ended, game_id, lynched_id),
+                )
+
+            if payout_deltas:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="mafia_payout",
+                    related_type="mafia_game",
+                    related_id=game_id,
+                    reason="mafia pot payout",
+                    metadata={
+                        "winner": winner.value,
+                        "entry_fee": entry_fee,
+                        "payout_per_winner": payout_per_winner,
+                    },
+                )
+                try:
+                    for discord_id, amount in payout_deltas.items():
+                        if amount <= 0:
+                            continue
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (amount, discord_id, gid),
+                        )
+                        if cursor.rowcount != 1:
+                            raise ValueError("payout_player_missing")
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            if bankruptcy_penalty_rate is not None:
+                kept_rate = max(0.0, min(1.0, bankruptcy_penalty_rate))
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="mafia_bankruptcy_penalty",
+                    related_type="mafia_game",
+                    related_id=game_id,
+                    reason="mafia bankruptcy penalty",
+                    metadata={"winner": winner.value, "entry_fee": entry_fee},
+                )
+                try:
+                    for discord_id, amount in payout_deltas.items():
+                        profit = max(0, int(amount) - entry_fee)
+                        if profit <= 0:
+                            continue
+                        cursor.execute(
+                            """
+                            SELECT COALESCE(penalty_games_remaining, 0) AS penalty_games
+                            FROM bankruptcy_state
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (discord_id, gid),
+                        )
+                        state = cursor.fetchone()
+                        if state is None or int(state["penalty_games"]) <= 0:
+                            continue
+                        penalty = int(profit * (1 - kept_rate))
+                        if penalty <= 0:
+                            continue
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (penalty, discord_id, gid),
+                        )
+                        if cursor.rowcount != 1:
+                            raise ValueError("penalty_player_missing")
+                        penalties[discord_id] = penalty
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            return {"applied": True, "bankruptcy_penalties": penalties, "guild_id": gid}
 
     # ── Players ─────────────────────────────────────────────────────────────
 
@@ -374,28 +642,47 @@ class MafiaRepository(BaseRepository):
 
     # ── Eligibility & opt-out ───────────────────────────────────────────────
 
-    def get_eligible_player_ids(self, guild_id: int | None, since: int) -> list[int]:
+    def get_eligible_player_ids(
+        self,
+        guild_id: int | None,
+        since: int,
+        *,
+        entry_fee: int = 0,
+        max_debt: int | None = None,
+    ) -> list[int]:
         """Distinct discord_ids active in /gamba or /dig within the last `since` window.
 
-        `since` is a unix timestamp lower-bound. Excludes opted-out players.
+        `since` is a unix timestamp lower-bound. Excludes opted-out players,
+        unregistered players, and players who cannot pay the entry fee without
+        exceeding the configured debt floor.
         """
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
+            debt_clause = ""
+            params: list = [gid, since, gid, since, gid, gid]
+            if max_debt is not None:
+                debt_clause = "AND COALESCE(p.jopacoin_balance, 0) - ? >= ?"
+                params.extend([entry_fee, -max_debt])
             cursor.execute(
-                """
-                SELECT DISTINCT discord_id FROM (
+                f"""
+                SELECT DISTINCT recent.discord_id FROM (
                     SELECT discord_id FROM wheel_spins
                       WHERE guild_id = ? AND spin_time >= ?
                     UNION
                     SELECT actor_id AS discord_id FROM dig_actions
                       WHERE guild_id = ? AND action_type = 'dig' AND created_at >= ?
                 ) AS recent
-                WHERE discord_id NOT IN (
+                JOIN players p
+                  ON p.discord_id = recent.discord_id
+                 AND p.guild_id = ?
+                WHERE recent.discord_id NOT IN (
                     SELECT discord_id FROM mafia_optout WHERE guild_id = ?
                 )
+                {debt_clause}
+                ORDER BY recent.discord_id
                 """,
-                (gid, since, gid, since, gid),
+                params,
             )
             return [row["discord_id"] for row in cursor.fetchall()]
 

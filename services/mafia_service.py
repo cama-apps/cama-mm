@@ -6,9 +6,11 @@ and read-side queries for the /mafia command surface.
 
 import logging
 import random
+import sqlite3
 import time
 from collections import Counter
 
+from config import MAX_DEBT
 from domain.models.mafia import (
     MAFIA_ROLES,
     TOWN_ROLES,
@@ -98,6 +100,8 @@ class MafiaService:
         flavor_service,
         hero_provider,
         rng: random.Random | None = None,
+        max_debt: int = MAX_DEBT,
+        bankruptcy_penalty_rate: float | None = None,
     ):
         self.repo = mafia_repo
         self.player_repo = player_repo
@@ -105,6 +109,8 @@ class MafiaService:
         self.flavor_service = flavor_service
         self.hero_provider = hero_provider
         self._rng = rng or random.Random()
+        self.max_debt = max_debt
+        self.bankruptcy_penalty_rate = bankruptcy_penalty_rate
 
     # ────────────────────────────────────────────────────────────────────
     # Lifecycle
@@ -121,46 +127,56 @@ class MafiaService:
         if existing is not None:
             return existing
 
-        eligible = self._collect_eligible_players(guild_id)
-        if len(eligible) < MIN_ROSTER:
-            logger.info(
-                "Mafia start skipped for guild %s: only %d eligible players",
-                guild_id,
-                len(eligible),
-            )
-            return None
+        for attempt in range(2):
+            eligible = self._collect_eligible_players(guild_id)
+            if len(eligible) < MIN_ROSTER:
+                logger.info(
+                    "Mafia start skipped for guild %s: only %d eligible players",
+                    guild_id,
+                    len(eligible),
+                )
+                return None
 
-        if len(eligible) > MAX_ROSTER:
-            eligible = self._rng.sample(eligible, MAX_ROSTER)
+            if len(eligible) > MAX_ROSTER:
+                eligible = self._rng.sample(eligible, MAX_ROSTER)
 
-        roster_size = len(eligible)
-        twist = self._roll_twist()
-        started_at = int(time.time())
+            roster_size = len(eligible)
+            twist = self._roll_twist()
+            started_at = int(time.time())
+            players = self._assign_roles(0, guild_id, eligible)
 
-        game_id = self.repo.create_game(
-            guild_id=guild_id,
-            game_date=game_date,
-            phase=MafiaPhase.NIGHT,
-            started_at=started_at,
-            roster_size=roster_size,
-            twist_event=twist,
-            entry_fee=ENTRY_FEE,
-        )
+            try:
+                game_id = self.repo.create_game_with_players_and_entry_fees(
+                    guild_id=guild_id,
+                    game_date=game_date,
+                    phase=MafiaPhase.NIGHT,
+                    started_at=started_at,
+                    roster_size=roster_size,
+                    twist_event=twist,
+                    entry_fee=ENTRY_FEE,
+                    players=players,
+                    max_debt=self.max_debt,
+                )
+            except sqlite3.IntegrityError:
+                existing = self.repo.get_game_for_date(guild_id, game_date)
+                if existing is not None:
+                    return existing
+                raise
+            except ValueError as exc:
+                if str(exc) == "entry_fee_debit_failed" and attempt == 0:
+                    continue
+                logger.info(
+                    "Mafia start skipped for guild %s: entry fee debit failed",
+                    guild_id,
+                )
+                return None
 
-        players = self._assign_roles(game_id, guild_id, eligible)
-        self.repo.add_players(game_id, players)
+            game = self.repo.get_game_by_id(game_id)
+            if game is not None:
+                game.players = self.repo.get_players(game_id)
+            return game
 
-        # Debit the entry fee from every rostered player. Negative balances are
-        # allowed — consistent with how the bankruptcy/loan system handles JC
-        # sinks elsewhere — and skipping under-balance players would skew the
-        # EV=0 symmetry argument.
-        for pid in eligible:
-            self.player_repo.add_balance(pid, guild_id, -ENTRY_FEE)
-
-        game = self.repo.get_game_by_id(game_id)
-        if game is not None:
-            game.players = players
-        return game
+        return None
 
     def resolve_night(self, guild_id: int | None) -> dict:
         """Apply night actions, mark the dead, advance to DAY.
@@ -214,25 +230,26 @@ class MafiaService:
                 plague_target = self._rng.choice(candidates)
 
         killed: list[dict] = []
+        killed_ids: list[int] = []
         for tid in mafia_kill_targets:
-            self._kill_player(game.game_id, tid, MafiaPhase.NIGHT, by_id)
             killed.append({"discord_id": tid, "by": "mafia"})
+            killed_ids.append(tid)
         if vig_target is not None:
-            self._kill_player(game.game_id, vig_target, MafiaPhase.NIGHT, by_id)
             killed.append({"discord_id": vig_target, "by": "vigilante"})
+            killed_ids.append(vig_target)
         if plague_target is not None:
-            self._kill_player(game.game_id, plague_target, MafiaPhase.NIGHT, by_id)
             killed.append({"discord_id": plague_target, "by": "plague"})
+            killed_ids.append(plague_target)
 
         # Process detective investigations: persist results.
         if game.twist_event != MafiaTwist.MEMORY_FOG:
             self._record_detective_results(game, by_id)
 
-        self.repo.set_phase(
-            game.game_id,
-            MafiaPhase.DAY,
-            night_ended_at=int(time.time()),
+        applied = self.repo.apply_night_resolution(
+            game.game_id, killed_ids, ended_at=int(time.time())
         )
+        if not applied:
+            return {"resolved": False, "reason": "night_already_resolved"}
 
         return {
             "resolved": True,
@@ -266,12 +283,13 @@ class MafiaService:
         if game.twist_event != MafiaTwist.TOWN_HALL:
             lynched_id = self._tally_lynch(valid_votes)
 
-        if lynched_id is not None:
-            self._kill_player(game.game_id, lynched_id, MafiaPhase.DAY, by_id)
+        if lynched_id is not None and lynched_id in by_id:
+            by_id[lynched_id].is_alive = False
+            by_id[lynched_id].eliminated_phase = MafiaPhase.DAY
 
-        # Re-read live state after lynch.
-        all_players = self.repo.get_players(game.game_id)
-        by_id = {p.discord_id: p for p in all_players}
+        # Evaluate against the local post-lynch state. The DB write happens
+        # atomically with payouts below.
+        all_players = list(by_id.values())
 
         # Win condition: jester first (overrides everything).
         winner: MafiaWinner
@@ -289,7 +307,8 @@ class MafiaService:
                 # One-day cadence: don't loop. Mafia wins by attrition if not pinned.
                 winner = MafiaWinner.MAFIA if alive_mafia > 0 else MafiaWinner.TOWN
 
-        pot_total = _pot_for_roster(game.roster_size)
+        entry_fee = game.entry_fee or ENTRY_FEE
+        pot_total = game.roster_size * entry_fee
         winning_ids = self._winners_for(all_players, winner)
         mvp_id = self._compute_mvp(
             game, all_players, winner, lynched_id, valid_votes
@@ -319,15 +338,21 @@ class MafiaService:
         else:
             payout_per_winner = 0
 
-        for pid, amount in deltas.items():
-            self.player_repo.add_balance(pid, game.guild_id, amount)
-
-        self.repo.finalize_game(
-            game.game_id,
+        finalize = self.repo.finalize_day_resolution(
+            game_id=game.game_id,
             winner=winner,
             payout_per_winner=payout_per_winner,
             mvp_id=mvp_id,
+            lynched_id=lynched_id,
+            payout_deltas=deltas,
+            entry_fee=entry_fee,
+            bankruptcy_penalty_rate=self.bankruptcy_penalty_rate,
         )
+        if not finalize.get("applied"):
+            return {
+                "resolved": False,
+                "reason": finalize.get("reason", "day_already_resolved"),
+            }
 
         return {
             "resolved": True,
@@ -337,8 +362,9 @@ class MafiaService:
             "mvp_id": mvp_id,
             "payout_per_winner": payout_per_winner,
             "pot_total": pot_total,
-            "entry_fee": ENTRY_FEE,
+            "entry_fee": entry_fee,
             "winning_ids": list(winning_ids),
+            "bankruptcy_penalties": finalize.get("bankruptcy_penalties", {}),
             "vote_breakdown": self._vote_breakdown(valid_votes),
             "twist": game.twist_event.value if game.twist_event else None,
         }
@@ -592,7 +618,9 @@ class MafiaService:
 
     def _collect_eligible_players(self, guild_id: int | None) -> list[int]:
         since = int(time.time()) - ELIGIBILITY_WINDOW_S
-        candidates = self.repo.get_eligible_player_ids(guild_id, since)
+        candidates = self.repo.get_eligible_player_ids(
+            guild_id, since, entry_fee=ENTRY_FEE, max_debt=self.max_debt
+        )
         return [pid for pid in candidates if self.is_active_for_auto_roster(guild_id, pid)]
 
     def _roll_twist(self) -> MafiaTwist | None:

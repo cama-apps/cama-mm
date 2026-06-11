@@ -15,6 +15,7 @@ from domain.models.mafia import (
     MafiaTwist,
     MafiaWinner,
 )
+from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.mafia_repository import MafiaRepository
 from repositories.player_repository import PlayerRepository
 from services.mafia_service import (
@@ -82,12 +83,22 @@ def _seed_player(player_repo, discord_id: int, balance: int = 0) -> None:
         discord_username=f"user_{discord_id}",
         guild_id=TEST_GUILD_ID,
     )
-    if balance:
-        player_repo.add_balance(discord_id, TEST_GUILD_ID, balance)
+    player_repo.update_balance(discord_id, TEST_GUILD_ID, balance)
 
 
 def _seed_eligible_via_dig(mafia_repo, ids: list[int], guild_id: int = TEST_GUILD_ID) -> None:
+    player_repo = PlayerRepository(mafia_repo.db_path)
     now = int(time.time())
+    for pid in ids:
+        try:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"user_{pid}",
+                guild_id=guild_id,
+            )
+        except ValueError:
+            pass
+        player_repo.update_balance(pid, guild_id, 100)
     with mafia_repo.connection() as conn:
         cursor = conn.cursor()
         for pid in ids:
@@ -118,6 +129,39 @@ def test_idempotent_start(mafia_repo, mafia_service):
     second = mafia_service.start_daily_game(TEST_GUILD_ID)
     assert second is not None
     assert first.game_id == second.game_id
+
+
+def test_start_daily_game_debits_entry_fee_once(mafia_repo, mafia_service, player_repo):
+    ids = list(range(101, 110))
+    _seed_eligible_via_dig(mafia_repo, ids)
+
+    first = mafia_service.start_daily_game(TEST_GUILD_ID)
+    assert first is not None
+    balances_after_first = {
+        pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids
+    }
+    assert set(balances_after_first.values()) == {100 - ENTRY_FEE}
+
+    second = mafia_service.start_daily_game(TEST_GUILD_ID)
+    assert second is not None
+    assert second.game_id == first.game_id
+    assert {
+        pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids
+    } == balances_after_first
+
+
+def test_auto_roster_excludes_players_past_entry_fee_debt_floor(
+    mafia_repo, mafia_service, player_repo
+):
+    ids = list(range(101, 107))
+    _seed_eligible_via_dig(mafia_repo, ids)
+    player_repo.update_balance(106, TEST_GUILD_ID, -480)
+
+    game = mafia_service.start_daily_game(TEST_GUILD_ID)
+    assert game is not None
+    rostered = {p.discord_id for p in mafia_repo.get_players(game.game_id)}
+    assert 106 not in rostered
+    assert len(rostered) == 5
 
 
 @pytest.mark.parametrize("roster_size", list(range(5, 16)))
@@ -192,6 +236,16 @@ def _new_game(mafia_repo, players: list[tuple[int, MafiaRole, bool]], date: str 
     """Helper to create a game and roster directly without service."""
     from domain.models.mafia import MafiaPlayer
 
+    player_repo = PlayerRepository(mafia_repo.db_path)
+    for pid, _, _ in players:
+        try:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"user_{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+        except ValueError:
+            pass
     gid = mafia_repo.create_game(TEST_GUILD_ID, date, MafiaPhase.NIGHT, int(time.time()), len(players), None)
     mp = []
     for pid, role, gf in players:
@@ -362,6 +416,32 @@ def test_no_kill_submission_picks_random_alive_non_mafia(mafia_service, mafia_re
     assert len(summary["killed"]) == 1
     victim_id = summary["killed"][0]["discord_id"]
     assert victim_id in {2, 3, 4, 5}
+
+
+def test_resolve_night_only_advances_once(mafia_service, mafia_repo):
+    gid = _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.MAFIA, True),
+            (2, MafiaRole.TOWNIE, False),
+            (3, MafiaRole.DOCTOR, False),
+            (4, MafiaRole.DETECTIVE, False),
+            (5, MafiaRole.TOWNIE, False),
+        ],
+    )
+
+    first = mafia_service.resolve_night(TEST_GUILD_ID)
+    assert first["resolved"] is True
+    deaths_after_first = [
+        p.discord_id for p in mafia_repo.get_players(gid) if not p.is_alive
+    ]
+
+    second = mafia_service.resolve_night(TEST_GUILD_ID)
+    assert second["resolved"] is False
+    deaths_after_second = [
+        p.discord_id for p in mafia_repo.get_players(gid) if not p.is_alive
+    ]
+    assert deaths_after_second == deaths_after_first
 
 
 # ── Day resolution / win conditions ──────────────────────────────────────
@@ -603,6 +683,90 @@ def test_zero_sum_across_outcomes(mafia_service, mafia_repo, player_repo):
         assert total_delta == 0, (
             f"scenario {i} ({expected_winner.value}): non-zero net delta {total_delta}"
         )
+
+
+def test_resolve_day_does_not_double_pay(mafia_service, mafia_repo, player_repo):
+    ids = [401, 402, 403, 404, 405]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=0)
+    starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
+    for pid in ids:
+        player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
+
+    _new_game(
+        mafia_repo,
+        [
+            (401, MafiaRole.MAFIA, True),
+            (402, MafiaRole.TOWNIE, False),
+            (403, MafiaRole.DOCTOR, False),
+            (404, MafiaRole.DETECTIVE, False),
+            (405, MafiaRole.TOWNIE, False),
+        ],
+    )
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (402, 403, 404, 405):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 401)
+
+    first = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert first["resolved"] is True
+    balances_after_first = {
+        pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids
+    }
+
+    second = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert second["resolved"] is False
+    assert {
+        pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids
+    } == balances_after_first
+
+    total_delta = sum(balances_after_first[pid] - starting[pid] for pid in ids)
+    assert total_delta == 0
+
+
+def test_bankruptcy_penalty_sinks_mafia_profit(
+    mafia_service, mafia_repo, player_repo
+):
+    bankruptcy_repo = BankruptcyRepository(mafia_repo.db_path)
+    mafia_service.bankruptcy_penalty_rate = 0.75
+    ids = [501, 502, 503, 504, 505]
+    town_ids = [502, 503, 504, 505]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=0)
+    starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
+    for pid in ids:
+        player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
+    for pid in town_ids:
+        bankruptcy_repo.upsert_state(
+            pid,
+            TEST_GUILD_ID,
+            last_bankruptcy_at=int(time.time()) - 1000,
+            penalty_games_remaining=3,
+        )
+
+    _new_game(
+        mafia_repo,
+        [
+            (501, MafiaRole.MAFIA, True),
+            (502, MafiaRole.TOWNIE, False),
+            (503, MafiaRole.DOCTOR, False),
+            (504, MafiaRole.DETECTIVE, False),
+            (505, MafiaRole.TOWNIE, False),
+        ],
+    )
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in town_ids:
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 501)
+
+    summary = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert summary["winner"] == MafiaWinner.TOWN.value
+    penalties = summary["bankruptcy_penalties"]
+    assert penalties
+    assert set(penalties).issubset(set(town_ids))
+
+    total_delta = sum(
+        player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
+    )
+    assert total_delta == -sum(penalties.values())
 
 
 # ── Auto-skip ─────────────────────────────────────────────────────────────
