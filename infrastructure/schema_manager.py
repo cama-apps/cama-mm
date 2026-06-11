@@ -460,6 +460,10 @@ class SchemaManager:
                 "backfill_economy_ledger_opening_balances",
                 self._migration_backfill_economy_ledger_opening_balances,
             ),
+            # Daily Mafia subgame
+            ("create_mafia_tables", self._migration_create_mafia_tables),
+            # Entry-fee economy: pot-funded payouts so per-game EV = 0.
+            ("add_mafia_entry_fee_column", self._migration_add_mafia_entry_fee_column),
         ]
 
     # --- Migrations ---
@@ -3931,3 +3935,96 @@ class SchemaManager:
         prediction rework replaced it; all pool-mode read/write paths have
         been removed."""
         cursor.execute("DROP TABLE IF EXISTS prediction_bets")
+
+    def _migration_create_mafia_tables(self, cursor) -> None:
+        """Create all tables for the Daily Mafia subgame."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_games (
+                game_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id             INTEGER NOT NULL DEFAULT 0,
+                game_date            TEXT    NOT NULL,
+                phase                TEXT    NOT NULL,
+                started_at           INTEGER NOT NULL,
+                night_ended_at       INTEGER,
+                day_ended_at         INTEGER,
+                winner               TEXT,
+                entry_fee            INTEGER NOT NULL DEFAULT 0,
+                payout_per_winner    INTEGER NOT NULL DEFAULT 0,
+                mvp_id               INTEGER,
+                roster_size          INTEGER NOT NULL,
+                twist_event          TEXT,
+                mafia_thread_id      INTEGER,
+                discussion_thread_id INTEGER,
+                setup_message_id     INTEGER,
+                UNIQUE(guild_id, game_date)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_games_guild_phase ON mafia_games(guild_id, phase)"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_players (
+                game_id          INTEGER NOT NULL,
+                discord_id       INTEGER NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                role             TEXT    NOT NULL,
+                is_godfather     INTEGER NOT NULL DEFAULT 0,
+                hero_name        TEXT,
+                is_alive         INTEGER NOT NULL DEFAULT 1,
+                eliminated_phase TEXT,
+                eliminated_at    INTEGER,
+                acted            INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (game_id, discord_id),
+                FOREIGN KEY (game_id) REFERENCES mafia_games(game_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_players_lookup ON mafia_players(guild_id, discord_id)"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_actions (
+                action_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id     INTEGER NOT NULL,
+                guild_id    INTEGER NOT NULL DEFAULT 0,
+                actor_id    INTEGER NOT NULL,
+                target_id   INTEGER,
+                action_type TEXT NOT NULL,
+                phase       TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                result      TEXT,
+                UNIQUE(game_id, actor_id, action_type, phase)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_actions_game_type ON mafia_actions(game_id, action_type)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_actions_actor ON mafia_actions(game_id, actor_id)"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_optout (
+                discord_id INTEGER NOT NULL,
+                guild_id   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+    def _migration_add_mafia_entry_fee_column(self, cursor) -> None:
+        """Persist the entry fee charged per mafia game so audits can reconstruct
+        the pot used to compute payouts. Idempotent for fresh installs where the
+        column already appears in _migration_create_mafia_tables.
+        """
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "entry_fee", "INTEGER NOT NULL DEFAULT 0"
+        )
