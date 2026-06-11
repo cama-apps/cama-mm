@@ -59,6 +59,10 @@ class BankruptcyService(IBankruptcyService):
     1. Their debt is cleared (balance set to 0)
     2. They receive reduced winnings for the next N games
     3. They cannot declare bankruptcy again for a cooldown period
+
+    Note: despite the name, ``penalty_rate`` is the fraction of winnings
+    KEPT while the penalty is active (e.g. 0.5 = winners keep 50%), matching
+    the BANKRUPTCY_PENALTY_RATE config semantics — not the fraction removed.
     """
 
     def __init__(

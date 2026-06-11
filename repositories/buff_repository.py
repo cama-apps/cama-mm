@@ -149,6 +149,41 @@ class BuffRepository(BaseRepository):
             )
             return cursor.rowcount > 0
 
+    def consume_and_credit_atomic(
+        self,
+        buff_id: int,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+    ) -> bool:
+        """Atomically consume a one-shot buff and credit the player's balance.
+
+        Consumes the buff exactly like ``consume_atomic`` (rowcount==0 means
+        another caller already claimed the charge -> False, no credit). When
+        the claim succeeds the balance credit commits in the same
+        ``BEGIN IMMEDIATE`` transaction, so a consumed charge can never be
+        burned without its payout."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE manashop_buffs SET triggered = 1 "
+                "WHERE id = ? AND triggered = 0",
+                (buff_id,),
+            )
+            if cursor.rowcount == 0:
+                return False
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (amount, discord_id, gid),
+            )
+            return True
+
     def update_data(self, buff_id: int, data: dict[str, Any]) -> None:
         """Overwrite the JSON ``data`` blob for a buff. Used for buffs that
         accumulate state (e.g. Blood Pact's running skim total)."""

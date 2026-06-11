@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,23 @@ if TYPE_CHECKING:
     from services.flavor_personas import FlavorPersona
 
 logger = logging.getLogger("cama_bot.services.ai")
+
+_LITELLM_PYDANTIC_SERIALIZER_WARNING = (
+        r"Pydantic serializer warnings:\n\s+"
+        r"PydanticSerializationUnexpectedValue\(Expected 10 fields but got 5: "
+        r"Expected `Message`"
+)
+
+
+def _suppress_litellm_pydantic_warnings() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        message=_LITELLM_PYDANTIC_SERIALIZER_WARNING,
+        category=UserWarning,
+    )
+
+
+_suppress_litellm_pydantic_warnings()
 
 # Strip control chars + newlines + backticks from values that are interpolated
 # into LLM prompts so a hostile display name can't end the prompt block early

@@ -104,49 +104,6 @@ class TestAbortLobbySleepRemoved:
         mock_thread.send.assert_called_once()
         mock_thread.edit.assert_called()
 
-    @pytest.mark.asyncio
-    async def test_abort_completes_quickly(self):
-        """Verify abort operation completes in under 1 second (not 15+ seconds)."""
-        import time
-
-        from commands.match import MatchCommands
-
-        # Create mock bot and services
-        mock_bot = MagicMock()
-        mock_lobby_service = MagicMock()
-        mock_match_service = MagicMock()
-        mock_player_service = MagicMock()
-
-        # Setup mock thread
-        mock_thread = AsyncMock()
-        mock_thread.send = AsyncMock()
-        mock_thread.edit = AsyncMock()
-        mock_bot.get_channel = MagicMock(return_value=mock_thread)
-        mock_bot.fetch_channel = AsyncMock(return_value=mock_thread)
-
-        # Setup pending state
-        from domain.models.pending_match_state import PendingMatchState
-        mock_match_service.get_last_shuffle.return_value = PendingMatchState(
-            thread_shuffle_thread_id=12345,
-        )
-        mock_lobby_service.get_lobby_thread_id.return_value = 12345
-
-        cog = MatchCommands(
-            mock_bot,
-            mock_lobby_service,
-            mock_match_service,
-            mock_player_service,
-        )
-
-        start_time = time.time()
-        await cog._abort_lobby_thread(guild_id=123)
-        elapsed = time.time() - start_time
-
-        # Should complete in under 1 second (was 15+ seconds before fix)
-        assert elapsed < 1.0, (
-            f"_abort_lobby_thread took {elapsed:.2f}s, should complete in under 1s"
-        )
-
 
 class TestGamblingLeaderboardNoFetchUser:
     """

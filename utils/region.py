@@ -8,6 +8,8 @@ without a database or network, and is shared by the service, commands, and embed
 
 # Region codes used in storage and the /player region command.
 REGION_NAMES = {"USE": "US East", "USW": "US West"}
+DEFAULT_REGION_CODE = "USW"
+DEFAULT_REGION_NAME = REGION_NAMES[DEFAULT_REGION_CODE]
 
 # OpenDota /players/{id}/counts "region" map keys -> our codes.
 # OpenDota region numbers: 1 = US West, 2 = US East.
@@ -17,8 +19,8 @@ OPENDOTA_REGION_TO_CODE = {"1": "USW", "2": "USE"}
 # Distinct from NULL (= not yet checked) so the startup backfill converges to a no-op.
 SENTINEL_NONE = "NONE"
 
-# Shown on the embed when nobody in the group has a region (drives adoption).
-NO_REGION_NUDGE = "No regions set — use `/player region`"
+# Kept for compatibility with older imports; all-unset lobbies now default to USW.
+NO_REGION_NUDGE = DEFAULT_REGION_NAME
 
 
 def infer_region_from_counts(counts: dict | None) -> str | None:
@@ -69,12 +71,35 @@ def summarize_region(players: list) -> str:
     """Recommend a server for a group of players' region votes.
 
     The region with the most resolved votes wins; a tie defaults to US West (matching
-    the inference tie-break). Returns the display name (e.g. ``"US East"``), or the
-    adoption nudge when nobody in the group has a region.
+    the inference tie-break). Returns US West when nobody in the group has a region,
+    so unconfigured lobbies have a concrete default.
     """
     votes = [resolve_region(p) for p in players]
     use = votes.count("USE")
     usw = votes.count("USW")
     if use == 0 and usw == 0:
-        return NO_REGION_NUDGE
+        return DEFAULT_REGION_NAME
     return REGION_NAMES["USE" if use > usw else "USW"]  # tie -> USW
+
+
+def region_split_mismatches(team1_players: list, team2_players: list) -> int:
+    """Count resolved players that prevent a clean USE-vs-USW team split.
+
+    Team labels are arbitrary, so this checks both orientations and returns the
+    smaller mismatch count:
+    - Team 1 USW / Team 2 USE
+    - Team 1 USE / Team 2 USW
+
+    Players without a resolved region do not count either way.
+    """
+    team1_regions = [resolve_region(p) for p in team1_players]
+    team2_regions = [resolve_region(p) for p in team2_players]
+
+    team1_use = team1_regions.count("USE")
+    team1_usw = team1_regions.count("USW")
+    team2_use = team2_regions.count("USE")
+    team2_usw = team2_regions.count("USW")
+
+    team1_usw_orientation = team1_use + team2_usw
+    team1_use_orientation = team1_usw + team2_use
+    return min(team1_usw_orientation, team1_use_orientation)

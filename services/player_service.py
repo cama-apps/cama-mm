@@ -222,7 +222,19 @@ class PlayerService:
 
     # --- Balance operations ---
 
-    def adjust_balance(self, discord_id: int, guild_id: int, delta: int) -> int:
+    def adjust_balance(
+        self,
+        discord_id: int,
+        guild_id: int,
+        delta: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
         """
         Add or subtract from a player's jopacoin balance.
 
@@ -234,10 +246,32 @@ class PlayerService:
         Returns:
             New balance after adjustment
         """
-        self.player_repo.add_balance(discord_id, guild_id, delta)
+        self.player_repo.add_balance(
+            discord_id,
+            guild_id,
+            delta,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
         return self.player_repo.get_balance(discord_id, guild_id)
 
-    def set_balance(self, discord_id: int, guild_id: int, amount: int) -> None:
+    def set_balance(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None:
         """
         Set a player's jopacoin balance to a specific amount.
 
@@ -246,7 +280,17 @@ class PlayerService:
             guild_id: Guild ID
             amount: New balance amount
         """
-        self.player_repo.update_balance(discord_id, guild_id, amount)
+        self.player_repo.update_balance(
+            discord_id,
+            guild_id,
+            amount,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
 
     # --- Exclusion count operations ---
 
@@ -517,6 +561,13 @@ class PlayerService:
         victim_discord_id: int,
         guild_id: int,
         amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
     ) -> dict[str, int]:
         """
         Atomically transfer jopacoin from victim to thief (shell mechanic).
@@ -534,7 +585,16 @@ class PlayerService:
             Dict with 'amount', 'thief_new_balance', 'victim_new_balance'
         """
         return self.player_repo.steal_atomic(
-            thief_discord_id, victim_discord_id, guild_id, amount
+            thief_discord_id,
+            victim_discord_id,
+            guild_id,
+            amount,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
         )
 
     def tip_atomic(

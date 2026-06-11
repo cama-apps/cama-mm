@@ -3,6 +3,7 @@ Tests for embed utilities.
 """
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from utils.embed_safety import validate_embed
@@ -65,6 +66,28 @@ class TestLobbyEmbedTimestamp:
         timestamp = int(match.group(1))
         # Verify it's a reasonable Unix timestamp (after year 2020)
         assert timestamp > 1577836800, "Timestamp should be after 2020"
+
+    def test_lobby_embed_defaults_region_to_us_west(self):
+        """Lobby embeds should show the default server when nobody has a region."""
+        lobby = MagicMock()
+        lobby.created_at = datetime.now()
+        lobby.get_player_count.return_value = 1
+        lobby.get_conditional_count.return_value = 0
+        lobby.get_total_count.return_value = 1
+        players = [
+            SimpleNamespace(
+                glicko_rating=None,
+                mmr=3000,
+                preferred_roles=None,
+                preferred_region=None,
+                inferred_region=None,
+            )
+        ]
+
+        embed = create_lobby_embed(lobby, players=players, player_ids=[1], ready_threshold=10)
+
+        region_field = next(field for field in embed.fields if field.name == "🌎 Lobby Region")
+        assert region_field.value == "US West"
 
 
 class TestFormatHelpers:

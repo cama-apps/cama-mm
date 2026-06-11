@@ -239,8 +239,9 @@ class TestThreatPayloadUnjittered:
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
     ):
         """A failure outcome carrying a curse (duration_digs=2) resolved
-        across 60 seeds always applies that exact curse — duration and
-        effect pass through the jitter unchanged."""
+        across 60 seeds always applies the same curse — the curse payload is
+        strengthened deterministically (fixed +1 duration / scaled effect) and
+        never touched by the per-fire JC jitter."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository)
         curse = {
@@ -268,6 +269,7 @@ class TestThreatPayloadUnjittered:
             tunnel = dig_repo.get_tunnel(10001, 12345)
             active = dig_service._get_active_curse(dict(tunnel))
             assert active is not None
-            assert active["effect"] == {"advance_bonus": -3}, "curse effect jittered"
+            # Deterministic curse strengthening (not jitter): -3 -> -4, dur 2 -> 3.
+            assert active["effect"] == {"advance_bonus": -4}, "curse effect jittered"
             durations.add(active["digs_remaining"])
-        assert durations == {2}, f"curse duration was jittered — saw {sorted(durations)}"
+        assert durations == {3}, f"curse duration was jittered — saw {sorted(durations)}"

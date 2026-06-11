@@ -3,9 +3,10 @@
 from types import SimpleNamespace
 
 from utils.region import (
-    NO_REGION_NUDGE,
+    DEFAULT_REGION_NAME,
     SENTINEL_NONE,
     infer_region_from_counts,
+    region_split_mismatches,
     resolve_region,
     summarize_region,
 )
@@ -84,12 +85,32 @@ class TestSummarizeRegion:
         players = [_player(preferred="USE")] * 5 + [_player(preferred="USW")] * 5
         assert summarize_region(players) == "US West"
 
-    def test_no_votes_returns_nudge(self):
-        """All-unset (including sentinel) shows the adoption nudge, not a server."""
+    def test_no_votes_defaults_to_west(self):
+        """All-unset (including sentinel) defaults the lobby server to US West."""
         players = [_player(), _player(inferred=SENTINEL_NONE)]
-        assert summarize_region(players) == NO_REGION_NUDGE
+        assert summarize_region(players) == DEFAULT_REGION_NAME
 
     def test_inferred_votes_count(self):
         """Inferred regions count toward the tally alongside explicit picks."""
         players = [_player(inferred="USE"), _player(inferred="USE"), _player(preferred="USW")]
         assert summarize_region(players) == "US East"
+
+
+class TestRegionSplitMismatches:
+    """region_split_mismatches scores team purity independent of team labels."""
+
+    def test_clean_split_has_no_mismatches(self):
+        team1 = [_player(preferred="USW") for _ in range(5)]
+        team2 = [_player(preferred="USE") for _ in range(5)]
+        assert region_split_mismatches(team1, team2) == 0
+        assert region_split_mismatches(team2, team1) == 0
+
+    def test_mixed_split_counts_best_orientation(self):
+        team1 = [_player(preferred="USW") for _ in range(4)] + [_player(preferred="USE")]
+        team2 = [_player(preferred="USE") for _ in range(4)] + [_player(preferred="USW")]
+        assert region_split_mismatches(team1, team2) == 2
+
+    def test_unset_players_do_not_count(self):
+        team1 = [_player(preferred="USW"), _player()]
+        team2 = [_player(preferred="USE"), _player(inferred=SENTINEL_NONE)]
+        assert region_split_mismatches(team1, team2) == 0

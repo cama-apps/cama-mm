@@ -326,14 +326,14 @@ class ManaService:
     def _get_current_win_streak(self, discord_id: int, guild_id: int | None) -> int:
         """Return current win/loss streak as a signed integer (positive=win, negative=loss)."""
         try:
-            outcomes = self.gambling_stats_service.bet_repo.get_player_bet_history(
+            outcomes = self.gambling_stats_service.get_player_bet_outcomes(
                 discord_id, guild_id
             )
             if not outcomes:
                 return 0
             streak = 0
-            for bet in reversed(outcomes):
-                won = bet.get("outcome") == "won"
+            for outcome in reversed(outcomes):
+                won = outcome == "won"
                 if streak == 0:
                     streak = 1 if won else -1
                 elif streak > 0 and won:

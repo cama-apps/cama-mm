@@ -153,6 +153,38 @@ def test_openskill_used_when_all_players_have_os_mu(repo_db_path):
     assert result["balancing_rating_system"] == "openskill"
 
 
+def test_region_shuffle_mode_splits_usw_and_use(repo_db_path):
+    """Region shuffle mode separates resolved USW and USE players when possible."""
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+
+    player_ids = _seed_players(player_repo, 10)
+    for pid in player_ids[:5]:
+        player_repo.update_preferred_region(pid, TEST_GUILD_ID, "USW")
+    for pid in player_ids[5:]:
+        player_repo.update_preferred_region(pid, TEST_GUILD_ID, "USE")
+
+    result = service.shuffle_players(
+        player_ids,
+        guild_id=TEST_GUILD_ID,
+        shuffle_mode="region",
+    )
+
+    assert result["shuffle_mode"] == "region"
+    assert result["region_split_penalty"] == 0
+    team_region_sets = {
+        frozenset(player.preferred_region for player in team.players)
+        for team in (result["radiant_team"], result["dire_team"])
+    }
+    assert team_region_sets == {frozenset({"USW"}), frozenset({"USE"})}
+
+
 def test_get_last_match_participant_ids_passes_guild_id(repo_db_path):
     """get_last_match_participant_ids forwards guild_id to the repo without TypeError.
 

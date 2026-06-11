@@ -22,6 +22,11 @@ from services.dig_constants import (
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
     BOSS_HP_REGEN_PER_3_HOURS,
+    BOSS_LOSS_EXTRA_COOLDOWN_SECONDS,
+    BOSS_LOSS_EXTRA_GEAR_TICKS,
+    BOSS_LOSS_KNOCKBACK_MAX,
+    BOSS_LOSS_KNOCKBACK_MIN,
+    BOSS_LOSS_REPAIR_BILL,
     BOSS_NAMES,
     BOSS_PAYOUTS,
     BOSS_PHASE2,
@@ -1021,9 +1026,22 @@ class BossCombatMixin:
                 luminosity_display=self._luminosity_combat_display(tunnel),
             )
         else:
-            knockback = random.randint(8, 16)
+            knockback = random.randint(BOSS_LOSS_KNOCKBACK_MIN, BOSS_LOSS_KNOCKBACK_MAX)
             new_depth = max(0, depth - knockback)
-            jc_delta = -wager if wager > 0 else 0
+            # A loss always costs something: forfeit the wager, or charge a flat
+            # repair bill on a free (no-wager) fight.
+            jc_delta = -wager if wager > 0 else -BOSS_LOSS_REPAIR_BILL
+
+            # Loss is harsher on gear — an extra durability tick beyond the
+            # per-fight tick above.
+            name_by_id = {
+                p.id: p.tier_def.name
+                for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
+                if p is not None
+            }
+            for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+                for i in self.dig_repo.tick_gear_durability(discord_id, guild_id):
+                    gear_broken_names.append(name_by_id.get(i, "a piece of gear"))
 
             # Persist post-fight boss HP so soften-and-retreat strategies work.
             # Mutates boss_progress in place to a dict with hp_remaining/last_engaged_at.
@@ -1041,13 +1059,13 @@ class BossCombatMixin:
             # knockback (or vice versa) on a crash.
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
-                balance_delta=-wager if wager > 0 else 0,
+                balance_delta=jc_delta,
                 tunnel_updates={
                     "depth": new_depth,
                     "boss_progress": json.dumps(boss_progress),
                     "boss_attempts": attempts,
                     "cheer_data": None,     # clear cheers on defeat
-                    "last_dig_at": now,
+                    "last_dig_at": now + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS,
                 },
                 log_detail={
                     "boundary": at_boss, "won": False, "risk": risk_tier,
@@ -2106,14 +2124,30 @@ class BossCombatMixin:
             )
 
         # Loss branch
-        knockback = random.randint(8, 16)
+        knockback = random.randint(BOSS_LOSS_KNOCKBACK_MIN, BOSS_LOSS_KNOCKBACK_MAX)
         extra_kb, extra_cd = self._apply_stinger_on_loss(
             discord_id, guild_id, tunnel, boss,
         )
         knockback += extra_kb
         new_depth = max(0, depth - knockback)
-        jc_delta = -wager if wager > 0 else 0
-        last_dig_effective = now + extra_cd  # extended cooldown pushes the timer forward
+        # A loss always costs something: forfeit the wager, or charge a flat
+        # repair bill on a free (no-wager) fight.
+        jc_delta = -wager if wager > 0 else -BOSS_LOSS_REPAIR_BILL
+        # Extended cooldown (stinger + flat loss penalty) pushes the timer forward.
+        last_dig_effective = now + extra_cd + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
+
+        # Loss is harsher on gear — an extra durability tick beyond the
+        # per-fight tick above, on the same pieces that fought.
+        for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+            if gear_snapshot_ids:
+                extra_broken = self.dig_repo.tick_gear_durability_ids(
+                    [int(g) for g in gear_snapshot_ids]
+                )
+            else:
+                extra_broken = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+            gear_broken_names.extend(
+                name_by_id.get(i, "a piece of gear") for i in extra_broken
+            )
 
         # Persist remaining boss HP so soften-and-retreat works for the
         # state-machine path. ending_boss_hp / boss_hp_max are forwarded
@@ -2134,7 +2168,7 @@ class BossCombatMixin:
         # leave depth knocked back without the matching balance change.
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            balance_delta=-wager if wager > 0 else 0,
+            balance_delta=jc_delta,
             tunnel_updates={
                 "depth": new_depth,
                 "boss_progress": json.dumps(bp_for_persist),

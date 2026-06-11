@@ -44,6 +44,48 @@ def _add_player(player_repo: PlayerRepository, discord_id: int, balance: int) ->
     player_repo.update_balance(discord_id, TEST_GUILD_ID, balance)
 
 
+def _insert_ledger_rows(tax_repo: TaxRepository, rows: list[tuple[int, int]]) -> None:
+    with tax_repo.connection() as conn:
+        conn.execute("DELETE FROM economy_ledger_entries")
+        for idx, account_id in rows:
+            conn.execute(
+                """
+                INSERT INTO economy_ledger_entries (
+                    guild_id, account_type, account_id, delta,
+                    balance_before, balance_after, source, reason, created_at
+                )
+                VALUES (?, 'player', ?, ?, ?, ?, 'test', ?, ?)
+                """,
+                (
+                    TEST_GUILD_ID,
+                    account_id,
+                    idx + 1,
+                    idx * 10,
+                    idx * 10 + idx + 1,
+                    f"ledger-entry-{idx}",
+                    1_700_000_000 + idx,
+                ),
+            )
+
+
+def test_recent_ledger_supports_offset_and_count(tax_stack):
+    service = tax_stack["service"]
+    _insert_ledger_rows(
+        tax_stack["tax_repo"],
+        [(idx, TARGET_ID if idx < 6 else OTHER_TARGET_ID) for idx in range(9)],
+    )
+
+    rows = service.get_recent_ledger(TEST_GUILD_ID, limit=3, offset=3)
+
+    assert [row["reason"] for row in rows] == [
+        "ledger-entry-5",
+        "ledger-entry-4",
+        "ledger-entry-3",
+    ]
+    assert service.count_ledger_entries(TEST_GUILD_ID) == 9
+    assert service.count_ledger_entries(TEST_GUILD_ID, user_id=TARGET_ID) == 6
+
+
 def test_player_snapshot_includes_loans_and_dark_bargains(tax_stack):
     player_repo = tax_stack["player_repo"]
     loan_repo = tax_stack["loan_repo"]

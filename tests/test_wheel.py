@@ -18,6 +18,56 @@ from domain.models.mana_effects import ManaEffects
 from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
 
+def _assert_gamba_adjust_call(
+    mock: MagicMock,
+    discord_id: int,
+    guild_id: int,
+    amount: int,
+) -> None:
+    mock.assert_called_once()
+    assert mock.call_args.args == (discord_id, guild_id, amount)
+    kwargs = mock.call_args.kwargs
+    assert kwargs["source"] == "gamba"
+    assert kwargs["actor_id"] == discord_id
+    assert kwargs["related_type"] == "wheel_spin"
+    assert kwargs["reason"].startswith("gamba ")
+
+
+def _assert_gamba_income_call(
+    mock: MagicMock,
+    discord_id: int,
+    amount: int,
+    guild_id: int,
+) -> None:
+    mock.assert_called_once()
+    assert mock.call_args.args == (discord_id, amount, guild_id)
+    kwargs = mock.call_args.kwargs
+    assert kwargs["source"] == "gamba"
+    assert kwargs["actor_id"] == discord_id
+    assert kwargs["related_type"] == "wheel_spin"
+    assert kwargs["reason"].startswith("gamba ")
+
+
+def _assert_gamba_steal_call(
+    mock: MagicMock,
+    *,
+    thief_discord_id: int,
+    victim_discord_id: int,
+    guild_id: int,
+    amount: int,
+) -> None:
+    mock.assert_called_once()
+    kwargs = mock.call_args.kwargs
+    assert kwargs["thief_discord_id"] == thief_discord_id
+    assert kwargs["victim_discord_id"] == victim_discord_id
+    assert kwargs["guild_id"] == guild_id
+    assert kwargs["amount"] == amount
+    assert kwargs["source"] == "gamba"
+    assert kwargs["actor_id"] == thief_discord_id
+    assert kwargs["related_type"] == "wheel_spin"
+    assert kwargs["reason"].startswith("gamba ")
+
+
 @pytest.mark.asyncio
 async def test_wheel_requires_registration():
     """Verify /gamba rejects unregistered users."""
@@ -152,7 +202,7 @@ async def test_wheel_positive_applies_garnishment():
                     await commands.gamba.callback(commands, interaction)
 
     # Should call garnishment service (user_id, amount, guild_id)
-    garnishment_service.add_income.assert_called_once_with(1002, expected_win, 123)
+    _assert_gamba_income_call(garnishment_service.add_income, 1002, expected_win, 123)
 
 
 @pytest.mark.asyncio
@@ -201,7 +251,7 @@ async def test_wheel_positive_no_debt_adds_directly():
                     await commands.gamba.callback(commands, interaction)
 
     # Should add balance directly (user_id, guild_id, amount)
-    player_service.adjust_balance.assert_called_once_with(1003, 123, 5)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1003, 123, 5)
 
 
 @pytest.mark.asyncio
@@ -250,7 +300,7 @@ async def test_wheel_white_mana_animation_uses_capped_wedges():
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     await commands.gamba.callback(commands, interaction)
 
-    player_service.adjust_balance.assert_called_once_with(1010, 123, 50)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1010, 123, 50)
     used_wedges = mock_gif.call_args.kwargs["wedges"]
     assert used_wedges[target_idx][0] == "50"
     assert used_wedges[target_idx][1] == 50
@@ -302,7 +352,7 @@ async def test_wheel_blue_mana_embed_uses_reduced_numeric_payout():
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     await commands.gamba.callback(commands, interaction)
 
-    player_service.adjust_balance.assert_called_once_with(1011, 123, 75)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1011, 123, 75)
     embed = message.edit.call_args.kwargs["embed"]
     assert embed.title == "🎉 Winner!"
     assert "won **75**" in embed.description
@@ -355,7 +405,7 @@ async def test_wheel_bankrupt_subtracts_balance():
                     await commands.gamba.callback(commands, interaction)
 
     # Should subtract the bankrupt value (negative)
-    player_service.adjust_balance.assert_called_once_with(1004, 123, bankrupt_value)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1004, 123, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -458,7 +508,7 @@ async def test_wheel_bankrupt_ignores_max_debt():
                     await commands.gamba.callback(commands, interaction)
 
     # Should subtract bankrupt value regardless of MAX_DEBT
-    player_service.adjust_balance.assert_called_once_with(1005, 123, bankrupt_value)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1005, 123, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -551,7 +601,7 @@ async def test_wheel_jackpot_result():
                     await commands.gamba.callback(commands, interaction)
 
     # Should add 100
-    player_service.adjust_balance.assert_called_once_with(1007, 123, 100)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1007, 123, 100)
 
 
 def test_wheel_wedges_has_correct_count():
@@ -863,7 +913,8 @@ async def test_wheel_red_shell_steals_from_player_above():
     player_service.get_player_above.assert_called_once_with(1010, 123)
 
     # Should call steal_atomic: max(pct=3, flat=2) = 3 JC
-    player_service.steal_atomic.assert_called_once_with(
+    _assert_gamba_steal_call(
+        player_service.steal_atomic,
         thief_discord_id=1010,
         victim_discord_id=2001,
         guild_id=123,
@@ -991,7 +1042,8 @@ async def test_wheel_blue_shell_steals_from_richest():
     player_service.get_leaderboard.assert_any_call(123, limit=1)
 
     # Should call steal_atomic: max(pct=5, flat=4) = 5 JC
-    player_service.steal_atomic.assert_called_once_with(
+    _assert_gamba_steal_call(
+        player_service.steal_atomic,
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
@@ -1073,7 +1125,7 @@ async def test_wheel_blue_shell_self_hit_when_richest():
 
     # Self-hit uses adjust_balance (not steal_atomic since no victim)
     # max(pct=10, flat=4) = 10 JC loss
-    player_service.adjust_balance.assert_called_once_with(1013, 123, -10)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -10)
 
     # Should credit nonprofit fund with the loss
     loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 10)
@@ -1689,7 +1741,8 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
                 with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
                     await cmds.gamba.callback(cmds, interaction)
 
-    player_service.steal_atomic.assert_called_once_with(
+    _assert_gamba_steal_call(
+        player_service.steal_atomic,
         thief_discord_id=spinner_id,
         victim_discord_id=8003,
         guild_id=123,
@@ -2165,7 +2218,9 @@ async def test_wheel_penalized_winner_is_debuffed(repo_db_path):
     # Callable side effects backed by the real repo — NOT an exhaustible list,
     # which is exactly the StopIteration trap the anchor gate fixed.
     player_service.get_balance.side_effect = lambda *a, **k: player_repo.get_balance(uid, guild_id)
-    player_service.adjust_balance.side_effect = lambda u, g, amt: player_repo.add_balance(u, g, amt)
+    player_service.adjust_balance.side_effect = (
+        lambda u, g, amt, **kwargs: player_repo.add_balance(u, g, amt, **kwargs)
+    )
 
     message = MagicMock()
     message.edit = AsyncMock()

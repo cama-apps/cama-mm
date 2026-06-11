@@ -6,62 +6,13 @@ Verifies that:
 - Conditional players only fill remaining slots (10 - regular_count)
 - Conditional players are prioritized by rating (higher = first) then RD (lower = first)
 - Extra conditional players are excluded, not regular players
+
+Tests the real production function from commands/match.py.
 """
 
 
+from commands.match import select_players_for_shuffle
 from domain.models.player import Player
-
-
-def priority_key(player: Player) -> tuple[float, float]:
-    """
-    Priority key for conditional player selection.
-    Higher rating = higher priority, lower RD = higher priority.
-    Extracted from commands/match.py for testing.
-    """
-    rating = player.glicko_rating if player.glicko_rating else 1500.0
-    rd = player.glicko_rd if player.glicko_rd else 350.0
-    return (rating, -rd)
-
-
-def select_players_for_shuffle(
-    regular_player_ids: list[int],
-    regular_players: list[Player],
-    conditional_player_ids: list[int],
-    conditional_players: list[Player],
-) -> tuple[list[int], list[Player], list[int], list[int]]:
-    """
-    Select players for shuffle, matching the logic in commands/match.py.
-
-    Returns:
-        (player_ids, players, included_conditional_ids, excluded_conditional_ids)
-    """
-    regular_count = len(regular_player_ids)
-
-    # Start with all regular players
-    player_ids = list(regular_player_ids)
-    players = list(regular_players)
-    included_conditional_ids = []
-    excluded_conditional_ids = []
-
-    if regular_count < 10:
-        # Need to include some conditional players to reach exactly 10
-        conditional_pairs = list(zip(conditional_player_ids, conditional_players))
-        conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
-
-        # Take exactly enough to reach 10
-        slots_available = 10 - regular_count
-        for cid, cplayer in conditional_pairs[:slots_available]:
-            player_ids.append(cid)
-            players.append(cplayer)
-            included_conditional_ids.append(cid)
-
-        # All remaining are excluded
-        excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
-    else:
-        # 10+ regular players means all conditional are excluded
-        excluded_conditional_ids = list(conditional_player_ids)
-
-    return player_ids, players, included_conditional_ids, excluded_conditional_ids
 
 
 def make_player(name: str, rating: float | None = 1500.0, rd: float | None = 350.0) -> Player:

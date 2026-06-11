@@ -21,6 +21,7 @@ import random
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.ai_service import AIService
+from services.dig_constants import BASE_DIG_JC_PAYOUT_CAP
 from services.dig_dm_context import (
     DigDMContextBuilder,
     render_dm_context_section,
@@ -291,6 +292,7 @@ class DigFlavorService:
 
             await self._apply_flavor_to_result(
                 result, validated, jc_earned, discord_id, guild_id,
+                is_boss=is_boss,
             )
             return result
 
@@ -305,6 +307,8 @@ class DigFlavorService:
         jc_earned: int,
         discord_id: int,
         guild_id: int,
+        *,
+        is_boss: bool = False,
     ) -> None:
         """Merge validated flavor output into the result dict + persist side effects.
 
@@ -324,6 +328,22 @@ class DigFlavorService:
         # JC nudge: convert pct to int, skip when there's no base JC to nudge.
         if jc_earned and abs(validated.flavor_bonus_pct) > 0:
             delta = int(round(jc_earned * validated.flavor_bonus_pct / 100.0))
+            # Respect the non-streak payout cap on normal digs: a positive nudge
+            # can never push the non-streak portion past BASE_DIG_JC_PAYOUT_CAP.
+            # Negative nudges always apply. Boss payouts have no such cap, so
+            # skip the clamp. Prefer the pre-tax capped basis the dig pipeline
+            # records (``nonstreak_jc``); fall back to deriving it from the total
+            # minus the milestone/streak buckets for results that predate it.
+            if delta > 0 and not is_boss:
+                nonstreak = result.get("nonstreak_jc")
+                if nonstreak is None:
+                    nonstreak = (
+                        jc_earned
+                        - int(result.get("milestone_bonus", 0) or 0)
+                        - int(result.get("streak_bonus", 0) or 0)
+                    )
+                headroom = max(0, BASE_DIG_JC_PAYOUT_CAP - int(nonstreak))
+                delta = min(delta, headroom)
             if delta != 0:
                 try:
                     await asyncio.to_thread(

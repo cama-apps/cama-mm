@@ -51,9 +51,9 @@ class NeonEventRepository(BaseRepository):
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT 1 FROM neon_events WHERE discord_id = ? "
-                    "AND (guild_id = ? OR (guild_id IS NULL AND ? = 0)) "
+                    "AND guild_id = ? "
                     "AND event_type = ? AND one_time = 1 LIMIT 1",
-                    (discord_id, guild_id, guild_id, event_type),
+                    (discord_id, guild_id, event_type),
                 )
                 return cursor.fetchone() is not None
         except Exception as e:

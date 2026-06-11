@@ -101,11 +101,24 @@ if _dig_channel_raw:
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
 
+# OpenSkill display constants. These are canonical: CamaOpenSkillSystem in
+# openskill_rating_system.py reads its MIN_MU / DISPLAY_SCALE class attributes
+# from here, and domain models use them without importing infrastructure.
+OPENSKILL_MIN_MU = 25.0  # mu floor (display rating 0)
+# Display scale factor: (mu - MIN_MU) * DISPLAY_SCALE = display rating.
+# Chosen so that mmr_to_os_mu(MMR_MAX) produces display == Glicko-2 RATING_MAX.
+# With mmr_to_os_mu(mmr) = 25 + mmr/200 and MMR_MAX=12000 → mu=85, and
+# Glicko-2 RATING_MAX=3000, we need factor = 3000 / (85 - 25) = 50.
+# This keeps OpenSkill and Glicko-2 display ratings on the same 0-3000 scale
+# so team-value computations do not inflate OpenSkill-rated players.
+OPENSKILL_DISPLAY_SCALE = 50.0
+
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 420.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.19),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 70.0),
+    "region_split_penalty": _parse_float("REGION_SPLIT_PENALTY", 500.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
     # Hardcoded default - not configurable via env var (silent operation)

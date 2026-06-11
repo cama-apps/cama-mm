@@ -959,7 +959,21 @@ class DigService(
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
         if overgrowth_active:
             jc_earned += 10
+
+        # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
+        # (capped). Folded into the non-streak total so it counts toward the base
+        # cap instead of stacking past it. The counter is bumped here and
+        # persisted below; the cave-in branch resets it to 0.
+        cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
+        if self._has_relic(discord_id, guild_id, "prospectors_streak"):
+            jc_earned += min(cavein_free_streak, 20)
+
+        # Cap the non-streak payout (base loot + relic). Milestones and the
+        # daily-streak bonus are separate buckets added on top.
         jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
+        # Pre-tax capped non-streak basis — used by the LLM flavor layer to clamp
+        # its nudge against the cap without being fooled by later taxes.
+        nonstreak_jc = jc_earned
 
         # 14. Check milestones (with ascension milestone multiplier).
         # Only award milestones that extend the tunnel's all-time high
@@ -990,13 +1004,6 @@ class DigService(
         streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
 
         jc_earned += streak_bonus
-
-        # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
-        # (capped). The counter is bumped here and persisted below; the cave-in
-        # branch resets it to 0.
-        cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
-        if self._has_relic(discord_id, guild_id, "prospectors_streak"):
-            jc_earned += min(cavein_free_streak, 20)
 
         # Plains tithe / Blue tax apply to the full payout (base + milestone +
         # streak) so the deflationary pressure matches /roll and /betting.
@@ -1173,6 +1180,7 @@ class DigService(
             depth_after=new_depth,
             advance=advance,
             jc_earned=jc_earned,
+            nonstreak_jc=nonstreak_jc,
             bankruptcy_penalty=dig_bankruptcy_penalty,
             milestone_bonus=milestone_bonus,
             streak_bonus=streak_bonus,

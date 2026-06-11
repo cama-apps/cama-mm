@@ -8,6 +8,7 @@ from rating_system import CamaRatingSystem
 from utils.embed_safety import truncate_field
 from utils.formatting import FROGLING_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
+from utils.region import summarize_region
 
 # Shared embed color palette. Centralized here so commands stop each redefining
 # their own COLOR_* constants (and drifting). Values are unchanged.
@@ -167,6 +168,12 @@ def create_lobby_embed(
             value=conditional_list,
             inline=False,
         )
+
+    embed.add_field(
+        name="🌎 Lobby Region",
+        value=summarize_region(list(players or []) + list(conditional_players or [])),
+        inline=False,
+    )
 
     # Status/ready indicator
     if total_count >= ready_threshold:

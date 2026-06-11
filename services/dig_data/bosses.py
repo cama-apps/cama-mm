@@ -1744,6 +1744,22 @@ RETREAT_BLOCK_LOSS_MAX: int = 3
 
 
 # ---------------------------------------------------------------------------
+# Boss-loss penalties
+# ---------------------------------------------------------------------------
+# Losing a boss fight should sting. On top of forfeiting the wager, a loss now:
+#   - knocks the digger back further,
+#   - charges a flat "repair bill" even on free (no-wager) fights so a loss is
+#     never costless,
+#   - extends the post-loss cooldown, and
+#   - takes an extra durability tick off the gear that fought.
+BOSS_LOSS_KNOCKBACK_MIN: int = 11               # was an inline 8
+BOSS_LOSS_KNOCKBACK_MAX: int = 20               # was an inline 16
+BOSS_LOSS_REPAIR_BILL: int = 8                  # flat JC bill on free-fight losses
+BOSS_LOSS_EXTRA_COOLDOWN_SECONDS: int = 3_600   # +1h on top of the normal cooldown
+BOSS_LOSS_EXTRA_GEAR_TICKS: int = 1             # extra durability tick on a loss
+
+
+# ---------------------------------------------------------------------------
 # Persisted boss HP / regen (boss revamp)
 # ---------------------------------------------------------------------------
 # Slowed to "1 HP per 3 hours" so soften-and-retreat damage actually sticks

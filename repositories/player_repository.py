@@ -659,54 +659,128 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return 0, None
             return int(row["dota_streak_days"] or 0), row["dota_last_played_date"]
 
-    def update_balance(self, discord_id: int, guild_id: int, amount: int) -> None:
+    def update_balance(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None:
         """Set a player's jopacoin balance to a specific amount."""
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-            """,
-                (amount, discord_id, guild_id),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
-            # Track lowest balance
-            cursor.execute(
-                """
-                UPDATE players
-                SET lowest_balance_ever = ?
-                WHERE discord_id = ? AND guild_id = ?
-                AND (lowest_balance_ever IS NULL OR ? < lowest_balance_ever)
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
                 """,
-                (amount, discord_id, guild_id, amount),
-            )
+                    (amount, discord_id, guild_id),
+                )
+                # Track lowest balance
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = ?
+                    WHERE discord_id = ? AND guild_id = ?
+                    AND (lowest_balance_ever IS NULL OR ? < lowest_balance_ever)
+                    """,
+                    (amount, discord_id, guild_id, amount),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
-    def add_balance(self, discord_id: int, guild_id: int, amount: int) -> None:
+    def add_balance(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None:
         """Add or subtract from a player's jopacoin balance."""
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-            """,
-                (amount, discord_id, guild_id),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
-            # Track lowest balance if this was a decrease
-            if amount < 0:
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
                 cursor.execute(
                     """
                     UPDATE players
-                    SET lowest_balance_ever = jopacoin_balance
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
-                    AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
-                    """,
-                    (discord_id, guild_id),
+                """,
+                    (amount, discord_id, guild_id),
                 )
+                # Track lowest balance if this was a decrease
+                if amount < 0:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET lowest_balance_ever = jopacoin_balance
+                        WHERE discord_id = ? AND guild_id = ?
+                        AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                        """,
+                        (discord_id, guild_id),
+                    )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
     def try_debit(self, discord_id: int, guild_id: int, amount: int) -> bool:
         """Atomically debit ``amount`` JC if and only if the player has enough.
@@ -743,7 +817,18 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return True
 
-    def add_balance_many(self, deltas_by_discord_id: dict[int, int], guild_id: int) -> None:
+    def add_balance_many(
+        self,
+        deltas_by_discord_id: dict[int, int],
+        guild_id: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> None:
         """
         Apply multiple balance deltas in a single transaction.
         """
@@ -752,27 +837,57 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                [(delta, discord_id, guild_id) for discord_id, delta in deltas_by_discord_id.items()],
-            )
-            # Track lowest balance for players who had negative deltas
-            negative_ids = [did for did, delta in deltas_by_discord_id.items() if delta < 0]
-            if negative_ids:
-                placeholders = ",".join("?" * len(negative_ids))
-                cursor.execute(
-                    f"""
-                    UPDATE players
-                    SET lowest_balance_ever = jopacoin_balance
-                    WHERE discord_id IN ({placeholders}) AND guild_id = ?
-                    AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
-                    """,
-                    negative_ids + [guild_id],
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
                 )
+            )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (delta, discord_id, guild_id)
+                        for discord_id, delta in deltas_by_discord_id.items()
+                    ],
+                )
+                # Track lowest balance for players who had negative deltas
+                negative_ids = [
+                    did for did, delta in deltas_by_discord_id.items() if delta < 0
+                ]
+                if negative_ids:
+                    placeholders = ",".join("?" * len(negative_ids))
+                    cursor.execute(
+                        f"""
+                        UPDATE players
+                        SET lowest_balance_ever = jopacoin_balance
+                        WHERE discord_id IN ({placeholders}) AND guild_id = ?
+                        AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                        """,
+                        negative_ids + [guild_id],
+                    )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
     def add_balance_with_garnishment(
         self,
@@ -781,6 +896,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         amount: int,
         garnishment_rate: float,
         bankruptcy_penalty_rate: float = 0.0,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
     ) -> dict[str, int]:
         """
         Add income with garnishment (and optional bankruptcy penalty) in one atomic op.
@@ -843,16 +965,41 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 garnished = int(amount * garnishment_rate)
                 net_before_penalty = amount - garnished
 
-            # Full gross is credited to the balance (garnishment is a
-            # bookkeeping split, not a separate debit).
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (amount, discord_id, guild_id),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                # Full gross is credited to the balance (garnishment is a
+                # bookkeeping split, not a separate debit).
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, discord_id, guild_id),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
             # Bankruptcy penalty (if requested) is computed against the live
             # post-garnishment net and debited in the same txn.
@@ -864,14 +1011,33 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 penalty = 0
 
             if penalty > 0:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (penalty, discord_id, guild_id),
-                )
+                if has_context:
+                    penalty_reason = (
+                        f"{reason} bankruptcy penalty"
+                        if reason
+                        else "bankruptcy penalty on income"
+                    )
+                    self._set_economy_ledger_context(
+                        cursor,
+                        source=source,
+                        actor_id=actor_id,
+                        related_type=related_type,
+                        related_id=related_id,
+                        reason=penalty_reason,
+                        metadata=metadata,
+                    )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (penalty, discord_id, guild_id),
+                    )
+                finally:
+                    if has_context:
+                        self._clear_economy_ledger_context(cursor)
 
             return {
                 "gross": amount,
@@ -1093,6 +1259,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         victim_discord_id: int,
         guild_id: int,
         amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
     ) -> dict[str, int]:
         """
         Atomically transfer jopacoin from victim to thief (shell mechanic).
@@ -1143,25 +1316,65 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 raise ValueError("Thief not found.")
             thief_balance = int(thief_row["balance"])
 
-            # Deduct from victim (can go below MAX_DEBT - intentional)
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (amount, victim_discord_id, guild_id),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
 
+            # Deduct from victim (can go below MAX_DEBT - intentional)
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=f"{reason} victim debit" if reason else None,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, victim_discord_id, guild_id),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
+
             # Add to thief
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (amount, thief_discord_id, guild_id),
-            )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=f"{reason} thief credit" if reason else None,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, thief_discord_id, guild_id),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
             # Track lowest balance for victim
             new_victim_balance = victim_balance - amount

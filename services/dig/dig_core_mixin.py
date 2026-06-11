@@ -758,7 +758,19 @@ class DigCoreMixin:
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
         if p.get("overgrowth_active"):
             jc_earned += 10
+
+        # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
+        # (capped). Folded into the non-streak total so it counts toward the base
+        # cap instead of stacking past it. The counter is bumped here and
+        # persisted below; the cave-in branch resets it to 0.
+        cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
+        if self._has_relic(discord_id, guild_id, "prospectors_streak"):
+            jc_earned += min(cavein_free_streak, 20)
+
+        # Cap the non-streak payout (base loot + relic). Milestones and the
+        # daily-streak bonus are separate buckets added on top.
         jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
+        nonstreak_jc = jc_earned  # pre-tax capped basis for the flavor clamp
 
         # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0
@@ -785,13 +797,6 @@ class DigCoreMixin:
         )
         streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
         jc_earned += streak_bonus
-
-        # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
-        # (capped). The counter is bumped here and persisted below; the cave-in
-        # branch resets it to 0.
-        cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
-        if self._has_relic(discord_id, guild_id, "prospectors_streak"):
-            jc_earned += min(cavein_free_streak, 20)
 
         # Plains tithe / Blue tax apply to the full payout.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
@@ -922,7 +927,7 @@ class DigCoreMixin:
         return self._ok(
             tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
             depth_before=depth_before, depth_after=new_depth,
-            advance=advance, jc_earned=jc_earned,
+            advance=advance, jc_earned=jc_earned, nonstreak_jc=nonstreak_jc,
             bankruptcy_penalty=dig_bankruptcy_penalty,
             milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
             cave_in=False, cave_in_detail=None,
@@ -1140,7 +1145,18 @@ class DigCoreMixin:
                     weather_combo_yield = 1.0
             if weather_combo_yield != 1.0:
                 jc_earned = int(jc_earned * weather_combo_yield)
+
+            # Relic: Prospector's Streak — folded into the non-streak total so it
+            # counts toward the base cap instead of stacking past it. Counter is
+            # bumped here and persisted below; the cave-in branch resets it to 0.
+            cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
+            if self._has_relic(discord_id, guild_id, "prospectors_streak"):
+                jc_earned += min(cavein_free_streak, 20)
+
+            # Cap the non-streak payout (base loot + relic). Milestones and the
+            # daily-streak bonus are separate buckets added on top.
             jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
+            nonstreak_jc = jc_earned  # pre-tax capped basis for the flavor clamp
 
             # Milestones (anti-farm: only award on depths that extend all-time high,
             # same as main dig() / _execute_deterministic_outcome).
@@ -1164,13 +1180,6 @@ class DigCoreMixin:
                     break
             streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
             jc_earned += streak_bonus
-
-            # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
-            # (capped). The counter is bumped here and persisted below; the cave-in
-            # branch resets it to 0.
-            cavein_free_streak = (tunnel.get("cavein_free_streak", 0) or 0) + 1
-            if self._has_relic(discord_id, guild_id, "prospectors_streak"):
-                jc_earned += min(cavein_free_streak, 20)
 
             # Artifact (deterministic)
             artifact = None
@@ -1311,7 +1320,7 @@ class DigCoreMixin:
             result = self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
-                advance=advance, jc_earned=jc_earned,
+                advance=advance, jc_earned=jc_earned, nonstreak_jc=nonstreak_jc,
                 bankruptcy_penalty=dig_bankruptcy_penalty,
                 milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
                 cave_in=False, cave_in_detail=None,

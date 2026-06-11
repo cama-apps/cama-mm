@@ -12,10 +12,114 @@ from discord.ext import commands
 from commands.checks import require_guild
 from services.permissions import has_tax_man_permission
 from services.tax_service import TaxService
+from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.tax")
+
+LEDGER_DEFAULT_LIMIT = 10
+LEDGER_MAX_LIMIT = 25
+LEDGER_MAX_PAGE = 10_000
+LEDGER_VIEW_TIMEOUT_SECONDS = 300
+
+
+class TaxLedgerView(discord.ui.View):
+    """Ephemeral pagination for Tax Man central ledger audits."""
+
+    def __init__(
+        self,
+        *,
+        tax_service: TaxService,
+        guild_id: int,
+        requester_id: int,
+        user: discord.User | None,
+        limit: int,
+        current_page: int,
+        total_entries: int,
+    ):
+        super().__init__(timeout=LEDGER_VIEW_TIMEOUT_SECONDS)
+        self.tax_service = tax_service
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.user = user
+        self.limit = limit
+        self.total_entries = total_entries
+        self.current_page = _clamp_ledger_page(current_page, limit, total_entries)
+        self.total_pages = _ledger_total_pages(total_entries, limit)
+        self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "This ledger view belongs to another Tax Man.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _load_page(self, page: int) -> discord.Embed:
+        self.total_entries = await asyncio.to_thread(
+            self.tax_service.count_ledger_entries,
+            self.guild_id,
+            user_id=self.user.id if self.user else None,
+        )
+        self.total_pages = _ledger_total_pages(self.total_entries, self.limit)
+        self.current_page = _clamp_ledger_page(page, self.limit, self.total_entries)
+        rows = await asyncio.to_thread(
+            self.tax_service.get_recent_ledger,
+            self.guild_id,
+            limit=self.limit,
+            offset=_ledger_offset(self.current_page, self.limit),
+            user_id=self.user.id if self.user else None,
+        )
+        self._sync_buttons()
+        return _build_ledger_embed(
+            rows,
+            user=self.user,
+            page=self.current_page,
+            total_entries=self.total_entries,
+            limit=self.limit,
+        )
+
+    async def _show_page(
+        self,
+        interaction: discord.Interaction,
+        page: int,
+    ) -> None:
+        try:
+            embed = await self._load_page(page)
+        except Exception:
+            logger.exception(
+                "Failed to paginate tax ledger for guild_id=%s",
+                self.guild_id,
+            )
+            await interaction.response.send_message(
+                "Couldn't load that ledger page right now.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    def _sync_buttons(self) -> None:
+        self.previous_page.disabled = self.current_page <= 1
+        self.next_page.disabled = self.current_page >= self.total_pages
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self._show_page(interaction, self.current_page - 1)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self._show_page(interaction, self.current_page + 1)
 
 
 class TaxCommands(commands.Cog):
@@ -101,13 +205,15 @@ class TaxCommands(commands.Cog):
     @app_commands.describe(
         user="Limit to one player",
         limit="Number of ledger entries to show",
+        page="Ledger page to show",
     )
     @require_guild
     async def ledger(
         self,
         interaction: discord.Interaction,
         user: discord.User | None = None,
-        limit: app_commands.Range[int, 1, 25] = 10,
+        limit: app_commands.Range[int, 1, LEDGER_MAX_LIMIT] = LEDGER_DEFAULT_LIMIT,
+        page: app_commands.Range[int, 1, LEDGER_MAX_PAGE] = 1,
     ):
         if not await self._require_tax_man(interaction):
             return
@@ -115,10 +221,17 @@ class TaxCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         try:
+            total_entries = await asyncio.to_thread(
+                self.tax_service.count_ledger_entries,
+                guild_id,
+                user_id=user.id if user else None,
+            )
+            page = _clamp_ledger_page(page, limit, total_entries)
             rows = await asyncio.to_thread(
                 self.tax_service.get_recent_ledger,
                 guild_id,
                 limit=limit,
+                offset=_ledger_offset(page, limit),
                 user_id=user.id if user else None,
             )
         except Exception:
@@ -130,8 +243,54 @@ class TaxCommands(commands.Cog):
             )
             return
 
-        embed = _build_ledger_embed(rows, user=user)
-        await safe_followup(interaction, embed=embed, ephemeral=True)
+        embed = _build_ledger_embed(
+            rows,
+            user=user,
+            page=page,
+            total_entries=total_entries,
+            limit=limit,
+        )
+        view = None
+        if _ledger_total_pages(total_entries, limit) > 1:
+            view = TaxLedgerView(
+                tax_service=self.tax_service,
+                guild_id=guild_id,
+                requester_id=interaction.user.id,
+                user=user,
+                limit=limit,
+                current_page=page,
+                total_entries=total_entries,
+            )
+        await safe_followup(interaction, embed=embed, view=view, ephemeral=True)
+
+
+def _ledger_total_pages(total_entries: int, limit: int) -> int:
+    limit = max(1, int(limit))
+    total_entries = max(0, int(total_entries))
+    return max(1, (total_entries + limit - 1) // limit)
+
+
+def _clamp_ledger_page(page: int, limit: int, total_entries: int) -> int:
+    total_pages = _ledger_total_pages(total_entries, limit)
+    return min(max(1, int(page)), total_pages)
+
+
+def _ledger_offset(page: int, limit: int) -> int:
+    return (max(1, int(page)) - 1) * max(1, int(limit))
+
+
+def _ledger_footer_text(page: int, total_entries: int, limit: int) -> str:
+    page = _clamp_ledger_page(page, limit, total_entries)
+    total_pages = _ledger_total_pages(total_entries, limit)
+    if total_entries <= 0:
+        return "Tax Man ledger | Page 1/1 | 0 entries"
+    first_entry = _ledger_offset(page, limit) + 1
+    last_entry = min(int(total_entries), page * int(limit))
+    return (
+        f"Tax Man ledger | Page {page}/{total_pages} | "
+        f"Entries {first_entry}-{last_entry} of {int(total_entries):,}"
+    )
+
 
 def _format_jc(amount: int) -> str:
     return f"{amount:,} {JOPACOIN_EMOTE}"
@@ -254,21 +413,37 @@ def _build_player_embed(
         value=_format_prediction_positions(snapshot["prediction_exposure"]),
         inline=False,
     )
-    embed.add_field(
-        name="Recent Ledger",
-        value=_format_ledger_rows(snapshot["recent_ledger"]),
+    add_lines_field(
+        embed,
+        "Recent Ledger",
+        _format_ledger_lines(snapshot["recent_ledger"]),
         inline=False,
     )
     embed.set_footer(text="Tax Man audit only")
     return embed
 
 
-def _build_ledger_embed(rows: list[dict], *, user: discord.User | None) -> discord.Embed:
+def _build_ledger_embed(
+    rows: list[dict],
+    *,
+    user: discord.User | None,
+    page: int = 1,
+    total_entries: int | None = None,
+    limit: int = LEDGER_DEFAULT_LIMIT,
+) -> discord.Embed:
     title = "Central Economy Ledger"
     if user is not None:
         title = f"Central Economy Ledger - {getattr(user, 'display_name', user.name)}"
     embed = discord.Embed(title=title, color=discord.Color.blurple())
-    embed.description = _format_ledger_rows(rows)
+    description = _format_ledger_rows(rows)
+    if not rows and total_entries:
+        description = "No ledger entries on this page."
+    embed.description = truncate_field(
+        description,
+        max_len=EMBED_LIMITS["description"],
+    )
+    if total_entries is not None:
+        embed.set_footer(text=_ledger_footer_text(page, total_entries, limit))
     return embed
 
 
@@ -349,11 +524,37 @@ def _format_source_totals(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_ledger_rows(rows: list[dict]) -> str:
+def _format_ledger_detail(row: dict) -> str:
+    reason = " ".join(str(row.get("reason") or "").split())
+    if reason:
+        return reason
+
+    source = str(row.get("source") or "balance_update")
+    source_labels = {
+        "balance_update": "balance adjustment",
+        "player_insert": "registration starting balance",
+        "nonprofit_insert": "nonprofit fund created",
+        "nonprofit_update": "nonprofit fund update",
+        "ledger_backfill": "opening balance backfill",
+        "dig": "dig balance change",
+        "gamba": "gamba wheel balance change",
+    }
+    label = source_labels.get(source, source.replace("_", " "))
+
+    related_type = " ".join(str(row.get("related_type") or "").split())
+    related_id = " ".join(str(row.get("related_id") or "").split())
+    if related_type and related_id:
+        return f"{label} ({related_type} #{related_id})"
+    if related_type:
+        return f"{label} ({related_type})"
+    return label
+
+
+def _format_ledger_lines(rows: list[dict], *, limit: int = 25) -> list[str]:
     if not rows:
-        return "No ledger entries yet."
+        return ["No ledger entries yet."]
     lines = []
-    for row in rows[:25]:
+    for row in rows[:limit]:
         account = (
             "nonprofit"
             if row["account_type"] == "nonprofit"
@@ -361,10 +562,14 @@ def _format_ledger_rows(rows: list[dict]) -> str:
         )
         lines.append(
             f"<t:{int(row['created_at'])}:R> - {account}: "
-            f"{_format_signed_jc(int(row['delta']))} via `{row['source']}` "
+            f"{_format_signed_jc(int(row['delta']))} - {_format_ledger_detail(row)} "
             f"-> {_format_jc(int(row['balance_after']))}"
         )
-    return "\n".join(lines)
+    return lines
+
+
+def _format_ledger_rows(rows: list[dict]) -> str:
+    return "\n".join(_format_ledger_lines(rows))
 
 
 async def setup(bot: commands.Bot):
