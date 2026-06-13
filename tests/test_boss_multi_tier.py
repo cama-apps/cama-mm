@@ -394,6 +394,38 @@ class TestStartBossDuel:
         assert "won" in result
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
 
+    def test_resume_claims_duel_atomically(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """resume_boss_duel must atomically CLAIM (read-and-delete) the paused
+        duel, not read it non-atomically. Otherwise two concurrent resumes both
+        read the row before either clears it and resolve twice (double wager /
+        double drop). We forbid the non-atomic read: a regression that reverts to
+        ``get_active_duel`` would call it here and trip the guard.
+        """
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        progress = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+        _seed_paused_duel(dig_repo, 10001, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+
+        real_get = dig_repo.get_active_duel
+
+        def _forbidden(*a, **k):
+            raise AssertionError(
+                "resume_boss_duel must claim the duel atomically, not read it "
+                "via get_active_duel (double-resolution race)."
+            )
+
+        monkeypatch.setattr(dig_repo, "get_active_duel", _forbidden)
+        # Succeeds by claiming the row; a second resume now finds nothing.
+        first = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=0)
+        assert first["success"]
+        monkeypatch.setattr(dig_repo, "get_active_duel", real_get)  # restore only this
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
+        second = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=0)
+        assert second["success"] is False
+
     def test_resume_without_state_errors(self, dig_service, dig_repo, player_repository):
         _register(player_repository)
         result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=0)
