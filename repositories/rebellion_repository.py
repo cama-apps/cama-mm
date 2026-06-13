@@ -608,12 +608,25 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             winning_bets = [b for b in bets if b["side"] == winning_side]
             winning_pool = sum(b["amount"] for b in winning_bets)
 
-            payouts = []
+            # Floor each winner's parimutuel share, then fold the rounding
+            # remainder into the largest stake so the whole pool is paid out
+            # instead of being silently destroyed (deterministic tie-break by
+            # bet_id).
+            shares: list[list] = []
             for bet in winning_bets:
                 if winning_pool > 0:
-                    payout = int(bet["amount"] / winning_pool * total_pool)
+                    share = int(bet["amount"] / winning_pool * total_pool)
                 else:
-                    payout = bet["amount"]
+                    share = bet["amount"]
+                shares.append([bet, share])
+
+            remainder = total_pool - sum(s for _, s in shares)
+            if remainder > 0 and shares:
+                top = max(shares, key=lambda bs: (bs[0]["amount"], -bs[0]["bet_id"]))
+                top[1] += remainder
+
+            payouts = []
+            for bet, payout in shares:
                 cursor.execute(
                     "UPDATE war_bets SET payout = ? WHERE bet_id = ?",
                     (payout, bet["bet_id"]),

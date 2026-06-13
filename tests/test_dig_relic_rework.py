@@ -295,12 +295,12 @@ def test_relic_cap_migration_trims_to_six_newest(repo_db_path):
     repo.update_tunnel(1, 0, prestige_level=9)
     for rid in list(BUFF_FUN_RELIC_IDS) + ["mole_claws"]:  # 8 distinct relics
         db_id = repo.add_artifact(1, 0, rid, is_relic=True)
-        repo.equip_relic(int(db_id), True)
+        repo.equip_relic(int(db_id), 1, 0, True)
         over_ids.append(int(db_id))
     repo.create_tunnel(2, 0, "Under")
     repo.update_tunnel(2, 0, prestige_level=3)
     for rid in ("crystal_compass", "magma_heart", "echo_stone"):
-        repo.equip_relic(int(repo.add_artifact(2, 0, rid, is_relic=True)), True)
+        repo.equip_relic(int(repo.add_artifact(2, 0, rid, is_relic=True)), 2, 0, True)
 
     sm = SchemaManager(repo_db_path)
     conn = sm._connect()
@@ -329,7 +329,7 @@ def test_relic_cap_migration_leaves_exactly_six_untouched(repo_db_path):
     repo.update_tunnel(5, 0, prestige_level=5)
     for rid in ("mole_claws", "magma_heart", "crystal_compass",
                 "echo_stone", "spore_cloak", "frozen_clock"):
-        repo.equip_relic(int(repo.add_artifact(5, 0, rid, is_relic=True)), True)
+        repo.equip_relic(int(repo.add_artifact(5, 0, rid, is_relic=True)), 5, 0, True)
 
     sm = SchemaManager(repo_db_path)
     conn = sm._connect()

@@ -515,7 +515,7 @@ class GearMixin:
             return self._error(
                 f"You've hit your relic cap ({cap}). Unequip one first.",
             )
-        self.dig_repo.equip_relic(int(artifact_db_id), True)
+        self.dig_repo.equip_relic(int(artifact_db_id), discord_id, guild_id, True)
         self._invalidate_relic_cache(discord_id, guild_id)
         return self._ok(artifact_id=target.get("artifact_id"), cap=cap)
 
@@ -525,7 +525,7 @@ class GearMixin:
         target = next((a for a in artifacts if int(a["id"]) == int(artifact_db_id)), None)
         if target is None:
             return self._error("That relic isn't in your inventory.")
-        self.dig_repo.unequip_relic(int(artifact_db_id))
+        self.dig_repo.unequip_relic(int(artifact_db_id), discord_id, guild_id)
         self._invalidate_relic_cache(discord_id, guild_id)
         return self._ok(artifact_id=target.get("artifact_id"))
 

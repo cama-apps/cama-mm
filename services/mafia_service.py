@@ -241,15 +241,17 @@ class MafiaService:
             killed.append({"discord_id": plague_target, "by": "plague"})
             killed_ids.append(plague_target)
 
-        # Process detective investigations: persist results.
-        if game.twist_event != MafiaTwist.MEMORY_FOG:
-            self._record_detective_results(game, by_id)
-
         applied = self.repo.apply_night_resolution(
             game.game_id, killed_ids, ended_at=int(time.time())
         )
         if not applied:
             return {"resolved": False, "reason": "night_already_resolved"}
+
+        # Process detective investigations only after the night has actually
+        # resolved. Recording them earlier let a concurrent no-op tick (one that
+        # loses the apply_night_resolution race) still re-write detective rows.
+        if game.twist_event != MafiaTwist.MEMORY_FOG:
+            self._record_detective_results(game, by_id)
 
         return {
             "resolved": True,

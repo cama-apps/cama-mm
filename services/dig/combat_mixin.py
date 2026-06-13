@@ -1425,14 +1425,16 @@ class BossCombatMixin:
         """Resume a paused duel after the player picks a reactive option.
 
         ``state_row`` may be supplied by the caller when the row was already
-        atomically claimed. When omitted, the row is read from the repo as
-        usual.
+        atomically claimed. When omitted, the row is atomically claimed here
+        (read-and-delete) so two concurrent resumes can't both resolve the same
+        duel and double-pay / double-drop — the first caller wins the row, the
+        second gets ``None`` and bails.
         """
         from domain.models.boss_mechanics import get_mechanic as _get_mechanic
         from services.dig_constants import get_boss_by_id as _get_boss
 
         if state_row is None:
-            state_row = self.dig_repo.get_active_duel(discord_id, guild_id)
+            state_row = self.dig_repo.claim_active_duel(discord_id, guild_id)
         if state_row is None:
             return self._error("No active duel to resume.")
 
