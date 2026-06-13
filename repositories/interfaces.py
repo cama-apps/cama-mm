@@ -975,11 +975,15 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
-    def settle_prediction_orderbook(self, prediction_id: int, outcome: str) -> dict:
+    def settle_prediction_orderbook(
+        self, prediction_id: int, outcome: str, resolved_by: int | None = None,
+        bankruptcy_penalty_rate: float | None = None,
+    ) -> dict:
         """Settle by paying ``contracts × CONTRACT_VALUE`` per winning holder.
 
         Cancels outstanding levels, marks status='resolved'. Returns winners /
-        losers summary and final lp_pnl.
+        losers summary and final lp_pnl. When ``bankruptcy_penalty_rate`` is
+        set, penalized winners' penalty share of profit is netted in-txn.
         """
         ...
 

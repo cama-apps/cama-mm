@@ -259,6 +259,51 @@ def test_resolve_orderbook_two_sided_holder_profit_nets_both_bases(
     assert winner["profit"] == payout - yes_cost - no_cost
 
 
+def test_resolve_orderbook_bankruptcy_penalty_is_netted_in_txn(
+    repo_db_path, player_repository
+):
+    """A penalized winner's bankruptcy penalty is withheld inside the settlement
+    txn (no follow-up debit): the credited balance is net of the penalty and the
+    winner dict reports it."""
+    from config import BANKRUPTCY_PENALTY_RATE
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from services.bankruptcy_service import BankruptcyService
+
+    bankruptcy_service = BankruptcyService(
+        BankruptcyRepository(repo_db_path), player_repository
+    )
+    prediction_repo = PredictionRepository(repo_db_path)
+    prediction_service = PredictionService(
+        prediction_repo=prediction_repo,
+        player_repo=player_repository,
+        admin_user_ids=[ADMIN_ID],
+        bankruptcy_service=bankruptcy_service,
+    )
+    _add_player(player_repository, 1, balance=1000)
+    # Put player 1 under penalty via the real path (declares bankruptcy from
+    # debt), then top their balance back up so they can buy contracts.
+    player_repository.update_balance(1, TEST_GUILD_ID, -50)
+    assert bankruptcy_service.execute_bankruptcy(1, TEST_GUILD_ID).success
+    player_repository.update_balance(1, TEST_GUILD_ID, 1000)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="penalty?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
+    yes_cost = prediction_repo.get_position(pid, 1)["yes_cost_basis_total"]
+
+    pre = player_repository.get_balance(1, TEST_GUILD_ID)
+    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+
+    payout = 5 * PREDICTION_CONTRACT_VALUE
+    penalty = int((payout - yes_cost) * (1 - BANKRUPTCY_PENALTY_RATE))
+    assert penalty > 0  # genuinely penalized
+    winner = next(w for w in result["winners"] if w["discord_id"] == 1)
+    assert winner["bankruptcy_penalty"] == penalty
+    # Balance was credited net of the penalty, in one shot.
+    assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == payout - penalty
+
+
 def test_resolve_orderbook_settles_locked_market(
     prediction_service, prediction_repo, player_repository
 ):
