@@ -304,6 +304,52 @@ def test_resolve_orderbook_bankruptcy_penalty_is_netted_in_txn(
     assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == payout - penalty
 
 
+def test_resolve_orderbook_penalty_uses_net_profit_for_hedger(
+    repo_db_path, player_repository
+):
+    """A two-sided holder under penalty is penalized on profit NET of both cost
+    bases, not the (larger) winning-side-only figure — so a hedger isn't
+    over-penalized. Fails on the old single-side profit basis."""
+    from config import BANKRUPTCY_PENALTY_RATE
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from services.bankruptcy_service import BankruptcyService
+
+    bankruptcy_service = BankruptcyService(
+        BankruptcyRepository(repo_db_path), player_repository
+    )
+    prediction_repo = PredictionRepository(repo_db_path)
+    prediction_service = PredictionService(
+        prediction_repo=prediction_repo,
+        player_repo=player_repository,
+        admin_user_ids=[ADMIN_ID],
+        bankruptcy_service=bankruptcy_service,
+    )
+    _add_player(player_repository, 1, balance=1000)
+    player_repository.update_balance(1, TEST_GUILD_ID, -50)
+    assert bankruptcy_service.execute_bankruptcy(1, TEST_GUILD_ID).success
+    player_repository.update_balance(1, TEST_GUILD_ID, 1000)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="hedge under penalty?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="no", contracts=3)
+    pos = prediction_repo.get_position(pid, 1)
+    yes_cost, no_cost = pos["yes_cost_basis_total"], pos["no_cost_basis_total"]
+    assert no_cost > 0  # genuinely two-sided
+
+    pre = player_repository.get_balance(1, TEST_GUILD_ID)
+    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+
+    payout = 5 * PREDICTION_CONTRACT_VALUE
+    net_profit = payout - yes_cost - no_cost  # penalty base nets BOTH stakes
+    penalty = int(net_profit * (1 - BANKRUPTCY_PENALTY_RATE))
+    assert penalty > 0
+    winner = next(w for w in result["winners"] if w["discord_id"] == 1)
+    assert winner["bankruptcy_penalty"] == penalty
+    assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == payout - penalty
+
+
 def test_resolve_orderbook_settles_locked_market(
     prediction_service, prediction_repo, player_repository
 ):
