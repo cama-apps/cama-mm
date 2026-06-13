@@ -507,23 +507,16 @@ class PredictionService:
         the penalty share of profit (payout − cost basis) is docked here as a
         coin sink. Stake (cost basis) is always returned whole.
         """
-        result = self.prediction_repo.settle_prediction_orderbook(
-            prediction_id, outcome, resolved_by=resolved_by
+        # The bankruptcy debuff is folded into the settlement txn: the penalty
+        # share of each penalized winner's profit is netted out of their credit
+        # there (no follow-up debit with a crash window). Winners returned
+        # already carry netted payout/profit and a ``bankruptcy_penalty`` field.
+        return self.prediction_repo.settle_prediction_orderbook(
+            prediction_id, outcome, resolved_by=resolved_by,
+            bankruptcy_penalty_rate=(
+                self.bankruptcy_service.penalty_rate if self.bankruptcy_service else None
+            ),
         )
-        if self.bankruptcy_service:
-            guild_id = result.get("guild_id")
-            winners = result.get("winners", [])
-            penalties = self.bankruptcy_service.debit_bankruptcy_penalty(
-                [(w["discord_id"], int(w.get("profit", 0))) for w in winners],
-                guild_id,
-            )
-            for w in winners:
-                pen = penalties.get(w["discord_id"], 0)
-                if pen:
-                    w["bankruptcy_penalty"] = pen
-                    w["payout"] = int(w.get("payout", 0)) - pen
-                    w["profit"] = int(w.get("profit", 0)) - pen
-        return result
 
     def cancel_orderbook(self, prediction_id: int) -> dict:
         """Cost-basis refund. Same admin gating enforced at the command layer."""

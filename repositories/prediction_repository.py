@@ -1230,14 +1230,17 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             return [(int(r["snapshot_at"]), int(r["fair_pct"])) for r in cursor.fetchall()]
 
     def settle_prediction_orderbook(
-        self, prediction_id: int, outcome: str, resolved_by: int | None = None
+        self, prediction_id: int, outcome: str, resolved_by: int | None = None,
+        bankruptcy_penalty_rate: float | None = None,
     ) -> dict:
         """Atomic resolve: cancel levels, pay winners, mark resolved.
 
         ``outcome`` is 'yes' or 'no'. Pays ``PREDICTION_CONTRACT_VALUE`` per
         winning contract; losing contracts pay 0. Cost basis is irrelevant —
         payout is purely a function of contract count. ``resolved_by`` is
-        recorded for the audit trail.
+        recorded for the audit trail. When ``bankruptcy_penalty_rate`` is set,
+        a penalized winner's penalty share of profit is netted out of their
+        credit inside this txn (no follow-up debit / crash window).
         """
         if outcome not in self.VALID_POSITIONS:
             raise ValueError(f"Invalid outcome: {outcome}")
@@ -1297,16 +1300,6 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     losing_qty = yes_c
 
                 if payout > 0:
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (payout, p["discord_id"], guild_id),
-                    )
-                    total_payout += payout
                     winning_basis = yes_t if outcome == "yes" else no_t
                     # Net profit subtracts BOTH sides' cost basis. A hedger who
                     # held the losing side too already paid for it, so true
@@ -1314,12 +1307,38 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     # keeps the bankruptcy-penalty base and the stats P&L
                     # (won*CV − total cost) consistent instead of over-crediting
                     # — and over-penalizing — two-sided holders.
-                    winners.append({
+                    profit = payout - winning_basis - losing_basis
+                    # Bankruptcy debuff folded into the txn: withhold the penalty
+                    # share of profit from a still-penalized winner's credit.
+                    penalty = 0
+                    if bankruptcy_penalty_rate is not None and profit > 0:
+                        cursor.execute(
+                            "SELECT COALESCE(penalty_games_remaining, 0) AS pg "
+                            "FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                            (p["discord_id"], guild_id),
+                        )
+                        st = cursor.fetchone()
+                        if st is not None and int(st["pg"]) > 0:
+                            penalty = int(profit * (1 - bankruptcy_penalty_rate))
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (payout - penalty, p["discord_id"], guild_id),
+                    )
+                    total_payout += payout
+                    winner = {
                         "discord_id": int(p["discord_id"]),
                         "contracts": winning_qty,
-                        "payout": payout,
-                        "profit": payout - winning_basis - losing_basis,
-                    })
+                        "payout": payout - penalty,
+                        "profit": profit - penalty,
+                    }
+                    if penalty:
+                        winner["bankruptcy_penalty"] = penalty
+                    winners.append(winner)
                 if losing_qty > 0:
                     losers.append({
                         "discord_id": int(p["discord_id"]),

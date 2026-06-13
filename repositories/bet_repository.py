@@ -748,16 +748,22 @@ class BetRepository(BaseRepository, IBetRepository):
         house_payout_multiplier: float,
         betting_mode: str = "pool",
         pending_match_id: int | None = None,
+        bankruptcy_penalty_rate: float | None = None,
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
         - credit winners in players.jopacoin_balance (based on effective bet with leverage)
+        - optionally dock each penalized winner's bankruptcy penalty in the SAME txn
         - tag all pending bets with match_id
 
         Args:
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
             pending_match_id: If provided, settle bets for this specific pending match.
                              Also includes legacy bets (pending_match_id IS NULL) with matching since_ts.
+            bankruptcy_penalty_rate: When set, winners still under a bankruptcy
+                             penalty keep only this fraction of their profit; the
+                             withheld share is netted out of the credit inside the
+                             settlement txn (no follow-up debit / crash window).
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
@@ -798,6 +804,14 @@ class BetRepository(BaseRepository, IBetRepository):
                     rows, winning_team, house_payout_multiplier
                 )
 
+            if bankruptcy_penalty_rate is not None:
+                penalties = self._apply_bankruptcy_penalty_in_txn(
+                    cursor, distributions, balance_deltas,
+                    normalized_guild, bankruptcy_penalty_rate,
+                )
+                if penalties:
+                    distributions["bankruptcy_penalties"] = penalties
+
             if balance_deltas:
                 cursor.executemany(
                     """
@@ -836,6 +850,46 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
 
         return distributions
+
+    def _apply_bankruptcy_penalty_in_txn(
+        self, cursor, distributions: dict, balance_deltas: dict[int, int],
+        normalized_guild: int, penalty_rate: float,
+    ) -> dict[int, int]:
+        """Net each penalized winner's bankruptcy penalty out of their credit,
+        inside the settlement txn.
+
+        Mirrors ``mafia_repository.finalize_day_resolution``: profit basis is
+        gross payout minus total at-risk stake (effective bet), aggregated per
+        user; the withheld share is ``floor(profit * (1 - keep_rate))`` and only
+        applies to winners still under penalty (``penalty_games_remaining > 0``).
+        Folding it here removes the post-settlement debit's crash window. The
+        bet ``payout`` column stays gross; only the balance credit is netted.
+        """
+        agg: dict[int, dict[str, int]] = {}
+        for w in distributions.get("winners", []):
+            a = agg.setdefault(w["discord_id"], {"payout": 0, "stake": 0})
+            a["payout"] += int(w.get("payout", 0))
+            a["stake"] += int(w.get("effective_bet", w.get("amount", 0)))
+
+        penalties: dict[int, int] = {}
+        for discord_id, a in agg.items():
+            profit = a["payout"] - a["stake"]
+            if profit <= 0:
+                continue
+            cursor.execute(
+                "SELECT COALESCE(penalty_games_remaining, 0) AS pg "
+                "FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_guild),
+            )
+            row = cursor.fetchone()
+            if row is None or int(row["pg"]) <= 0:
+                continue
+            penalty = int(profit * (1 - penalty_rate))
+            if penalty <= 0:
+                continue
+            balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) - penalty
+            penalties[discord_id] = penalty
+        return penalties
 
     def _calculate_house_payouts(
         self, rows: list, winning_team: str, house_payout_multiplier: float
