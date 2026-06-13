@@ -265,6 +265,113 @@ class DigService(
     # Core Dig
     # ------------------------------------------------------------------
 
+    def _grant_dig_item_charges(
+        self, discord_id: int, guild_id, tunnel: dict, now: int, item_flags: dict,
+    ) -> None:
+        """Apply the charge-granting consumables resolved for this dig.
+
+        Each grants its effect to both the DB row and the in-memory ``tunnel``
+        dict (so the rest of the dig sees it): hard hat (+3 cave-in-prevention
+        charges), grappling hook (+5 cushion charges), sonar pulse (primes the
+        skip flag for the NEXT dig), reinforcement (48h window), void bait
+        (+3 double-event digs). Side effects only.
+        """
+        # Hard hat: grant 3 charges of full cave-in prevention
+        if item_flags["has_hard_hat"]:
+            existing_charges = tunnel.get("hard_hat_charges", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                hard_hat_charges=existing_charges + 3,
+            )
+            tunnel["hard_hat_charges"] = existing_charges + 3
+
+        # Grappling Hook: grant 5 charges that cushion the next cave-ins
+        # (zero block_loss + no stun). Stacks across purchases.
+        if item_flags["has_grappling_hook"]:
+            existing_gh = tunnel.get("grappling_hook_charges", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                grappling_hook_charges=existing_gh + 5,
+            )
+            tunnel["grappling_hook_charges"] = existing_gh + 5
+
+        # Sonar Pulse: prime the skip flag — it fires on the NEXT dig, not
+        # this one (the dig where the item is consumed just sets the flag).
+        if item_flags["has_sonar_pulse"]:
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, sonar_skip_pending=1,
+            )
+            tunnel["sonar_skip_pending"] = 1
+
+        # Reinforcement: 48h window — half sabotage damage + cave-in block_loss cap
+        if item_flags["has_reinforcement"]:
+            reinforced_until_ts = now + 48 * 3600
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                reinforced_until=reinforced_until_ts,
+            )
+
+        # Void Bait: double event chance for next 3 digs
+        if item_flags["has_void_bait"]:
+            existing_vb = tunnel.get("void_bait_digs", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                void_bait_digs=existing_vb + 3,
+            )
+            tunnel["void_bait_digs"] = existing_vb + 3
+
+    def _charge_paid_dig_or_block(
+        self, discord_id: int, guild_id, tunnel: dict, today: str, paid: bool,
+    ) -> tuple[dict | None, int]:
+        """Resolve the cooldown / paid-dig gate for a non-first dig.
+
+        Returns ``(block, paid_dig_cost)``: ``block`` is a non-None response
+        dict when the dig can't proceed (on cooldown and not paid, or
+        insufficient balance) and the caller should surface it; otherwise None
+        with ``paid_dig_cost`` (0 when off cooldown). The paid-dig debit and the
+        paid-day counter commit atomically here so a crash between the two
+        writes can't charge JC without counting the dig.
+        """
+        cooldown_remaining = self._apply_mana_cooldown_reduction(
+            discord_id, guild_id, self._get_cooldown_remaining(tunnel)
+        )
+        if cooldown_remaining <= 0:
+            return None, 0
+
+        if not paid:
+            pc = tunnel.get("paid_digs_today") or 0
+            if tunnel.get("paid_dig_date") != today:
+                pc = 0
+            preview_cost = self._apply_mana_paid_cost_modifier(
+                discord_id, guild_id, self._calculate_paid_dig_cost(tunnel, pc),
+            )
+            return {
+                "success": False,
+                "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
+                "cooldown_remaining": cooldown_remaining,
+                "paid_dig_cost": preview_cost,
+                "paid_dig_available": True,
+            }, 0
+
+        paid_count = tunnel.get("paid_digs_today") or 0
+        if tunnel.get("paid_dig_date") != today:
+            paid_count = 0
+        paid_dig_cost = self._apply_mana_paid_cost_modifier(
+            discord_id, guild_id, self._calculate_paid_dig_cost(tunnel, paid_count),
+        )
+        balance = self.player_repo.get_balance(discord_id, guild_id)
+        if balance < paid_dig_cost:
+            return self._error(
+                f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
+            ), 0
+
+        self.dig_repo.atomic_tunnel_balance_update(
+            discord_id, guild_id,
+            balance_delta=-paid_dig_cost,
+            tunnel_updates={"paid_dig_date": today, "paid_digs_today": paid_count + 1},
+        )
+        return None, paid_dig_cost
+
     def dig(self, discord_id: int, guild_id, paid: bool = False) -> dict:
         """
         Main dig action.
@@ -339,56 +446,11 @@ class DigService(
         #    short-circuited above.
         paid_dig_cost = 0
         if not is_first_dig:
-            cooldown_remaining = self._apply_mana_cooldown_reduction(
-                discord_id, guild_id, self._get_cooldown_remaining(tunnel)
+            block, paid_dig_cost = self._charge_paid_dig_or_block(
+                discord_id, guild_id, tunnel, today, paid,
             )
-            if cooldown_remaining > 0:
-                if not paid:
-                    pd = tunnel.get("paid_dig_date")
-                    pc = tunnel.get("paid_digs_today") or 0
-                    if pd != today:
-                        pc = 0
-                    preview_cost = self._apply_mana_paid_cost_modifier(
-                        discord_id, guild_id,
-                        self._calculate_paid_dig_cost(tunnel, pc),
-                    )
-                    return {
-                        "success": False,
-                        "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
-                        "cooldown_remaining": cooldown_remaining,
-                        "paid_dig_cost": preview_cost,
-                        "paid_dig_available": True,
-                    }
-
-                # Paid dig requested
-                paid_date = tunnel.get("paid_dig_date")
-                paid_count = tunnel.get("paid_digs_today") or 0
-
-                if paid_date != today:
-                    paid_count = 0
-
-                paid_dig_cost = self._apply_mana_paid_cost_modifier(
-                    discord_id, guild_id,
-                    self._calculate_paid_dig_cost(tunnel, paid_count),
-                )
-
-                balance = self.player_repo.get_balance(discord_id, guild_id)
-                if balance < paid_dig_cost:
-                    return self._error(
-                        f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
-                    )
-
-                # Debit for paid dig: balance + paid-day counter commit
-                # together so a crash can't take the cost without
-                # incrementing paid_digs_today (or vice versa).
-                self.dig_repo.atomic_tunnel_balance_update(
-                    discord_id, guild_id,
-                    balance_delta=-paid_dig_cost,
-                    tunnel_updates={
-                        "paid_dig_date": today,
-                        "paid_digs_today": paid_count + 1,
-                    },
-                )
+            if block is not None:
+                return block
 
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
@@ -421,14 +483,12 @@ class DigService(
         # 6. Get queued items and apply effects
         items_used, items_used_ids, _item_flags = self._resolve_queued_items(discord_id, guild_id)
         has_dynamite = _item_flags["has_dynamite"]
-        has_hard_hat = _item_flags["has_hard_hat"]
         has_lantern = _item_flags["has_lantern"]
         has_torch = _item_flags["has_torch"]
-        has_grappling_hook = _item_flags["has_grappling_hook"]
         has_depth_charge = _item_flags["has_depth_charge"]
-        has_reinforcement = _item_flags["has_reinforcement"]
         has_sonar_pulse = _item_flags["has_sonar_pulse"]
-        has_void_bait = _item_flags["has_void_bait"]
+        # hard_hat / grappling_hook / reinforcement / void_bait charge grants
+        # are applied via _grant_dig_item_charges below (read from _item_flags).
 
         # Snapshot the pre-dig Sonar Pulse skip flag BEFORE granting items.
         # Sonar Pulse primes the flag for the *next* dig, not the dig where
@@ -436,49 +496,7 @@ class DigService(
         # tunnel before we touch it.
         sonar_skip_active_this_dig = int(tunnel.get("sonar_skip_pending") or 0) > 0
 
-        # Hard hat: grant 3 charges of full cave-in prevention
-        if has_hard_hat:
-            existing_charges = tunnel.get("hard_hat_charges", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                hard_hat_charges=existing_charges + 3,
-            )
-            tunnel["hard_hat_charges"] = existing_charges + 3
-
-        # Grappling Hook: grant 5 charges that cushion the next cave-ins
-        # (zero block_loss + no stun). Stacks across purchases.
-        if has_grappling_hook:
-            existing_gh = tunnel.get("grappling_hook_charges", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                grappling_hook_charges=existing_gh + 5,
-            )
-            tunnel["grappling_hook_charges"] = existing_gh + 5
-
-        # Sonar Pulse: prime the skip flag — it fires on the NEXT dig, not
-        # this one (the dig where the item is consumed just sets the flag).
-        if has_sonar_pulse:
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, sonar_skip_pending=1,
-            )
-            tunnel["sonar_skip_pending"] = 1
-
-        # Reinforcement: 48h window — half sabotage damage + cave-in block_loss cap
-        if has_reinforcement:
-            reinforced_until_ts = now + 48 * 3600
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                reinforced_until=reinforced_until_ts,
-            )
-
-        # Void Bait: double event chance for next 3 digs
-        if has_void_bait:
-            existing_vb = tunnel.get("void_bait_digs", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                void_bait_digs=existing_vb + 3,
-            )
-            tunnel["void_bait_digs"] = existing_vb + 3
+        self._grant_dig_item_charges(discord_id, guild_id, tunnel, now, _item_flags)
 
         # 7. Get layer info
         layer = self._get_layer(depth_before)
@@ -1268,50 +1286,11 @@ class DigService(
         # Cooldown / paid dig check — normal digs only.
         paid_dig_cost = 0
         if not is_first_dig:
-            cooldown_remaining = self._apply_mana_cooldown_reduction(
-                discord_id, guild_id, self._get_cooldown_remaining(tunnel)
+            block, paid_dig_cost = self._charge_paid_dig_or_block(
+                discord_id, guild_id, tunnel, today, paid,
             )
-            if cooldown_remaining > 0:
-                if not paid:
-                    pd = tunnel.get("paid_dig_date")
-                    pc = tunnel.get("paid_digs_today") or 0
-                    if pd != today:
-                        pc = 0
-                    preview_cost = self._apply_mana_paid_cost_modifier(
-                        discord_id, guild_id,
-                        self._calculate_paid_dig_cost(tunnel, pc),
-                    )
-                    return {
-                        "success": False,
-                        "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
-                        "cooldown_remaining": cooldown_remaining,
-                        "paid_dig_cost": preview_cost,
-                        "paid_dig_available": True,
-                    }, None
-
-                paid_date = tunnel.get("paid_dig_date")
-                paid_count = tunnel.get("paid_digs_today") or 0
-                if paid_date != today:
-                    paid_count = 0
-                paid_dig_cost = self._apply_mana_paid_cost_modifier(
-                    discord_id, guild_id,
-                    self._calculate_paid_dig_cost(tunnel, paid_count),
-                )
-                balance = self.player_repo.get_balance(discord_id, guild_id)
-                if balance < paid_dig_cost:
-                    return self._error(
-                        f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
-                    ), None
-                # Debit cost and flip paid_digs_today atomically so a crash
-                # between the two writes can't charge JC without counting the dig.
-                self.dig_repo.atomic_tunnel_balance_update(
-                    discord_id, guild_id,
-                    balance_delta=-paid_dig_cost,
-                    tunnel_updates={
-                        "paid_dig_date": today,
-                        "paid_digs_today": paid_count + 1,
-                    },
-                )
+            if block is not None:
+                return block, None
 
         if is_first_dig:
             return self._execute_first_dig(
@@ -1349,40 +1328,12 @@ class DigService(
         has_torch = _item_flags["has_torch"]
         has_grappling_hook = _item_flags["has_grappling_hook"]
         has_depth_charge = _item_flags["has_depth_charge"]
-        has_reinforcement = _item_flags["has_reinforcement"]
         has_sonar_pulse = _item_flags["has_sonar_pulse"]
-        has_void_bait = _item_flags["has_void_bait"]
 
         # Sonar Pulse flag persists across digs — snapshot pre-grant.
         sonar_skip_active_this_dig = int(tunnel.get("sonar_skip_pending") or 0) > 0
 
-        if has_hard_hat:
-            existing_charges = tunnel.get("hard_hat_charges", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, hard_hat_charges=existing_charges + 3,
-            )
-            tunnel["hard_hat_charges"] = existing_charges + 3
-        if has_grappling_hook:
-            existing_gh = tunnel.get("grappling_hook_charges", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, grappling_hook_charges=existing_gh + 5,
-            )
-            tunnel["grappling_hook_charges"] = existing_gh + 5
-        if has_sonar_pulse:
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, sonar_skip_pending=1,
-            )
-            tunnel["sonar_skip_pending"] = 1
-        if has_reinforcement:
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, reinforced_until=now + 48 * 3600,
-            )
-        if has_void_bait:
-            existing_vb = tunnel.get("void_bait_digs", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, void_bait_digs=existing_vb + 3,
-            )
-            tunnel["void_bait_digs"] = existing_vb + 3
+        self._grant_dig_item_charges(discord_id, guild_id, tunnel, now, _item_flags)
 
         # Layer, luminosity, weather, buffs
         layer = self._get_layer(depth_before)
