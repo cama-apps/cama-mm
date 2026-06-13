@@ -867,19 +867,23 @@ class DigRepository(BaseRepository, IDigRepository):
         balance_delta: int = 0,
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
+        add_relic_artifact_id: str | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None:
-        """Apply a balance delta + tunnel update + optional inventory add +
+        """Apply a balance delta + tunnel update + optional inventory/relic add +
         optional audit log in one BEGIN IMMEDIATE.
 
         Covers the common "debit balance, then mutate the actor's tunnel
         row" two-step pattern (upgrade_pickaxe, set_trap, buy_insurance,
         buy_item). Without this, a crash between the balance debit and the
         tunnel mutation leaves the player with coins deducted and nothing
-        to show for it.
+        to show for it. ``add_relic_artifact_id`` fuses a relic drop into the
+        same txn (pinnacle victory) so a crash can't mint a relic without also
+        marking the boss defeated and paying out.
 
-        Returns the ``id`` of the newly inserted inventory row (when
+        Returns the ``id`` of the newly inserted relic row (when
+        ``add_relic_artifact_id`` is given), else the inventory row id (when
         ``add_inventory_item`` is given), else None.
         """
         if tunnel_updates:
@@ -933,6 +937,18 @@ class DigRepository(BaseRepository, IDigRepository):
                 )
                 inventory_id = cursor.lastrowid
 
+            relic_id: int | None = None
+            if add_relic_artifact_id is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO dig_artifacts
+                        (discord_id, guild_id, artifact_id, found_at, is_relic, equipped)
+                    VALUES (?, ?, ?, ?, 1, 0)
+                    """,
+                    (discord_id, gid, add_relic_artifact_id, int(time.time())),
+                )
+                relic_id = cursor.lastrowid
+
             if log_detail is not None:
                 cursor.execute(
                     """
@@ -947,7 +963,7 @@ class DigRepository(BaseRepository, IDigRepository):
                     ),
                 )
 
-            return inventory_id
+            return relic_id if add_relic_artifact_id is not None else inventory_id
 
     def atomic_boss_full_victory(
         self,

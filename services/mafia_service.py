@@ -178,6 +178,34 @@ class MafiaService:
 
         return None
 
+    # ── Read / wiring pass-throughs ──────────────────────────────────────
+    # The cog depends on the service, not the repo. These keep the loop and
+    # posting helpers off ``mafia_service.repo`` directly.
+
+    def get_active_game(self, guild_id: int | None) -> MafiaGame | None:
+        return self.repo.get_active_game(guild_id)
+
+    def get_game_by_id(self, game_id: int) -> MafiaGame | None:
+        return self.repo.get_game_by_id(game_id)
+
+    def get_players(self, game_id: int) -> list[MafiaPlayer]:
+        return self.repo.get_players(game_id)
+
+    def set_thread_ids(
+        self,
+        game_id: int,
+        *,
+        mafia_thread_id: int | None = None,
+        discussion_thread_id: int | None = None,
+        setup_message_id: int | None = None,
+    ) -> None:
+        self.repo.set_thread_ids(
+            game_id,
+            mafia_thread_id=mafia_thread_id,
+            discussion_thread_id=discussion_thread_id,
+            setup_message_id=setup_message_id,
+        )
+
     def resolve_night(self, guild_id: int | None) -> dict:
         """Apply night actions, mark the dead, advance to DAY.
 
@@ -300,14 +328,13 @@ class MafiaService:
         else:
             alive = [p for p in all_players if p.is_alive]
             alive_mafia = sum(1 for p in alive if p.role == MafiaRole.MAFIA)
-            alive_non_mafia = sum(1 for p in alive if p.role != MafiaRole.MAFIA)
             if alive_mafia == 0:
+                # Town pinned every mafia → town wins.
                 winner = MafiaWinner.TOWN
-            elif alive_mafia >= alive_non_mafia:
-                winner = MafiaWinner.MAFIA
             else:
-                # One-day cadence: don't loop. Mafia wins by attrition if not pinned.
-                winner = MafiaWinner.MAFIA if alive_mafia > 0 else MafiaWinner.TOWN
+                # One-day cadence: any surviving mafia wins, whether they reached
+                # parity or simply weren't all lynched. Town must eliminate them all.
+                winner = MafiaWinner.MAFIA
 
         entry_fee = game.entry_fee or ENTRY_FEE
         pot_total = game.roster_size * entry_fee

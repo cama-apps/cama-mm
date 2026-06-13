@@ -350,7 +350,7 @@ class MafiaCommands(commands.Cog):
     async def _tick_guild(self, guild: discord.Guild) -> None:
         guild_id = guild.id
         game = await asyncio.to_thread(
-            self.mafia_service.repo.get_active_game, guild_id
+            self.mafia_service.get_active_game, guild_id
         )
 
         if game is None:
@@ -372,7 +372,7 @@ class MafiaCommands(commands.Cog):
                 )
                 if summary.get("resolved"):
                     refreshed = await asyncio.to_thread(
-                        self.mafia_service.repo.get_game_by_id, game.game_id
+                        self.mafia_service.get_game_by_id, game.game_id
                     )
                     await self._post_day_announcement(guild, refreshed, summary)
             elif elapsed >= NIGHT_DURATION_S - PHASE_REMINDER_LEAD_S:
@@ -385,7 +385,7 @@ class MafiaCommands(commands.Cog):
                 )
                 if summary.get("resolved"):
                     refreshed = await asyncio.to_thread(
-                        self.mafia_service.repo.get_game_by_id, game.game_id
+                        self.mafia_service.get_game_by_id, game.game_id
                     )
                     await self._post_resolution(guild, refreshed, summary)
             elif elapsed >= NIGHT_DURATION_S + DAY_DURATION_S - PHASE_REMINDER_LEAD_S:
@@ -399,13 +399,19 @@ class MafiaCommands(commands.Cog):
         return (game_date, phase.value) in self._announced_phases.get(guild_id, set())
 
     def _mark_announced(self, guild_id: int, game_date: str, phase: MafiaPhase) -> None:
-        self._announced_phases.setdefault(guild_id, set()).add((game_date, phase.value))
+        # Only the current game_date matters, so drop stale dates as we record —
+        # otherwise the set grows one entry per day forever (slow memory leak).
+        seen = {e for e in self._announced_phases.get(guild_id, set()) if e[0] == game_date}
+        seen.add((game_date, phase.value))
+        self._announced_phases[guild_id] = seen
 
     def _was_reminded(self, guild_id: int, game_date: str, phase: MafiaPhase) -> bool:
         return (game_date, phase.value) in self._reminded_phases.get(guild_id, set())
 
     def _mark_reminded(self, guild_id: int, game_date: str, phase: MafiaPhase) -> None:
-        self._reminded_phases.setdefault(guild_id, set()).add((game_date, phase.value))
+        seen = {e for e in self._reminded_phases.get(guild_id, set()) if e[0] == game_date}
+        seen.add((game_date, phase.value))
+        self._reminded_phases[guild_id] = seen
 
     async def _post_setup(self, guild: discord.Guild, game) -> None:
         if self._was_announced(guild.id, game.game_date, MafiaPhase.SETUP):
@@ -415,7 +421,7 @@ class MafiaCommands(commands.Cog):
             return
 
         players = await asyncio.to_thread(
-            self.mafia_service.repo.get_players, game.game_id
+            self.mafia_service.get_players, game.game_id
         )
         narration = await self.flavor_service.setup_narration(game)
         roster = " ".join(f"<@{p.discord_id}>" for p in players)
@@ -443,7 +449,7 @@ class MafiaCommands(commands.Cog):
         try:
             msg = await channel.send(embed=embed)
             await asyncio.to_thread(
-                self.mafia_service.repo.set_thread_ids,
+                self.mafia_service.set_thread_ids,
                 game.game_id,
                 setup_message_id=msg.id,
             )
@@ -479,7 +485,7 @@ class MafiaCommands(commands.Cog):
                     f"Coordinate kills here. Submit your final pick via `/mafia act`."
                 )
                 await asyncio.to_thread(
-                    self.mafia_service.repo.set_thread_ids,
+                    self.mafia_service.set_thread_ids,
                     game.game_id,
                     mafia_thread_id=thread.id,
                 )
@@ -505,7 +511,7 @@ class MafiaCommands(commands.Cog):
         players_by_id = {
             p.discord_id: p
             for p in await asyncio.to_thread(
-                self.mafia_service.repo.get_players, game.game_id
+                self.mafia_service.get_players, game.game_id
             )
         }
 
@@ -543,7 +549,7 @@ class MafiaCommands(commands.Cog):
                     auto_archive_duration=1440,
                 )
                 await asyncio.to_thread(
-                    self.mafia_service.repo.set_thread_ids,
+                    self.mafia_service.set_thread_ids,
                     game.game_id,
                     discussion_thread_id=thread.id,
                 )
@@ -578,7 +584,7 @@ class MafiaCommands(commands.Cog):
         players_by_id = {
             p.discord_id: p
             for p in await asyncio.to_thread(
-                self.mafia_service.repo.get_players, game.game_id
+                self.mafia_service.get_players, game.game_id
             )
         }
 

@@ -46,8 +46,10 @@ class ServiceContainer:
         cerebras_api_key: str | None = None,
         llm_api_key: str | None = None,
         ai_model: str = "groq/qwen/qwen3-32b",
-        ai_timeout_seconds: int = 30,
-        ai_max_tokens: int = 4096,
+        # Defaults mirror config.py (AI_TIMEOUT_SECONDS / AI_MAX_TOKENS) so a
+        # container built without these kwargs gets the same model budget as prod.
+        ai_timeout_seconds: int = 15,
+        ai_max_tokens: int = 500,
     ):
         self.db_path = db_path
         self.admin_user_ids = admin_user_ids or []

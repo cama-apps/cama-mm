@@ -1189,10 +1189,14 @@ class ProgressionMixin:
         vendetta_reflect = 0
         vendetta_bonus = 0
         if self._has_relic(target_id, guild_id, "vendetta_coin"):
-            vendetta_reflect = max(1, int(damage * 0.5))
             vendetta_bonus = 5
+            reflect_amount = max(1, int(damage * 0.5))
             try:
-                self.player_repo.add_balance(actor_id, guild_id, -vendetta_reflect)
+                # Reflect via an atomic, floored debit so a relic proc can't
+                # drain the saboteur below zero. If they can't absorb the pain,
+                # no reflect lands but the owner still gets their flat bonus.
+                if self.player_repo.try_debit(actor_id, guild_id, reflect_amount):
+                    vendetta_reflect = reflect_amount
                 self.player_repo.add_balance(target_id, guild_id, vendetta_bonus)
                 self.dig_repo.log_action(
                     discord_id=target_id, guild_id=guild_id,

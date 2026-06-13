@@ -227,6 +227,38 @@ def test_resolve_orderbook_pays_no_side_when_no_wins(
     assert player_repository.get_balance(1, TEST_GUILD_ID) == yes_pre
 
 
+def test_resolve_orderbook_two_sided_holder_profit_nets_both_bases(
+    prediction_service, prediction_repo, player_repository
+):
+    """A hedger holding BOTH sides: resolving YES credits only the YES payout,
+    and the reported profit subtracts the losing NO cost basis too. This keeps
+    the bankruptcy-penalty base (charged on profit) and the stats P&L from
+    over-crediting — and over-penalizing — two-sided holders.
+    """
+    _add_player(player_repository, 1, balance=10000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="hedger?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="no", contracts=3)
+
+    pos = prediction_repo.get_position(pid, 1)
+    yes_cost = pos["yes_cost_basis_total"]
+    no_cost = pos["no_cost_basis_total"]
+    assert no_cost > 0  # genuinely two-sided
+
+    pre = player_repository.get_balance(1, TEST_GUILD_ID)
+    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+
+    payout = 5 * PREDICTION_CONTRACT_VALUE
+    # Only the winning (YES) side is credited.
+    assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == payout
+    winner = next(w for w in result["winners"] if w["discord_id"] == 1)
+    assert winner["payout"] == payout
+    # Profit nets BOTH cost bases, not just the winning side's.
+    assert winner["profit"] == payout - yes_cost - no_cost
+
+
 def test_resolve_orderbook_settles_locked_market(
     prediction_service, prediction_repo, player_repository
 ):

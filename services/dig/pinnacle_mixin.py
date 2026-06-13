@@ -166,16 +166,16 @@ class PinnacleMixin:
             return None
         return random.choice(PINNACLE_FORESHADOW_LINES)
 
-    def _drop_pinnacle_relic(
-        self, discord_id: int, guild_id, tunnel: dict, pinnacle_id: str,
-    ) -> dict:
-        """Roll and persist a pinnacle relic with 2 random stats.
+    def _roll_pinnacle_relic(self, tunnel: dict, pinnacle_id: str) -> dict:
+        """Roll a pinnacle relic with 2 random stats — WITHOUT persisting it.
 
-        Returns the relic descriptor (name, stats, prestige_at_drop) for
-        the embed. Stores it as a `dig_artifacts` row with a synthetic
-        artifact_id of the form ``pinnacle:<base>:<suffix>:<stat1>:<stat2>``.
-        Combat-affecting stats are decoded and folded into combat math via
-        ``_apply_pinnacle_relic_stats`` when the relic is equipped.
+        Returns the relic descriptor (name, stats, prestige_at_drop, the
+        synthetic ``artifact_id`` of the form
+        ``pinnacle:<base>:<suffix>:<stat1>:<stat2>``). The actual
+        ``dig_artifacts`` insert is fused into the victory transaction by the
+        caller so a crash can't mint the relic without also paying out. The
+        ``db_id`` is filled in once the atomic insert returns. Combat-affecting
+        stats are decoded via ``_apply_pinnacle_relic_stats`` when equipped.
         """
         prestige_level = tunnel.get("prestige_level", 0) or 0
         base_name = PINNACLE_RELIC_BASE_NAME[pinnacle_id]
@@ -188,16 +188,13 @@ class PinnacleMixin:
         # rolls never share a name (the old random suffix ignored the stats).
         suffix = pinnacle_suffix_from_stats(stat_ids)
         artifact_id = f"pinnacle:{base_name}:{suffix}:{stat_ids[0]}:{stat_ids[1]}"
-        relic_db_id = self.dig_repo.add_artifact(
-            discord_id, guild_id, artifact_id, is_relic=True,
-        )
         return {
             "name": f"{base_name} of {suffix}",
             "stats": [s.label for s in rolled_stats],
             "stat_ids": stat_ids,
             "prestige_at_drop": prestige_level,
             "artifact_id": artifact_id,
-            "db_id": relic_db_id,
+            "db_id": None,
         }
 
     def _apply_pinnacle_relic_stats(
@@ -856,7 +853,7 @@ class PinnacleMixin:
                 eff_mult = self._effective_wager_multiplier(base_mult, win_chance)
                 wager_payout = int(wager * (eff_mult - 1))
             total_reward = jc_reward + wager_payout
-            relic_drop = self._drop_pinnacle_relic(discord_id, guild_id, tunnel, pinnacle_id)
+            relic_drop = self._roll_pinnacle_relic(tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
             boss_progress[str(PINNACLE_DEPTH)] = {
                 "status": "defeated",
@@ -868,9 +865,13 @@ class PinnacleMixin:
                 "last_engaged_at": int(now),
             }
             prev_max_depth = tunnel.get("max_depth", 0) or 0
-            self.dig_repo.atomic_tunnel_balance_update(
+            # Fuse the relic drop into the victory txn: a crash can no longer
+            # mint the relic without also marking the pinnacle defeated and
+            # paying out (which previously let a retry drop a second relic).
+            relic_drop["db_id"] = self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=total_reward,
+                add_relic_artifact_id=relic_drop["artifact_id"],
                 tunnel_updates={
                     "depth": new_depth,
                     "max_depth": max(prev_max_depth, new_depth),
