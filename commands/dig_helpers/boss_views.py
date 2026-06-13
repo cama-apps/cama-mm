@@ -917,6 +917,9 @@ class BossEncounterView(discord.ui.View):
         self.has_lantern = has_lantern
         self.dig_flavor_service = dig_flavor_service
         self.message: discord.Message | None = None
+        # Guards against a fast double-click on Fight re-entering resolution
+        # before the first click's await completes and stops the view.
+        self._engaged = False
         if not has_lantern:
             self.scout.disabled = True
 
@@ -937,6 +940,11 @@ class BossEncounterView(discord.ui.View):
             # Others can cheer, not fight
             await interaction.response.send_message("Only the tunnel owner can fight.", ephemeral=True)
             return
+        if self._engaged:
+            # A prior click already started resolution; swallow the duplicate.
+            await safe_defer(interaction)
+            return
+        self._engaged = True
         # Multi-phase carry: a prior phase win locked the original wager onto
         # this boss. Skip the wager modal — the carried stake rides forward.
         carried = await asyncio.to_thread(

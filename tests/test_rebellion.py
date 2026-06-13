@@ -910,13 +910,18 @@ class TestMetaBetPayouts:
         before = {pid: player_repo.get_balance(pid, guild_id) for pid in [12100, 12101, 12102, 12200, 12201]}
         result = rebellion_repo.settle_meta_bets(war_id, "rebels")
 
-        # Total pool = 30 + 40 = 70
-        # Rebel winners split 70 proportionally: each bet 10 out of 30, so each gets 70 * (10/30) = 23
+        # Total pool = 30 + 40 = 70. Each rebel bet 10 of 30, so a share floors
+        # to int(70 * 10/30) = 23 (sum 69); the 1-coin remainder folds into one
+        # winner so the whole 70 is paid out and nothing is destroyed.
         assert result["total_pool"] == 70
         assert result["winning_side"] == "rebels"
-        for pid in [12100, 12101, 12102]:
-            new_bal = player_repo.get_balance(pid, guild_id)
-            assert new_bal > before[pid], f"Rebel bettor {pid} should profit"
+        payout_amounts = sorted(p["payout"] for p in result["payouts"])
+        assert payout_amounts == [23, 23, 24]
+        assert sum(payout_amounts) == 70, "full pool conserved (no coins burned)"
+        # Each winner's balance rose by exactly their reported payout.
+        for p in result["payouts"]:
+            pid = p["discord_id"]
+            assert player_repo.get_balance(pid, guild_id) == before[pid] + p["payout"]
 
         # Losers get nothing
         for pid in [12200, 12201]:
@@ -930,16 +935,44 @@ class TestMetaBetPayouts:
         before = {pid: player_repo.get_balance(pid, guild_id) for pid in [12100, 12101, 12102, 12200, 12201]}
         result = rebellion_repo.settle_meta_bets(war_id, "wheel")
 
-        # Wheel winners: 2 bettors each bet 20 out of 40, split 70
-        # Each gets 70 * (20/40) = 35
+        # Wheel winners: 2 bettors each bet 20 of 40, split 70 evenly →
+        # int(70 * 20/40) = 35 each, no remainder.
         assert result["total_pool"] == 70
-        for pid in [12200, 12201]:
-            new_bal = player_repo.get_balance(pid, guild_id)
-            assert new_bal > before[pid], f"Wheel bettor {pid} should profit"
+        payout_amounts = sorted(p["payout"] for p in result["payouts"])
+        assert payout_amounts == [35, 35]
+        assert sum(payout_amounts) == 70
+        for p in result["payouts"]:
+            pid = p["discord_id"]
+            assert player_repo.get_balance(pid, guild_id) == before[pid] + p["payout"]
 
         for pid in [12100, 12101, 12102]:
             new_bal = player_repo.get_balance(pid, guild_id)
             assert new_bal == before[pid], f"Rebel bettor {pid} should not receive payout"
+
+    def test_meta_bet_remainder_folds_into_largest_stake(self, rebellion_repo, player_repo):
+        """Uneven stakes produce a floor remainder; it must land on the largest
+        stake and the full pool must be conserved (no coins destroyed)."""
+        guild_id = TEST_GUILD_ID
+        now = int(time.time())
+        _add_player(player_repo, 14001, balance=200, guild_id=guild_id)
+        war_id = rebellion_repo.create_war(guild_id, 14001, now + 900, now)
+        # rebels pool 7 + 3 = 10; wheel pool 4; total = 14.
+        # winner 14100 (7): int(14 * 7/10) = 9 ; winner 14101 (3): int(14 * 3/10) = 4
+        # sum 13, remainder 1 -> folds into the larger stake (14100) -> 10.
+        for pid, side, amount in [
+            (14100, "rebels", 7),
+            (14101, "rebels", 3),
+            (14200, "wheel", 4),
+        ]:
+            _add_player(player_repo, pid, balance=100, guild_id=guild_id)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+
+        result = rebellion_repo.settle_meta_bets(war_id, "rebels")
+        assert result["total_pool"] == 14
+        payouts = {p["discord_id"]: p["payout"] for p in result["payouts"]}
+        assert sum(payouts.values()) == 14, "nothing destroyed"
+        assert payouts[14100] == 10  # 9 + 1 remainder (largest stake)
+        assert payouts[14101] == 4
 
     def test_empty_meta_bets_no_crash(self, rebellion_repo, player_repo):
         guild_id = TEST_GUILD_ID

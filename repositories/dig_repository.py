@@ -628,22 +628,31 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def equip_relic(self, artifact_db_id: int, equipped: bool = True) -> None:
-        """Set equipped flag on a relic."""
+    def equip_relic(
+        self, artifact_db_id: int, discord_id: int, guild_id: int | None,
+        equipped: bool = True,
+    ) -> None:
+        """Set equipped flag on a relic the player actually owns."""
+        gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE dig_artifacts SET equipped = ? WHERE id = ?",
-                (int(equipped), artifact_db_id),
+                "UPDATE dig_artifacts SET equipped = ? "
+                "WHERE id = ? AND discord_id = ? AND guild_id = ?",
+                (int(equipped), artifact_db_id, int(discord_id), gid),
             )
 
-    def unequip_relic(self, artifact_db_id: int) -> None:
-        """Unequip a relic."""
+    def unequip_relic(
+        self, artifact_db_id: int, discord_id: int, guild_id: int | None,
+    ) -> None:
+        """Unequip a relic the player actually owns."""
+        gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE dig_artifacts SET equipped = 0 WHERE id = ?",
-                (artifact_db_id,),
+                "UPDATE dig_artifacts SET equipped = 0 "
+                "WHERE id = ? AND discord_id = ? AND guild_id = ?",
+                (artifact_db_id, int(discord_id), gid),
             )
 
     def count_equipped_relics(self, discord_id: int, guild_id: int) -> int:

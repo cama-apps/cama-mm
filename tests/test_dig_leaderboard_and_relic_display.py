@@ -99,7 +99,7 @@ class TestDigInfoRelicShape:
             db_id = dig_repo.add_artifact(
                 discord_id, guild_id, relic_id, is_relic=True,
             )
-            dig_repo.equip_relic(db_id, equipped=True)
+            dig_repo.equip_relic(db_id, discord_id, guild_id, equipped=True)
 
         info = dig_service.get_tunnel_info(discord_id, guild_id)
         relics = info["relics"]

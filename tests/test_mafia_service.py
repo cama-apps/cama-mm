@@ -685,6 +685,103 @@ def test_zero_sum_across_outcomes(mafia_service, mafia_repo, player_repo):
         )
 
 
+def test_mafia_faction_win_pays_whole_pot(mafia_service, mafia_repo, player_repo):
+    """A MAFIA faction win hands the entire pot to the mafia and stays zero-sum.
+
+    The other payout tests only drive TOWN and JESTER wins; this exercises the
+    mafia winning-faction split + within-faction MVP/dust allocation.
+    """
+    roles = [
+        (601, MafiaRole.MAFIA, True),
+        (602, MafiaRole.MAFIA, False),
+        (603, MafiaRole.TOWNIE, False),
+        (604, MafiaRole.DETECTIVE, False),
+        (605, MafiaRole.TOWNIE, False),
+    ]
+    ids = [pid for pid, _, _ in roles]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=0)
+    starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
+    for pid in ids:
+        player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
+
+    gid = _new_game(mafia_repo, roles)
+    with mafia_repo.connection() as conn:
+        conn.cursor().execute(
+            "UPDATE mafia_games SET roster_size = ? WHERE game_id = ?",
+            (len(roles), gid),
+        )
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+
+    # Town misfires and lynches a townie (605); the two mafia survive and now
+    # equal the two remaining non-mafia → mafia win by attrition.
+    for actor, target in [(601, 605), (602, 605), (603, 605), (604, 601)]:
+        mafia_service.submit_day_vote(TEST_GUILD_ID, actor, target)
+
+    summary = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert summary["winner"] == MafiaWinner.MAFIA.value
+    assert summary["lynched_id"] == 605
+    winning_ids = summary["winning_ids"]
+    assert set(winning_ids) == {601, 602}
+
+    pot = summary["pot_total"]
+    assert pot == _pot_for_roster(5)
+    mvp_share = MVP_BONUS if summary["mvp_id"] in winning_ids else 0
+    assert summary["payout_per_winner"] == (pot - mvp_share) // len(winning_ids)
+
+    # The whole pot went to the mafia (net of their own two entry fees).
+    winner_delta = sum(
+        player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in winning_ids
+    )
+    assert winner_delta == pot - len(winning_ids) * ENTRY_FEE
+
+    # Losers only lost their fee, and the whole game is zero-sum.
+    for pid in (603, 604, 605):
+        assert player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] == -ENTRY_FEE
+    total_delta = sum(
+        player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
+    )
+    assert total_delta == 0
+
+
+def test_detective_backfill_skipped_when_night_resolution_noops(
+    mafia_service, mafia_repo, monkeypatch
+):
+    """Detective backfill must run only after the night actually resolves.
+
+    Regression guard: detective rows were previously written *before* calling
+    apply_night_resolution, so a concurrent tick that lost the resolution race
+    (apply returns False) still mutated detective state on a no-op path.
+    """
+    _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.MAFIA, True),
+            (2, MafiaRole.TOWNIE, False),
+            (3, MafiaRole.DOCTOR, False),
+            (4, MafiaRole.DETECTIVE, False),
+            (5, MafiaRole.TOWNIE, False),
+        ],
+    )
+    res = mafia_service.submit_night_action(
+        TEST_GUILD_ID, 4, 1, MafiaActionType.INVESTIGATE
+    )
+    assert res["ok"]
+
+    # Lose the resolution race: apply_night_resolution no-ops.
+    monkeypatch.setattr(mafia_repo, "apply_night_resolution", lambda *a, **k: False)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        mafia_service, "_record_detective_results",
+        lambda *a, **k: calls.append(1),
+    )
+
+    summary = mafia_service.resolve_night(TEST_GUILD_ID)
+    assert summary["resolved"] is False
+    assert summary["reason"] == "night_already_resolved"
+    assert calls == [], "detective backfill ran on the no-op resolution path"
+
+
 def test_resolve_day_does_not_double_pay(mafia_service, mafia_repo, player_repo):
     ids = [401, 402, 403, 404, 405]
     for pid in ids:
