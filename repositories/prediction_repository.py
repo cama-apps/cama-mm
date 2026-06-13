@@ -1308,11 +1308,17 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     )
                     total_payout += payout
                     winning_basis = yes_t if outcome == "yes" else no_t
+                    # Net profit subtracts BOTH sides' cost basis. A hedger who
+                    # held the losing side too already paid for it, so true
+                    # profit is payout − (winning_basis + losing_basis). This
+                    # keeps the bankruptcy-penalty base and the stats P&L
+                    # (won*CV − total cost) consistent instead of over-crediting
+                    # — and over-penalizing — two-sided holders.
                     winners.append({
                         "discord_id": int(p["discord_id"]),
                         "contracts": winning_qty,
                         "payout": payout,
-                        "profit": payout - winning_basis,
+                        "profit": payout - winning_basis - losing_basis,
                     })
                 if losing_qty > 0:
                     losers.append({

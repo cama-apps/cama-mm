@@ -93,8 +93,16 @@ class RatingUpdateMixin:
         os_baseline = self.match_repo.get_os_baseline_for_match(match_id, guild_id)
 
         if os_baseline:
-            # Use Phase 1 baseline (os_mu_before/os_sigma_before from rating_history)
-            os_ratings = os_baseline
+            # Use Phase 1 baseline (os_mu_before/os_sigma_before from rating_history).
+            # A participant missing from a partial baseline must fall back to their
+            # CURRENT rating, not OpenSkill defaults — otherwise a real rating would
+            # be recomputed from mu=25 and silently regress.
+            os_ratings = dict(os_baseline)
+            missing = [d for d in discord_ids if d not in os_ratings]
+            if missing:
+                os_ratings.update(
+                    self.player_repo.get_openskill_ratings_bulk(missing, guild_id)
+                )
             logger.debug(f"Match {match_id}: using Phase 1 baseline for {len(os_baseline)} players")
         else:
             # Legacy fallback: use current player ratings (pre-Phase 1 matches)

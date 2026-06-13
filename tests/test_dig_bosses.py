@@ -1075,16 +1075,19 @@ class TestPinnacleRelicDrop:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
-        relic = dig_service._drop_pinnacle_relic(
-            10001, TEST_GUILD_ID, tunnel, "forgotten_king",
-        )
+        relic = dig_service._roll_pinnacle_relic(tunnel, "forgotten_king")
         assert relic["name"].startswith("Crown of ")
         assert len(relic["stats"]) == 2
         assert len(relic["stat_ids"]) == 2
         assert relic["stat_ids"][0] != relic["stat_ids"][1]
-        # Artifact persisted in dig_artifacts.
+        # Rolling alone does NOT persist — the insert is fused into the victory
+        # txn. The atomic helper persists it and returns the new row id.
+        db_id = dig_repo.atomic_tunnel_balance_update(
+            10001, TEST_GUILD_ID, add_relic_artifact_id=relic["artifact_id"],
+        )
         artifacts = dig_repo.get_artifacts(10001, TEST_GUILD_ID)
         assert any(a["artifact_id"].startswith("pinnacle:") for a in artifacts)
+        assert any(int(a["id"]) == db_id for a in artifacts)
 
     def test_drop_name_derives_suffix_from_stats(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -1100,9 +1103,7 @@ class TestPinnacleRelicDrop:
         dig_service.dig(10001, TEST_GUILD_ID)
         tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
         for pid in PINNACLE_POOL_IDS:
-            relic = dig_service._drop_pinnacle_relic(
-                10001, TEST_GUILD_ID, tunnel, pid,
-            )
+            relic = dig_service._roll_pinnacle_relic(tunnel, pid)
             base = PINNACLE_RELIC_BASE_NAME[pid]
             suffix = relic["name"][len(base) + 4:]  # strip "<base> of "
             assert suffix == pinnacle_suffix_from_stats(relic["stat_ids"])

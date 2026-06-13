@@ -383,8 +383,10 @@ class BalancedShuffler:
             # recent match participants have their count reduced to prefer excluding them
             def effective_exclusion_count(p: Player) -> float:
                 base_count = exclusion_counts.get(p.name, 0)
-                # Reduce count for recent participants (makes them more likely to be excluded)
-                if p.name in recent_match_names:
+                # Reduce count for recent participants (makes them more likely to be
+                # excluded). Guard the divisor: an exclusion penalty of 0 means "no
+                # exclusion weighting", so recent participants get no reduction.
+                if p.name in recent_match_names and self.exclusion_penalty_weight:
                     return base_count - (self.recent_match_penalty_weight / self.exclusion_penalty_weight)
                 return base_count
 
