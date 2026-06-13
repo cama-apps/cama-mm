@@ -604,6 +604,18 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             if not bets:
                 return {"total_pool": 0, "winning_side": winning_side, "payouts": []}
 
+            # Idempotency guard: payout is NULL until settled, so any non-NULL
+            # payout means this war was already settled. Re-running inside the
+            # txn would re-pay winners, so bail with a no-op summary.
+            if any(b["payout"] is not None for b in bets):
+                return {
+                    "total_pool": sum(b["amount"] for b in bets),
+                    "winning_side": winning_side,
+                    "winning_pool": 0,
+                    "payouts": [],
+                    "already_settled": True,
+                }
+
             total_pool = sum(b["amount"] for b in bets)
             winning_bets = [b for b in bets if b["side"] == winning_side]
             winning_pool = sum(b["amount"] for b in winning_bets)

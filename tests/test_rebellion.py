@@ -974,6 +974,23 @@ class TestMetaBetPayouts:
         assert payouts[14100] == 10  # 9 + 1 remainder (largest stake)
         assert payouts[14101] == 4
 
+    def test_meta_bets_double_settle_is_noop(self, rebellion_repo, player_repo):
+        """A second settle_meta_bets call must not re-pay winners."""
+        guild_id = TEST_GUILD_ID
+        war_id = self._create_war_with_bets(rebellion_repo, player_repo, guild_id)
+        first = rebellion_repo.settle_meta_bets(war_id, "rebels")
+        assert first["payouts"]
+        after_first = {
+            pid: player_repo.get_balance(pid, guild_id)
+            for pid in [12100, 12101, 12102, 12200, 12201]
+        }
+
+        second = rebellion_repo.settle_meta_bets(war_id, "rebels")
+        assert second.get("already_settled") is True
+        assert second["payouts"] == []
+        for pid, bal in after_first.items():
+            assert player_repo.get_balance(pid, guild_id) == bal
+
     def test_empty_meta_bets_no_crash(self, rebellion_repo, player_repo):
         guild_id = TEST_GUILD_ID
         now = int(time.time())
