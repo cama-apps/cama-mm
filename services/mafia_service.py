@@ -58,14 +58,13 @@ ELIGIBILITY_WINDOW_S = 24 * 3600
 # Auto-skip: if a player's last N games all show acted=0, exclude from auto-roster.
 AUTO_SKIP_THRESHOLD = 3
 
-# Economy. Each rostered player is charged ENTRY_FEE at game start; the fees
-# pool into a single pot distributed among the winning faction at day
-# resolution. Because roles are assigned uniformly at random, the per-player
-# expectation of the pot share equals exactly ENTRY_FEE regardless of the
-# (unknown) faction win-rate distribution — so EV per game = 0 by construction.
-# MVP_BONUS is now drawn from the pot rather than minted.
-ENTRY_FEE = 30
+# Economy. Each rostered player is charged ENTRY_FEE at game start; the reduced
+# buy-in pools into a single pot distributed among the winning faction at day
+# resolution. MVP_BONUS is drawn from the payout pool rather than minted.
+ENTRY_FEE = 8
 MVP_BONUS = 20
+PAYOUT_RATE_NUMERATOR = 1
+PAYOUT_RATE_DENOMINATOR = 1
 
 TITLES: dict[str, callable] = {
     "Don of Dire":  lambda s: s["mafia_wins"] >= 10,
@@ -78,6 +77,10 @@ TITLES: dict[str, callable] = {
 
 def _pot_for_roster(roster_size: int) -> int:
     return roster_size * ENTRY_FEE
+
+
+def _payout_pool_for_pot(pot_total: int) -> int:
+    return pot_total * PAYOUT_RATE_NUMERATOR // PAYOUT_RATE_DENOMINATOR
 
 
 def _allowed_action_for_role(role: MafiaRole) -> MafiaActionType | None:
@@ -338,21 +341,21 @@ class MafiaService:
 
         entry_fee = game.entry_fee or ENTRY_FEE
         pot_total = game.roster_size * entry_fee
+        payout_pool = _payout_pool_for_pot(pot_total)
         winning_ids = self._winners_for(all_players, winner)
         mvp_id = self._compute_mvp(
             game, all_players, winner, lynched_id, valid_votes
         )
 
-        # Split the pot among winners. MVP_BONUS + integer-division remainder
+        # Split the payout pool among winners. MVP_BONUS + integer-division remainder
         # ride on top of the winning faction's MVP share — within-faction
-        # redistribution conserves the faction total, so EV per random role
-        # assignment stays exactly zero. The dust must always be allocated to
-        # some winner (otherwise zero-sum leaks).
+        # redistribution conserves the reduced faction total. The dust must
+        # always be allocated to some winner so payouts match the reduced pool.
         deltas: dict[int, int] = {}
         if winning_ids:
             mvp_in_winners = mvp_id is not None and mvp_id in winning_ids
-            mvp_share = MVP_BONUS if mvp_in_winners else 0
-            remainder_pot = pot_total - mvp_share
+            mvp_share = min(MVP_BONUS, payout_pool) if mvp_in_winners else 0
+            remainder_pot = payout_pool - mvp_share
             base_payout = remainder_pot // len(winning_ids)
             dust = remainder_pot - base_payout * len(winning_ids)
             for wid in winning_ids:
@@ -391,6 +394,7 @@ class MafiaService:
             "mvp_id": mvp_id,
             "payout_per_winner": payout_per_winner,
             "pot_total": pot_total,
+            "payout_pool": payout_pool,
             "entry_fee": entry_fee,
             "winning_ids": list(winning_ids),
             "bankruptcy_penalties": finalize.get("bankruptcy_penalties", {}),

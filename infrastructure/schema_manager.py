@@ -462,7 +462,7 @@ class SchemaManager:
             ),
             # Daily Mafia subgame
             ("create_mafia_tables", self._migration_create_mafia_tables),
-            # Entry-fee economy: pot-funded payouts so per-game EV = 0.
+            # Entry-fee economy: persist fees so payout pools can be audited.
             ("add_mafia_entry_fee_column", self._migration_add_mafia_entry_fee_column),
         ]
 

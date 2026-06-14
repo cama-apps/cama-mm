@@ -23,6 +23,7 @@ from services.mafia_service import (
     MVP_BONUS,
     ROLE_TABLE,
     MafiaService,
+    _payout_pool_for_pot,
     _pot_for_roster,
 )
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
@@ -155,7 +156,7 @@ def test_auto_roster_excludes_players_past_entry_fee_debt_floor(
 ):
     ids = list(range(101, 107))
     _seed_eligible_via_dig(mafia_repo, ids)
-    player_repo.update_balance(106, TEST_GUILD_ID, -480)
+    player_repo.update_balance(106, TEST_GUILD_ID, -493)
 
     game = mafia_service.start_daily_game(TEST_GUILD_ID)
     assert game is not None
@@ -553,10 +554,10 @@ def test_town_hall_blocks_lynch(mafia_service, mafia_repo):
 
 
 def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
-    # Roster of 7 → pot = 210. resolve_day only redistributes the pot; it does
-    # not debit fees (that happens in start_daily_game). To check post-resolution
-    # net delta, we simulate the fee debit ourselves so this test exercises the
-    # full end-to-end balance change.
+    # Roster of 7 -> pot = 56. resolve_day only pays winners; it does not debit
+    # fees (that happens in start_daily_game). To check post-resolution net
+    # delta, we simulate the fee debit ourselves so this test exercises the full
+    # end-to-end balance change.
     ids = [101, 102, 103, 104, 105, 106, 107]
     for pid in ids:
         _seed_player(player_repo, pid, balance=0)
@@ -589,13 +590,15 @@ def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
     assert summary["winner"] == MafiaWinner.TOWN.value
 
     pot = _pot_for_roster(7)
+    payout_pool = _payout_pool_for_pot(pot)
     assert summary["pot_total"] == pot
+    assert summary["payout_pool"] == payout_pool
     assert summary["entry_fee"] == ENTRY_FEE
 
-    # Town has 6 winners. MVP gets (pot - MVP_BONUS) // 6 base + MVP_BONUS +
-    # rounding dust; the other 5 winners each get the base.
-    base = (pot - MVP_BONUS) // 6
-    dust = (pot - MVP_BONUS) - base * 6
+    # Town has 6 winners. MVP gets (payout_pool - MVP_BONUS) // 6 base +
+    # MVP_BONUS + rounding dust; the other 5 winners each get the base.
+    base = (payout_pool - MVP_BONUS) // 6
+    dust = (payout_pool - MVP_BONUS) - base * 6
     assert summary["payout_per_winner"] == base
 
     mvp_id = summary["mvp_id"]
@@ -611,8 +614,7 @@ def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
         player_repo.get_balance(101, TEST_GUILD_ID) - starting[101] == -ENTRY_FEE
     )
 
-    # Zero-sum invariant: the sum of all balance deltas across the roster is
-    # exactly zero. This is the property that makes EV per game = 0.
+    # The full reduced pot is paid out.
     total_delta = sum(
         player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
     )
@@ -623,10 +625,15 @@ def test_pot_for_roster_helper():
     assert _pot_for_roster(5) == 5 * ENTRY_FEE
     assert _pot_for_roster(10) == 10 * ENTRY_FEE
     assert _pot_for_roster(15) == 15 * ENTRY_FEE
+    assert _payout_pool_for_pot(_pot_for_roster(5)) == 40
+    assert _payout_pool_for_pot(_pot_for_roster(10)) == 80
+    assert _payout_pool_for_pot(_pot_for_roster(15)) == 120
 
 
-def test_zero_sum_across_outcomes(mafia_service, mafia_repo, player_repo):
-    """The pot mechanic conserves JC for every win outcome — net delta is 0."""
+def test_reduced_buyin_conserves_pot_across_outcomes(
+    mafia_service, mafia_repo, player_repo
+):
+    """The full reduced pot is paid out for every win outcome."""
     scenarios = [
         # (roles, voters_target, expected_winner)
         # Town wins (4 town vs 1 mafia after lynch).
@@ -677,11 +684,16 @@ def test_zero_sum_across_outcomes(mafia_service, mafia_repo, player_repo):
         summary = mafia_service.resolve_day(TEST_GUILD_ID)
         assert summary["winner"] == expected_winner.value
 
+        pot = _pot_for_roster(len(ids))
+        payout_pool = _payout_pool_for_pot(pot)
+        assert summary["pot_total"] == pot
+        assert summary["payout_pool"] == payout_pool
+
         total_delta = sum(
             player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
         )
         assert total_delta == 0, (
-            f"scenario {i} ({expected_winner.value}): non-zero net delta {total_delta}"
+            f"scenario {i} ({expected_winner.value}): wrong net delta {total_delta}"
         )
 
 
@@ -826,19 +838,18 @@ def test_bankruptcy_penalty_sinks_mafia_profit(
     bankruptcy_repo = BankruptcyRepository(mafia_repo.db_path)
     mafia_service.bankruptcy_penalty_rate = 0.75
     ids = [501, 502, 503, 504, 505]
-    town_ids = [502, 503, 504, 505]
+    mafia_id = 501
     for pid in ids:
         _seed_player(player_repo, pid, balance=0)
     starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
     for pid in ids:
         player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
-    for pid in town_ids:
-        bankruptcy_repo.upsert_state(
-            pid,
-            TEST_GUILD_ID,
-            last_bankruptcy_at=int(time.time()) - 1000,
-            penalty_games_remaining=3,
-        )
+    bankruptcy_repo.upsert_state(
+        mafia_id,
+        TEST_GUILD_ID,
+        last_bankruptcy_at=int(time.time()) - 1000,
+        penalty_games_remaining=3,
+    )
 
     _new_game(
         mafia_repo,
@@ -851,14 +862,12 @@ def test_bankruptcy_penalty_sinks_mafia_profit(
         ],
     )
     _force_phase(mafia_repo, MafiaPhase.DAY)
-    for voter in town_ids:
-        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 501)
 
     summary = mafia_service.resolve_day(TEST_GUILD_ID)
-    assert summary["winner"] == MafiaWinner.TOWN.value
+    assert summary["winner"] == MafiaWinner.MAFIA.value
     penalties = summary["bankruptcy_penalties"]
     assert penalties
-    assert set(penalties).issubset(set(town_ids))
+    assert set(penalties) == {mafia_id}
 
     total_delta = sum(
         player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids

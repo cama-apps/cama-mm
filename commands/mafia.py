@@ -291,7 +291,7 @@ class MafiaCommands(commands.Cog):
                 "**Phases**\n"
                 "• Night (6h): Mafia/Doctor/Detective/Vigilante submit `/mafia act`.\n"
                 "• Day (13h): Living players vote with `/mafia vote`. Tallies hidden.\n"
-                "• Resolution: Winners split the pot, MVP gets a bonus from it.\n\n"
+                "• Resolution: Winners split the pot; MVP bonus comes from it.\n\n"
                 "**Roles**\n"
                 f"{ROLE_EMOJI[MafiaRole.MAFIA]} Mafia — kill at night.\n"
                 f"{ROLE_EMOJI[MafiaRole.DOCTOR]} Doctor — protect one player at night.\n"
@@ -302,7 +302,7 @@ class MafiaCommands(commands.Cog):
                 f"{GODFATHER_EMOJI} Godfather — a mafia who reads as Town to the detective.\n\n"
                 f"**Stakes**: every rostered player pays {ENTRY_FEE} {JOPACOIN_EMOTE} entry. "
                 f"The pot (`roster × {ENTRY_FEE}`) is split among the winning faction; "
-                f"MVP gets +{MVP_BONUS} from the pot. Long-run EV is 0 — play to win.\n\n"
+                f"MVP gets +{MVP_BONUS} from that payout pool.\n\n"
                 "Use `/mafia optout` to skip auto-roster."
             ),
             color=0x5865F2,
@@ -603,6 +603,7 @@ class MafiaCommands(commands.Cog):
         body_lines.append("")
         payout = summary.get("payout_per_winner", 0)
         pot_total = summary.get("pot_total", 0)
+        payout_pool = summary.get("payout_pool", pot_total)
         winning_ids = summary.get("winning_ids", [])
         mvp_id = summary.get("mvp_id")
 
@@ -610,7 +611,7 @@ class MafiaCommands(commands.Cog):
             mention_list = ", ".join(f"<@{wid}>" for wid in winning_ids[:15])
             extra = "" if len(winning_ids) <= 15 else f" (+{len(winning_ids) - 15} more)"
             body_lines.append(
-                f"**Pot:** {pot_total} {JOPACOIN_EMOTE} → "
+                f"**Pot:** {payout_pool} {JOPACOIN_EMOTE} → "
                 f"{payout} each to {mention_list}{extra}"
             )
         if mvp_id is not None:
