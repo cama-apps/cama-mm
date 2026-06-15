@@ -15,6 +15,15 @@ from domain.models.mafia import (
 from repositories.base_repository import BaseRepository
 
 
+def _row_get(row, key, default=None):
+    """Safe column access for rows that may predate a migration."""
+    try:
+        keys = row.keys()
+    except AttributeError:
+        return row[key]
+    return row[key] if key in keys else default
+
+
 def _row_to_game(row) -> MafiaGame:
     return MafiaGame(
         game_id=row["game_id"],
@@ -33,6 +42,11 @@ def _row_to_game(row) -> MafiaGame:
         mafia_thread_id=row["mafia_thread_id"],
         discussion_thread_id=row["discussion_thread_id"],
         setup_message_id=row["setup_message_id"],
+        day_number=_row_get(row, "day_number", 1) or 1,
+        phase_started_at=_row_get(row, "phase_started_at"),
+        standings_message_id=_row_get(row, "standings_message_id"),
+        graveyard_thread_id=_row_get(row, "graveyard_thread_id"),
+        status=_row_get(row, "status", "ACTIVE") or "ACTIVE",
     )
 
 
@@ -99,6 +113,7 @@ class MafiaRepository(BaseRepository):
         roster_size: int,
         twist_event: MafiaTwist | None,
         entry_fee: int = 0,
+        phase_started_at: int | None = None,
     ) -> int:
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -107,8 +122,8 @@ class MafiaRepository(BaseRepository):
                 """
                 INSERT INTO mafia_games (
                     guild_id, game_date, phase, started_at, roster_size,
-                    twist_event, entry_fee
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    twist_event, entry_fee, phase_started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     gid,
@@ -118,6 +133,7 @@ class MafiaRepository(BaseRepository):
                     roster_size,
                     twist_event.value if twist_event else None,
                     entry_fee,
+                    phase_started_at if phase_started_at is not None else started_at,
                 ),
             )
             return cursor.lastrowid
@@ -146,8 +162,8 @@ class MafiaRepository(BaseRepository):
                 """
                 INSERT INTO mafia_games (
                     guild_id, game_date, phase, started_at, roster_size,
-                    twist_event, entry_fee
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    twist_event, entry_fee, phase_started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     gid,
@@ -157,6 +173,7 @@ class MafiaRepository(BaseRepository):
                     roster_size,
                     twist_event.value if twist_event else None,
                     entry_fee,
+                    started_at,
                 ),
             )
             game_id = cursor.lastrowid
@@ -251,6 +268,13 @@ class MafiaRepository(BaseRepository):
                 params,
             )
 
+    def set_twist_event(self, game_id: int, twist: MafiaTwist | None) -> None:
+        with self.connection() as conn:
+            conn.cursor().execute(
+                "UPDATE mafia_games SET twist_event = ? WHERE game_id = ?",
+                (twist.value if twist else None, game_id),
+            )
+
     def set_thread_ids(
         self,
         game_id: int,
@@ -258,6 +282,8 @@ class MafiaRepository(BaseRepository):
         mafia_thread_id: int | None = None,
         discussion_thread_id: int | None = None,
         setup_message_id: int | None = None,
+        graveyard_thread_id: int | None = None,
+        standings_message_id: int | None = None,
     ) -> None:
         sets: list[str] = []
         params: list = []
@@ -270,6 +296,12 @@ class MafiaRepository(BaseRepository):
         if setup_message_id is not None:
             sets.append("setup_message_id = ?")
             params.append(setup_message_id)
+        if graveyard_thread_id is not None:
+            sets.append("graveyard_thread_id = ?")
+            params.append(graveyard_thread_id)
+        if standings_message_id is not None:
+            sets.append("standings_message_id = ?")
+            params.append(standings_message_id)
         if not sets:
             return
         params.append(game_id)
@@ -306,17 +338,21 @@ class MafiaRepository(BaseRepository):
     def apply_night_resolution(
         self, game_id: int, killed_ids: list[int], *, ended_at: int | None = None
     ) -> bool:
-        """Atomically apply night deaths and advance NIGHT -> DAY once."""
+        """Atomically apply night deaths and advance NIGHT -> DAY once.
+
+        Resets ``phase_started_at`` to ``ended_at`` so the day clock starts from
+        the moment the night resolved.
+        """
         ended = ended_at if ended_at is not None else int(time.time())
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE mafia_games
-                SET phase = ?, night_ended_at = ?
+                SET phase = ?, night_ended_at = ?, phase_started_at = ?
                 WHERE game_id = ? AND phase = ?
                 """,
-                (MafiaPhase.DAY.value, ended, game_id, MafiaPhase.NIGHT.value),
+                (MafiaPhase.DAY.value, ended, ended, game_id, MafiaPhase.NIGHT.value),
             )
             if cursor.rowcount != 1:
                 return False
@@ -332,6 +368,102 @@ class MafiaRepository(BaseRepository):
                 )
             return True
 
+    def advance_to_next_cycle(
+        self, game_id: int, *, ended_at: int | None = None
+    ) -> bool:
+        """Atomically advance DAY -> next NIGHT (undecided game continues).
+
+        Increments day_number, resets phase_started_at, records day_ended_at.
+        Returns False if the game wasn't in DAY (already advanced/resolved).
+        """
+        ended = ended_at if ended_at is not None else int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE mafia_games
+                SET phase = ?, day_ended_at = ?, phase_started_at = ?,
+                    day_number = day_number + 1
+                WHERE game_id = ? AND phase = ?
+                """,
+                (MafiaPhase.NIGHT.value, ended, ended, game_id, MafiaPhase.DAY.value),
+            )
+            return cursor.rowcount == 1
+
+    def revive_player(self, game_id: int, discord_id: int) -> None:
+        """Bring a dead player back (Resurrection event)."""
+        with self.connection() as conn:
+            conn.cursor().execute(
+                """
+                UPDATE mafia_players
+                SET is_alive = 1, eliminated_phase = NULL, eliminated_at = NULL
+                WHERE game_id = ? AND discord_id = ?
+                """,
+                (game_id, discord_id),
+            )
+
+    def cancel_game(
+        self, game_id: int, *, refund: bool = True
+    ) -> dict[str, Any]:
+        """Abort an in-flight game: optionally refund entry fees, mark CANCELLED.
+
+        Returns {"applied": bool, "refunded": {discord_id: amount}}.
+        """
+        refunded: dict[int, int] = {}
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT guild_id, entry_fee, phase FROM mafia_games WHERE game_id = ?",
+                (game_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return {"applied": False, "reason": "game_not_found", "refunded": {}}
+            if row["phase"] == MafiaPhase.RESOLVED.value:
+                return {"applied": False, "reason": "already_resolved", "refunded": {}}
+            gid = row["guild_id"]
+            entry_fee = row["entry_fee"] or 0
+
+            if refund and entry_fee > 0:
+                cursor.execute(
+                    "SELECT discord_id FROM mafia_players WHERE game_id = ?",
+                    (game_id,),
+                )
+                player_ids = [r["discord_id"] for r in cursor.fetchall()]
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="mafia_abort_refund",
+                    related_type="mafia_game",
+                    related_id=game_id,
+                    reason="mafia game aborted — entry fee refunded",
+                    metadata={"entry_fee": entry_fee},
+                )
+                try:
+                    for discord_id in player_ids:
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (entry_fee, discord_id, gid),
+                        )
+                        if cursor.rowcount == 1:
+                            refunded[discord_id] = entry_fee
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            cursor.execute(
+                """
+                UPDATE mafia_games
+                SET phase = ?, status = 'CANCELLED', winner = ?, day_ended_at = ?
+                WHERE game_id = ?
+                """,
+                (MafiaPhase.RESOLVED.value, MafiaWinner.NONE.value, int(time.time()), game_id),
+            )
+            return {"applied": True, "refunded": refunded}
+
     def finalize_day_resolution(
         self,
         *,
@@ -343,6 +475,7 @@ class MafiaRepository(BaseRepository):
         payout_deltas: dict[int, int],
         entry_fee: int,
         bankruptcy_penalty_rate: float | None = None,
+        nonprofit_overflow: int = 0,
         ended_at: int | None = None,
     ) -> dict[str, Any]:
         """Atomically apply lynch, payouts, bankruptcy sinks, and DAY -> RESOLVED."""
@@ -417,6 +550,20 @@ class MafiaRepository(BaseRepository):
                             raise ValueError("payout_player_missing")
                 finally:
                     self._clear_economy_ledger_context(cursor)
+
+            # Capped-payout overflow flows into the nonprofit fund, in the same
+            # transaction as the payouts so the pot is conserved atomically.
+            if nonprofit_overflow > 0:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (gid, nonprofit_overflow),
+                )
 
             if bankruptcy_penalty_rate is not None:
                 kept_rate = max(0.0, min(1.0, bankruptcy_penalty_rate))
@@ -566,8 +713,9 @@ class MafiaRepository(BaseRepository):
         action_type: MafiaActionType,
         phase: MafiaPhase,
         result: str | None = None,
+        day_number: int = 1,
     ) -> None:
-        """UPSERT an action and mark the actor as having acted."""
+        """UPSERT an action (scoped to the cycle) and mark the actor as acted."""
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())
         with self.connection() as conn:
@@ -575,9 +723,10 @@ class MafiaRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO mafia_actions (
-                    game_id, guild_id, actor_id, target_id, action_type, phase, created_at, result
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(game_id, actor_id, action_type, phase) DO UPDATE SET
+                    game_id, guild_id, actor_id, target_id, action_type, phase,
+                    day_number, created_at, result
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(game_id, actor_id, action_type, phase, day_number) DO UPDATE SET
                     target_id = excluded.target_id,
                     created_at = excluded.created_at,
                     result = excluded.result
@@ -589,6 +738,7 @@ class MafiaRepository(BaseRepository):
                     target_id,
                     action_type.value,
                     phase.value,
+                    day_number,
                     now,
                     result,
                 ),
@@ -603,6 +753,7 @@ class MafiaRepository(BaseRepository):
         game_id: int,
         action_type: MafiaActionType | None = None,
         phase: MafiaPhase | None = None,
+        day_number: int | None = None,
     ) -> list[dict]:
         clauses = ["game_id = ?"]
         params: list = [game_id]
@@ -612,6 +763,9 @@ class MafiaRepository(BaseRepository):
         if phase is not None:
             clauses.append("phase = ?")
             params.append(phase.value)
+        if day_number is not None:
+            clauses.append("day_number = ?")
+            params.append(day_number)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -625,20 +779,243 @@ class MafiaRepository(BaseRepository):
         game_id: int,
         actor_id: int,
         action_type: MafiaActionType,
+        day_number: int | None = None,
     ) -> dict | None:
-        """Find the most recent action of a given type by an actor across any phase."""
+        """Find the most recent action of a given type by an actor.
+
+        Scoped to ``day_number`` when provided (one-read-per-night detective);
+        otherwise spans all cycles (vigilante one-shot per game).
+        """
+        clauses = ["game_id = ?", "actor_id = ?", "action_type = ?"]
+        params: list = [game_id, actor_id, action_type.value]
+        if day_number is not None:
+            clauses.append("day_number = ?")
+            params.append(day_number)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT * FROM mafia_actions
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                params,
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    # ── Town Bounty ─────────────────────────────────────────────────────────
+
+    def add_bounty(
+        self,
+        *,
+        game_id: int,
+        guild_id: int | None,
+        day_number: int,
+        target_id: int,
+        contributor_id: int,
+        max_debt: int,
+    ) -> dict[str, Any]:
+        """Stake 1 JC on a suspect for the current day.
+
+        The PRIMARY KEY enforces ≤1 stake per contributor/target/day. The stake
+        is parked in the nonprofit fund: on a successful bounty it is paid back
+        out (capped at N); on failure it stays forfeited. Atomic.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM mafia_bounties
+                WHERE game_id = ? AND day_number = ? AND target_id = ? AND contributor_id = ?
+                """,
+                (game_id, day_number, target_id, contributor_id),
+            )
+            if cursor.fetchone() is not None:
+                return {"ok": False, "error": "already_staked"}
+
+            # Debit 1 JC from the contributor (respecting the debt floor).
+            self._set_economy_ledger_context(
+                cursor,
+                source="mafia_bounty_stake",
+                related_type="mafia_game",
+                related_id=game_id,
+                reason="mafia town bounty stake",
+                metadata={"day_number": day_number, "target_id": target_id},
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND COALESCE(jopacoin_balance, 0) - 1 >= ?
+                    """,
+                    (contributor_id, gid, -max_debt),
+                )
+                if cursor.rowcount != 1:
+                    return {"ok": False, "error": "insufficient_funds"}
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
+            # Park the stake in the nonprofit fund.
+            cursor.execute(
+                """
+                INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                VALUES (?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    total_collected = total_collected + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (gid,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO mafia_bounties
+                    (game_id, guild_id, day_number, target_id, contributor_id, amount, created_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?)
+                """,
+                (game_id, gid, day_number, target_id, contributor_id, now),
+            )
+            return {"ok": True}
+
+    def get_bounties_for_day(self, game_id: int, day_number: int) -> list[dict]:
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM mafia_bounties WHERE game_id = ? AND day_number = ?",
+                (game_id, day_number),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def resolve_day_bounties(
+        self,
+        *,
+        game_id: int,
+        guild_id: int | None,
+        day_number: int,
+        lynched_id: int | None,
+        lynched_was_mafia: bool,
+        alive_count: int,
+    ) -> dict[str, Any]:
+        """Pay out a successful bounty (capped at N = alive_count), drawn from the
+        nonprofit fund where the stakes were parked. Failed/other stakes stay
+        forfeited. Atomic. Returns {"paid": {contributor_id: amount}, "reward": int}.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        paid: dict[int, int] = {}
+        reward_total = 0
+        if lynched_id is None or not lynched_was_mafia:
+            return {"paid": paid, "reward": 0}
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT contributor_id FROM mafia_bounties
+                WHERE game_id = ? AND day_number = ? AND target_id = ?
+                """,
+                (game_id, day_number, lynched_id),
+            )
+            winners = [r["contributor_id"] for r in cursor.fetchall()]
+            if not winners:
+                return {"paid": paid, "reward": 0}
+
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (gid,),
+            )
+            row = cursor.fetchone()
+            available = row["total_collected"] if row else 0
+            reward_total = max(0, min(alive_count, available))
+            if reward_total <= 0:
+                return {"paid": paid, "reward": 0}
+
+            # Draw the reward out of the nonprofit fund and split it.
+            cursor.execute(
+                """
+                UPDATE nonprofit_fund
+                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ?
+                """,
+                (reward_total, gid),
+            )
+            base = reward_total // len(winners)
+            dust = reward_total - base * len(winners)
+            self._set_economy_ledger_context(
+                cursor,
+                source="mafia_bounty_payout",
+                related_type="mafia_game",
+                related_id=game_id,
+                reason="mafia town bounty payout",
+                metadata={"day_number": day_number, "target_id": lynched_id},
+            )
+            try:
+                for i, cid in enumerate(winners):
+                    amount = base + (dust if i == 0 else 0)
+                    if amount <= 0:
+                        continue
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (amount, cid, gid),
+                    )
+                    if cursor.rowcount == 1:
+                        paid[cid] = amount
+            finally:
+                self._clear_economy_ledger_context(cursor)
+            return {"paid": paid, "reward": reward_total}
+
+    # ── Meta (hall of fame) ─────────────────────────────────────────────────
+
+    def get_hall_of_fame_message_id(self, guild_id: int | None) -> int | None:
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT hall_of_fame_message_id FROM mafia_meta WHERE guild_id = ?",
+                (gid,),
+            )
+            row = cursor.fetchone()
+            return row["hall_of_fame_message_id"] if row else None
+
+    def set_hall_of_fame_message_id(self, guild_id: int | None, message_id: int) -> None:
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            conn.cursor().execute(
+                """
+                INSERT INTO mafia_meta (guild_id, hall_of_fame_message_id, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    hall_of_fame_message_id = excluded.hall_of_fame_message_id,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (gid, message_id),
+            )
+
+    def get_recent_winners(self, guild_id: int | None, limit: int = 10) -> list[dict]:
+        """Resolved games (most recent first) for the hall of fame."""
+        gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT * FROM mafia_actions
-                WHERE game_id = ? AND actor_id = ? AND action_type = ?
-                ORDER BY created_at DESC LIMIT 1
+                SELECT game_id, game_date, winner, mvp_id, payout_per_winner
+                FROM mafia_games
+                WHERE guild_id = ? AND phase = ? AND status = 'ACTIVE'
+                  AND winner IS NOT NULL AND winner != ?
+                ORDER BY game_id DESC LIMIT ?
                 """,
-                (game_id, actor_id, action_type.value),
+                (gid, MafiaPhase.RESOLVED.value, MafiaWinner.NONE.value, limit),
             )
-            row = cursor.fetchone()
-            return dict(row) if row else None
+            return [dict(row) for row in cursor.fetchall()]
 
     # ── Eligibility & opt-out ───────────────────────────────────────────────
 
@@ -727,6 +1104,41 @@ class MafiaRepository(BaseRepository):
                 (discord_id, gid),
             )
             return cursor.fetchone() is not None
+
+    # Signups are a single pending bucket per guild (no calendar), consumed and
+    # cleared when the next game starts. The week_start column holds a sentinel.
+    _SIGNUP_BUCKET = "pending"
+
+    def add_signup(self, guild_id: int | None, discord_id: int) -> None:
+        """Opt-in roster priority for the next game (/mafia join)."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            conn.cursor().execute(
+                """
+                INSERT OR IGNORE INTO mafia_signups (guild_id, week_start, discord_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (gid, self._SIGNUP_BUCKET, discord_id, int(time.time())),
+            )
+
+    def get_signups(self, guild_id: int | None) -> list[int]:
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT discord_id FROM mafia_signups WHERE guild_id = ? AND week_start = ?",
+                (gid, self._SIGNUP_BUCKET),
+            )
+            return [row["discord_id"] for row in cursor.fetchall()]
+
+    def clear_signups(self, guild_id: int | None) -> None:
+        """Consume the pending signup bucket once a game has started."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            conn.cursor().execute(
+                "DELETE FROM mafia_signups WHERE guild_id = ? AND week_start = ?",
+                (gid, self._SIGNUP_BUCKET),
+            )
 
     # ── History, leaderboard, stats ─────────────────────────────────────────
 

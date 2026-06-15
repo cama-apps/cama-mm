@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import os
 import platform
-import resource
 import sqlite3
 import subprocess
 import sys
@@ -17,6 +16,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource  # Unix-only; absent on Windows.
+except ImportError:  # pragma: no cover - platform-dependent
+    resource = None
 
 
 def _utc_now() -> datetime:
@@ -68,6 +72,8 @@ def _format_duration(seconds: int) -> str:
 
 
 def _rss_bytes() -> int:
+    if resource is None:
+        return 0
     usage = resource.getrusage(resource.RUSAGE_SELF)
     rss = int(usage.ru_maxrss)
     if sys.platform == "darwin":
@@ -189,7 +195,7 @@ class MonitoringService:
         if isinstance(latency, int | float) and latency >= 0:
             discord_latency_ms = latency * 1000
 
-        usage = resource.getrusage(resource.RUSAGE_SELF)
+        usage = resource.getrusage(resource.RUSAGE_SELF) if resource is not None else None
         status = "ok" if not reasons else "degraded"
 
         return HealthSnapshot(
@@ -204,8 +210,8 @@ class MonitoringService:
             db_size=_format_bytes(self._db_size_bytes()),
             memory_rss=_format_bytes(_rss_bytes()),
             open_fds=_open_fd_count(),
-            io_blocks_in=int(usage.ru_inblock),
-            io_blocks_out=int(usage.ru_oublock),
+            io_blocks_in=int(usage.ru_inblock) if usage is not None else 0,
+            io_blocks_out=int(usage.ru_oublock) if usage is not None else 0,
             discord_latency_ms=discord_latency_ms,
             guild_count=len(getattr(bot, "guilds", []) or []) if bot is not None else 0,
             usage=self.usage_monitor.snapshot(),

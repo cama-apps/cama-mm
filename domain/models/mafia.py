@@ -18,6 +18,7 @@ class MafiaRole(str, Enum):
     VIGILANTE = "VIGILANTE"
     TOWNIE = "TOWNIE"
     JESTER = "JESTER"
+    BOOKIE = "BOOKIE"
 
 
 class MafiaActionType(str, Enum):
@@ -26,6 +27,7 @@ class MafiaActionType(str, Enum):
     INVESTIGATE = "INVESTIGATE"
     VIG_KILL = "VIG_KILL"
     VOTE = "VOTE"
+    WAGER = "WAGER"
 
 
 class MafiaTwist(str, Enum):
@@ -33,6 +35,7 @@ class MafiaTwist(str, Enum):
     TOWN_HALL = "TOWN_HALL"
     MEMORY_FOG = "MEMORY_FOG"
     PLAGUE = "PLAGUE"
+    RESURRECTION = "RESURRECTION"  # weekend-only: revives one dead non-mafia
 
 
 class MafiaWinner(str, Enum):
@@ -69,9 +72,9 @@ class MafiaGame:
 
     game_id: int
     guild_id: int
-    game_date: str  # 'YYYY-MM-DD' from DigService._get_game_date()
+    game_date: str  # Monday 'YYYY-MM-DD' of the game week (weekly unique key)
     phase: MafiaPhase
-    started_at: int  # unix ts
+    started_at: int  # unix ts the week began
     roster_size: int
     twist_event: MafiaTwist | None = None
     night_ended_at: int | None = None
@@ -83,4 +86,10 @@ class MafiaGame:
     mafia_thread_id: int | None = None
     discussion_thread_id: int | None = None
     setup_message_id: int | None = None
+    # Week-long redesign.
+    day_number: int = 1  # 1-based cycle counter
+    phase_started_at: int | None = None  # start of the current phase
+    standings_message_id: int | None = None
+    graveyard_thread_id: int | None = None
+    status: str = "ACTIVE"  # ACTIVE / CANCELLED
     players: list[MafiaPlayer] = field(default_factory=list)
