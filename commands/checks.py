@@ -134,3 +134,38 @@ async def require_dig_channel(interaction: discord.Interaction) -> bool:
         ephemeral=True,
     )
     return False
+
+
+async def require_mafia_channel(interaction: discord.Interaction) -> bool:
+    """Gate /mafia commands to the configured MAFIA_CHANNEL_ID.
+
+    Threads under the mafia channel inherit (parent.id check). If the
+    configured channel can't be resolved in this guild, fall back to
+    require_gamba_channel so other guilds and misconfigured deploys keep
+    working. Wrong channel charges 1 JC and sends an ephemeral pointer. Must
+    be called before deferring.
+    """
+    from config import MAFIA_CHANNEL_ID
+
+    guild = interaction.guild
+    if guild is None or guild.get_channel(MAFIA_CHANNEL_ID) is None:
+        return await require_gamba_channel(interaction)
+
+    channel = interaction.channel
+    if getattr(channel, "id", None) == MAFIA_CHANNEL_ID:
+        return True
+    parent = getattr(channel, "parent", None)
+    if parent is not None and getattr(parent, "id", None) == MAFIA_CHANNEL_ID:
+        return True
+
+    user_id = interaction.user.id
+    guild_id = guild.id
+    player_service = interaction.client.player_service  # type: ignore[union-attr]
+    await asyncio.to_thread(player_service.adjust_balance, user_id, guild_id, -1)
+
+    await interaction.response.send_message(
+        f"The case is being worked elsewhere — take it to <#{MAFIA_CHANNEL_ID}>. "
+        "A single jopacoin slips into an informant's pocket as penance.",
+        ephemeral=True,
+    )
+    return False

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 
 import pytest
@@ -89,10 +88,11 @@ def test_create_and_fetch_game(mafia_repo):
     assert same.game_id == gid
 
 
-def test_unique_game_per_date(mafia_repo):
-    mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 1000, 5, None)
-    with pytest.raises(sqlite3.IntegrityError):
-        mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 2000, 5, None)
+def test_multiple_games_per_date_allowed(mafia_repo):
+    # Continuous cadence: games run back-to-back, so a start date can repeat.
+    g1 = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 1000, 5, None)
+    g2 = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 2000, 5, None)
+    assert g1 != g2
 
 
 def test_get_active_game_excludes_resolved(mafia_repo):

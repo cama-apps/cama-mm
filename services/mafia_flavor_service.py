@@ -40,6 +40,19 @@ _DEATH_TEMPLATES = [
     "Initiate, ult, dead. {name} ({hero}) — a {role} — has been removed from the game.",
     "{name} got Pudge'd in their sleep. A {role} ({hero}) lost.",
     "{hero} could not buy back from this one. {name} ({role}) is dead.",
+    "{name} ({hero}) tabbed out for one second. One second was enough. A {role} falls.",
+    "GG no re — {name} ({hero}), a {role}, disconnected from life permanently.",
+    "{name} went to tip the courier and never came back. {hero} ({role}), deleted.",
+    "Smoke of deceit, a dagger, silence. {name} ({hero}) — {role} — is mid-no-more.",
+    "{name} ({hero}) had 1 HP and no salve. The {role} bleeds out at dawn.",
+    "They found {name}'s {hero} bottle, still crackling. The {role} is gone.",
+    "{name} ({hero}) went all-in on the gamba and the gamba went all-in back. {role}, busted.",
+    "Dug too greedily and too deep — {name} ({hero}), a {role}, never resurfaced.",
+    "{name} ({hero}) flamed the mafia in all-chat. The mafia muted them. Forever. {role} down.",
+    "A perfectly placed ward saw {name} ({hero}) die anyway. {role}, dewarded.",
+    "{name} ({hero}) said 'ez' at minute 12. The {role} did not make it to minute 13.",
+    "Roshan stirs, the night ends, and {name} ({hero}) — a {role} — does not.",
+    "{name} ({hero}) bought back into the wrong neighborhood. {role}, refunded to the void.",
 ]
 
 _PLAGUE_DEATH_TEMPLATES = [
@@ -54,6 +67,10 @@ _LYNCH_TEMPLATES = [
     "{name} ({hero}) was sent to the well. Confirmed: {role}.",
     "Cleaved at high noon. {name} ({hero}) — {role} — has been lynched.",
     "{name} dies trying to claim innocence. {role} ({hero}) was the truth.",
+    "The vote lands like a Reverse Polarity. {name} ({hero}), a {role}, is gone.",
+    "Town diff. {name} ({hero}) — {role} — gets reported, votekicked, and lynched.",
+    "{name} ({hero}) typed a 6-paragraph defense. The town typed 'F1'. {role} executed.",
+    "Pitchforks over jopacoin — {name} ({hero}), a {role}, is strung up at the fountain.",
 ]
 
 _NO_LYNCH_TEMPLATES = [
@@ -149,4 +166,5 @@ def _role_label(role: MafiaRole) -> str:
         MafiaRole.VIGILANTE: "Vigilante",
         MafiaRole.TOWNIE: "Townie",
         MafiaRole.JESTER: "Jester",
+        MafiaRole.BOOKIE: "Bookie",
     }.get(role, role.value)

@@ -464,6 +464,16 @@ class SchemaManager:
             ("create_mafia_tables", self._migration_create_mafia_tables),
             # Entry-fee economy: persist fees so payout pools can be audited.
             ("add_mafia_entry_fee_column", self._migration_add_mafia_entry_fee_column),
+            # Week-long redesign: multi-cycle game state, per-night actions,
+            # town bounties, and a per-guild hall-of-fame pointer.
+            ("add_mafia_weekly_game_columns", self._migration_add_mafia_weekly_game_columns),
+            ("rebuild_mafia_actions_per_night", self._migration_rebuild_mafia_actions_per_night),
+            ("create_mafia_bounties_table", self._migration_create_mafia_bounties_table),
+            ("create_mafia_meta_table", self._migration_create_mafia_meta_table),
+            ("create_mafia_signups_table", self._migration_create_mafia_signups_table),
+            # Continuous cadence: games start back-to-back, so more than one can
+            # share a calendar start-date — drop the per-date unique constraint.
+            ("rebuild_mafia_games_drop_date_unique", self._migration_rebuild_mafia_games_drop_date_unique),
         ]
 
     # --- Migrations ---
@@ -4027,4 +4037,205 @@ class SchemaManager:
         """
         self._add_column_if_not_exists(
             cursor, "mafia_games", "entry_fee", "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    def _migration_add_mafia_weekly_game_columns(self, cursor) -> None:
+        """Week-long redesign: a game now spans multiple night/day cycles.
+
+        - day_number: 1-based cycle counter.
+        - phase_started_at: start of the current phase (drives the per-cycle
+          clock); backfilled to started_at for in-flight rows.
+        - standings_message_id / graveyard_thread_id: visibility surfaces.
+        - status: ACTIVE / CANCELLED (admin abort).
+        """
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "day_number", "INTEGER NOT NULL DEFAULT 1"
+        )
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "phase_started_at", "INTEGER"
+        )
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "standings_message_id", "INTEGER"
+        )
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "graveyard_thread_id", "INTEGER"
+        )
+        self._add_column_if_not_exists(
+            cursor, "mafia_games", "status", "TEXT NOT NULL DEFAULT 'ACTIVE'"
+        )
+        cursor.execute(
+            "UPDATE mafia_games SET phase_started_at = started_at "
+            "WHERE phase_started_at IS NULL"
+        )
+
+    def _migration_rebuild_mafia_actions_per_night(self, cursor) -> None:
+        """Re-key mafia_actions per cycle.
+
+        The original UNIQUE(game_id, actor_id, action_type, phase) prevents a
+        second night's KILL/INVESTIGATE/etc. With a week-long game, actions must
+        be unique per cycle, so the constraint becomes
+        UNIQUE(game_id, actor_id, action_type, phase, day_number). SQLite can't
+        drop a table-level UNIQUE in place, so rebuild the table. Guarded by the
+        presence of the day_number column so it only runs once.
+        """
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='mafia_actions'")
+        if not cursor.fetchone():
+            return
+        cursor.execute("PRAGMA table_info(mafia_actions)")
+        existing_cols = {row["name"] for row in cursor.fetchall()}
+        if "day_number" in existing_cols:
+            return
+
+        cursor.execute(
+            """
+            CREATE TABLE mafia_actions_new (
+                action_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id     INTEGER NOT NULL,
+                guild_id    INTEGER NOT NULL DEFAULT 0,
+                actor_id    INTEGER NOT NULL,
+                target_id   INTEGER,
+                action_type TEXT NOT NULL,
+                phase       TEXT NOT NULL,
+                day_number  INTEGER NOT NULL DEFAULT 1,
+                created_at  INTEGER NOT NULL,
+                result      TEXT,
+                UNIQUE(game_id, actor_id, action_type, phase, day_number)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO mafia_actions_new
+                (action_id, game_id, guild_id, actor_id, target_id,
+                 action_type, phase, day_number, created_at, result)
+            SELECT action_id, game_id, guild_id, actor_id, target_id,
+                   action_type, phase, 1, created_at, result
+            FROM mafia_actions
+            """
+        )
+        cursor.execute("DROP TABLE mafia_actions")
+        cursor.execute("ALTER TABLE mafia_actions_new RENAME TO mafia_actions")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_actions_game_type ON mafia_actions(game_id, action_type)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_actions_actor ON mafia_actions(game_id, actor_id)"
+        )
+
+    def _migration_create_mafia_bounties_table(self, cursor) -> None:
+        """Town Bounty: living players stake at most 1 JC per suspect per day.
+
+        The composite PRIMARY KEY enforces the one-stake-per-contributor-per-
+        target-per-day rule at the storage layer.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_bounties (
+                game_id        INTEGER NOT NULL,
+                guild_id       INTEGER NOT NULL DEFAULT 0,
+                day_number     INTEGER NOT NULL,
+                target_id      INTEGER NOT NULL,
+                contributor_id INTEGER NOT NULL,
+                amount         INTEGER NOT NULL DEFAULT 1,
+                created_at     INTEGER NOT NULL,
+                PRIMARY KEY (game_id, day_number, target_id, contributor_id),
+                FOREIGN KEY (game_id) REFERENCES mafia_games(game_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_bounties_day "
+            "ON mafia_bounties(game_id, day_number)"
+        )
+
+    def _migration_create_mafia_meta_table(self, cursor) -> None:
+        """Per-guild mafia metadata (e.g. the pinned hall-of-fame message id)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_meta (
+                guild_id                INTEGER PRIMARY KEY DEFAULT 0,
+                hall_of_fame_message_id INTEGER,
+                updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    def _migration_create_mafia_signups_table(self, cursor) -> None:
+        """Opt-in roster priority: players who /mafia join for a given week."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_signups (
+                guild_id   INTEGER NOT NULL DEFAULT 0,
+                week_start TEXT    NOT NULL,
+                discord_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, week_start, discord_id)
+            )
+            """
+        )
+
+    def _migration_rebuild_mafia_games_drop_date_unique(self, cursor) -> None:
+        """Drop UNIQUE(guild_id, game_date) so games can start back-to-back.
+
+        With the continuous cadence, a finished game's start-date can repeat for
+        the next game the same day. SQLite can't drop a table-level UNIQUE in
+        place, so rebuild. Guarded by the constraint still being present.
+        """
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='mafia_games'")
+        if not cursor.fetchone():
+            return
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='mafia_games'")
+        row = cursor.fetchone()
+        if row is None or "UNIQUE(guild_id, game_date)" not in row[0]:
+            return  # already rebuilt
+
+        cursor.execute(
+            """
+            CREATE TABLE mafia_games_new (
+                game_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id             INTEGER NOT NULL DEFAULT 0,
+                game_date            TEXT    NOT NULL,
+                phase                TEXT    NOT NULL,
+                started_at           INTEGER NOT NULL,
+                night_ended_at       INTEGER,
+                day_ended_at         INTEGER,
+                winner               TEXT,
+                entry_fee            INTEGER NOT NULL DEFAULT 0,
+                payout_per_winner    INTEGER NOT NULL DEFAULT 0,
+                mvp_id               INTEGER,
+                roster_size          INTEGER NOT NULL,
+                twist_event          TEXT,
+                mafia_thread_id      INTEGER,
+                discussion_thread_id INTEGER,
+                setup_message_id     INTEGER,
+                day_number           INTEGER NOT NULL DEFAULT 1,
+                phase_started_at     INTEGER,
+                standings_message_id INTEGER,
+                graveyard_thread_id  INTEGER,
+                status               TEXT NOT NULL DEFAULT 'ACTIVE'
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO mafia_games_new (
+                game_id, guild_id, game_date, phase, started_at, night_ended_at,
+                day_ended_at, winner, entry_fee, payout_per_winner, mvp_id,
+                roster_size, twist_event, mafia_thread_id, discussion_thread_id,
+                setup_message_id, day_number, phase_started_at,
+                standings_message_id, graveyard_thread_id, status
+            )
+            SELECT
+                game_id, guild_id, game_date, phase, started_at, night_ended_at,
+                day_ended_at, winner, entry_fee, payout_per_winner, mvp_id,
+                roster_size, twist_event, mafia_thread_id, discussion_thread_id,
+                setup_message_id, day_number, phase_started_at,
+                standings_message_id, graveyard_thread_id, status
+            FROM mafia_games
+            """
+        )
+        cursor.execute("DROP TABLE mafia_games")
+        cursor.execute("ALTER TABLE mafia_games_new RENAME TO mafia_games")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mafia_games_guild_phase ON mafia_games(guild_id, phase)"
         )

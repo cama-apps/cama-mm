@@ -6,7 +6,6 @@ and read-side queries for the /mafia command surface.
 
 import logging
 import random
-import sqlite3
 import time
 from collections import Counter
 
@@ -43,28 +42,41 @@ ROLE_TABLE: dict[int, dict[str, int]] = {
 MIN_ROSTER = 5
 MAX_ROSTER = 15
 
-# Phase clock (seconds since started_at).
-NIGHT_DURATION_S = 6 * 3600
-DAY_DURATION_S = 13 * 3600
-PHASE_REMINDER_LEAD_S = 3600
+# Phases advance as soon as every living actor has acted (see night_ready /
+# day_ready). These durations are only an anti-AFK *fallback*: if someone never
+# acts, the phase force-advances after this long so a game can't stall forever.
+NIGHT_DURATION_S = 24 * 3600
+DAY_DURATION_S = 24 * 3600
+# Ping un-acted players if a phase has been open this long without resolving.
+PHASE_REMINDER_AFTER_S = 8 * 3600
+# Absolute backstop on cycles so a degenerate game can't loop forever.
+MAX_CYCLES = 14
 
 # Probabilities.
 JESTER_PROBABILITY = 0.20
+BOOKIE_PROBABILITY = 0.20
 TWIST_PROBABILITY = 0.30
 
-# Eligibility window for /gamba and /dig activity.
-ELIGIBILITY_WINDOW_S = 24 * 3600
+# Eligibility window for /gamba and /dig activity feeding the auto-roster.
+ELIGIBILITY_WINDOW_S = 7 * 24 * 3600
 
 # Auto-skip: if a player's last N games all show acted=0, exclude from auto-roster.
 AUTO_SKIP_THRESHOLD = 3
 
-# Economy. Each rostered player is charged ENTRY_FEE at game start; the reduced
-# buy-in pools into a single pot distributed among the winning faction at day
-# resolution. MVP_BONUS is drawn from the payout pool rather than minted.
+# Economy. Each rostered player is charged ENTRY_FEE at game start; the fees
+# pool into a single pot distributed among the winning faction at day
+# resolution. Because roles are assigned uniformly at random, the per-player
+# expectation of the pot share equals exactly ENTRY_FEE regardless of the
+# (unknown) faction win-rate distribution — so EV per game = 0 by construction.
+# MVP_BONUS is now drawn from the pot rather than minted.
 ENTRY_FEE = 8
 MVP_BONUS = 20
-PAYOUT_RATE_NUMERATOR = 1
-PAYOUT_RATE_DENOMINATOR = 1
+# Hard cap on what any single winner can take from one game's pot. Whatever the
+# pot would have paid a winner beyond this overflows to the nonprofit fund, so
+# the game stays zero-sum (coins move to a pool, never minted or burned).
+MAX_WINNER_PAYOUT = 50
+# The Bookie (neutral) skims this much off the top when their lynch wager hits.
+BOOKIE_PAYOUT = MAX_WINNER_PAYOUT
 
 TITLES: dict[str, callable] = {
     "Don of Dire":  lambda s: s["mafia_wins"] >= 10,
@@ -79,8 +91,14 @@ def _pot_for_roster(roster_size: int) -> int:
     return roster_size * ENTRY_FEE
 
 
-def _payout_pool_for_pot(pot_total: int) -> int:
-    return pot_total * PAYOUT_RATE_NUMERATOR // PAYOUT_RATE_DENOMINATOR
+def phase_duration(phase: MafiaPhase, at_ts: int) -> int:
+    """Anti-AFK fallback length for a NIGHT/DAY phase (force-advance backstop).
+
+    Phases normally resolve the moment everyone has acted; this is just the
+    maximum a phase stays open if someone never does. ``at_ts`` is accepted for
+    signature stability (the duration is uniform now).
+    """
+    return NIGHT_DURATION_S if phase == MafiaPhase.NIGHT else DAY_DURATION_S
 
 
 def _allowed_action_for_role(role: MafiaRole) -> MafiaActionType | None:
@@ -89,6 +107,7 @@ def _allowed_action_for_role(role: MafiaRole) -> MafiaActionType | None:
         MafiaRole.DOCTOR: MafiaActionType.SAVE,
         MafiaRole.DETECTIVE: MafiaActionType.INVESTIGATE,
         MafiaRole.VIGILANTE: MafiaActionType.VIG_KILL,
+        MafiaRole.BOOKIE: MafiaActionType.WAGER,
     }.get(role)
 
 
@@ -119,19 +138,26 @@ class MafiaService:
     # Lifecycle
     # ────────────────────────────────────────────────────────────────────
 
-    def start_daily_game(self, guild_id: int | None) -> MafiaGame | None:
-        """Idempotent. Creates today's game if not already started.
+    def start_game(
+        self, guild_id: int | None, *, force: bool = False
+    ) -> MafiaGame | None:
+        """Idempotent. Start a new game if none is currently active.
 
-        Returns the new game on creation, the existing game if today's already
-        exists, or None if the eligible roster is too small.
+        Games run back-to-back with no calendar gating: the cog calls this on
+        every tick where there's no active game and immediately after one
+        resolves. ``game_date`` records the start date (informational; it may
+        repeat). Returns the new/existing ACTIVE game, or None if the roster is
+        too small. ``force`` is accepted for the admin path (kept for clarity).
         """
-        game_date = self.dig_service._get_game_date()
-        existing = self.repo.get_game_for_date(guild_id, game_date)
-        if existing is not None:
-            return existing
+        today = self.dig_service._get_game_date()
 
+        active = self.repo.get_active_game(guild_id)
+        if active is not None and active.status == "ACTIVE":
+            return active
+
+        signups = self.repo.get_signups(guild_id)
         for attempt in range(2):
-            eligible = self._collect_eligible_players(guild_id)
+            eligible = self._collect_roster(guild_id, signups=signups)
             if len(eligible) < MIN_ROSTER:
                 logger.info(
                     "Mafia start skipped for guild %s: only %d eligible players",
@@ -139,9 +165,6 @@ class MafiaService:
                     len(eligible),
                 )
                 return None
-
-            if len(eligible) > MAX_ROSTER:
-                eligible = self._rng.sample(eligible, MAX_ROSTER)
 
             roster_size = len(eligible)
             twist = self._roll_twist()
@@ -151,7 +174,7 @@ class MafiaService:
             try:
                 game_id = self.repo.create_game_with_players_and_entry_fees(
                     guild_id=guild_id,
-                    game_date=game_date,
+                    game_date=today,
                     phase=MafiaPhase.NIGHT,
                     started_at=started_at,
                     roster_size=roster_size,
@@ -160,11 +183,6 @@ class MafiaService:
                     players=players,
                     max_debt=self.max_debt,
                 )
-            except sqlite3.IntegrityError:
-                existing = self.repo.get_game_for_date(guild_id, game_date)
-                if existing is not None:
-                    return existing
-                raise
             except ValueError as exc:
                 if str(exc) == "entry_fee_debit_failed" and attempt == 0:
                     continue
@@ -174,6 +192,7 @@ class MafiaService:
                 )
                 return None
 
+            self.repo.clear_signups(guild_id)
             game = self.repo.get_game_by_id(game_id)
             if game is not None:
                 game.players = self.repo.get_players(game_id)
@@ -181,33 +200,18 @@ class MafiaService:
 
         return None
 
-    # ── Read / wiring pass-throughs ──────────────────────────────────────
-    # The cog depends on the service, not the repo. These keep the loop and
-    # posting helpers off ``mafia_service.repo`` directly.
-
-    def get_active_game(self, guild_id: int | None) -> MafiaGame | None:
-        return self.repo.get_active_game(guild_id)
-
-    def get_game_by_id(self, game_id: int) -> MafiaGame | None:
-        return self.repo.get_game_by_id(game_id)
-
-    def get_players(self, game_id: int) -> list[MafiaPlayer]:
-        return self.repo.get_players(game_id)
-
-    def set_thread_ids(
-        self,
-        game_id: int,
-        *,
-        mafia_thread_id: int | None = None,
-        discussion_thread_id: int | None = None,
-        setup_message_id: int | None = None,
-    ) -> None:
-        self.repo.set_thread_ids(
-            game_id,
-            mafia_thread_id=mafia_thread_id,
-            discussion_thread_id=discussion_thread_id,
-            setup_message_id=setup_message_id,
-        )
+    def _collect_roster(
+        self, guild_id: int | None, *, signups: list[int] | tuple[int, ...] = ()
+    ) -> list[int]:
+        """Eligible players capped at MAX_ROSTER, opt-in signups first."""
+        eligible = self._collect_eligible_players(guild_id)
+        if len(eligible) <= MAX_ROSTER:
+            return eligible
+        signup_set = set(signups)
+        prioritized = [pid for pid in eligible if pid in signup_set]
+        rest = [pid for pid in eligible if pid not in signup_set]
+        self._rng.shuffle(rest)
+        return (prioritized + rest)[:MAX_ROSTER]
 
     def resolve_night(self, guild_id: int | None) -> dict:
         """Apply night actions, mark the dead, advance to DAY.
@@ -218,19 +222,20 @@ class MafiaService:
         if game is None or game.phase != MafiaPhase.NIGHT:
             return {"resolved": False, "reason": "no_active_night"}
 
+        dn = game.day_number
         all_players = self.repo.get_players(game.game_id)
         by_id = {p.discord_id: p for p in all_players}
         alive_ids = {p.discord_id for p in all_players if p.is_alive}
         mafia_ids = {p.discord_id for p in all_players if p.role == MafiaRole.MAFIA}
 
         kill_actions = self.repo.get_actions(
-            game.game_id, MafiaActionType.KILL, MafiaPhase.NIGHT
+            game.game_id, MafiaActionType.KILL, MafiaPhase.NIGHT, day_number=dn
         )
         save_actions = self.repo.get_actions(
-            game.game_id, MafiaActionType.SAVE, MafiaPhase.NIGHT
+            game.game_id, MafiaActionType.SAVE, MafiaPhase.NIGHT, day_number=dn
         )
         vig_actions = self.repo.get_actions(
-            game.game_id, MafiaActionType.VIG_KILL, MafiaPhase.NIGHT
+            game.game_id, MafiaActionType.VIG_KILL, MafiaPhase.NIGHT, day_number=dn
         )
 
         # Determine mafia kill targets.
@@ -272,8 +277,9 @@ class MafiaService:
             killed.append({"discord_id": plague_target, "by": "plague"})
             killed_ids.append(plague_target)
 
+        now = int(time.time())
         applied = self.repo.apply_night_resolution(
-            game.game_id, killed_ids, ended_at=int(time.time())
+            game.game_id, killed_ids, ended_at=now
         )
         if not applied:
             return {"resolved": False, "reason": "night_already_resolved"}
@@ -284,91 +290,153 @@ class MafiaService:
         if game.twist_event != MafiaTwist.MEMORY_FOG:
             self._record_detective_results(game, by_id)
 
+        # Resurrection (weekend-only, once per game): revive a fallen non-mafia
+        # at dawn. Clearing the twist makes it idempotent.
+        revived_id = self._maybe_resurrect(game, killed_ids, now)
+
         return {
             "resolved": True,
             "game_id": game.game_id,
+            "day_number": dn,
             "twist": game.twist_event.value if game.twist_event else None,
             "killed": killed,
+            "revived_id": revived_id,
             "save_blocked": save_target is not None and save_target not in [k["discord_id"] for k in killed],
         }
 
+    def _maybe_resurrect(
+        self, game: MafiaGame, killed_ids: list[int], now: int
+    ) -> int | None:
+        """Weekend Resurrection event: revive one dead non-mafia, once per game."""
+        from utils.game_date import game_date_for_timestamp, weekday_of_game_date
+
+        if game.twist_event != MafiaTwist.RESURRECTION:
+            return None
+        if weekday_of_game_date(game_date_for_timestamp(now)) < 5:  # weekday
+            return None
+        players = self.repo.get_players(game.game_id)
+        just_killed = set(killed_ids)
+        candidates = [
+            p.discord_id
+            for p in players
+            if not p.is_alive
+            and p.role != MafiaRole.MAFIA
+            and p.discord_id not in just_killed
+        ]
+        if not candidates:
+            return None
+        revived = self._rng.choice(candidates)
+        self.repo.revive_player(game.game_id, revived)
+        # Consume the event so it can't fire again.
+        self.repo.set_twist_event(game.game_id, None)
+        return revived
+
     def resolve_day(self, guild_id: int | None) -> dict:
-        """Tally votes, apply lynch, evaluate win condition, pay out."""
+        """Resolve a day: lynch, bounties, win check; then continue or finalize."""
         game = self.repo.get_active_game(guild_id)
         if game is None or game.phase != MafiaPhase.DAY:
             return {"resolved": False, "reason": "no_active_day"}
 
+        dn = game.day_number
         all_players = self.repo.get_players(game.game_id)
         by_id = {p.discord_id: p for p in all_players}
-        alive = [p for p in all_players if p.is_alive]
-        alive_ids = {p.discord_id for p in alive}
+        alive_ids = {p.discord_id for p in all_players if p.is_alive}
 
         votes = self.repo.get_actions(
-            game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY
+            game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY, day_number=dn
         )
-        # Only count votes from alive players targeting alive players.
         valid_votes = [
             v for v in votes
             if v["actor_id"] in alive_ids and v["target_id"] in alive_ids
         ]
 
-        lynched_id: int | None = None
-        if game.twist_event != MafiaTwist.TOWN_HALL:
-            lynched_id = self._tally_lynch(valid_votes)
+        # Town Hall only suppresses the lynch on the first day (a week-long
+        # suppression would make the game unwinnable by vote).
+        town_hall_today = game.twist_event == MafiaTwist.TOWN_HALL and dn == 1
+        lynched_id = None if town_hall_today else self._tally_lynch(valid_votes)
 
         if lynched_id is not None and lynched_id in by_id:
             by_id[lynched_id].is_alive = False
             by_id[lynched_id].eliminated_phase = MafiaPhase.DAY
 
-        # Evaluate against the local post-lynch state. The DB write happens
-        # atomically with payouts below.
-        all_players = list(by_id.values())
+        post_players = list(by_id.values())
+        post_alive = [p for p in post_players if p.is_alive]
 
-        # Win condition: jester first (overrides everything).
-        winner: MafiaWinner
-        if lynched_id is not None and by_id[lynched_id].role == MafiaRole.JESTER:
+        # Town Bounty resolves every day: a correct (lynched-and-mafia) read pays
+        # contributors out of the nonprofit fund (capped at N alive). Mark a
+        # correct Bookie wager durably for the end-of-week cash-out.
+        lynched_was_mafia = (
+            lynched_id is not None and by_id[lynched_id].role == MafiaRole.MAFIA
+        )
+        bounty = self.repo.resolve_day_bounties(
+            game_id=game.game_id,
+            guild_id=guild_id,
+            day_number=dn,
+            lynched_id=lynched_id,
+            lynched_was_mafia=lynched_was_mafia,
+            alive_count=len(post_alive),
+        )
+        self._mark_bookie_wager(game, dn, lynched_id)
+
+        # Win evaluation.
+        jester_win = (
+            lynched_id is not None and by_id[lynched_id].role == MafiaRole.JESTER
+        )
+        alive_mafia = sum(1 for p in post_alive if p.role == MafiaRole.MAFIA)
+        alive_non_mafia = sum(1 for p in post_alive if p.role != MafiaRole.MAFIA)
+        cap_reached = self._cycle_cap_reached(dn)
+
+        winner: MafiaWinner | None
+        if jester_win:
             winner = MafiaWinner.JESTER
+        elif alive_mafia == 0:
+            winner = MafiaWinner.TOWN
+        elif alive_mafia >= alive_non_mafia:
+            winner = MafiaWinner.MAFIA
+        elif cap_reached:
+            # Hit the cycle cap: force a standing tally — town survived if it
+            # still outnumbers the mafia.
+            winner = (
+                MafiaWinner.TOWN if alive_non_mafia > alive_mafia else MafiaWinner.MAFIA
+            )
         else:
-            alive = [p for p in all_players if p.is_alive]
-            alive_mafia = sum(1 for p in alive if p.role == MafiaRole.MAFIA)
-            if alive_mafia == 0:
-                # Town pinned every mafia → town wins.
-                winner = MafiaWinner.TOWN
-            else:
-                # One-day cadence: any surviving mafia wins, whether they reached
-                # parity or simply weren't all lynched. Town must eliminate them all.
-                winner = MafiaWinner.MAFIA
+            winner = None  # undecided → the game continues to the next cycle
 
+        if winner is None:
+            # Apply the lynch death and roll into the next night. No payout.
+            if lynched_id is not None:
+                self.repo.set_player_alive(
+                    game.game_id, lynched_id, alive=False,
+                    eliminated_phase=MafiaPhase.DAY,
+                )
+            advanced = self.repo.advance_to_next_cycle(
+                game.game_id, ended_at=int(time.time())
+            )
+            if not advanced:
+                return {"resolved": False, "reason": "day_already_resolved"}
+            return {
+                "resolved": True,
+                "continued": True,
+                "game_id": game.game_id,
+                "day_number": dn,
+                "lynched_id": lynched_id,
+                "alive_count": len(post_alive),
+                "bounty": bounty,
+                "vote_breakdown": self._vote_breakdown(valid_votes),
+                "vote_detail": self._vote_detail(valid_votes),
+                "twist": game.twist_event.value if game.twist_event else None,
+            }
+
+        # Finalize: capped payouts, nonprofit overflow, end-of-week Bookie skim.
         entry_fee = game.entry_fee or ENTRY_FEE
         pot_total = game.roster_size * entry_fee
-        payout_pool = _payout_pool_for_pot(pot_total)
-        winning_ids = self._winners_for(all_players, winner)
-        mvp_id = self._compute_mvp(
-            game, all_players, winner, lynched_id, valid_votes
-        )
+        winning_ids = self._winners_for(post_players, winner)
+        mvp_id = self._compute_mvp(game, post_players, winner, lynched_id, valid_votes)
+        bookie_id = self._bookie_hits_over_week(game, post_players)
 
-        # Split the payout pool among winners. MVP_BONUS + integer-division remainder
-        # ride on top of the winning faction's MVP share — within-faction
-        # redistribution conserves the reduced faction total. The dust must
-        # always be allocated to some winner so payouts match the reduced pool.
-        deltas: dict[int, int] = {}
-        if winning_ids:
-            mvp_in_winners = mvp_id is not None and mvp_id in winning_ids
-            mvp_share = min(MVP_BONUS, payout_pool) if mvp_in_winners else 0
-            remainder_pot = payout_pool - mvp_share
-            base_payout = remainder_pot // len(winning_ids)
-            dust = remainder_pot - base_payout * len(winning_ids)
-            for wid in winning_ids:
-                deltas[wid] = base_payout
-            # Bonus + rounding dust go to the MVP if there is one; otherwise
-            # the dust falls to the first winner (deterministic, faction-local).
-            if mvp_in_winners:
-                deltas[mvp_id] += mvp_share + dust
-            elif dust:
-                deltas[winning_ids[0]] += dust
-            payout_per_winner = base_payout
-        else:
-            payout_per_winner = 0
+        deltas, payout_per_winner, nonprofit_overflow = self._compute_payout_deltas(
+            pot_total, winning_ids, mvp_id, bookie_id
+        )
 
         finalize = self.repo.finalize_day_resolution(
             game_id=game.game_id,
@@ -379,6 +447,7 @@ class MafiaService:
             payout_deltas=deltas,
             entry_fee=entry_fee,
             bankruptcy_penalty_rate=self.bankruptcy_penalty_rate,
+            nonprofit_overflow=nonprofit_overflow,
         )
         if not finalize.get("applied"):
             return {
@@ -388,19 +457,169 @@ class MafiaService:
 
         return {
             "resolved": True,
+            "continued": False,
             "game_id": game.game_id,
+            "day_number": dn,
             "winner": winner.value,
             "lynched_id": lynched_id,
             "mvp_id": mvp_id,
             "payout_per_winner": payout_per_winner,
             "pot_total": pot_total,
-            "payout_pool": payout_pool,
             "entry_fee": entry_fee,
             "winning_ids": list(winning_ids),
+            "bookie_id": bookie_id,
+            "bookie_payout": deltas.get(bookie_id, 0) if bookie_id is not None else 0,
+            "nonprofit_overflow": nonprofit_overflow,
+            "bounty": bounty,
+            "cap_forced": cap_reached and not jester_win and alive_mafia > 0,
             "bankruptcy_penalties": finalize.get("bankruptcy_penalties", {}),
             "vote_breakdown": self._vote_breakdown(valid_votes),
+            "vote_detail": self._vote_detail(valid_votes),
             "twist": game.twist_event.value if game.twist_event else None,
         }
+
+    def _compute_payout_deltas(
+        self,
+        pot_total: int,
+        winning_ids: list[int],
+        mvp_id: int | None,
+        bookie_id: int | None,
+    ) -> tuple[dict[int, int], int, int]:
+        """Build per-winner payout deltas: Bookie skim off the top, faction split
+        with MVP bonus + dust, each capped at +50, remainder → nonprofit overflow.
+        Returns (deltas, payout_per_winner, nonprofit_overflow).
+        """
+        deltas: dict[int, int] = {}
+        faction_pot = pot_total
+        if bookie_id is not None:
+            bookie_take = min(BOOKIE_PAYOUT, pot_total)
+            deltas[bookie_id] = bookie_take
+            faction_pot = pot_total - bookie_take
+
+        if winning_ids:
+            mvp_in_winners = mvp_id is not None and mvp_id in winning_ids
+            # Clamp the MVP bonus to what the faction pot can cover so a small
+            # pot (e.g. mostly consumed by the Bookie skim) can never push the
+            # base split negative — that would mint coins on resolution.
+            mvp_share = min(MVP_BONUS, faction_pot) if mvp_in_winners else 0
+            remainder_pot = faction_pot - mvp_share
+            base_payout = remainder_pot // len(winning_ids)
+            dust = remainder_pot - base_payout * len(winning_ids)
+            for wid in winning_ids:
+                deltas[wid] = base_payout
+            if mvp_in_winners:
+                deltas[mvp_id] += mvp_share + dust
+            elif dust:
+                deltas[winning_ids[0]] += dust
+            payout_per_winner = base_payout
+        else:
+            payout_per_winner = 0
+
+        deltas = {wid: min(amount, MAX_WINNER_PAYOUT) for wid, amount in deltas.items()}
+        nonprofit_overflow = pot_total - sum(deltas.values())
+        payout_per_winner = min(payout_per_winner, MAX_WINNER_PAYOUT)
+        return deltas, payout_per_winner, nonprofit_overflow
+
+    def force_finalize(self, guild_id: int | None) -> dict:
+        """Admin 'stop': end the game now with a standing tally + payout."""
+        game = self.repo.get_active_game(guild_id)
+        if game is None or game.phase == MafiaPhase.RESOLVED or game.status != "ACTIVE":
+            return {"resolved": False, "reason": "no_active_game"}
+
+        players = self.repo.get_players(game.game_id)
+        alive = [p for p in players if p.is_alive]
+        alive_mafia = sum(1 for p in alive if p.role == MafiaRole.MAFIA)
+        alive_non_mafia = sum(1 for p in alive if p.role != MafiaRole.MAFIA)
+        if alive_mafia == 0:
+            winner = MafiaWinner.TOWN
+        elif alive_mafia >= alive_non_mafia:
+            winner = MafiaWinner.MAFIA
+        else:
+            winner = (
+                MafiaWinner.TOWN if alive_non_mafia > alive_mafia else MafiaWinner.MAFIA
+            )
+
+        entry_fee = game.entry_fee or ENTRY_FEE
+        pot_total = game.roster_size * entry_fee
+        winning_ids = self._winners_for(players, winner)
+        mvp_id = self._compute_mvp(game, players, winner, None, [])
+        bookie_id = self._bookie_hits_over_week(game, players)
+        deltas, payout_per_winner, nonprofit_overflow = self._compute_payout_deltas(
+            pot_total, winning_ids, mvp_id, bookie_id
+        )
+        # finalize_day_resolution only fires from the DAY phase.
+        self.repo.set_phase(game.game_id, MafiaPhase.DAY)
+        finalize = self.repo.finalize_day_resolution(
+            game_id=game.game_id,
+            winner=winner,
+            payout_per_winner=payout_per_winner,
+            mvp_id=mvp_id,
+            lynched_id=None,
+            payout_deltas=deltas,
+            entry_fee=entry_fee,
+            bankruptcy_penalty_rate=self.bankruptcy_penalty_rate,
+            nonprofit_overflow=nonprofit_overflow,
+        )
+        if not finalize.get("applied"):
+            return {"resolved": False, "reason": finalize.get("reason", "finalize_failed")}
+        return {
+            "resolved": True,
+            "continued": False,
+            "game_id": game.game_id,
+            "day_number": game.day_number,
+            "winner": winner.value,
+            "lynched_id": None,
+            "mvp_id": mvp_id,
+            "payout_per_winner": payout_per_winner,
+            "pot_total": pot_total,
+            "entry_fee": entry_fee,
+            "winning_ids": list(winning_ids),
+            "bookie_id": bookie_id,
+            "bookie_payout": deltas.get(bookie_id, 0) if bookie_id is not None else 0,
+            "nonprofit_overflow": nonprofit_overflow,
+            "forced_stop": True,
+            "vote_breakdown": {},
+            "twist": game.twist_event.value if game.twist_event else None,
+        }
+
+    def abort_game(self, guild_id: int | None, *, refund: bool = True) -> dict:
+        """Admin 'abort': cancel the game, optionally refunding entry fees."""
+        game = self.repo.get_active_game(guild_id)
+        if game is None or game.status != "ACTIVE":
+            return {"ok": False, "reason": "no_active_game"}
+        result = self.repo.cancel_game(game.game_id, refund=refund)
+        return {
+            "ok": result.get("applied", False),
+            "game_id": game.game_id,
+            "refunded": result.get("refunded", {}),
+            "standings_message_id": game.standings_message_id,
+        }
+
+    def _cycle_cap_reached(self, dn: int) -> bool:
+        """Absolute backstop — force a standing tally past MAX_CYCLES cycles."""
+        return dn >= MAX_CYCLES
+
+    def _mark_bookie_wager(
+        self, game: MafiaGame, dn: int, lynched_id: int | None
+    ) -> None:
+        """Durably flag a correct Bookie wager for this day (result='HIT')."""
+        if lynched_id is None:
+            return
+        wagers = self.repo.get_actions(
+            game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=dn
+        )
+        for w in wagers:
+            if w["target_id"] == lynched_id and w.get("result") != "HIT":
+                self.repo.record_action(
+                    game_id=game.game_id,
+                    guild_id=game.guild_id,
+                    actor_id=w["actor_id"],
+                    target_id=lynched_id,
+                    action_type=MafiaActionType.WAGER,
+                    phase=MafiaPhase.NIGHT,
+                    result="HIT",
+                    day_number=dn,
+                )
 
     # ────────────────────────────────────────────────────────────────────
     # Action submission
@@ -437,6 +656,26 @@ class MafiaService:
             return {"ok": False, "error": "Mafia don't kill their own."}
         if action_type == MafiaActionType.INVESTIGATE and target_id == actor_id:
             return {"ok": False, "error": "You can't investigate yourself."}
+        if action_type == MafiaActionType.INVESTIGATE:
+            # One read per night (scoped to this cycle). Re-checking the same
+            # target replays the cached verdict; a different target is rejected
+            # so the detective can't read the whole town from instant replies.
+            prior = self.repo.get_action_for_actor(
+                game.game_id, actor_id, MafiaActionType.INVESTIGATE,
+                day_number=game.day_number,
+            )
+            if prior is not None:
+                if prior["target_id"] == target_id:
+                    return {
+                        "ok": True,
+                        "action": action_type.value,
+                        "result": prior["result"],
+                    }
+                return {
+                    "ok": False,
+                    "error": "You've already used your read tonight — "
+                    "it's locked on your first target.",
+                }
         if action_type == MafiaActionType.VIG_KILL:
             prior = self.repo.get_action_for_actor(
                 game.game_id, actor_id, MafiaActionType.VIG_KILL
@@ -464,6 +703,7 @@ class MafiaService:
             action_type=action_type,
             phase=MafiaPhase.NIGHT,
             result=result_payload,
+            day_number=game.day_number,
         )
 
         out: dict = {"ok": True, "action": action_type.value}
@@ -488,6 +728,10 @@ class MafiaService:
         if target is None or not target.is_alive:
             return {"ok": False, "error": "Target is not a living player."}
 
+        prior = self.repo.get_action_for_actor(
+            game.game_id, voter_id, MafiaActionType.VOTE, day_number=game.day_number
+        )
+        changed = prior is not None and prior["target_id"] != target_id
         self.repo.record_action(
             game_id=game.game_id,
             guild_id=guild_id,
@@ -495,8 +739,55 @@ class MafiaService:
             target_id=target_id,
             action_type=MafiaActionType.VOTE,
             phase=MafiaPhase.DAY,
+            day_number=game.day_number,
         )
+        return {"ok": True, "changed": changed}
+
+    def submit_bounty(
+        self, guild_id: int | None, contributor_id: int, target_id: int
+    ) -> dict:
+        """Stake 1 JC on a suspect during the day (Town Bounty)."""
+        game = self.repo.get_active_game(guild_id)
+        if game is None or game.phase != MafiaPhase.DAY:
+            return {"ok": False, "error": "Bounties can only be placed during the day."}
+        contributor = self.repo.get_player(game.game_id, contributor_id)
+        if contributor is None or not contributor.is_alive:
+            return {"ok": False, "error": "Only living players can place bounties."}
+        if target_id == contributor_id:
+            return {"ok": False, "error": "You can't put a bounty on yourself."}
+        target = self.repo.get_player(game.game_id, target_id)
+        if target is None or not target.is_alive:
+            return {"ok": False, "error": "Target is not a living player."}
+        res = self.repo.add_bounty(
+            game_id=game.game_id,
+            guild_id=guild_id,
+            day_number=game.day_number,
+            target_id=target_id,
+            contributor_id=contributor_id,
+            max_debt=self.max_debt,
+        )
+        if not res.get("ok"):
+            msg = {
+                "already_staked": "You've already staked your jopacoin on them today.",
+                "insufficient_funds": "You can't cover the 1 jopacoin stake.",
+            }.get(res.get("error"), "Bounty rejected.")
+            return {"ok": False, "error": msg}
         return {"ok": True}
+
+    def join(self, guild_id: int | None, discord_id: int) -> dict:
+        """Reserve a roster seat in the next game (opt-in priority)."""
+        self.repo.add_signup(guild_id, discord_id)
+        # Opting in also clears any standing opt-out.
+        self.repo.set_optout(guild_id, discord_id, False)
+        return {"ok": True}
+
+    def night_ready(self, game: MafiaGame) -> bool:
+        """True once every living night-actor has submitted this cycle."""
+        return not self.players_needing_night_action(game)
+
+    def day_ready(self, game: MafiaGame) -> bool:
+        """True once every living player has voted this cycle."""
+        return not self.players_needing_day_vote(game)
 
     # ────────────────────────────────────────────────────────────────────
     # Read-side
@@ -511,11 +802,13 @@ class MafiaService:
         alive = [p for p in players if p.is_alive]
         deaths = [p for p in players if not p.is_alive]
 
+        phase_start = game.phase_started_at or game.started_at
         out = {
             "active": True,
             "game_id": game.game_id,
             "phase": game.phase.value,
             "started_at": game.started_at,
+            "day_number": game.day_number,
             "alive_count": len(alive),
             "roster_size": game.roster_size,
             "deaths": [
@@ -529,12 +822,12 @@ class MafiaService:
             "twist": game.twist_event.value if game.twist_event else None,
         }
 
-        if game.phase == MafiaPhase.NIGHT:
-            out["phase_ends_at"] = game.started_at + NIGHT_DURATION_S
-        elif game.phase == MafiaPhase.DAY:
-            out["phase_ends_at"] = game.started_at + NIGHT_DURATION_S + DAY_DURATION_S
+        if game.phase in (MafiaPhase.NIGHT, MafiaPhase.DAY):
+            out["phase_ends_at"] = phase_start + phase_duration(game.phase, phase_start)
+        if game.phase == MafiaPhase.DAY:
             votes = self.repo.get_actions(
-                game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY
+                game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY,
+                day_number=game.day_number,
             )
             voted_ids = {
                 v["actor_id"] for v in votes if v["actor_id"] in {p.discord_id for p in alive}
@@ -621,9 +914,11 @@ class MafiaService:
     # ────────────────────────────────────────────────────────────────────
 
     def players_needing_night_action(self, game: MafiaGame) -> list[int]:
-        """Alive role-bearing players who haven't submitted their night action."""
+        """Alive role-bearing players who haven't submitted this night's action."""
         players = self.repo.get_players(game.game_id)
-        actions = self.repo.get_actions(game.game_id, phase=MafiaPhase.NIGHT)
+        actions = self.repo.get_actions(
+            game.game_id, phase=MafiaPhase.NIGHT, day_number=game.day_number
+        )
         actor_action: dict[int, set[str]] = {}
         for a in actions:
             actor_action.setdefault(a["actor_id"], set()).add(a["action_type"])
@@ -641,7 +936,9 @@ class MafiaService:
 
     def players_needing_day_vote(self, game: MafiaGame) -> list[int]:
         players = self.repo.get_players(game.game_id)
-        votes = self.repo.get_actions(game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY)
+        votes = self.repo.get_actions(
+            game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY, day_number=game.day_number
+        )
         voted = {v["actor_id"] for v in votes}
         return [p.discord_id for p in players if p.is_alive and p.discord_id not in voted]
 
@@ -688,6 +985,13 @@ class MafiaService:
         if len(townies) >= 2 and self._rng.random() < JESTER_PROBABILITY:
             swap = self._rng.choice(townies)
             assignments[swap] = MafiaRole.JESTER
+
+        # Optional bookie swap (neutral wildcard): replaces one remaining townie,
+        # guarding ≥2 townies left so town isn't gutted. Independent of jester.
+        townies = [pid for pid, r in assignments.items() if r == MafiaRole.TOWNIE]
+        if len(townies) >= 2 and self._rng.random() < BOOKIE_PROBABILITY:
+            swap = self._rng.choice(townies)
+            assignments[swap] = MafiaRole.BOOKIE
 
         # Godfather: random among mafia.
         mafia_ids = [pid for pid, r in assignments.items() if r == MafiaRole.MAFIA]
@@ -789,7 +1093,8 @@ class MafiaService:
         backfill it here. No-op for normal flows.
         """
         invests = self.repo.get_actions(
-            game.game_id, MafiaActionType.INVESTIGATE, MafiaPhase.NIGHT
+            game.game_id, MafiaActionType.INVESTIGATE, MafiaPhase.NIGHT,
+            day_number=game.day_number,
         )
         for a in invests:
             if a.get("result"):
@@ -808,7 +1113,31 @@ class MafiaService:
                 action_type=MafiaActionType.INVESTIGATE,
                 phase=MafiaPhase.NIGHT,
                 result=verdict,
+                day_number=game.day_number,
             )
+
+    def _bookie_hits_over_week(
+        self, game: MafiaGame, all_players: list[MafiaPlayer]
+    ) -> int | None:
+        """The Bookie cashes if they're alive at the end and called ≥1 lynch.
+
+        Correct calls are flagged durably (WAGER row result='HIT') as each day
+        resolves, so this just counts them across the week.
+        """
+        bookie = next(
+            (p for p in all_players if p.role == MafiaRole.BOOKIE), None
+        )
+        if bookie is None or not bookie.is_alive:
+            return None
+        wagers = self.repo.get_actions(
+            game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT
+        )
+        hits = sum(
+            1
+            for w in wagers
+            if w["actor_id"] == bookie.discord_id and w.get("result") == "HIT"
+        )
+        return bookie.discord_id if hits >= 1 else None
 
     def _winners_for(
         self, all_players: list[MafiaPlayer], winner: MafiaWinner
@@ -877,3 +1206,10 @@ class MafiaService:
     @staticmethod
     def _vote_breakdown(votes: list[dict]) -> dict[int, int]:
         return dict(Counter(v["target_id"] for v in votes))
+
+    @staticmethod
+    def _vote_detail(votes: list[dict]) -> list[dict]:
+        """Per-voter (who → whom) for the dusk reveal."""
+        return [
+            {"actor_id": v["actor_id"], "target_id": v["target_id"]} for v in votes
+        ]

@@ -31,6 +31,38 @@ def yesterday_of(today: str) -> str:
     ).strftime("%Y-%m-%d")
 
 
+def game_date_for_timestamp(ts: float) -> str:
+    """Game-date string for a unix timestamp (4 AM PST rollover)."""
+    return game_date_for(datetime.datetime.fromtimestamp(ts, tz=datetime.UTC))
+
+
+def weekday_of_game_date(date_str: str) -> int:
+    """Weekday of a game-date string. Monday=0 … Sunday=6."""
+    return datetime.datetime.strptime(date_str, "%Y-%m-%d").weekday()
+
+
+def week_start_of_game_date(date_str: str) -> str:
+    """The Monday game-date of the week containing ``date_str``."""
+    d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    return (d - datetime.timedelta(days=d.weekday())).strftime("%Y-%m-%d")
+
+
+def game_date_start_timestamp(date_str: str) -> int:
+    """Unix ts when a game-date begins — 04:00 PST on that calendar date."""
+    d = datetime.datetime.strptime(date_str, "%Y-%m-%d").replace(
+        tzinfo=_PST
+    ) + datetime.timedelta(hours=4)
+    return int(d.timestamp())
+
+
+def game_week_deadline_timestamp(week_start: str) -> int:
+    """Unix ts of the Sunday-night deadline — start of the next week's Monday."""
+    next_monday = (
+        datetime.datetime.strptime(week_start, "%Y-%m-%d") + datetime.timedelta(days=7)
+    ).strftime("%Y-%m-%d")
+    return game_date_start_timestamp(next_monday)
+
+
 def streak_bonus_for(streak_days: int, schedule: dict[int, int]) -> int:
     """Look up the JC bonus for a given streak length. Picks the largest tier ≤ streak."""
     bonus = 0

@@ -19,11 +19,13 @@ from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.mafia_repository import MafiaRepository
 from repositories.player_repository import PlayerRepository
 from services.mafia_service import (
+    BOOKIE_PAYOUT,
     ENTRY_FEE,
+    MAX_CYCLES,
+    MAX_WINNER_PAYOUT,
     MVP_BONUS,
     ROLE_TABLE,
     MafiaService,
-    _payout_pool_for_pot,
     _pot_for_roster,
 )
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
@@ -118,16 +120,16 @@ def _seed_eligible_via_dig(mafia_repo, ids: list[int], guild_id: int = TEST_GUIL
 
 def test_below_min_returns_none(mafia_repo, mafia_service):
     _seed_eligible_via_dig(mafia_repo, [1, 2, 3])  # only 3 < MIN_ROSTER=5
-    result = mafia_service.start_daily_game(TEST_GUILD_ID)
+    result = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert result is None
     assert mafia_repo.get_game_for_date(TEST_GUILD_ID, "2026-04-24") is None
 
 
 def test_idempotent_start(mafia_repo, mafia_service):
     _seed_eligible_via_dig(mafia_repo, list(range(101, 110)))  # 9 players
-    first = mafia_service.start_daily_game(TEST_GUILD_ID)
+    first = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert first is not None
-    second = mafia_service.start_daily_game(TEST_GUILD_ID)
+    second = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert second is not None
     assert first.game_id == second.game_id
 
@@ -136,14 +138,14 @@ def test_start_daily_game_debits_entry_fee_once(mafia_repo, mafia_service, playe
     ids = list(range(101, 110))
     _seed_eligible_via_dig(mafia_repo, ids)
 
-    first = mafia_service.start_daily_game(TEST_GUILD_ID)
+    first = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert first is not None
     balances_after_first = {
         pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids
     }
     assert set(balances_after_first.values()) == {100 - ENTRY_FEE}
 
-    second = mafia_service.start_daily_game(TEST_GUILD_ID)
+    second = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert second is not None
     assert second.game_id == first.game_id
     assert {
@@ -156,9 +158,10 @@ def test_auto_roster_excludes_players_past_entry_fee_debt_floor(
 ):
     ids = list(range(101, 107))
     _seed_eligible_via_dig(mafia_repo, ids)
-    player_repo.update_balance(106, TEST_GUILD_ID, -493)
+    # Past the debt floor: balance − ENTRY_FEE would drop below −MAX_DEBT (500).
+    player_repo.update_balance(106, TEST_GUILD_ID, -495)
 
-    game = mafia_service.start_daily_game(TEST_GUILD_ID)
+    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert game is not None
     rostered = {p.discord_id for p in mafia_repo.get_players(game.game_id)}
     assert 106 not in rostered
@@ -172,7 +175,7 @@ def test_role_assignment_table(mafia_repo, mafia_service, roster_size):
     # Force jester probability to 0 for this test (deterministic counts)
     mafia_service._rng = random.Random(0)
     # Patch JESTER_PROBABILITY indirectly: we assert ignoring jester swap below
-    game = mafia_service.start_daily_game(TEST_GUILD_ID)
+    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert game is not None
 
     players = mafia_repo.get_players(game.game_id)
@@ -194,12 +197,18 @@ def test_role_assignment_table(mafia_repo, mafia_service, roster_size):
         - expected["detective"]
         - expected["vigilante"]
     )
-    assert counts[MafiaRole.TOWNIE] + counts[MafiaRole.JESTER] == townie_pool
+    # Jester and Bookie are optional swap-ins that each replace a townie.
+    assert (
+        counts[MafiaRole.TOWNIE]
+        + counts[MafiaRole.JESTER]
+        + counts[MafiaRole.BOOKIE]
+        == townie_pool
+    )
 
 
 def test_godfather_always_among_mafia(mafia_repo, mafia_service):
     _seed_eligible_via_dig(mafia_repo, list(range(101, 113)))  # 12 players → 3 mafia
-    game = mafia_service.start_daily_game(TEST_GUILD_ID)
+    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     players = mafia_repo.get_players(game.game_id)
     gfs = [p for p in players if p.is_godfather]
     assert len(gfs) == 1
@@ -208,7 +217,7 @@ def test_godfather_always_among_mafia(mafia_repo, mafia_service):
 
 def test_oversized_roster_capped(mafia_repo, mafia_service):
     _seed_eligible_via_dig(mafia_repo, list(range(101, 131)))  # 30 players
-    game = mafia_service.start_daily_game(TEST_GUILD_ID)
+    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert game.roster_size == 15
 
 
@@ -216,17 +225,17 @@ def test_optout_excludes_player(mafia_repo, mafia_service):
     ids = list(range(101, 110))
     _seed_eligible_via_dig(mafia_repo, ids)
     mafia_service.set_optout(TEST_GUILD_ID, 105, True)
-    game = mafia_service.start_daily_game(TEST_GUILD_ID)
+    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     rostered = {p.discord_id for p in mafia_repo.get_players(game.game_id)}
     assert 105 not in rostered
 
 
 def test_guild_isolation(mafia_repo, mafia_service):
     _seed_eligible_via_dig(mafia_repo, list(range(101, 110)))  # guild A
-    game_a = mafia_service.start_daily_game(TEST_GUILD_ID)
+    game_a = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert game_a is not None
     # Guild B has no eligible players → no game
-    game_b = mafia_service.start_daily_game(TEST_GUILD_ID_SECONDARY)
+    game_b = mafia_service.start_game(TEST_GUILD_ID_SECONDARY, force=True)
     assert game_b is None
 
 
@@ -291,20 +300,50 @@ def test_mafia_cannot_kill_mafia(mafia_service, mafia_repo):
 
 
 def test_detective_godfather_reads_as_town(mafia_service, mafia_repo):
+    # Two detectives so each spends its single read on a distinct target:
+    # the godfather reads as Town, a regular mafioso reads as Mafia.
     _new_game(
         mafia_repo,
         [
             (1, MafiaRole.DETECTIVE, False),
             (2, MafiaRole.MAFIA, True),  # Godfather
             (3, MafiaRole.MAFIA, False),
-            (4, MafiaRole.TOWNIE, False),
+            (4, MafiaRole.DETECTIVE, False),
         ],
     )
     on_gf = mafia_service.submit_night_action(TEST_GUILD_ID, 1, 2, MafiaActionType.INVESTIGATE)
     assert on_gf["result"] == "Town"
 
-    on_regular = mafia_service.submit_night_action(TEST_GUILD_ID, 1, 3, MafiaActionType.INVESTIGATE)
+    on_regular = mafia_service.submit_night_action(TEST_GUILD_ID, 4, 3, MafiaActionType.INVESTIGATE)
     assert on_regular["result"] == "Mafia"
+
+
+def test_detective_one_read_per_night(mafia_service, mafia_repo):
+    _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.DETECTIVE, False),
+            (2, MafiaRole.MAFIA, True),
+            (3, MafiaRole.MAFIA, False),
+            (4, MafiaRole.TOWNIE, False),
+        ],
+    )
+    first = mafia_service.submit_night_action(TEST_GUILD_ID, 1, 2, MafiaActionType.INVESTIGATE)
+    assert first["ok"] and first["result"] == "Town"
+
+    # A second, different target is rejected — no new info leaks.
+    second = mafia_service.submit_night_action(TEST_GUILD_ID, 1, 3, MafiaActionType.INVESTIGATE)
+    assert second["ok"] is False
+
+    # Re-checking the original target replays the cached verdict.
+    repeat = mafia_service.submit_night_action(TEST_GUILD_ID, 1, 2, MafiaActionType.INVESTIGATE)
+    assert repeat["ok"] and repeat["result"] == "Town"
+
+    # The stored read is still the first target, not the rejected one.
+    stored = mafia_repo.get_action_for_actor(
+        mafia_repo.get_active_game(TEST_GUILD_ID).game_id, 1, MafiaActionType.INVESTIGATE
+    )
+    assert stored["target_id"] == 2
 
 
 def test_vigilante_one_shot(mafia_service, mafia_repo):
@@ -554,10 +593,10 @@ def test_town_hall_blocks_lynch(mafia_service, mafia_repo):
 
 
 def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
-    # Roster of 7 -> pot = 56. resolve_day only pays winners; it does not debit
-    # fees (that happens in start_daily_game). To check post-resolution net
-    # delta, we simulate the fee debit ourselves so this test exercises the full
-    # end-to-end balance change.
+    # Roster of 7 → pot = 210. resolve_day only redistributes the pot; it does
+    # not debit fees (that happens in start_daily_game). To check post-resolution
+    # net delta, we simulate the fee debit ourselves so this test exercises the
+    # full end-to-end balance change.
     ids = [101, 102, 103, 104, 105, 106, 107]
     for pid in ids:
         _seed_player(player_repo, pid, balance=0)
@@ -590,16 +629,15 @@ def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
     assert summary["winner"] == MafiaWinner.TOWN.value
 
     pot = _pot_for_roster(7)
-    payout_pool = _payout_pool_for_pot(pot)
     assert summary["pot_total"] == pot
-    assert summary["payout_pool"] == payout_pool
     assert summary["entry_fee"] == ENTRY_FEE
 
-    # Town has 6 winners. MVP gets (payout_pool - MVP_BONUS) // 6 base +
-    # MVP_BONUS + rounding dust; the other 5 winners each get the base.
-    base = (payout_pool - MVP_BONUS) // 6
-    dust = (payout_pool - MVP_BONUS) - base * 6
+    # Town has 6 winners. MVP gets base + MVP_BONUS + dust; others get base.
+    # At a 15 buy-in none of these exceed the +50 cap, so there's no overflow.
+    base = (pot - MVP_BONUS) // 6
+    dust = (pot - MVP_BONUS) - base * 6
     assert summary["payout_per_winner"] == base
+    assert summary["nonprofit_overflow"] == 0
 
     mvp_id = summary["mvp_id"]
     for pid in [102, 103, 104, 105, 106, 107]:
@@ -608,32 +646,161 @@ def test_payout_amount_scales(mafia_service, mafia_repo, player_repo):
             assert delta == base + MVP_BONUS + dust - ENTRY_FEE
         else:
             assert delta == base - ENTRY_FEE
+        # No individual winner exceeds the cap.
+        assert delta + ENTRY_FEE <= MAX_WINNER_PAYOUT
 
     # Mafia paid the fee and got nothing back.
     assert (
         player_repo.get_balance(101, TEST_GUILD_ID) - starting[101] == -ENTRY_FEE
     )
 
-    # The full reduced pot is paid out.
+    # Zero-sum including the nonprofit sink: player deltas + overflow == 0.
     total_delta = sum(
         player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
     )
-    assert total_delta == 0
+    assert total_delta + summary["nonprofit_overflow"] == 0
+
+
+def test_payout_cap_overflow(mafia_service):
+    # A small winning faction in a big roster blows past the +50/winner cap.
+    # pot = 15 buy-in × 15 roster = 225; 4 mafia winners → 51 each before the
+    # cap, so each clamps to 50 and the rest overflows to the nonprofit fund.
+    pot_total = 15 * 15
+    winning_ids = [1, 2, 3, 4]
+    deltas, payout_per_winner, overflow = mafia_service._compute_payout_deltas(
+        pot_total, winning_ids, mvp_id=1, bookie_id=None
+    )
+    assert all(v <= MAX_WINNER_PAYOUT for v in deltas.values())
+    assert max(deltas.values()) == MAX_WINNER_PAYOUT
+    assert sum(deltas.values()) + overflow == pot_total
+    assert overflow > 0
+
+
+# ── Multi-cycle engine (continuous cadence) ───────────────────────────────
+
+
+def _undecided_roster():
+    # 1 mafia vs 4 town: lynching nobody leaves the game undecided.
+    return [
+        (1, MafiaRole.MAFIA, False),
+        (2, MafiaRole.TOWNIE, False),
+        (3, MafiaRole.DETECTIVE, False),
+        (4, MafiaRole.DOCTOR, False),
+        (5, MafiaRole.TOWNIE, False),
+    ]
+
+
+def _set_day_number(mafia_repo, day_number: int) -> None:
+    with mafia_repo.connection() as conn:
+        conn.cursor().execute(
+            "UPDATE mafia_games SET day_number = ? "
+            "WHERE game_id = (SELECT MAX(game_id) FROM mafia_games)",
+            (day_number,),
+        )
+
+
+def test_multi_cycle_continues_when_undecided(mafia_service, mafia_repo):
+    gid = _new_game(mafia_repo, _undecided_roster())
+    # Night 1: mafia kills a townie.
+    mafia_service.submit_night_action(TEST_GUILD_ID, 1, 4, MafiaActionType.KILL)
+    mafia_service.resolve_night(TEST_GUILD_ID)
+    g = mafia_repo.get_game_by_id(gid)
+    assert g.phase == MafiaPhase.DAY and g.day_number == 1
+    # Day 1: no lynch → still 1 mafia vs survivors → undecided → roll to night 2.
+    rd = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert rd["resolved"] and rd["continued"] is True
+    g = mafia_repo.get_game_by_id(gid)
+    assert g.phase == MafiaPhase.NIGHT and g.day_number == 2 and g.status == "ACTIVE"
+
+
+def test_cycle_cap_forces_tally(mafia_service, mafia_repo):
+    _new_game(mafia_repo, _undecided_roster())
+    _set_day_number(mafia_repo, MAX_CYCLES)
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    # No lynch, but we've hit MAX_CYCLES → forced standing tally. Town still
+    # outnumbers the lone mafia, so town wins.
+    rd = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert rd["resolved"] and rd["continued"] is False
+    assert rd["winner"] == MafiaWinner.TOWN.value
+
+
+def test_new_game_starts_after_previous_resolves(mafia_repo, mafia_service):
+    _seed_eligible_via_dig(mafia_repo, list(range(101, 110)))
+    g1 = mafia_service.start_game(TEST_GUILD_ID, force=True)
+    assert g1 is not None
+    # While g1 is active, start_game is idempotent.
+    assert mafia_service.start_game(TEST_GUILD_ID, force=True).game_id == g1.game_id
+    # Resolve g1, then a brand-new game starts immediately — sharing the same
+    # start date, which the dropped UNIQUE(guild_id, game_date) now permits.
+    with mafia_repo.connection() as conn:
+        conn.cursor().execute(
+            "UPDATE mafia_games SET phase = ? WHERE game_id = ?",
+            (MafiaPhase.RESOLVED.value, g1.game_id),
+        )
+    g2 = mafia_service.start_game(TEST_GUILD_ID, force=True)
+    assert g2 is not None and g2.game_id != g1.game_id
+    assert g2.game_date == g1.game_date
+
+
+def test_phase_ready_gating(mafia_service, mafia_repo):
+    _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.MAFIA, False),
+            (2, MafiaRole.DOCTOR, False),
+            (3, MafiaRole.DETECTIVE, False),
+            (4, MafiaRole.TOWNIE, False),
+            (5, MafiaRole.TOWNIE, False),
+        ],
+    )
+    g = mafia_repo.get_active_game(TEST_GUILD_ID)
+    # Night: not ready until mafia, doctor, and detective have all acted.
+    assert mafia_service.night_ready(g) is False
+    mafia_service.submit_night_action(TEST_GUILD_ID, 1, 4, MafiaActionType.KILL)
+    mafia_service.submit_night_action(TEST_GUILD_ID, 2, 1, MafiaActionType.SAVE)
+    assert mafia_service.night_ready(g) is False
+    mafia_service.submit_night_action(TEST_GUILD_ID, 3, 1, MafiaActionType.INVESTIGATE)
+    assert mafia_service.night_ready(g) is True
+
+    # Day: not ready until every living player has voted.
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    g = mafia_repo.get_active_game(TEST_GUILD_ID)
+    assert mafia_service.day_ready(g) is False
+    for voter in (1, 2, 3, 4, 5):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 1)
+    assert mafia_service.day_ready(g) is True
+
+
+def test_town_bounty_pays_on_correct_lynch(mafia_service, mafia_repo, player_repo):
+    ids = [1, 2, 3, 4, 5]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=50)
+    _new_game(mafia_repo, _undecided_roster())
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    # Two townies stake a bounty on the mafioso (1 JC each, parked in nonprofit).
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 2, 1)["ok"]
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 3, 1)["ok"]
+    # A second stake on the same target the same day is rejected.
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 2, 1)["ok"] is False
+    assert player_repo.get_balance(2, TEST_GUILD_ID) == 49
+
+    for voter in (2, 3, 5):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 1)
+    rd = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert rd["winner"] == MafiaWinner.TOWN.value
+    bounty = rd["bounty"]
+    assert bounty["reward"] > 0
+    assert set(bounty["paid"]) == {2, 3}
 
 
 def test_pot_for_roster_helper():
     assert _pot_for_roster(5) == 5 * ENTRY_FEE
     assert _pot_for_roster(10) == 10 * ENTRY_FEE
     assert _pot_for_roster(15) == 15 * ENTRY_FEE
-    assert _payout_pool_for_pot(_pot_for_roster(5)) == 40
-    assert _payout_pool_for_pot(_pot_for_roster(10)) == 80
-    assert _payout_pool_for_pot(_pot_for_roster(15)) == 120
 
 
-def test_reduced_buyin_conserves_pot_across_outcomes(
-    mafia_service, mafia_repo, player_repo
-):
-    """The full reduced pot is paid out for every win outcome."""
+def test_zero_sum_across_outcomes(mafia_service, mafia_repo, player_repo):
+    """The pot mechanic conserves JC for every win outcome — net delta is 0."""
     scenarios = [
         # (roles, voters_target, expected_winner)
         # Town wins (4 town vs 1 mafia after lynch).
@@ -684,16 +851,15 @@ def test_reduced_buyin_conserves_pot_across_outcomes(
         summary = mafia_service.resolve_day(TEST_GUILD_ID)
         assert summary["winner"] == expected_winner.value
 
-        pot = _pot_for_roster(len(ids))
-        payout_pool = _payout_pool_for_pot(pot)
-        assert summary["pot_total"] == pot
-        assert summary["payout_pool"] == payout_pool
-
+        # Zero-sum including the nonprofit sink: any pot beyond the +50/winner
+        # cap leaves the player pool for the nonprofit fund, so player deltas
+        # plus the overflow must net to zero.
         total_delta = sum(
             player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
         )
-        assert total_delta == 0, (
-            f"scenario {i} ({expected_winner.value}): wrong net delta {total_delta}"
+        assert total_delta + summary["nonprofit_overflow"] == 0, (
+            f"scenario {i} ({expected_winner.value}): "
+            f"net delta {total_delta}, overflow {summary['nonprofit_overflow']}"
         )
 
 
@@ -829,7 +995,93 @@ def test_resolve_day_does_not_double_pay(mafia_service, mafia_repo, player_repo)
     } == balances_after_first
 
     total_delta = sum(balances_after_first[pid] - starting[pid] for pid in ids)
-    assert total_delta == 0
+    assert total_delta + first["nonprofit_overflow"] == 0
+
+
+class _ForceSwapRng(random.Random):
+    """RNG whose random() always returns 0.0 so every probability gate fires."""
+
+    def random(self):  # noqa: D401 - deterministic override
+        return 0.0
+
+
+def test_bookie_assignment_swap_and_guard(mafia_service, mafia_repo):
+    # Roster 8 has 4 townies → both the jester and bookie swaps fit.
+    mafia_service._rng = _ForceSwapRng(0)
+    players = mafia_service._assign_roles(0, TEST_GUILD_ID, list(range(1, 9)))
+    roles = [p.role for p in players]
+    assert roles.count(MafiaRole.BOOKIE) == 1
+    assert roles.count(MafiaRole.JESTER) == 1
+
+    # Roster 5 has only 2 townies → the jester swap consumes one, leaving < 2,
+    # so the bookie guard suppresses the swap.
+    mafia_service._rng = _ForceSwapRng(0)
+    small = mafia_service._assign_roles(0, TEST_GUILD_ID, list(range(1, 6)))
+    small_roles = [p.role for p in small]
+    assert small_roles.count(MafiaRole.JESTER) == 1
+    assert small_roles.count(MafiaRole.BOOKIE) == 0
+
+
+def _bookie_scenario(mafia_repo, player_repo, wager_target: int):
+    ids = [601, 602, 603, 604, 605]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=0)
+    _new_game(
+        mafia_repo,
+        [
+            (601, MafiaRole.MAFIA, True),
+            (602, MafiaRole.TOWNIE, False),
+            (603, MafiaRole.TOWNIE, False),
+            (604, MafiaRole.DOCTOR, False),
+            (605, MafiaRole.BOOKIE, False),
+        ],
+    )
+    return ids
+
+
+def test_bookie_hit_cashes_out(mafia_service, mafia_repo, player_repo):
+    ids = _bookie_scenario(mafia_repo, player_repo, wager_target=601)
+    # Bookie wagers on the mafioso the town will lynch.
+    res = mafia_service.submit_night_action(
+        TEST_GUILD_ID, 605, 601, MafiaActionType.WAGER
+    )
+    assert res["ok"]
+
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 601)
+
+    summary = mafia_service.resolve_day(TEST_GUILD_ID)
+    # The faction winner is unchanged — the Bookie is a parasitic side-winner.
+    assert summary["winner"] == MafiaWinner.TOWN.value
+    assert summary["bookie_id"] == 605
+    # The skim is capped at the pot, so on a small (5×ENTRY_FEE) pot it can be
+    # the whole pot rather than the full BOOKIE_PAYOUT.
+    pot = _pot_for_roster(5)
+    expected_skim = min(BOOKIE_PAYOUT, pot)
+    assert summary["bookie_payout"] == expected_skim
+    assert player_repo.get_balance(605, TEST_GUILD_ID) == expected_skim
+    # No coins are minted: every collected coin ends up with a player or in the
+    # nonprofit overflow, so player balances sum back to exactly the pot.
+    assert summary["nonprofit_overflow"] >= 0
+    assert sum(player_repo.get_balance(p, TEST_GUILD_ID) for p in ids) == pot
+
+
+def test_bookie_miss_pays_nothing(mafia_service, mafia_repo, player_repo):
+    _bookie_scenario(mafia_repo, player_repo, wager_target=602)
+    # Bookie wagers on a townie who will NOT be lynched.
+    mafia_service.submit_night_action(TEST_GUILD_ID, 605, 602, MafiaActionType.WAGER)
+
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 601)
+
+    summary = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert summary["winner"] == MafiaWinner.TOWN.value
+    assert summary["bookie_id"] is None
+    assert summary["bookie_payout"] == 0
+    # The Bookie took the entry-fee risk and got nothing back.
+    assert player_repo.get_balance(605, TEST_GUILD_ID) == 0
 
 
 def test_bankruptcy_penalty_sinks_mafia_profit(
@@ -838,18 +1090,19 @@ def test_bankruptcy_penalty_sinks_mafia_profit(
     bankruptcy_repo = BankruptcyRepository(mafia_repo.db_path)
     mafia_service.bankruptcy_penalty_rate = 0.75
     ids = [501, 502, 503, 504, 505]
-    mafia_id = 501
+    town_ids = [502, 503, 504, 505]
     for pid in ids:
         _seed_player(player_repo, pid, balance=0)
     starting = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in ids}
     for pid in ids:
         player_repo.add_balance(pid, TEST_GUILD_ID, -ENTRY_FEE)
-    bankruptcy_repo.upsert_state(
-        mafia_id,
-        TEST_GUILD_ID,
-        last_bankruptcy_at=int(time.time()) - 1000,
-        penalty_games_remaining=3,
-    )
+    for pid in town_ids:
+        bankruptcy_repo.upsert_state(
+            pid,
+            TEST_GUILD_ID,
+            last_bankruptcy_at=int(time.time()) - 1000,
+            penalty_games_remaining=3,
+        )
 
     _new_game(
         mafia_repo,
@@ -862,17 +1115,21 @@ def test_bankruptcy_penalty_sinks_mafia_profit(
         ],
     )
     _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in town_ids:
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 501)
 
     summary = mafia_service.resolve_day(TEST_GUILD_ID)
-    assert summary["winner"] == MafiaWinner.MAFIA.value
+    assert summary["winner"] == MafiaWinner.TOWN.value
     penalties = summary["bankruptcy_penalties"]
     assert penalties
-    assert set(penalties) == {mafia_id}
+    assert set(penalties).issubset(set(town_ids))
 
+    # Both sinks drain the player pool: bankruptcy penalties and the +50-cap
+    # overflow to the nonprofit fund.
     total_delta = sum(
         player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
     )
-    assert total_delta == -sum(penalties.values())
+    assert total_delta == -sum(penalties.values()) - summary["nonprofit_overflow"]
 
 
 # ── Auto-skip ─────────────────────────────────────────────────────────────
