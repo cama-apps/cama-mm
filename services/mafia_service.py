@@ -365,19 +365,18 @@ class MafiaService:
         lynched_was_mafia = (
             lynched_id is not None and by_id[lynched_id].role == MafiaRole.MAFIA
         )
-        # Durably flag a correct Bookie wager for this day BEFORE the win check:
-        # the end-of-week skim (_bookie_hits_over_week / _compute_payout_deltas)
-        # needs the final day's HIT on record. This is idempotent bookkeeping,
-        # not a coin move — the skim itself is paid atomically inside
-        # finalize_day_resolution.
-        self._mark_bookie_wager(game, dn, lynched_id)
 
-        def _pay_bounties() -> dict:
-            # The Town Bounty draws from the nonprofit fund, so it fires only
-            # AFTER the day resolution is atomically claimed below. Doing it
-            # earlier let a lost race with an admin stop/abort debit the fund
-            # (and re-pay, since bounties aren't marked) for a day that then
-            # reports unresolved.
+        def _commit_post_claim() -> dict:
+            # Both durable side effects fire ONLY after the day resolution is
+            # atomically claimed below: the Bookie HIT mark and the Town Bounty
+            # fund-draw. Doing either earlier let a lost race with an admin
+            # stop/abort leave a spurious HIT on record (which a rival finalize
+            # would pay a skim for) or debit the nonprofit fund (and re-pay,
+            # since bounties aren't marked) for a day that then reports
+            # unresolved. The current day's hit still feeds THIS day's skim via
+            # _bookie_hit_today (in memory) before finalize, so same-day cash-out
+            # is unaffected.
+            self._mark_bookie_wager(game, dn, lynched_id)
             return self.repo.resolve_day_bounties(
                 game_id=game.game_id,
                 guild_id=guild_id,
@@ -423,7 +422,7 @@ class MafiaService:
             )
             if not advanced:
                 return {"resolved": False, "reason": "day_already_resolved"}
-            bounty = _pay_bounties()
+            bounty = _commit_post_claim()
             return {
                 "resolved": True,
                 "continued": True,
@@ -442,7 +441,9 @@ class MafiaService:
         pot_total = game.roster_size * entry_fee
         winning_ids = self._winners_for(post_players, winner)
         mvp_id = self._compute_mvp(game, post_players, winner, lynched_id, valid_votes)
-        bookie_id = self._bookie_hits_over_week(game, post_players)
+        bookie_id = self._bookie_hits_over_week(
+            game, post_players, extra_hit=self._bookie_hit_today(game, dn, lynched_id)
+        )
 
         deltas, payout_per_winner, nonprofit_overflow = self._compute_payout_deltas(
             pot_total, winning_ids, mvp_id, bookie_id
@@ -464,7 +465,7 @@ class MafiaService:
                 "resolved": False,
                 "reason": finalize.get("reason", "day_already_resolved"),
             }
-        bounty = _pay_bounties()
+        bounty = _commit_post_claim()
 
         return {
             "resolved": True,
@@ -1128,12 +1129,18 @@ class MafiaService:
             )
 
     def _bookie_hits_over_week(
-        self, game: MafiaGame, all_players: list[MafiaPlayer]
+        self,
+        game: MafiaGame,
+        all_players: list[MafiaPlayer],
+        *,
+        extra_hit: bool = False,
     ) -> int | None:
         """The Bookie cashes if they're alive at the end and called ≥1 lynch.
 
-        Correct calls are flagged durably (WAGER row result='HIT') as each day
-        resolves, so this just counts them across the week.
+        Past correct calls are flagged durably (WAGER row result='HIT') as each
+        day resolves. ``extra_hit`` counts the day being resolved RIGHT NOW: its
+        durable HIT is written only after the resolution is claimed (see
+        resolve_day / _commit_post_claim), so it is not yet on record here.
         """
         bookie = next(
             (p for p in all_players if p.role == MafiaRole.BOOKIE), None
@@ -1148,7 +1155,22 @@ class MafiaService:
             for w in wagers
             if w["actor_id"] == bookie.discord_id and w.get("result") == "HIT"
         )
+        if extra_hit:
+            hits += 1
         return bookie.discord_id if hits >= 1 else None
+
+    def _bookie_hit_today(
+        self, game: MafiaGame, dn: int, lynched_id: int | None
+    ) -> bool:
+        """Whether this day's Bookie wager called the lynch correctly. Computed
+        in memory so it can feed this day's skim before finalize; the matching
+        durable HIT is written only after the resolution is claimed."""
+        if lynched_id is None:
+            return False
+        wagers = self.repo.get_actions(
+            game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=dn
+        )
+        return any(w["target_id"] == lynched_id for w in wagers)
 
     def _winners_for(
         self, all_players: list[MafiaPlayer], winner: MafiaWinner
