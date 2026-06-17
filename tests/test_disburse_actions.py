@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from commands.betting_helpers import disburse_actions as actions
-from commands.betting_helpers.disburse_embeds import build_disburse_votes_embed
+from commands.betting_helpers.disburse_embeds import (
+    build_disburse_embed,
+    build_disburse_votes_embed,
+)
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -151,6 +154,19 @@ def _vote_rows(count: int) -> list[dict]:
 
 def _individual_vote_field(embed) -> str:
     return next(field.value for field in embed.fields if "Individual Votes" in field.name)
+
+
+def test_disburse_embed_uses_jopacoin_reserve_language():
+    embed = build_disburse_embed(_Proposal())
+
+    text = "\n".join(
+        [embed.title or "", embed.description or ""]
+        + [f"{field.name}\n{field.value}" for field in embed.fields]
+    )
+    assert "Jopacoin Reserve" in text
+    assert "server operations budget" in text
+    assert "Keep budget in reserve" in text
+    assert "Nonprofit" not in text
 
 
 def test_disburse_votes_embed_pages_show_every_voter():

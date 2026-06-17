@@ -10,6 +10,174 @@ from repositories.base_repository import BaseRepository, safe_json_loads
 class TaxRepository(BaseRepository):
     """Read helpers for guild and player monetary exposure."""
 
+    def levy_fine_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        amount: int,
+        actor_id: int,
+        reason: str | None,
+        cooldown_seconds: int,
+        max_amount: int,
+        now: int | None = None,
+    ) -> dict:
+        """Debit a Tax Man fine and record the per-player cooldown atomically."""
+        gid = self.normalize_guild_id(guild_id)
+        requested_amount = int(amount)
+        if requested_amount <= 0:
+            return {"status": "invalid_amount"}
+        max_amount = max(0, int(max_amount))
+        if max_amount <= 0:
+            return {"status": "no_outstanding_obligations"}
+        cooldown_seconds = max(0, int(cooldown_seconds))
+        now = int(time.time()) if now is None else int(now)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            player_row = cursor.execute(
+                """
+                SELECT discord_id, discord_username,
+                       COALESCE(jopacoin_balance, 0) AS balance
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, gid),
+            ).fetchone()
+            if player_row is None:
+                return {"status": "target_not_registered"}
+
+            cooldown_row = cursor.execute(
+                """
+                SELECT last_fined_at, last_amount, last_actor_id, last_reason
+                FROM tax_fine_cooldowns
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, gid),
+            ).fetchone()
+            if cooldown_row is not None and cooldown_seconds > 0:
+                last_fined_at = int(cooldown_row["last_fined_at"] or 0)
+                next_fine_at = last_fined_at + cooldown_seconds
+                if now < next_fine_at:
+                    return {
+                        "status": "cooldown",
+                        "discord_id": discord_id,
+                        "guild_id": gid,
+                        "balance": int(player_row["balance"] or 0),
+                        "last_fined_at": last_fined_at,
+                        "next_fine_at": next_fine_at,
+                        "cooldown_remaining": next_fine_at - now,
+                        "last_amount": int(cooldown_row["last_amount"] or 0),
+                        "last_actor_id": cooldown_row["last_actor_id"],
+                        "last_reason": cooldown_row["last_reason"],
+                    }
+
+            balance_before = int(player_row["balance"] or 0)
+            applied_amount = min(requested_amount, max_amount)
+            balance_after = balance_before - applied_amount
+            ledger_reason = f"tax fine: {reason}" if reason else "tax fine"
+            metadata = {
+                "requested_amount": requested_amount,
+                "applied_amount": applied_amount,
+                "outstanding_obligations": max_amount,
+                "cooldown_seconds": cooldown_seconds,
+            }
+            self._set_economy_ledger_context(
+                cursor,
+                source="tax_fine",
+                actor_id=actor_id,
+                related_type="tax_fine",
+                related_id=discord_id,
+                reason=ledger_reason,
+                metadata=metadata,
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (applied_amount, discord_id, gid),
+                )
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = ?
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND (lowest_balance_ever IS NULL OR ? < lowest_balance_ever)
+                    """,
+                    (balance_after, discord_id, gid, balance_after),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
+            self._set_economy_ledger_context(
+                cursor,
+                source="tax_fine",
+                actor_id=actor_id,
+                related_type="tax_fine",
+                related_id=discord_id,
+                reason=f"{ledger_reason} reserve credit",
+                metadata=metadata,
+            )
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (gid, applied_amount),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
+            cursor.execute(
+                """
+                INSERT INTO tax_fine_cooldowns (
+                    discord_id, guild_id, last_fined_at, last_amount,
+                    last_actor_id, last_reason, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    last_fined_at = excluded.last_fined_at,
+                    last_amount = excluded.last_amount,
+                    last_actor_id = excluded.last_actor_id,
+                    last_reason = excluded.last_reason,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    discord_id,
+                    gid,
+                    now,
+                    applied_amount,
+                    actor_id,
+                    reason,
+                ),
+            )
+            return {
+                "status": "ok",
+                "discord_id": discord_id,
+                "guild_id": gid,
+                "name": player_row["discord_username"],
+                "requested_amount": requested_amount,
+                "applied_amount": applied_amount,
+                "outstanding_obligations": max_amount,
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+                "nonprofit_credit": applied_amount,
+                "reserve_credit": applied_amount,
+                "actor_id": actor_id,
+                "reason": reason,
+                "fined_at": now,
+                "next_fine_at": now + cooldown_seconds,
+                "capped": applied_amount != requested_amount,
+            }
+
     def get_active_dark_bargain_debts(self, guild_id: int | None) -> list[dict]:
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())

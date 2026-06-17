@@ -1,4 +1,4 @@
-"""Action handlers for the tip/paydebt/bankruptcy/loan/nonprofit command bodies.
+"""Action handlers for the tip/paydebt/bankruptcy/loan/reserve command bodies.
 
 Extracted from the cog so the slash-command handlers in ``commands/betting.py``
 can stay thin orchestrators around the imported helpers.
@@ -119,8 +119,8 @@ async def tip_action(
     else:
         fee = max(1, math.ceil(amount * TIP_FEE_RATE))
 
-    # Plains tithe: extra debit on sender, also to nonprofit. Folded into
-    # tip_atomic so the sender debit and nonprofit credit commit together.
+    # Plains tithe: extra debit on sender, also to the reserve. Folded into
+    # tip_atomic so the sender debit and reserve credit commit together.
     tithe = 0
     if effects and effects.plains_tithe_rate > 0:
         tithe = max(1, int(amount * effects.plains_tithe_rate))
@@ -151,7 +151,7 @@ async def tip_action(
             )
             return
 
-    # Atomic transfer: sender debit + recipient credit + nonprofit credit
+    # Atomic transfer: sender debit + recipient credit + reserve credit
     # (fee + tithe) all commit together.
     try:
         await asyncio.to_thread(
@@ -219,7 +219,7 @@ async def tip_action(
     _tip_prefix = f"{_tip_badge} " if _tip_badge else ""
     await interaction.followup.send(
         f"{_tip_prefix}{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}! "
-        f"({fee} {JOPACOIN_EMOTE} fee to nonprofit){mana_suffix}",
+        f"({fee} {JOPACOIN_EMOTE} fee to Jopacoin Reserve){mana_suffix}",
         ephemeral=False,
     )
 
@@ -715,7 +715,7 @@ async def loan_action(
             inline=False,
         )
         embed.set_footer(
-            text=f"Loan #{result.total_loans_taken} | Fee donated to Gambling Addiction Nonprofit"
+            text=f"Loan #{result.total_loans_taken} | Fee deposited to Jopacoin Reserve"
         )
 
     # Mana post-effects on loan
@@ -793,7 +793,7 @@ async def loan_action(
 async def nonprofit_action(
     cog: BettingCommands, interaction: discord.Interaction,
 ) -> None:
-    """View how much has been collected for the nonprofit."""
+    """View the server operations budget held in reserve."""
     if not cog.loan_service:
         await interaction.response.send_message(
             "Loan service is not available.", ephemeral=True
@@ -814,22 +814,23 @@ async def nonprofit_action(
             reserved = proposal.fund_amount
 
     embed = discord.Embed(
-        title="💝 Jopacoin Nonprofit for Gambling Addiction",
+        title="🏛️ Jopacoin Reserve",
         description=(
-            "All loan fees are donated to help those with negative balance.\n\n"
-            "*\"We're here to help... by taking a cut of every loan.\"*"
+            "The reserve is the server operations budget. Fees, fines, and "
+            "economy sinks collect here before Tax Men allocate the budget.\n\n"
+            "*A public balance sheet for server business.*"
         ),
         color=0xE91E63,  # Pink
     )
 
     if reserved > 0:
         embed.add_field(
-            name="Available Funds",
+            name="Available Budget",
             value=f"**{total}** {JOPACOIN_EMOTE}",
             inline=True,
         )
         embed.add_field(
-            name="Reserved for Proposal",
+            name="Reserved Budget",
             value=f"**{reserved}** {JOPACOIN_EMOTE}",
             inline=True,
         )
@@ -840,7 +841,7 @@ async def nonprofit_action(
         )
     else:
         embed.add_field(
-            name="Available Funds",
+            name="Available Budget",
             value=f"**{total}** {JOPACOIN_EMOTE}",
             inline=False,
         )
@@ -851,7 +852,7 @@ async def nonprofit_action(
         if reserved > 0:
             status_value = f"Proposal active ({reserved} reserved)"
         else:
-            status_value = f"Ready for disbursement! (min: {DISBURSE_MIN_FUND})"
+            status_value = f"Ready for allocation! (min: {DISBURSE_MIN_FUND})"
     else:
         status_value = f"Collecting... ({effective_total}/{DISBURSE_MIN_FUND} needed)"
 
@@ -898,9 +899,7 @@ async def nonprofit_action(
                 inline=False,
             )
 
-    embed.set_footer(text="Use /disburse propose to start a distribution vote!")
+    embed.set_footer(text="Use /disburse propose to start a reserve allocation vote!")
 
     await safe_followup(interaction, embed=embed)
-
-
 

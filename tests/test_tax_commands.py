@@ -66,14 +66,18 @@ class _FakeResponse:
         self.messages: list[dict] = []
         self._done = False
 
-    async def send_message(self, content=None, ephemeral=None, embed=None):
+    async def send_message(self, content=None, ephemeral=None, embed=None, **kwargs):
         self._done = True
         self.messages.append(
-            {"content": content, "ephemeral": ephemeral, "embed": embed}
+            {"content": content, "ephemeral": ephemeral, "embed": embed, **kwargs}
         )
 
     async def defer(self, ephemeral=False):
         self._done = True
+
+    async def edit_message(self, **kwargs):
+        self._done = True
+        self.messages.append({"edit": True, **kwargs})
 
     def is_done(self):
         return self._done
@@ -126,10 +130,10 @@ def _assert_ledger_page_metadata(
     assert f"Entries {first_entry}-{last_entry} of {total_entries:,}" in text
 
 
-def test_tax_group_is_audit_only():
+def test_tax_group_contains_audit_and_enforcement_commands():
     names = {cmd.name for cmd in tax_commands.TaxCommands.tax.walk_commands()}
 
-    assert names == {"audit", "player", "ledger"}
+    assert names == {"audit", "player", "ledger", "fine", "bankruptcy"}
 
 
 def test_tax_player_recent_ledger_splits_long_field():
@@ -295,3 +299,285 @@ async def test_tax_ledger_page_calculates_offset_for_service(monkeypatch):
         user_id=None,
     )
     assert interaction.followup.messages[-1]["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_tax_player_uses_paginated_recent_ledger_slice(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    limit = tax_commands.PLAYER_LEDGER_DEFAULT_LIMIT
+    tax_service = SimpleNamespace(
+        get_player_snapshot=MagicMock(
+            return_value=_player_snapshot([_ledger_row(idx) for idx in range(limit)])
+        ),
+        count_ledger_entries=MagicMock(return_value=17),
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.player.callback(cog, interaction, user=target)
+
+    tax_service.get_player_snapshot.assert_called_once_with(
+        99,
+        123,
+        ledger_limit=limit,
+        ledger_offset=0,
+    )
+    tax_service.count_ledger_entries.assert_called_once_with(123, user_id=99)
+
+    message = interaction.followup.messages[-1]
+    assert message["ephemeral"] is True
+    assert isinstance(message["view"], tax_commands.TaxPlayerLedgerView)
+    assert message["view"].previous_page.disabled is True
+    assert message["view"].next_page.disabled is False
+    _assert_ledger_page_metadata(
+        message["embed"],
+        page=1,
+        total_entries=17,
+        limit=limit,
+    )
+    assert validate_embed(message["embed"]) == []
+
+
+@pytest.mark.asyncio
+async def test_tax_player_ledger_view_loads_next_page_with_offset():
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    limit = tax_commands.PLAYER_LEDGER_DEFAULT_LIMIT
+    tax_service = SimpleNamespace(
+        count_ledger_entries=MagicMock(return_value=21),
+        get_player_snapshot=MagicMock(
+            return_value=_player_snapshot([_ledger_row(idx) for idx in range(16, 21)])
+        ),
+    )
+    view = tax_commands.TaxPlayerLedgerView(
+        tax_service=tax_service,
+        guild_id=123,
+        requester_id=42,
+        user=target,
+        limit=limit,
+        current_page=1,
+        total_entries=21,
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await view._show_page(interaction, 3)
+
+    tax_service.count_ledger_entries.assert_called_once_with(123, user_id=99)
+    tax_service.get_player_snapshot.assert_called_once_with(
+        99,
+        123,
+        ledger_limit=limit,
+        ledger_offset=16,
+    )
+
+    edited_message = interaction.response.messages[-1]
+    assert edited_message["edit"] is True
+    assert edited_message["view"] is view
+    assert view.previous_page.disabled is False
+    assert view.next_page.disabled is True
+    _assert_ledger_page_metadata(
+        edited_message["embed"],
+        page=3,
+        total_entries=21,
+        limit=limit,
+    )
+    assert validate_embed(edited_message["embed"]) == []
+
+
+@pytest.mark.asyncio
+async def test_tax_fine_calls_service_and_reports_capped_amount(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    tax_service = SimpleNamespace(
+        levy_fine=MagicMock(
+            return_value={
+                "status": "ok",
+                "requested_amount": 10,
+                "applied_amount": 7,
+                "balance_before": 7,
+                "balance_after": -3,
+                "next_fine_at": 1_702_592_000,
+            }
+        )
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.fine.callback(
+        cog,
+        interaction,
+        user=target,
+        amount=10,
+        reason="failure to file",
+    )
+
+    tax_service.levy_fine.assert_called_once_with(
+        99,
+        123,
+        amount=10,
+        actor_id=42,
+        reason="failure to file",
+    )
+    message = interaction.followup.messages[-1]
+    assert message["ephemeral"] is True
+    assert "Levied a 7" in message["content"]
+    assert "Jopacoin Reserve" in message["content"]
+    assert "capped to audited obligations" in message["content"]
+    assert "7" in message["content"]
+    assert "-3" in message["content"]
+    assert "<t:1702592000:R>" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_fine_reports_cooldown(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    tax_service = SimpleNamespace(
+        levy_fine=MagicMock(
+            return_value={
+                "status": "cooldown",
+                "next_fine_at": 1_702_592_000,
+            }
+        )
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.fine.callback(
+        cog,
+        interaction,
+        user=target,
+        amount=10,
+        reason=None,
+    )
+
+    assert "still on Tax Man fine cooldown" in interaction.followup.messages[-1]["content"]
+    assert "<t:1702592000:f>" in interaction.followup.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_bankruptcy_add_calls_service(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    tax_service = SimpleNamespace(
+        add_bankruptcy_modifier=MagicMock(
+            return_value={
+                "status": "ok",
+                "action": "add",
+                "games": 3,
+                "previous_games": 0,
+                "penalty_games_remaining": 3,
+            }
+        )
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.bankruptcy.callback(
+        cog,
+        interaction,
+        user=target,
+        action=SimpleNamespace(value="add"),
+        games=3,
+        reason="manual review",
+    )
+
+    tax_service.add_bankruptcy_modifier.assert_called_once_with(
+        99,
+        123,
+        games=3,
+        actor_id=42,
+        reason="manual review",
+    )
+    message = interaction.followup.messages[-1]
+    assert message["ephemeral"] is True
+    assert "Added 3" in message["content"]
+    assert "0 -> 3" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_bankruptcy_remove_calls_service(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    tax_service = SimpleNamespace(
+        remove_bankruptcy_modifier=MagicMock(
+            return_value={
+                "status": "ok",
+                "action": "remove",
+                "previous_games": 5,
+                "penalty_games_remaining": 0,
+            }
+        )
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.bankruptcy.callback(
+        cog,
+        interaction,
+        user=target,
+        action=SimpleNamespace(value="remove"),
+        games=0,
+        reason="appeal granted",
+    )
+
+    tax_service.remove_bankruptcy_modifier.assert_called_once_with(
+        99,
+        123,
+        actor_id=42,
+        reason="appeal granted",
+    )
+    message = interaction.followup.messages[-1]
+    assert message["ephemeral"] is True
+    assert "Removed bankruptcy modifier" in message["content"]
+    assert "5 -> 0" in message["content"]

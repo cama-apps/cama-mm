@@ -1,4 +1,4 @@
-"""Embed builders for the nonprofit fund disbursement (`/disburse`) flow."""
+"""Embed builders for the Jopacoin Reserve disbursement (`/disburse`) flow."""
 
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ def build_disburse_embed(proposal) -> discord.Embed:
     progress = proposal.quorum_progress
 
     embed = discord.Embed(
-        title="💝 Nonprofit Fund Disbursement Vote",
+        title="🏛️ Jopacoin Reserve Allocation Vote",
         description=(
-            f"Vote on how to distribute **{proposal.fund_amount}** {JOPACOIN_EMOTE}.\n\n"
+            f"Vote on how to allocate **{proposal.fund_amount}** {JOPACOIN_EMOTE} "
+            "from the server operations budget.\n\n"
             "Click a button below to vote!"
         ),
         color=0xE91E63,  # Pink
@@ -65,7 +66,7 @@ def build_disburse_embed(proposal) -> discord.Embed:
     )
     embed.add_field(
         name="❌ Cancel",
-        value=f"Keep funds in nonprofit\n**{votes.get('cancel', 0)}** votes",
+        value=f"Keep budget in reserve\n**{votes.get('cancel', 0)}** votes",
         inline=True,
     )
 
@@ -112,7 +113,7 @@ def build_disburse_votes_embed(
 
     embed = discord.Embed(
         title="🔍 Disbursement Vote Details (Tax Man)",
-        description=f"Fund Amount: **{proposal.fund_amount}** {JOPACOIN_EMOTE}",
+        description=f"Reserve Budget: **{proposal.fund_amount}** {JOPACOIN_EMOTE}",
         color=0x9C27B0,
     )
 

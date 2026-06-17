@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
+from config import BANKRUPTCY_PENALTY_GAMES
 from services.permissions import has_tax_man_permission
 from services.tax_service import TaxService
 from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
@@ -22,6 +23,7 @@ LEDGER_DEFAULT_LIMIT = 10
 LEDGER_MAX_LIMIT = 25
 LEDGER_MAX_PAGE = 10_000
 LEDGER_VIEW_TIMEOUT_SECONDS = 300
+PLAYER_LEDGER_DEFAULT_LIMIT = 8
 
 
 class TaxLedgerView(discord.ui.View):
@@ -122,6 +124,112 @@ class TaxLedgerView(discord.ui.View):
         await self._show_page(interaction, self.current_page + 1)
 
 
+class TaxPlayerLedgerView(discord.ui.View):
+    """Ephemeral pagination for the recent ledger slice in player audits."""
+
+    def __init__(
+        self,
+        *,
+        tax_service: TaxService,
+        guild_id: int,
+        requester_id: int,
+        user: discord.User,
+        limit: int,
+        current_page: int,
+        total_entries: int,
+    ):
+        super().__init__(timeout=LEDGER_VIEW_TIMEOUT_SECONDS)
+        self.tax_service = tax_service
+        self.guild_id = guild_id
+        self.requester_id = requester_id
+        self.user = user
+        self.limit = limit
+        self.total_entries = total_entries
+        self.current_page = _clamp_ledger_page(current_page, limit, total_entries)
+        self.total_pages = _ledger_total_pages(total_entries, limit)
+        self._sync_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "This player audit view belongs to another Tax Man.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _load_page(self, page: int) -> discord.Embed:
+        self.total_entries = await asyncio.to_thread(
+            self.tax_service.count_ledger_entries,
+            self.guild_id,
+            user_id=self.user.id,
+        )
+        self.total_pages = _ledger_total_pages(self.total_entries, self.limit)
+        self.current_page = _clamp_ledger_page(page, self.limit, self.total_entries)
+        snapshot = await asyncio.to_thread(
+            self.tax_service.get_player_snapshot,
+            self.user.id,
+            self.guild_id,
+            ledger_limit=self.limit,
+            ledger_offset=_ledger_offset(self.current_page, self.limit),
+        )
+        self._sync_buttons()
+        return _build_player_embed(
+            self.user,
+            snapshot,
+            self.tax_service,
+            ledger_page=self.current_page,
+            total_ledger_entries=self.total_entries,
+            ledger_limit=self.limit,
+        )
+
+    async def _show_page(
+        self,
+        interaction: discord.Interaction,
+        page: int,
+    ) -> None:
+        try:
+            embed = await self._load_page(page)
+        except ValueError as exc:
+            await interaction.response.send_message(
+                _format_tax_error(str(exc)),
+                ephemeral=True,
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Failed to paginate tax player audit guild_id=%s user_id=%s",
+                self.guild_id,
+                self.user.id,
+            )
+            await interaction.response.send_message(
+                "Couldn't load that player ledger page right now.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    def _sync_buttons(self) -> None:
+        self.previous_page.disabled = self.current_page <= 1
+        self.next_page.disabled = self.current_page >= self.total_pages
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self._show_page(interaction, self.current_page - 1)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await self._show_page(interaction, self.current_page + 1)
+
+
 class TaxCommands(commands.Cog):
     tax = app_commands.Group(name="tax", description="Tax Man economy audit")
 
@@ -177,6 +285,13 @@ class TaxCommands(commands.Cog):
                 self.tax_service.get_player_snapshot,
                 user.id,
                 guild_id,
+                ledger_limit=PLAYER_LEDGER_DEFAULT_LIMIT,
+                ledger_offset=0,
+            )
+            total_ledger_entries = await asyncio.to_thread(
+                self.tax_service.count_ledger_entries,
+                guild_id,
+                user_id=user.id,
             )
         except ValueError as exc:
             await safe_followup(
@@ -198,8 +313,147 @@ class TaxCommands(commands.Cog):
             )
             return
 
-        embed = _build_player_embed(user, snapshot, self.tax_service)
-        await safe_followup(interaction, embed=embed, ephemeral=True)
+        embed = _build_player_embed(
+            user,
+            snapshot,
+            self.tax_service,
+            ledger_page=1,
+            total_ledger_entries=total_ledger_entries,
+            ledger_limit=PLAYER_LEDGER_DEFAULT_LIMIT,
+        )
+        view = None
+        if _ledger_total_pages(total_ledger_entries, PLAYER_LEDGER_DEFAULT_LIMIT) > 1:
+            view = TaxPlayerLedgerView(
+                tax_service=self.tax_service,
+                guild_id=guild_id,
+                requester_id=interaction.user.id,
+                user=user,
+                limit=PLAYER_LEDGER_DEFAULT_LIMIT,
+                current_page=1,
+                total_entries=total_ledger_entries,
+            )
+        await safe_followup(interaction, embed=embed, view=view, ephemeral=True)
+
+    @tax.command(name="fine", description="Levy a Tax Man fine against a player")
+    @app_commands.describe(
+        user="Player to fine",
+        amount="Jopacoin amount to fine",
+        reason="Reason recorded in the central ledger",
+    )
+    @require_guild
+    async def fine(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        amount: int,
+        reason: str | None = None,
+    ):
+        if not await self._require_tax_man(interaction):
+            return
+        await safe_defer(interaction, ephemeral=True)
+
+        guild_id = interaction.guild.id
+        try:
+            result = await asyncio.to_thread(
+                self.tax_service.levy_fine,
+                user.id,
+                guild_id,
+                amount=amount,
+                actor_id=interaction.user.id,
+                reason=reason,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to levy tax fine guild_id=%s user_id=%s actor_id=%s amount=%s",
+                guild_id,
+                user.id,
+                interaction.user.id,
+                amount,
+            )
+            await safe_followup(
+                interaction,
+                content="Couldn't levy that Tax Man fine right now.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_followup(
+            interaction,
+            content=_format_fine_result(user, result),
+            ephemeral=True,
+        )
+
+    @tax.command(
+        name="bankruptcy",
+        description="Add or remove a player's bankruptcy modifier",
+    )
+    @app_commands.describe(
+        user="Player to modify",
+        action="Add or remove the bankruptcy modifier",
+        games="Penalty games to add; ignored when removing",
+        reason="Reason for the modifier change",
+    )
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="add", value="add"),
+            app_commands.Choice(name="remove", value="remove"),
+        ]
+    )
+    @require_guild
+    async def bankruptcy(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        action: app_commands.Choice[str],
+        games: app_commands.Range[int, 0, 100] = BANKRUPTCY_PENALTY_GAMES,
+        reason: str | None = None,
+    ):
+        if not await self._require_tax_man(interaction):
+            return
+        await safe_defer(interaction, ephemeral=True)
+
+        guild_id = interaction.guild.id
+        action_value = action.value if hasattr(action, "value") else str(action)
+        try:
+            if action_value == "add":
+                result = await asyncio.to_thread(
+                    self.tax_service.add_bankruptcy_modifier,
+                    user.id,
+                    guild_id,
+                    games=games,
+                    actor_id=interaction.user.id,
+                    reason=reason,
+                )
+            elif action_value == "remove":
+                result = await asyncio.to_thread(
+                    self.tax_service.remove_bankruptcy_modifier,
+                    user.id,
+                    guild_id,
+                    actor_id=interaction.user.id,
+                    reason=reason,
+                )
+            else:
+                result = {"status": "invalid_action"}
+        except Exception:
+            logger.exception(
+                "Failed to update bankruptcy modifier guild_id=%s user_id=%s actor_id=%s action=%s",
+                guild_id,
+                user.id,
+                interaction.user.id,
+                action_value,
+            )
+            await safe_followup(
+                interaction,
+                content="Couldn't update that bankruptcy modifier right now.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_followup(
+            interaction,
+            content=_format_bankruptcy_modifier_result(user, result),
+            ephemeral=True,
+        )
 
     @tax.command(name="ledger", description="View recent central ledger entries")
     @app_commands.describe(
@@ -292,6 +546,11 @@ def _ledger_footer_text(page: int, total_entries: int, limit: int) -> str:
     )
 
 
+def _player_ledger_footer_text(page: int, total_entries: int, limit: int) -> str:
+    ledger_text = _ledger_footer_text(page, total_entries, limit)
+    return f"Tax Man audit only | Recent ledger {ledger_text.removeprefix('Tax Man ledger | ')}"
+
+
 def _format_jc(amount: int) -> str:
     return f"{amount:,} {JOPACOIN_EMOTE}"
 
@@ -305,6 +564,64 @@ def _format_tax_error(error: str) -> str:
     if error == "target_not_registered":
         return "That user is not registered in this guild."
     return "That player audit could not be loaded."
+
+
+def _format_fine_result(user: discord.User, result: dict) -> str:
+    display_name = getattr(user, "display_name", user.name)
+    status = result.get("status")
+    if status == "ok":
+        applied = int(result["applied_amount"])
+        requested = int(result["requested_amount"])
+        before = int(result["balance_before"])
+        after = int(result["balance_after"])
+        line = (
+            f"Levied a {_format_jc(applied)} fine against {display_name}. "
+            f"Balance: {_format_jc(before)} -> {_format_jc(after)}. "
+            f"Credited {_format_jc(applied)} to the Jopacoin Reserve."
+        )
+        if applied < requested:
+            line += f" Requested {_format_jc(requested)}, capped to audited obligations."
+        next_fine_at = result.get("next_fine_at")
+        if next_fine_at is not None:
+            line += f" Next fine available <t:{int(next_fine_at)}:R>."
+        return line
+    if status == "cooldown":
+        return (
+            f"{display_name} is still on Tax Man fine cooldown until "
+            f"<t:{int(result['next_fine_at'])}:f> (<t:{int(result['next_fine_at'])}:R>)."
+        )
+    if status == "no_outstanding_obligations":
+        return f"{display_name} has no audited outstanding obligations to fine."
+    if status == "target_not_registered":
+        return "That user is not registered in this guild."
+    if status == "invalid_amount":
+        return "Fine amount must be positive."
+    return "That fine could not be levied."
+
+
+def _format_bankruptcy_modifier_result(user: discord.User, result: dict) -> str:
+    display_name = getattr(user, "display_name", user.name)
+    status = result.get("status")
+    if status == "ok":
+        previous = int(result.get("previous_games") or 0)
+        current = int(result.get("penalty_games_remaining") or 0)
+        if result.get("action") == "add":
+            games = int(result.get("games") or 0)
+            return (
+                f"Added {games:,} bankruptcy modifier game(s) to {display_name}. "
+                f"Penalty games: {previous:,} -> {current:,}."
+            )
+        return (
+            f"Removed bankruptcy modifier from {display_name}. "
+            f"Penalty games: {previous:,} -> {current:,}."
+        )
+    if status == "target_not_registered":
+        return "That user is not registered in this guild."
+    if status == "invalid_games":
+        return "Bankruptcy modifier games must be positive when adding."
+    if status == "invalid_action":
+        return "Unknown bankruptcy modifier action."
+    return "That bankruptcy modifier could not be updated."
 
 
 def _build_audit_embed(
@@ -327,7 +644,7 @@ def _build_audit_embed(
         inline=True,
     )
     embed.add_field(
-        name="Nonprofit",
+        name="Jopacoin Reserve",
         value=(
             f"Available: {_format_jc(snapshot['nonprofit_available'])}\n"
             f"Reserved: {_format_jc(snapshot['nonprofit_reserved'])}"
@@ -370,6 +687,10 @@ def _build_player_embed(
     user: discord.User,
     snapshot: dict,
     tax_service: TaxService,
+    *,
+    ledger_page: int = 1,
+    total_ledger_entries: int | None = None,
+    ledger_limit: int = PLAYER_LEDGER_DEFAULT_LIMIT,
 ) -> discord.Embed:
     embed = discord.Embed(
         title=f"Tax Man Player Audit - {getattr(user, 'display_name', user.name)}",
@@ -419,7 +740,14 @@ def _build_player_embed(
         _format_ledger_lines(snapshot["recent_ledger"]),
         inline=False,
     )
-    embed.set_footer(text="Tax Man audit only")
+    footer = "Tax Man audit only"
+    if total_ledger_entries is not None:
+        footer = _player_ledger_footer_text(
+            ledger_page,
+            total_ledger_entries,
+            ledger_limit,
+        )
+    embed.set_footer(text=footer)
     return embed
 
 
@@ -533,8 +861,8 @@ def _format_ledger_detail(row: dict) -> str:
     source_labels = {
         "balance_update": "balance adjustment",
         "player_insert": "registration starting balance",
-        "nonprofit_insert": "nonprofit fund created",
-        "nonprofit_update": "nonprofit fund update",
+        "nonprofit_insert": "Jopacoin Reserve created",
+        "nonprofit_update": "Jopacoin Reserve update",
         "ledger_backfill": "opening balance backfill",
         "dig": "dig balance change",
         "gamba": "gamba wheel balance change",
@@ -556,7 +884,7 @@ def _format_ledger_lines(rows: list[dict], *, limit: int = 25) -> list[str]:
     lines = []
     for row in rows[:limit]:
         account = (
-            "nonprofit"
+            "Jopacoin Reserve"
             if row["account_type"] == "nonprofit"
             else f"<@{row['account_id']}>"
         )

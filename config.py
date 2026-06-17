@@ -73,6 +73,7 @@ TAX_MAN_USER_IDS = _parse_int_list_raw(
     os.getenv("TAX_MAN_USER_IDS", os.getenv("TAX_MEN_USER_IDS")),
     [],
 )
+TAX_FINE_COOLDOWN_SECONDS = _parse_int("TAX_FINE_COOLDOWN_SECONDS", 30 * 24 * 60 * 60)
 
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
 LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 20)
