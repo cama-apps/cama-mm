@@ -1165,6 +1165,50 @@ def test_bookie_miss_pays_nothing(mafia_service, mafia_repo, player_repo):
     assert player_repo.get_balance(605, TEST_GUILD_ID) == 0
 
 
+def test_bookie_hit_not_recorded_when_resolution_loses_race(
+    mafia_service, mafia_repo, player_repo, monkeypatch
+):
+    """The Bookie HIT is durable state that feeds the end-of-week skim, so like
+    the Town Bounty it must be committed only AFTER the day resolution is
+    claimed. If resolve_day loses the race (an admin stop/abort resolved the day
+    out-of-band), no spurious HIT may be left on record — otherwise a rival
+    finalize pays the Bookie a skim for a lynch that was never enacted."""
+    _bookie_scenario(mafia_repo, player_repo, wager_target=601)
+    assert mafia_service.submit_night_action(
+        TEST_GUILD_ID, 605, 601, MafiaActionType.WAGER
+    )["ok"]
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 601)
+
+    game = mafia_repo.get_active_game(TEST_GUILD_ID)
+    dn = game.day_number
+
+    # Lose the resolution claim (another path resolved the day first).
+    monkeypatch.setattr(
+        mafia_repo,
+        "finalize_day_resolution",
+        lambda **kw: {"applied": False, "reason": "already_resolved"},
+    )
+    rd = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert rd["resolved"] is False
+
+    # No spurious HIT persisted, and the Bookie wasn't paid.
+    wagers = mafia_repo.get_actions(
+        game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=dn
+    )
+    assert all(w.get("result") != "HIT" for w in wagers)
+    assert player_repo.get_balance(605, TEST_GUILD_ID) == 0
+
+    # A real finalize that wins the claim (standing tally, no lynch enacted) must
+    # not pay the Bookie a skim off a HIT that was never legitimately recorded.
+    monkeypatch.undo()
+    forced = mafia_service.force_finalize(TEST_GUILD_ID)
+    assert forced["resolved"] is True
+    assert forced["bookie_id"] is None
+    assert player_repo.get_balance(605, TEST_GUILD_ID) == 0
+
+
 def test_bankruptcy_penalty_sinks_mafia_profit(
     mafia_service, mafia_repo, player_repo
 ):

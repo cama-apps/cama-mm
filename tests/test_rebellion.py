@@ -377,6 +377,25 @@ class TestWarFlow:
 
         return war_id
 
+    def test_attack_vote_tolerates_malformed_voter_entry(self, rebellion_repo):
+        """The vote-dedup read uses .get(), so a malformed attack_voter_ids
+        entry (one missing 'discord_id', e.g. legacy/corrupt data) can't raise
+        KeyError inside the vote transaction and a fresh vote still records."""
+        now = int(time.time())
+        war_id = rebellion_repo.create_war(TEST_GUILD_ID, 3501, now + 900, now)
+        # Corrupt the stored voter list with an entry missing 'discord_id'.
+        with rebellion_repo.connection() as conn:
+            conn.cursor().execute(
+                "UPDATE wheel_wars SET attack_voter_ids = ? WHERE war_id = ?",
+                (json.dumps([{"bankruptcy_count": 0}]), war_id),
+            )
+            conn.commit()
+
+        result = rebellion_repo.add_attack_vote(war_id, 3502, bankruptcy_count=0)
+        assert result.get("duplicate") is not True
+        voters = json.loads(rebellion_repo.get_war(war_id)["attack_voter_ids"])
+        assert any(v.get("discord_id") == 3502 for v in voters)
+
     def test_fizzle_path_refunds_defenders(self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo):
         """Fizzle returns defender stakes."""
         guild_id = TEST_GUILD_ID
