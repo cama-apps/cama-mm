@@ -1190,10 +1190,21 @@ def test_bookie_hit_not_recorded_when_resolution_loses_race(
         "finalize_day_resolution",
         lambda **kw: {"applied": False, "reason": "already_resolved"},
     )
+    # Spy on the durable-HIT writer: the deterministic, load-insensitive core
+    # guarantee is that _commit_post_claim (its only caller during resolution) is
+    # never reached when the claim is lost — independent of re-reading DB state.
+    marked: list = []
+    real_mark = mafia_service._mark_bookie_wager
+    monkeypatch.setattr(
+        mafia_service,
+        "_mark_bookie_wager",
+        lambda *a, **k: marked.append(a) or real_mark(*a, **k),
+    )
     rd = mafia_service.resolve_day(TEST_GUILD_ID)
     assert rd["resolved"] is False
+    assert marked == []  # the HIT writer was never invoked
 
-    # No spurious HIT persisted, and the Bookie wasn't paid.
+    # And the observable outcome: no spurious HIT persisted, Bookie unpaid.
     wagers = mafia_repo.get_actions(
         game.game_id, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=dn
     )
@@ -1207,6 +1218,59 @@ def test_bookie_hit_not_recorded_when_resolution_loses_race(
     assert forced["resolved"] is True
     assert forced["bookie_id"] is None
     assert player_repo.get_balance(605, TEST_GUILD_ID) == 0
+
+
+def test_bookie_hit_carries_over_multi_day_to_finalize(
+    mafia_service, mafia_repo, player_repo
+):
+    """The core multi-day mechanic the fix relies on: a correct Bookie wager on a
+    CONTINUE day persists a durable HIT (committed after that day's claim), and a
+    LATER finalize day cashes it out via the past-HIT count even though the
+    Bookie placed no wager that final day (extra_hit is False then)."""
+    roster = [
+        (601, MafiaRole.MAFIA, True),
+        (606, MafiaRole.MAFIA, False),
+        (602, MafiaRole.TOWNIE, False),
+        (603, MafiaRole.TOWNIE, False),
+        (604, MafiaRole.DOCTOR, False),
+        (605, MafiaRole.BOOKIE, False),
+    ]
+    for pid, _, _ in roster:
+        _seed_player(player_repo, pid, balance=0)
+    gid = _new_game(mafia_repo, roster)
+    with mafia_repo.connection() as conn:
+        conn.cursor().execute(
+            "UPDATE mafia_games SET roster_size = ? WHERE game_id = ?", (len(roster), gid)
+        )
+
+    # Day 1 (NIGHT): the Bookie wagers on the mafioso the town will lynch.
+    assert mafia_service.submit_night_action(
+        TEST_GUILD_ID, 605, 601, MafiaActionType.WAGER
+    )["ok"]
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 601)
+    rd1 = mafia_service.resolve_day(TEST_GUILD_ID)
+    # One mafioso still alive → undecided → continue, no payout yet.
+    assert rd1["continued"] is True
+    # The day-1 HIT is now durably on record (persisted after the claim).
+    day1_wagers = mafia_repo.get_actions(
+        gid, MafiaActionType.WAGER, MafiaPhase.NIGHT, day_number=1
+    )
+    assert any(w["target_id"] == 601 and w.get("result") == "HIT" for w in day1_wagers)
+
+    # Day 2 (DAY): the Bookie does NOT wager again. Town lynches the last
+    # mafioso → TOWN finalize. The skim must be driven purely by the day-1 HIT
+    # (this day's extra_hit is False), proving the carry-over count works.
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (602, 603, 604):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 606)
+    rd2 = mafia_service.resolve_day(TEST_GUILD_ID)
+    assert rd2["continued"] is False
+    assert rd2["winner"] == MafiaWinner.TOWN.value
+    assert rd2["bookie_id"] == 605
+    assert rd2["bookie_payout"] > 0
+    assert player_repo.get_balance(605, TEST_GUILD_ID) == rd2["bookie_payout"]
 
 
 def test_bankruptcy_penalty_sinks_mafia_profit(
