@@ -148,13 +148,19 @@ class RatingUpdateMixin:
         # committed to players.
         updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
         history_updates = []
+        default_mu = self.openskill_system.DEFAULT_MU
+        default_sigma = self.openskill_system.DEFAULT_SIGMA
         for pid, (new_mu, new_sigma, fantasy_weight) in results.items():
             old_mu, old_sigma = os_ratings.get(pid, (None, None))
+            # The OS engine substitutes defaults for a None baseline when it
+            # computes, so record the same defaults in history — otherwise the
+            # "before" snapshot (None) disagrees with the math that produced the
+            # "after", mirroring the Phase 1 coalesce in recording_mixin.
             history_updates.append({
                 "discord_id": pid,
-                "os_mu_before": old_mu,
+                "os_mu_before": old_mu if old_mu is not None else default_mu,
                 "os_mu_after": new_mu,
-                "os_sigma_before": old_sigma,
+                "os_sigma_before": old_sigma if old_sigma is not None else default_sigma,
                 "os_sigma_after": new_sigma,
                 "fantasy_weight": fantasy_weight,
             })

@@ -129,6 +129,49 @@ def test_update_openskill_for_match_no_fantasy_data_skips(repo_db_path):
     assert post == pre
 
 
+def test_phase2_unrated_participant_records_default_baseline_not_none(repo_db_path):
+    """Phase-2 overwrites rating_history.os_mu_before. When a participant is
+    absent from the Phase-1 baseline (its before-columns are NULL, so the
+    baseline query skips it) AND has no current OS rating, the engine recomputes
+    from its default mu/sigma. The persisted 'before' must therefore be that
+    default — not None — or the history row disagrees with the math that
+    produced 'after'."""
+    service, player_repo, match_repo = _build_service(repo_db_path)
+    player_ids = _seed_players(player_repo)
+    match_id = _record_a_match(service, player_ids)
+    unrated = player_ids[0]
+    with match_repo.connection() as conn:
+        conn.execute(
+            "UPDATE match_participants SET fantasy_points = 15.0 WHERE match_id = ?",
+            (match_id,),
+        )
+        # Drop this player from the baseline (NULL before-cols) but keep the row
+        # so Phase-2's UPDATE still targets it, and strip the current OS rating
+        # so the bulk fallback yields (None, None).
+        conn.execute(
+            "UPDATE rating_history SET os_mu_before = NULL, os_sigma_before = NULL "
+            "WHERE match_id = ? AND discord_id = ?",
+            (match_id, unrated),
+        )
+        conn.execute(
+            "UPDATE players SET os_mu = NULL, os_sigma = NULL "
+            "WHERE discord_id = ? AND guild_id = ?",
+            (unrated, TEST_GUILD_ID),
+        )
+
+    res = service.update_openskill_ratings_for_match(match_id, guild_id=TEST_GUILD_ID)
+    assert res["success"] is True
+
+    with match_repo.connection() as conn:
+        row = conn.execute(
+            "SELECT os_mu_before, os_sigma_before FROM rating_history "
+            "WHERE match_id = ? AND discord_id = ?",
+            (match_id, unrated),
+        ).fetchone()
+    assert row["os_mu_before"] == CamaOpenSkillSystem.DEFAULT_MU
+    assert row["os_sigma_before"] == CamaOpenSkillSystem.DEFAULT_SIGMA
+
+
 def test_update_openskill_for_match_missing_match_errors(repo_db_path):
     """A non-existent match id returns a failure dict, not an exception."""
     service, _player_repo, _match_repo = _build_service(repo_db_path)

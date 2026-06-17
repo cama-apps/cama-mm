@@ -89,7 +89,7 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                 context=f"wheel_wars.attack_voter_ids war_id={war_id}",
             )
             # Prevent duplicate votes
-            if any(v["discord_id"] == discord_id for v in voters):
+            if any(v.get("discord_id") == discord_id for v in voters):
                 return {
                     "effective_attack_count": row["effective_attack_count"],
                     "duplicate": True,

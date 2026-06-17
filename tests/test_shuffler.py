@@ -583,6 +583,35 @@ class TestShuffler:
         shuffler3 = BalancedShuffler(exclusion_penalty_weight=0.0)
         assert shuffler3.exclusion_penalty_weight == 0.0
 
+    def test_zero_exclusion_penalty_weight_with_recent_participants(self):
+        """Regression: exclusion_penalty_weight=0 disables exclusion weighting,
+        so the >10-player greedy path must give recent participants NO reduction
+        rather than dividing by the zero weight. Before the divisor guard this
+        raised ZeroDivisionError for any >10 pool with recent participants."""
+        players = []
+        exclusion_counts = {}
+        for i in range(12):
+            player = Player(
+                name=f"Player{i}", mmr=1000 + i * 200, preferred_roles=[str(i % 5 + 1)]
+            )
+            players.append(player)
+            exclusion_counts[player.name] = i
+
+        shuffler = BalancedShuffler(
+            use_glicko=False, off_role_flat_penalty=50.0, exclusion_penalty_weight=0.0
+        )
+        # Some of the pool participated in the most recent match — the exact
+        # input that drove the old code into the zero divisor.
+        recent = {"Player0", "Player3", "Player7"}
+
+        team1, team2, excluded, _score = shuffler._greedy_shuffle(
+            players, exclusion_counts, recent_match_names=recent
+        )
+
+        assert len(team1.players) == 5
+        assert len(team2.players) == 5
+        assert len(excluded) == 2
+
     def test_shuffle_from_pool_without_exclusion_counts(self):
         """Test that shuffle_from_pool works without exclusion counts (backward compatibility)."""
         players = [

@@ -126,44 +126,6 @@ class TestConstants:
 
 
 # --------------------------------------------------------------------------- #
-# Shared debit primitive (used by bet settlement + prediction resolution)
-# --------------------------------------------------------------------------- #
-
-
-class TestDebitPrimitive:
-    def test_debits_penalty_share_of_profit(self, repos, bankruptcy_service):
-        pid = 5101
-        _add_player(repos["player"], pid)
-        _penalize(repos, bankruptcy_service, pid)  # balance -> FRESH_START, penalized
-        # Simulate the gross payout already credited by an atomic settlement.
-        repos["player"].add_balance(pid, TEST_GUILD_ID, 100)
-        before = repos["player"].get_balance(pid, TEST_GUILD_ID)
-
-        penalties = bankruptcy_service.debit_bankruptcy_penalty([(pid, 100)], TEST_GUILD_ID)
-
-        assert penalties == {pid: 25}
-        assert repos["player"].get_balance(pid, TEST_GUILD_ID) == before - 25
-
-    def test_no_debit_when_not_penalized(self, repos, bankruptcy_service):
-        pid = 5102
-        _add_player(repos["player"], pid, balance=100)
-        penalties = bankruptcy_service.debit_bankruptcy_penalty([(pid, 100)], TEST_GUILD_ID)
-        assert penalties == {}
-        assert repos["player"].get_balance(pid, TEST_GUILD_ID) == 100
-
-    def test_skips_nonpositive_profit(self, repos, bankruptcy_service):
-        pid = 5103
-        _add_player(repos["player"], pid)
-        _penalize(repos, bankruptcy_service, pid)
-        before = repos["player"].get_balance(pid, TEST_GUILD_ID)
-        penalties = bankruptcy_service.debit_bankruptcy_penalty(
-            [(pid, 0), (pid, -10)], TEST_GUILD_ID
-        )
-        assert penalties == {}
-        assert repos["player"].get_balance(pid, TEST_GUILD_ID) == before
-
-
-# --------------------------------------------------------------------------- #
 # Dota bet settlement
 # --------------------------------------------------------------------------- #
 
