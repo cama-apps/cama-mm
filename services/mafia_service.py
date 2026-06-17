@@ -362,21 +362,30 @@ class MafiaService:
         post_players = list(by_id.values())
         post_alive = [p for p in post_players if p.is_alive]
 
-        # Town Bounty resolves every day: a correct (lynched-and-mafia) read pays
-        # contributors out of the nonprofit fund (capped at N alive). Mark a
-        # correct Bookie wager durably for the end-of-week cash-out.
         lynched_was_mafia = (
             lynched_id is not None and by_id[lynched_id].role == MafiaRole.MAFIA
         )
-        bounty = self.repo.resolve_day_bounties(
-            game_id=game.game_id,
-            guild_id=guild_id,
-            day_number=dn,
-            lynched_id=lynched_id,
-            lynched_was_mafia=lynched_was_mafia,
-            alive_count=len(post_alive),
-        )
+        # Durably flag a correct Bookie wager for this day BEFORE the win check:
+        # the end-of-week skim (_bookie_hits_over_week / _compute_payout_deltas)
+        # needs the final day's HIT on record. This is idempotent bookkeeping,
+        # not a coin move — the skim itself is paid atomically inside
+        # finalize_day_resolution.
         self._mark_bookie_wager(game, dn, lynched_id)
+
+        def _pay_bounties() -> dict:
+            # The Town Bounty draws from the nonprofit fund, so it fires only
+            # AFTER the day resolution is atomically claimed below. Doing it
+            # earlier let a lost race with an admin stop/abort debit the fund
+            # (and re-pay, since bounties aren't marked) for a day that then
+            # reports unresolved.
+            return self.repo.resolve_day_bounties(
+                game_id=game.game_id,
+                guild_id=guild_id,
+                day_number=dn,
+                lynched_id=lynched_id,
+                lynched_was_mafia=lynched_was_mafia,
+                alive_count=len(post_alive),
+            )
 
         # Win evaluation.
         jester_win = (
@@ -414,6 +423,7 @@ class MafiaService:
             )
             if not advanced:
                 return {"resolved": False, "reason": "day_already_resolved"}
+            bounty = _pay_bounties()
             return {
                 "resolved": True,
                 "continued": True,
@@ -454,6 +464,7 @@ class MafiaService:
                 "resolved": False,
                 "reason": finalize.get("reason", "day_already_resolved"),
             }
+        bounty = _pay_bounties()
 
         return {
             "resolved": True,

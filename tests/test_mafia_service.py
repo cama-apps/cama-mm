@@ -793,6 +793,87 @@ def test_town_bounty_pays_on_correct_lynch(mafia_service, mafia_repo, player_rep
     assert set(bounty["paid"]) == {2, 3}
 
 
+def _nonprofit_fund(mafia_repo) -> int:
+    with mafia_repo.connection() as conn:
+        row = conn.cursor().execute(
+            "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+            (TEST_GUILD_ID,),
+        ).fetchone()
+        return row["total_collected"] if row else 0
+
+
+def test_bounty_not_paid_when_finalize_loses_race(
+    mafia_service, mafia_repo, player_repo, monkeypatch
+):
+    """The Town Bounty draws from the nonprofit fund, so it must fire only after
+    the day resolution is atomically claimed. If finalize loses the race (the
+    game was resolved out-of-band, e.g. an admin stop racing the 5-min phase
+    loop), the fund must not be debited and no contributor paid — otherwise the
+    fund is double-spent for a day that reports unresolved."""
+    ids = [1, 2, 3, 4, 5]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=50)
+    _new_game(mafia_repo, _undecided_roster())  # 1 mafia (id 1) vs 4 town
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 2, 1)["ok"]
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 3, 1)["ok"]
+    for voter in (2, 3, 5):  # lynch the mafioso → town wins → finalize branch
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 1)
+
+    fund_before = _nonprofit_fund(mafia_repo)
+    assert fund_before > 0  # the two parked stakes
+    bal_before = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (2, 3)}
+
+    # Simulate another path winning the resolution claim.
+    monkeypatch.setattr(
+        mafia_repo,
+        "finalize_day_resolution",
+        lambda **kw: {"applied": False, "reason": "already_resolved"},
+    )
+    rd = mafia_service.resolve_day(TEST_GUILD_ID)
+
+    assert rd["resolved"] is False
+    assert _nonprofit_fund(mafia_repo) == fund_before  # fund untouched
+    for pid in (2, 3):
+        assert player_repo.get_balance(pid, TEST_GUILD_ID) == bal_before[pid]
+
+
+def test_bounty_not_paid_when_advance_loses_race(
+    mafia_service, mafia_repo, player_repo, monkeypatch
+):
+    """Same gating on the continue branch: lynching a mafioso while the game is
+    still undecided must not pay the bounty if advance_to_next_cycle loses the
+    resolution claim."""
+    roster = [
+        (1, MafiaRole.MAFIA, True),
+        (6, MafiaRole.MAFIA, False),
+        (2, MafiaRole.TOWNIE, False),
+        (3, MafiaRole.DETECTIVE, False),
+        (4, MafiaRole.DOCTOR, False),
+        (5, MafiaRole.TOWNIE, False),
+    ]
+    for pid, _, _ in roster:
+        _seed_player(player_repo, pid, balance=50)
+    _new_game(mafia_repo, roster)  # 2 mafia vs 4 town → still undecided after 1 lynch
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 2, 1)["ok"]
+    assert mafia_service.submit_bounty(TEST_GUILD_ID, 3, 1)["ok"]
+    for voter in (2, 3, 5):  # lynch one mafioso; the other survives → continue
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 1)
+
+    fund_before = _nonprofit_fund(mafia_repo)
+    assert fund_before > 0
+    bal_before = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (2, 3)}
+
+    monkeypatch.setattr(mafia_repo, "advance_to_next_cycle", lambda *a, **k: False)
+    rd = mafia_service.resolve_day(TEST_GUILD_ID)
+
+    assert rd["resolved"] is False
+    assert _nonprofit_fund(mafia_repo) == fund_before
+    for pid in (2, 3):
+        assert player_repo.get_balance(pid, TEST_GUILD_ID) == bal_before[pid]
+
+
 def test_pot_for_roster_helper():
     assert _pot_for_roster(5) == 5 * ENTRY_FEE
     assert _pot_for_roster(10) == 10 * ENTRY_FEE
