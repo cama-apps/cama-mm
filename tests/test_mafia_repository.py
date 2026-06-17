@@ -378,3 +378,130 @@ def test_compute_player_stats_correct_reads(mafia_repo):
     assert stats["correct_reads"] == 1
     assert stats["wins"] == 1
     assert stats["town_wins"] == 1
+
+
+# ── Bounties / nonprofit-fund money flow ──────────────────────────────────
+# These methods move real jopacoins (debit the contributor, park/draw the
+# nonprofit fund), so they get direct repo-level coverage of conservation and
+# the rejection paths rather than only indirect service-test exercise.
+
+
+def _fund(mafia_repo, guild_id: int = TEST_GUILD_ID) -> int:
+    with mafia_repo.connection() as conn:
+        row = conn.cursor().execute(
+            "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        return row["total_collected"] if row else 0
+
+
+def _balance(mafia_repo, discord_id: int, guild_id: int = TEST_GUILD_ID) -> int:
+    return PlayerRepository(mafia_repo.db_path).get_balance(discord_id, guild_id)
+
+
+def _bounty(mafia_repo, gid, contributor_id, *, target_id=99, day_number=1, guild_id=TEST_GUILD_ID):
+    return mafia_repo.add_bounty(
+        game_id=gid, guild_id=guild_id, day_number=day_number,
+        target_id=target_id, contributor_id=contributor_id, max_debt=500,
+    )
+
+
+def test_add_bounty_debits_contributor_and_parks_in_fund(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=5)
+
+    assert _bounty(mafia_repo, gid, 10)["ok"] is True
+    # Conserved: the contributor loses exactly 1, the fund gains exactly 1.
+    assert _balance(mafia_repo, 10) == 4
+    assert _fund(mafia_repo) == 1
+    assert len(mafia_repo.get_bounties_for_day(gid, 1)) == 1
+
+
+def test_add_bounty_rejects_duplicate_with_no_double_debit(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=5)
+
+    assert _bounty(mafia_repo, gid, 10)["ok"] is True
+    assert _bounty(mafia_repo, gid, 10) == {"ok": False, "error": "already_staked"}
+    # The rejected re-stake must not debit again or grow the fund.
+    assert _balance(mafia_repo, 10) == 4
+    assert _fund(mafia_repo) == 1
+
+
+def test_add_bounty_respects_debt_floor(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    # Already at the debt floor: one more stake would breach -max_debt.
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=-500)
+
+    assert _bounty(mafia_repo, gid, 10) == {"ok": False, "error": "insufficient_funds"}
+    assert _balance(mafia_repo, 10) == -500  # unchanged
+    assert _fund(mafia_repo) == 0
+    assert mafia_repo.get_bounties_for_day(gid, 1) == []
+
+
+def test_resolve_day_bounties_pays_correct_read_and_conserves(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    for cid in (10, 11):
+        _seed_registered_player(mafia_repo, discord_id=cid, guild_id=TEST_GUILD_ID, balance=5)
+        assert _bounty(mafia_repo, gid, cid)["ok"] is True
+    assert _fund(mafia_repo) == 2  # both stakes parked
+    bal_before = {cid: _balance(mafia_repo, cid) for cid in (10, 11)}
+
+    result = mafia_repo.resolve_day_bounties(
+        game_id=gid, guild_id=TEST_GUILD_ID, day_number=1,
+        lynched_id=99, lynched_was_mafia=True, alive_count=4,
+    )
+    # reward = min(alive_count=4, available=2) = 2, split across the two winners.
+    assert result["reward"] == 2
+    assert set(result["paid"]) == {10, 11}
+    assert sum(result["paid"].values()) == 2
+    # Conserved: the fund drops by the reward, contributors gain exactly it.
+    assert _fund(mafia_repo) == 0
+    for cid in (10, 11):
+        assert _balance(mafia_repo, cid) - bal_before[cid] == result["paid"][cid]
+
+
+def test_resolve_day_bounties_wrong_read_forfeits_stakes(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=5)
+    assert _bounty(mafia_repo, gid, 10)["ok"] is True
+    bal_before, fund_before = _balance(mafia_repo, 10), _fund(mafia_repo)
+
+    # Lynched player was NOT mafia → no payout; stakes stay forfeited in the fund.
+    result = mafia_repo.resolve_day_bounties(
+        game_id=gid, guild_id=TEST_GUILD_ID, day_number=1,
+        lynched_id=99, lynched_was_mafia=False, alive_count=4,
+    )
+    assert result == {"paid": {}, "reward": 0}
+    assert _balance(mafia_repo, 10) == bal_before
+    assert _fund(mafia_repo) == fund_before
+
+
+def test_resolve_day_bounties_caps_reward_at_alive_count(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    for cid in (10, 11, 12, 13, 14):  # 5 parked stakes
+        _seed_registered_player(mafia_repo, discord_id=cid, guild_id=TEST_GUILD_ID, balance=5)
+        assert _bounty(mafia_repo, gid, cid)["ok"] is True
+    assert _fund(mafia_repo) == 5
+
+    # Only 2 alive → reward capped at 2; the other 3 staked coins stay forfeited.
+    result = mafia_repo.resolve_day_bounties(
+        game_id=gid, guild_id=TEST_GUILD_ID, day_number=1,
+        lynched_id=99, lynched_was_mafia=True, alive_count=2,
+    )
+    assert result["reward"] == 2
+    assert sum(result["paid"].values()) == 2
+    assert _fund(mafia_repo) == 3  # 5 parked − 2 paid
+
+
+def test_add_bounty_is_guild_isolated(mafia_repo):
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=5)
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID_SECONDARY, balance=5)
+
+    assert _bounty(mafia_repo, gid, 10)["ok"] is True
+    # Guild B's fund and the same user's guild-B balance are untouched.
+    assert _fund(mafia_repo, TEST_GUILD_ID) == 1
+    assert _fund(mafia_repo, TEST_GUILD_ID_SECONDARY) == 0
+    assert _balance(mafia_repo, 10, TEST_GUILD_ID) == 4
+    assert _balance(mafia_repo, 10, TEST_GUILD_ID_SECONDARY) == 5
