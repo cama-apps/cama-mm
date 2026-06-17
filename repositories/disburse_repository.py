@@ -324,16 +324,29 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
 
             # 2) Return the reserve to the nonprofit fund.
             if fund_amount_to_return:
-                cursor.execute(
-                    """
-                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(guild_id) DO UPDATE SET
-                        total_collected = total_collected + excluded.total_collected,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (normalized_guild, fund_amount_to_return),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="disburse",
+                    related_type="disbursement",
+                    reason="Jopacoin Reserve proposal funds returned",
+                    metadata={
+                        "fund_amount": fund_amount_to_return,
+                        "distribution_total": total,
+                    },
                 )
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(guild_id) DO UPDATE SET
+                            total_collected = total_collected + excluded.total_collected,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (normalized_guild, fund_amount_to_return),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             # 3) Deduct the distribution total and credit recipients. We verify
             #    sufficiency against the post-credit pool so a stale snapshot
@@ -349,25 +362,52 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                     raise ValueError(
                         f"Insufficient funds in nonprofit. Available: {available}, needed: {total}"
                     )
-                cursor.execute(
-                    """
-                    UPDATE nonprofit_fund
-                    SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE guild_id = ?
-                    """,
-                    (total, normalized_guild),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="disburse",
+                    related_type="disbursement",
+                    reason="Jopacoin Reserve disbursement debit",
+                    metadata={
+                        "recipient_count": len(distributions),
+                        "distribution_total": total,
+                    },
                 )
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [
-                        (amount, discord_id, normalized_guild)
-                        for discord_id, amount in distributions
-                    ],
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE nonprofit_fund
+                        SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ?
+                        """,
+                        (total, normalized_guild),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="disburse",
+                    related_type="disbursement",
+                    reason="Jopacoin Reserve disbursement payout",
+                    metadata={
+                        "recipient_count": len(distributions),
+                        "distribution_total": total,
+                    },
                 )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [
+                            (amount, discord_id, normalized_guild)
+                            for discord_id, amount in distributions
+                        ],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             # 4) Record history in the same txn — no silent "completed but no log"
             #    state is possible if this fails, because it rolls the whole op back.
@@ -446,16 +486,27 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             )
 
             if fund_amount_to_return:
-                cursor.execute(
-                    """
-                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(guild_id) DO UPDATE SET
-                        total_collected = total_collected + excluded.total_collected,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (normalized_guild, fund_amount_to_return),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="disburse",
+                    related_type="disbursement",
+                    related_id=proposal_id,
+                    reason="cancelled proposal funds returned to reserve",
+                    metadata={"fund_amount": fund_amount_to_return},
                 )
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(guild_id) DO UPDATE SET
+                            total_collected = total_collected + excluded.total_collected,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (normalized_guild, fund_amount_to_return),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             return proposal_id
 

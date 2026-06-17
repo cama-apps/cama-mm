@@ -191,14 +191,32 @@ class BetRepository(BaseRepository, IBetRepository):
                 if new_balance < -max_debt:
                     raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (effective_bet, discord_id, normalized_guild),
+            self._set_economy_ledger_context(
+                cursor,
+                source="bet",
+                related_type="pending_match" if pending_match_id is not None else "bet_window",
+                related_id=pending_match_id if pending_match_id is not None else since_ts,
+                reason="bet stake placed",
+                metadata={
+                    "team": team,
+                    "amount": amount,
+                    "effective_bet": effective_bet,
+                    "leverage": leverage,
+                    "is_blind": is_blind,
+                    "allow_negative": allow_negative,
+                },
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (effective_bet, discord_id, normalized_guild),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             cursor.execute(
                 """
@@ -356,14 +374,31 @@ class BetRepository(BaseRepository, IBetRepository):
                 if new_balance < -max_debt:
                     raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (effective_bet, discord_id, normalized_guild),
+            self._set_economy_ledger_context(
+                cursor,
+                source="bet",
+                related_type="pending_match",
+                related_id=actual_pending_match_id,
+                reason="pending match bet stake placed",
+                metadata={
+                    "team": team,
+                    "amount": amount,
+                    "effective_bet": effective_bet,
+                    "leverage": leverage,
+                    "is_blind": is_blind,
+                },
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (effective_bet, discord_id, normalized_guild),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
             cursor.execute(
                 """
                 INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement, pending_match_id)
@@ -813,14 +848,32 @@ class BetRepository(BaseRepository, IBetRepository):
                     distributions["bankruptcy_penalties"] = penalties
 
             if balance_deltas:
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [(delta, discord_id, normalized_guild) for discord_id, delta in balance_deltas.items()],
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="bet_settlement",
+                    related_type="pending_match" if pending_match_id is not None else "bet_window",
+                    related_id=pending_match_id if pending_match_id is not None else since_ts,
+                    reason="bet settlement payout",
+                    metadata={
+                        "winning_team": winning_team,
+                        "betting_mode": betting_mode,
+                        "payout_count": len(balance_deltas),
+                    },
                 )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [
+                            (delta, discord_id, normalized_guild)
+                            for discord_id, delta in balance_deltas.items()
+                        ],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             # Store payout for winning bets
             if payout_updates:
@@ -1081,14 +1134,28 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
                 bet_ids.append(row["bet_id"])
 
-            cursor.executemany(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                [(delta, discord_id, normalized_guild) for discord_id, delta in refund_deltas.items()],
+            self._set_economy_ledger_context(
+                cursor,
+                source="bet_refund",
+                related_type="pending_match" if pending_match_id is not None else "bet_window",
+                related_id=pending_match_id if pending_match_id is not None else since_ts,
+                reason="cancelled bet stake refund",
+                metadata={"refund_count": len(refund_deltas), "bet_count": len(bet_ids)},
             )
+            try:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (delta, discord_id, normalized_guild)
+                        for discord_id, delta in refund_deltas.items()
+                    ],
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             # Delete by bet_id for precise targeting
             if bet_ids:

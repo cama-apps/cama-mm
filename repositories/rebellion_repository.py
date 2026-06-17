@@ -167,14 +167,25 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                     f"You need {stake} JC to vote DEFEND (you have {balance})."
                 )
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (stake, discord_id, normalized_guild),
+            self._set_economy_ledger_context(
+                cursor,
+                source="rebellion",
+                related_type="wheel_war",
+                related_id=war_id,
+                reason="wheel war defend stake",
+                metadata={"stake": stake},
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (stake, discord_id, normalized_guild),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             voters.append(discord_id)
             new_count = row["effective_defend_count"] + 1.0
@@ -221,14 +232,28 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             if defender_ids:
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [(defender_stake, did, normalized_guild) for did in defender_ids],
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war defend stake refund",
+                    metadata={
+                        "defender_count": len(defender_ids),
+                        "defender_stake": defender_stake,
+                    },
                 )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [(defender_stake, did, normalized_guild) for did in defender_ids],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
             cursor.execute(
                 """
                 UPDATE wheel_wars
@@ -269,23 +294,48 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             cursor = conn.cursor()
 
             if defender_ids:
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [(per_defender_credit, did, normalized_guild) for did in defender_ids],
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war defender victory payout",
+                    metadata={
+                        "defender_count": len(defender_ids),
+                        "per_defender_credit": per_defender_credit,
+                    },
                 )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [(per_defender_credit, did, normalized_guild) for did in defender_ids],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
             if first_defender_id is not None and first_defender_bonus > 0:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (first_defender_bonus, first_defender_id, normalized_guild),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war first defender bonus",
+                    metadata={"first_defender_bonus": first_defender_bonus},
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (first_defender_bonus, first_defender_id, normalized_guild),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             cursor.execute(
                 """
@@ -369,28 +419,56 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (inciter_flat_reward, inciter_id, normalized_guild),
+            self._set_economy_ledger_context(
+                cursor,
+                source="rebellion",
+                related_type="wheel_war",
+                related_id=war_id,
+                reason="wheel war inciter victory payout",
+                metadata={"inciter_flat_reward": inciter_flat_reward},
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (inciter_flat_reward, inciter_id, normalized_guild),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             # Exclude the inciter: they already received inciter_flat_reward above.
             # attacker_ids includes the inciter (added at war creation), so we
             # must filter them out to avoid double-paying.
             non_inciter_attackers = [did for did in attacker_ids if did != inciter_id]
             if non_inciter_attackers:
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [(per_attacker_credit, did, normalized_guild) for did in non_inciter_attackers],
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war attacker victory payout",
+                    metadata={
+                        "attacker_count": len(non_inciter_attackers),
+                        "per_attacker_credit": per_attacker_credit,
+                    },
                 )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [
+                            (per_attacker_credit, did, normalized_guild)
+                            for did in non_inciter_attackers
+                        ],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             cursor.execute(
                 """
@@ -570,10 +648,21 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             if balance < amount:
                 raise ValueError(f"Insufficient balance: have {balance}, need {amount}")
             # Debit balance
-            cursor.execute(
-                "UPDATE players SET jopacoin_balance = jopacoin_balance - ? WHERE discord_id = ? AND guild_id = ?",
-                (amount, discord_id, normalized),
+            self._set_economy_ledger_context(
+                cursor,
+                source="rebellion_bet",
+                related_type="wheel_war",
+                related_id=war_id,
+                reason="wheel war meta-bet stake",
+                metadata={"side": side, "amount": amount},
             )
+            try:
+                cursor.execute(
+                    "UPDATE players SET jopacoin_balance = jopacoin_balance - ? WHERE discord_id = ? AND guild_id = ?",
+                    (amount, discord_id, normalized),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
             # Insert bet
             cursor.execute(
                 """
@@ -643,13 +732,28 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                     "UPDATE war_bets SET payout = ? WHERE bet_id = ?",
                     (payout, bet["bet_id"]),
                 )
-                cursor.execute(
-                    """
-                    UPDATE players SET jopacoin_balance = jopacoin_balance + ?
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (payout, bet["discord_id"], bet["guild_id"]),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion_bet",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war meta-bet payout",
+                    metadata={
+                        "side": bet["side"],
+                        "winning_side": winning_side,
+                        "bet_id": bet["bet_id"],
+                    },
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players SET jopacoin_balance = jopacoin_balance + ?
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (payout, bet["discord_id"], bet["guild_id"]),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
                 payouts.append({"discord_id": bet["discord_id"], "payout": payout})
 
             # Mark losing bets with payout=0

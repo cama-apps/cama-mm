@@ -157,7 +157,17 @@ class DisburseService:
         # Atomically read and deduct the entire nonprofit fund to prevent race
         # conditions where fund_amount could change between read and deduct.
         fund_amount = self.loan_repo.get_and_deduct_nonprofit_fund_atomic(
-            guild_id, min_amount=self.min_fund
+            guild_id,
+            min_amount=self.min_fund,
+            source="disburse",
+            related_type="disbursement",
+            related_id=proposal_id,
+            reason="Jopacoin Reserve funds locked for allocation vote",
+            metadata={
+                "proposal_id": proposal_id,
+                "min_fund": self.min_fund,
+                "quorum_required": quorum_required,
+            },
         )
 
         self.disburse_repo.create_proposal(

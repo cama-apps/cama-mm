@@ -116,7 +116,15 @@ class RecordingMixin:
             bonus = streak_bonus_for(new_streak, STREAKS)
             result[pid] = {"days": new_streak, "bonus": bonus}
             if bonus > 0:
-                self.player_repo.add_balance(pid, guild_id, bonus)
+                self.player_repo.add_balance(
+                    pid,
+                    guild_id,
+                    bonus,
+                    source="match_streak",
+                    related_type="dota_streak",
+                    reason="Dota streak match bonus",
+                    metadata={"streak_days": new_streak, "bonus": bonus},
+                )
                 net_bonus = bonus
                 if self.betting_service:
                     skimmed = self.betting_service._apply_blood_pact_skim(

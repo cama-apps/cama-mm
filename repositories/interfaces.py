@@ -1315,13 +1315,46 @@ class ILoanRepository(ABC):
     def get_nonprofit_fund(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
-    def add_to_nonprofit_fund(self, guild_id: int | None, amount: int) -> int: ...
+    def add_to_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int: ...
 
     @abstractmethod
-    def deduct_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int: ...
+    def deduct_from_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int: ...
 
     @abstractmethod
-    def get_and_deduct_nonprofit_fund_atomic(self, guild_id: int | None, min_amount: int = 0) -> int: ...
+    def get_and_deduct_nonprofit_fund_atomic(
+        self,
+        guild_id: int | None,
+        min_amount: int = 0,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int: ...
 
     @abstractmethod
     def execute_loan_atomic(

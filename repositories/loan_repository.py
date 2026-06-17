@@ -101,7 +101,18 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else 0
 
-    def add_to_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+    def add_to_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
         """
         Add amount to the nonprofit fund.
 
@@ -111,16 +122,41 @@ class LoanRepository(BaseRepository, ILoanRepository):
         normalized_id = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    total_collected = total_collected + excluded.total_collected,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (normalized_id, amount),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_id, amount),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
                 (normalized_id,),
@@ -128,7 +164,18 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else amount
 
-    def deduct_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+    def deduct_from_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
         """
         Atomically deduct amount from the nonprofit fund.
 
@@ -163,14 +210,39 @@ class LoanRepository(BaseRepository, ILoanRepository):
                     f"Insufficient nonprofit funds. Available: {current}, requested: {amount}"
                 )
 
-            cursor.execute(
-                """
-                UPDATE nonprofit_fund
-                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id = ?
-                """,
-                (amount, normalized_id),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE nonprofit_fund
+                    SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                    """,
+                    (amount, normalized_id),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
@@ -179,7 +251,18 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"]
 
-    def get_and_deduct_nonprofit_fund_atomic(self, guild_id: int | None, min_amount: int = 0) -> int:
+    def get_and_deduct_nonprofit_fund_atomic(
+        self,
+        guild_id: int | None,
+        min_amount: int = 0,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
         """
         Atomically read the entire nonprofit fund balance and deduct it.
 
@@ -215,14 +298,39 @@ class LoanRepository(BaseRepository, ILoanRepository):
             if current <= 0:
                 return 0
 
-            cursor.execute(
-                """
-                UPDATE nonprofit_fund
-                SET total_collected = 0, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id = ?
-                """,
-                (normalized_id,),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE nonprofit_fund
+                    SET total_collected = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                    """,
+                    (normalized_id,),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
 
             return current
 
@@ -324,15 +432,26 @@ class LoanRepository(BaseRepository, ILoanRepository):
             balance_before = balance_row["balance"]
             was_negative_loan = balance_before < 0
 
-            # Credit the loan amount to player
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (amount, discord_id, normalized_guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="loan",
+                related_type="loan",
+                related_id=discord_id,
+                reason="loan principal credit",
+                metadata={"amount": amount, "fee": fee},
             )
+            try:
+                # Credit the loan amount to player
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, discord_id, normalized_guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             # Update/insert loan state
             new_negative_loans = negative_loans_taken + (1 if was_negative_loan else 0)
@@ -412,25 +531,47 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 raise ValueError("Player not found.")
             balance_before = balance_row["balance"]
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (total_owed, discord_id, normalized_guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="loan_repayment",
+                related_type="loan",
+                related_id=discord_id,
+                reason="loan principal and fee repayment",
+                metadata={"principal": principal, "fee": fee, "total_owed": total_owed},
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (total_owed, discord_id, normalized_guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
-            cursor.execute(
-                """
-                INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    total_collected = total_collected + excluded.total_collected,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (normalized_guild_id, fee),
+            self._set_economy_ledger_context(
+                cursor,
+                source="loan_repayment",
+                related_type="loan",
+                related_id=discord_id,
+                reason="loan repayment fee reserve credit",
+                metadata={"principal": principal, "fee": fee, "total_owed": total_owed},
             )
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_guild_id, fee),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
                 (normalized_guild_id,),
@@ -499,25 +640,45 @@ class LoanRepository(BaseRepository, ILoanRepository):
                     f"Insufficient funds in nonprofit. Available: {available}, needed: {total}"
                 )
 
-            # Deduct from nonprofit
-            cursor.execute(
-                """
-                UPDATE nonprofit_fund
-                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id = ?
-                """,
-                (total, normalized_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="disburse",
+                related_type="disbursement",
+                reason="Jopacoin Reserve disbursement debit",
+                metadata={"recipient_count": len(distributions), "total": total},
             )
+            try:
+                # Deduct from nonprofit
+                cursor.execute(
+                    """
+                    UPDATE nonprofit_fund
+                    SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                    """,
+                    (total, normalized_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
-            # Credit players
-            cursor.executemany(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                [(amount, discord_id, normalized_id) for discord_id, amount in distributions],
+            self._set_economy_ledger_context(
+                cursor,
+                source="disburse",
+                related_type="disbursement",
+                reason="Jopacoin Reserve disbursement payout",
+                metadata={"recipient_count": len(distributions), "total": total},
             )
+            try:
+                # Credit players
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(amount, discord_id, normalized_id) for discord_id, amount in distributions],
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             return total
 

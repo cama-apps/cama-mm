@@ -501,15 +501,30 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     f"Insufficient balance: need {total_cost}, have {balance}."
                 )
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance - ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (total_cost, discord_id, guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="prediction",
+                related_type="prediction",
+                related_id=prediction_id,
+                reason="prediction contract purchase",
+                metadata={
+                    "side": side,
+                    "contracts": contracts,
+                    "total_cost": total_cost,
+                },
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (total_cost, discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             for level_id, _, take in fills:
                 cursor.execute(
@@ -657,15 +672,30 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 weighted_pct = sum((100 - price) * take for _, price, take in fills)
             total_proceeds = _quote_total(weighted_pct, "sell")
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (total_proceeds, discord_id, guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="prediction",
+                related_type="prediction",
+                related_id=prediction_id,
+                reason="prediction contract sale",
+                metadata={
+                    "side": side,
+                    "contracts": contracts,
+                    "total_proceeds": total_proceeds,
+                },
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (total_proceeds, discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             for level_id, _, take in fills:
                 cursor.execute(
@@ -1320,15 +1350,31 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         st = cursor.fetchone()
                         if st is not None and int(st["pg"]) > 0:
                             penalty = int(profit * (1 - bankruptcy_penalty_rate))
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (payout - penalty, p["discord_id"], guild_id),
+                    self._set_economy_ledger_context(
+                        cursor,
+                        source="prediction_resolution",
+                        related_type="prediction",
+                        related_id=prediction_id,
+                        reason="prediction resolution payout",
+                        metadata={
+                            "outcome": outcome,
+                            "gross_payout": payout,
+                            "bankruptcy_penalty": penalty,
+                            "winning_contracts": winning_qty,
+                        },
                     )
+                    try:
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (payout - penalty, p["discord_id"], guild_id),
+                        )
+                    finally:
+                        self._clear_economy_ledger_context(cursor)
                     total_payout += payout
                     winner = {
                         "discord_id": int(p["discord_id"]),
@@ -1412,15 +1458,26 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             for h in holders:
                 refund = int(h["yes_cost_basis_total"]) + int(h["no_cost_basis_total"])
                 if refund > 0:
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (refund, h["discord_id"], guild_id),
+                    self._set_economy_ledger_context(
+                        cursor,
+                        source="prediction_refund",
+                        related_type="prediction",
+                        related_id=prediction_id,
+                        reason="cancelled prediction cost-basis refund",
+                        metadata={"refund": refund},
                     )
+                    try:
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (refund, h["discord_id"], guild_id),
+                        )
+                    finally:
+                        self._clear_economy_ledger_context(cursor)
                     total_refunded += refund
                 refunded.append({
                     "discord_id": int(h["discord_id"]),

@@ -206,7 +206,16 @@ class BankruptcyService(IBankruptcyService):
                 "penalty_applied"
             ]
             if penalty > 0:
-                self.player_repo.add_balance(discord_id, guild_id, -penalty)
+                self.player_repo.add_balance(
+                    discord_id,
+                    guild_id,
+                    -penalty,
+                    source="bankruptcy_penalty",
+                    related_type="bankruptcy",
+                    related_id=discord_id,
+                    reason="bankruptcy penalty on winnings",
+                    metadata={"profit": profit, "penalty": penalty},
+                )
                 penalties[discord_id] = penalty
         return penalties
 

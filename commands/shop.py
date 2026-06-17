@@ -1907,7 +1907,17 @@ class ShopCommands(commands.Cog):
             loan_service = getattr(self.bot, "loan_service", None)
             if loan_service is not None:
                 try:
-                    await asyncio.to_thread(loan_service.add_to_nonprofit_fund, guild_id, cost)
+                    await asyncio.to_thread(
+                        loan_service.add_to_nonprofit_fund,
+                        guild_id,
+                        cost,
+                        source="shop",
+                        actor_id=user_id,
+                        related_type="manashop_purchase",
+                        related_id="communion",
+                        reason="communion reserve donation",
+                        metadata={"item": "communion", "cost": cost},
+                    )
                 except Exception:
                     pass
             # Grant a small "blessing" buff: +10% next match win bonus.

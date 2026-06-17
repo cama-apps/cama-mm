@@ -271,6 +271,10 @@ class TriviaView(discord.ui.View):
                                     loan_service.add_to_nonprofit_fund,
                                     self.session.guild_id,
                                     mana_tithe,
+                                    source="trivia",
+                                    related_type="plains_tithe",
+                                    reason="trivia plains tithe reserve credit",
+                                    metadata={"tithe": mana_tithe, "net_jc_before_tithe": jc},
                                 )
                                 jc -= mana_tithe
                             except Exception:

@@ -121,7 +121,14 @@ class ProgressionMixin:
         if effects.plains_tithe_rate > 0 and modified > 0 and loan_service is not None:
             tithe = max(1, int(modified * effects.plains_tithe_rate))
             try:
-                loan_service.add_to_nonprofit_fund(guild_id, tithe)
+                loan_service.add_to_nonprofit_fund(
+                    guild_id,
+                    tithe,
+                    source="dig",
+                    related_type="plains_tithe",
+                    reason="dig plains tithe reserve credit",
+                    metadata={"total_jc": total_jc, "tithe": tithe},
+                )
                 modified -= tithe
             except Exception:
                 logger.warning(
@@ -881,7 +888,17 @@ class ProgressionMixin:
         )
         if target_jc_bonus > 0:
             try:
-                self.player_repo.add_balance(target_id, guild_id, target_jc_bonus)
+                self.player_repo.add_balance(
+                    target_id,
+                    guild_id,
+                    target_jc_bonus,
+                    source="dig",
+                    actor_id=helper_id,
+                    related_type="mentor_bonus",
+                    related_id=helper_id,
+                    reason="dig mentor target bonus",
+                    metadata={"advance": advance, "bonus": target_jc_bonus},
+                )
             except Exception:
                 logger.debug("Mentor's Lantern target bonus failed", exc_info=True)
                 target_jc_bonus = 0
@@ -959,7 +976,15 @@ class ProgressionMixin:
 
                 if self.buff_service.has_pvp_immunity(target_id, guild_id):
                     self.player_repo.add_balance(
-                        target_id, guild_id, victim_block_tip,
+                        target_id,
+                        guild_id,
+                        victim_block_tip,
+                        source="dig",
+                        actor_id=actor_id,
+                        related_type="sabotage_block",
+                        related_id=actor_id,
+                        reason="dig sabotage ward block tip",
+                        metadata={"tip": victim_block_tip},
                     )
                     return self._error(
                         "Your target is shielded by an active manashop ward — "
@@ -969,7 +994,15 @@ class ProgressionMixin:
                 if self.buff_service.consume_aegis_charge(target_id, guild_id):
                     # Charge absorbed — log the wasted attempt and refund cost.
                     self.player_repo.add_balance(
-                        target_id, guild_id, victim_block_tip,
+                        target_id,
+                        guild_id,
+                        victim_block_tip,
+                        source="dig",
+                        actor_id=actor_id,
+                        related_type="sabotage_block",
+                        related_id=actor_id,
+                        reason="dig sabotage aegis block tip",
+                        metadata={"tip": victim_block_tip},
                     )
                     self.dig_repo.log_action(
                         discord_id=actor_id, guild_id=guild_id,
@@ -1176,7 +1209,19 @@ class ProgressionMixin:
                 if steal_pct > 0 and target_depth > 0:
                     attacker_steal_jc = max(1, int(target_depth * steal_pct * 0.5))
                     self.player_repo.add_balance(
-                        actor_id, guild_id, attacker_steal_jc,
+                        actor_id,
+                        guild_id,
+                        attacker_steal_jc,
+                        source="dig",
+                        actor_id=target_id,
+                        related_type="sabotage_steal",
+                        related_id=target_id,
+                        reason="dig black mana sabotage steal",
+                        metadata={
+                            "target_id": target_id,
+                            "target_depth": target_depth,
+                            "amount": attacker_steal_jc,
+                        },
                     )
             except Exception:
                 logger.debug("Black sabotage steal failed", exc_info=True)
@@ -1195,9 +1240,29 @@ class ProgressionMixin:
                 # Reflect via an atomic, floored debit so a relic proc can't
                 # drain the saboteur below zero. If they can't absorb the pain,
                 # no reflect lands but the owner still gets their flat bonus.
-                if self.player_repo.try_debit(actor_id, guild_id, reflect_amount):
+                if self.player_repo.try_debit(
+                    actor_id,
+                    guild_id,
+                    reflect_amount,
+                    source="dig",
+                    actor_id=target_id,
+                    related_type="vendetta_reflect",
+                    related_id=target_id,
+                    reason="dig vendetta reflect debit",
+                    metadata={"target_id": target_id, "damage": damage},
+                ):
                     vendetta_reflect = reflect_amount
-                self.player_repo.add_balance(target_id, guild_id, vendetta_bonus)
+                self.player_repo.add_balance(
+                    target_id,
+                    guild_id,
+                    vendetta_bonus,
+                    source="dig",
+                    actor_id=actor_id,
+                    related_type="vendetta_reflect",
+                    related_id=actor_id,
+                    reason="dig vendetta reflect bonus",
+                    metadata={"attacker_id": actor_id, "damage": damage},
+                )
                 self.dig_repo.log_action(
                     discord_id=target_id, guild_id=guild_id,
                     action_type="vendetta_reflect",

@@ -455,7 +455,12 @@ async def test_wheel_bankrupt_credits_nonprofit_fund():
                     await cmds.gamba.callback(cmds, interaction)
 
     # Should credit the nonprofit fund with the absolute loss value
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, abs(int(bankrupt_value)))
+    loan_service.add_to_nonprofit_fund.assert_called_once()
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (
+        123,
+        abs(int(bankrupt_value)),
+    )
+    assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
 @pytest.mark.asyncio
@@ -1128,7 +1133,9 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -10)
 
     # Should credit nonprofit fund with the loss
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 10)
+    loan_service.add_to_nonprofit_fund.assert_called_once()
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
+    assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
 @pytest.mark.asyncio
@@ -1211,7 +1218,9 @@ async def test_wheel_lightning_bolt_taxes_all_players():
         assert call[0][2] < 0, "Tax should be negative"
 
     # Should credit nonprofit fund with total tax (20 + 10 + 2 = 32)
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 32)
+    loan_service.add_to_nonprofit_fund.assert_called_once()
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 32)
+    assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
 @pytest.mark.asyncio
@@ -1290,7 +1299,9 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
     assert adjust_calls[0][0] == (3001, 123, -10)  # 2% of 500 = 10
 
     # Nonprofit receives only the one tax
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 10)
+    loan_service.add_to_nonprofit_fund.assert_called_once()
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
+    assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
 @pytest.mark.asyncio

@@ -180,7 +180,15 @@ class GearMixin:
             # daily cap is already consumed (player just misses out) rather than
             # leaving the claim unrecorded and re-claimable.
             self.slow_drip_repo.add_claim(discord_id, guild_id, today, credit)
-            self.player_repo.add_balance(discord_id, guild_id, credit)
+            self.player_repo.add_balance(
+                discord_id,
+                guild_id,
+                credit,
+                source="dig",
+                related_type="slow_drip",
+                reason="dig slow drip credit",
+                metadata={"today": today, "claimed_today": already, "credit": credit},
+            )
             return credit
         except Exception:
             logger.debug("Slow Drip claim failed", exc_info=True)
@@ -417,7 +425,16 @@ class GearMixin:
         if int(row["durability"]) >= GEAR_MAX_DURABILITY:
             return self._error("That piece is already at full durability.")
         cost = self._gear_repair_cost(row["slot"], int(row["tier"]))
-        if cost > 0 and not self.player_repo.try_debit(discord_id, guild_id, cost):
+        if cost > 0 and not self.player_repo.try_debit(
+            discord_id,
+            guild_id,
+            cost,
+            source="dig",
+            related_type="gear_repair",
+            related_id=gear_id,
+            reason="dig gear repair cost",
+            metadata={"slot": row["slot"], "tier": int(row["tier"]), "cost": cost},
+        ):
             balance = self.player_repo.get_balance(discord_id, guild_id)
             return self._error(f"Repair costs {cost} JC; you only have {balance}.")
         self.dig_repo.repair_gear(gear_id, GEAR_MAX_DURABILITY)
@@ -437,7 +454,15 @@ class GearMixin:
         if not damaged:
             return self._error("Nothing to repair.")
         total_cost = sum(self._gear_repair_cost(r["slot"], int(r["tier"])) for r in damaged)
-        if total_cost > 0 and not self.player_repo.try_debit(discord_id, guild_id, total_cost):
+        if total_cost > 0 and not self.player_repo.try_debit(
+            discord_id,
+            guild_id,
+            total_cost,
+            source="dig",
+            related_type="gear_repair_all",
+            reason="dig gear repair-all cost",
+            metadata={"repaired": len(damaged), "cost": total_cost},
+        ):
             balance = self.player_repo.get_balance(discord_id, guild_id)
             return self._error(
                 f"Total repair costs {total_cost} JC; you only have {balance}.",
@@ -469,7 +494,19 @@ class GearMixin:
         if prestige < td.prestige_required:
             return self._error(f"{td.name} requires prestige {td.prestige_required}.")
         if td.shop_price > 0 and not self.player_repo.try_debit(
-            discord_id, guild_id, td.shop_price,
+            discord_id,
+            guild_id,
+            td.shop_price,
+            source="dig",
+            related_type="gear_purchase",
+            related_id=f"{slot_enum.value}:{tier}",
+            reason="dig gear purchase",
+            metadata={
+                "slot": slot_enum.value,
+                "tier": tier,
+                "name": td.name,
+                "cost": td.shop_price,
+            },
         ):
             balance = self.player_repo.get_balance(discord_id, guild_id)
             return self._error(

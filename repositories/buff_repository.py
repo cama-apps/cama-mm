@@ -173,15 +173,26 @@ class BuffRepository(BaseRepository):
             )
             if cursor.rowcount == 0:
                 return False
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (amount, discord_id, gid),
+            self._set_economy_ledger_context(
+                cursor,
+                source="manashop_buff",
+                related_type="buff",
+                related_id=buff_id,
+                reason="manashop one-shot buff credit",
+                metadata={"buff_id": buff_id, "amount": amount},
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, discord_id, gid),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
             return True
 
     def update_data(self, buff_id: int, data: dict[str, Any]) -> None:
@@ -380,15 +391,32 @@ class BuffRepository(BaseRepository):
                     amount = default_penalty
                     status = "defaulted"
 
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (amount, discord_id, guild_id),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="manashop_buff",
+                    related_type="dark_bargain",
+                    related_id=debt["id"],
+                    reason=f"dark bargain {status}",
+                    metadata={
+                        "amount_due": amount_due,
+                        "amount_charged": amount,
+                        "status": status,
+                        "default_penalty": default_penalty,
+                        "default_penalty_games": default_penalty_games,
+                    },
                 )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (amount, discord_id, guild_id),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
                 cursor.execute(
                     """
                     UPDATE players

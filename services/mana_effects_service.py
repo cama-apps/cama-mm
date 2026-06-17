@@ -92,19 +92,41 @@ class ManaEffectsService:
             return 0
 
         try:
-            self.loan_service.subtract_from_nonprofit_fund(guild_id, amount)
+            self.loan_service.subtract_from_nonprofit_fund(
+                guild_id,
+                amount,
+                source="mana",
+                related_type="bankruptcy_stipend",
+                related_id=discord_id,
+                reason="white mana bankruptcy stipend reserve debit",
+                metadata={"amount": amount, "land": land},
+            )
         except Exception:
             logger.exception("Failed to deduct stipend from nonprofit fund")
             return 0
 
         try:
             self.player_repo.add_balance(
-                discord_id, self.player_repo.normalize_guild_id(guild_id), amount
+                discord_id,
+                self.player_repo.normalize_guild_id(guild_id),
+                amount,
+                source="mana",
+                related_type="bankruptcy_stipend",
+                reason="white mana bankruptcy stipend",
+                metadata={"amount": amount, "land": land},
             )
         except Exception:
             logger.exception("Stipend balance adjust failed; refunding nonprofit")
             try:
-                self.loan_service.add_to_nonprofit_fund(guild_id, amount)
+                self.loan_service.add_to_nonprofit_fund(
+                    guild_id,
+                    amount,
+                    source="mana",
+                    related_type="bankruptcy_stipend",
+                    related_id=discord_id,
+                    reason="white mana bankruptcy stipend refund",
+                    metadata={"amount": amount, "land": land},
+                )
             except Exception:
                 logger.exception("Stipend refund to nonprofit also failed")
             return 0
@@ -157,7 +179,15 @@ class ManaEffectsService:
         if effects.blue_tax_rate <= 0 or gain <= 0:
             return 0
         tax = max(1, int(gain * effects.blue_tax_rate))
-        self.player_repo.add_balance(discord_id, guild_id, -tax)
+        self.player_repo.add_balance(
+            discord_id,
+            guild_id,
+            -tax,
+            source="mana",
+            related_type="blue_tax",
+            reason="blue mana gain tax",
+            metadata={"gain": gain, "tax": tax},
+        )
         return tax
 
     def apply_blue_cashback(self, discord_id: int, guild_id: int | None, loss: int) -> int:
@@ -166,7 +196,15 @@ class ManaEffectsService:
         if effects.blue_cashback_rate <= 0 or loss <= 0:
             return 0
         cashback = max(1, int(abs(loss) * effects.blue_cashback_rate))
-        self.player_repo.add_balance(discord_id, guild_id, cashback)
+        self.player_repo.add_balance(
+            discord_id,
+            guild_id,
+            cashback,
+            source="mana",
+            related_type="blue_cashback",
+            reason="blue mana loss cashback",
+            metadata={"loss": loss, "cashback": cashback},
+        )
         return cashback
 
     def apply_green_cap(self, effects: ManaEffects, gain: int) -> int:
@@ -206,8 +244,24 @@ class ManaEffectsService:
         if effects.plains_tithe_rate <= 0 or gain <= 0:
             return 0
         tithe = max(1, int(gain * effects.plains_tithe_rate))
-        self.player_repo.add_balance(discord_id, guild_id, -tithe)
-        self.loan_service.add_to_nonprofit_fund(guild_id, tithe)
+        self.player_repo.add_balance(
+            discord_id,
+            guild_id,
+            -tithe,
+            source="mana",
+            related_type="plains_tithe",
+            reason="plains mana tithe",
+            metadata={"gain": gain, "tithe": tithe},
+        )
+        self.loan_service.add_to_nonprofit_fund(
+            guild_id,
+            tithe,
+            source="mana",
+            related_type="plains_tithe",
+            related_id=discord_id,
+            reason="plains mana tithe reserve credit",
+            metadata={"gain": gain, "tithe": tithe},
+        )
         return tithe
 
     # ------------------------------------------------------------------

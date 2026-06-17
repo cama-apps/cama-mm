@@ -259,7 +259,22 @@ def resolve_splash(
     for vid in victim_ids:
         if mode == "grant":
             actual = int(penalty_jc)
-            player_repo.add_balance(vid, guild_id, actual)
+            player_repo.add_balance(
+                vid,
+                guild_id,
+                actual,
+                source="dig",
+                actor_id=digger_id,
+                related_type="splash_victim",
+                related_id=event_name,
+                reason="dig splash victim grant",
+                metadata={
+                    "event_name": event_name,
+                    "strategy": strategy,
+                    "mode": mode,
+                    "digger_id": digger_id,
+                },
+            )
             dig_repo.log_action(
                 discord_id=vid,
                 guild_id=guild_id,
@@ -277,6 +292,16 @@ def resolve_splash(
                     victim_discord_id=vid,
                     guild_id=guild_id,
                     amount=actual,
+                    source="dig",
+                    actor_id=digger_id,
+                    related_type="splash_victim",
+                    related_id=event_name,
+                    reason="dig splash steal",
+                    metadata={
+                        "event_name": event_name,
+                        "strategy": strategy,
+                        "mode": mode,
+                    },
                 )
             except ValueError:
                 logger.exception(
@@ -312,7 +337,22 @@ def resolve_splash(
         actual = int(min(penalty_jc, current_balance))
         if actual <= 0:
             continue
-        player_repo.add_balance(vid, guild_id, -actual)
+        player_repo.add_balance(
+            vid,
+            guild_id,
+            -actual,
+            source="dig",
+            actor_id=digger_id,
+            related_type="splash_victim",
+            related_id=event_name,
+            reason="dig splash victim penalty",
+            metadata={
+                "event_name": event_name,
+                "strategy": strategy,
+                "mode": mode,
+                "digger_id": digger_id,
+            },
+        )
         dig_repo.log_action(
             discord_id=vid,
             guild_id=guild_id,

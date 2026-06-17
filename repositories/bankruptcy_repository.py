@@ -108,14 +108,29 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
                 if elapsed < cooldown_seconds:
                     raise ValueError(f"cooldown:{cooldown_seconds - elapsed}")
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (fresh_start_balance, discord_id, normalized_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="bankruptcy",
+                related_type="bankruptcy",
+                related_id=discord_id,
+                reason="bankruptcy fresh start balance reset",
+                metadata={
+                    "debt_cleared": abs(balance),
+                    "fresh_start_balance": fresh_start_balance,
+                    "penalty_games": penalty_games,
+                },
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (fresh_start_balance, discord_id, normalized_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
             cursor.execute(
                 """
                 INSERT INTO bankruptcy_state (discord_id, guild_id, last_bankruptcy_at, penalty_games_remaining, bankruptcy_count, updated_at)

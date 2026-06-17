@@ -762,17 +762,33 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "balance": balance,
                 }
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                  AND COALESCE(jopacoin_balance, 0) >= ?
-                """,
-                (cost, discord_id, normalized, cost),
+            self._set_economy_ledger_context(
+                cursor,
+                source="protected_hero",
+                related_type="pending_match",
+                related_id=pending_match_id,
+                reason="protected hero purchase",
+                metadata={
+                    "hero_id": hero_id,
+                    "team_side": team_side,
+                    "cost": cost,
+                },
             )
-            if cursor.rowcount == 0:
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND COALESCE(jopacoin_balance, 0) >= ?
+                    """,
+                    (cost, discord_id, normalized, cost),
+                )
+                debit_rowcount = cursor.rowcount
+            finally:
+                self._clear_economy_ledger_context(cursor)
+            if debit_rowcount == 0:
                 cursor.execute(
                     """
                     SELECT COALESCE(jopacoin_balance, 0) AS balance

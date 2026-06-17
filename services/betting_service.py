@@ -296,7 +296,15 @@ class BettingService:
                     sanctuary_bonus = 0
                 if sanctuary_bonus > 0:
                     try:
-                        self.player_repo.add_balance(pid, guild_id, sanctuary_bonus)
+                        self.player_repo.add_balance(
+                            pid,
+                            guild_id,
+                            sanctuary_bonus,
+                            source="manashop_buff",
+                            related_type="sanctuary_match_bonus",
+                            reason="sanctuary match-win bonus",
+                            metadata={"bonus": sanctuary_bonus},
+                        )
                         credited += sanctuary_bonus
                     except Exception:
                         logger.exception(

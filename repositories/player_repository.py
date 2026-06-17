@@ -782,7 +782,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 if has_context:
                     self._clear_economy_ledger_context(cursor)
 
-    def try_debit(self, discord_id: int, guild_id: int, amount: int) -> bool:
+    def try_debit(
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> bool:
         """Atomically debit ``amount`` JC if and only if the player has enough.
 
         Returns True on success, False if the balance was insufficient. Uses
@@ -794,17 +806,43 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                  AND COALESCE(jopacoin_balance, 0) >= ?
-                """,
-                (amount, discord_id, guild_id, amount),
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
             )
-            if cursor.rowcount == 0:
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND COALESCE(jopacoin_balance, 0) >= ?
+                    """,
+                    (amount, discord_id, guild_id, amount),
+                )
+                debit_rowcount = cursor.rowcount
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
+            if debit_rowcount == 0:
                 return False
             cursor.execute(
                 """
@@ -1101,25 +1139,49 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             debt = abs(to_balance)
             actual_amount = min(amount, debt)
 
-            # Deduct from sender
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (actual_amount, from_discord_id, guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="debt_payment",
+                actor_id=from_discord_id,
+                related_type="player_debt",
+                related_id=to_discord_id,
+                reason="debt payment sender debit",
+                metadata={"amount_paid": actual_amount},
             )
+            try:
+                # Deduct from sender
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (actual_amount, from_discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
-            # Add to recipient (reduces debt)
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (actual_amount, to_discord_id, guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="debt_payment",
+                actor_id=from_discord_id,
+                related_type="player_debt",
+                related_id=to_discord_id,
+                reason="debt payment recipient credit",
+                metadata={"amount_paid": actual_amount},
             )
+            try:
+                # Add to recipient (reduces debt)
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (actual_amount, to_discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             return {
                 "amount_paid": actual_amount,
@@ -1203,23 +1265,52 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             to_balance = int(to_row["balance"])
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (total_cost, from_discord_id, guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="tip",
+                actor_id=from_discord_id,
+                related_type="player_tip",
+                related_id=to_discord_id,
+                reason="tip sender debit",
+                metadata={
+                    "amount": amount,
+                    "fee": fee,
+                    "tithe": tithe,
+                    "total_cost": total_cost,
+                },
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (total_cost, from_discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (amount, to_discord_id, guild_id),
+            self._set_economy_ledger_context(
+                cursor,
+                source="tip",
+                actor_id=from_discord_id,
+                related_type="player_tip",
+                related_id=to_discord_id,
+                reason="tip recipient credit",
+                metadata={"amount": amount, "fee": fee, "tithe": tithe},
             )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, to_discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
             new_from_balance = from_balance - total_cost
             cursor.execute(
@@ -1233,16 +1324,33 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
 
             if nonprofit_credit > 0:
-                cursor.execute(
-                    """
-                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                    ON CONFLICT(guild_id) DO UPDATE SET
-                        total_collected = total_collected + excluded.total_collected,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    (guild_id, nonprofit_credit),
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="tip",
+                    actor_id=from_discord_id,
+                    related_type="player_tip",
+                    related_id=to_discord_id,
+                    reason="tip fee and tithe reserve credit",
+                    metadata={
+                        "amount": amount,
+                        "fee": fee,
+                        "tithe": tithe,
+                        "nonprofit_credit": nonprofit_credit,
+                    },
                 )
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(guild_id) DO UPDATE SET
+                            total_collected = total_collected + excluded.total_collected,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (guild_id, nonprofit_credit),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
 
             return {
                 "amount": amount,
@@ -1587,14 +1695,24 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return 0
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.executemany(
-                """
-                UPDATE players
-                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                [(interest, discord_id, guild_id) for discord_id, interest in updates],
+            self._set_economy_ledger_context(
+                cursor,
+                source="debt_interest",
+                related_type="debt_interest",
+                reason="debt interest charge",
+                metadata={"charge_count": len(updates)},
             )
+            try:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(interest, discord_id, guild_id) for discord_id, interest in updates],
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
             return cursor.rowcount
 
     def increment_wins(self, discord_id: int, guild_id: int) -> None:

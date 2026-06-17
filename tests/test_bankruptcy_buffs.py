@@ -234,8 +234,14 @@ class TestWhiteStipend:
         _register(svc["player_repo"], 70003, balance=0)
         paid = svc["effects"].apply_bankrupt_stipend(70003, GID, "Plains")
         assert paid == WHITE_BANKRUPT_STIPEND
-        svc["loan_service"].subtract_from_nonprofit_fund.assert_called_once_with(
-            GID, WHITE_BANKRUPT_STIPEND
+        svc["loan_service"].subtract_from_nonprofit_fund.assert_called_once()
+        assert svc["loan_service"].subtract_from_nonprofit_fund.call_args.args == (
+            GID,
+            WHITE_BANKRUPT_STIPEND,
+        )
+        assert (
+            svc["loan_service"].subtract_from_nonprofit_fund.call_args.kwargs["source"]
+            == "mana"
         )
 
     def test_negative_balance_pays_full(self, svc):
@@ -252,7 +258,12 @@ class TestWhiteStipend:
         svc["loan_service"].get_nonprofit_fund.return_value = 3
         paid = svc["effects"].apply_bankrupt_stipend(70005, GID, "Plains")
         assert paid == 3
-        svc["loan_service"].subtract_from_nonprofit_fund.assert_called_once_with(GID, 3)
+        svc["loan_service"].subtract_from_nonprofit_fund.assert_called_once()
+        assert svc["loan_service"].subtract_from_nonprofit_fund.call_args.args == (GID, 3)
+        assert (
+            svc["loan_service"].subtract_from_nonprofit_fund.call_args.kwargs["source"]
+            == "mana"
+        )
 
     def test_empty_fund_skips(self, svc):
         _register(svc["player_repo"], 70006, balance=-10)

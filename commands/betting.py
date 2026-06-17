@@ -1367,7 +1367,17 @@ class BettingCommands(commands.Cog):
                 # Credit nonprofit fund with the self-hit loss
                 if self.loan_service:
                     try:
-                        await asyncio.to_thread(self.loan_service.add_to_nonprofit_fund, guild_id, shell_amount)
+                        await asyncio.to_thread(
+                            self.loan_service.add_to_nonprofit_fund,
+                            guild_id,
+                            shell_amount,
+                            source="gamba",
+                            actor_id=user_id,
+                            related_type="wheel_spin",
+                            related_id="BLUE_SHELL",
+                            reason="gamba blue shell self-hit reserve credit",
+                            metadata={"amount": shell_amount},
+                        )
                     except Exception:
                         logger.warning("Failed to add blue shell self-hit to nonprofit fund")
             elif leaderboard:
@@ -1430,7 +1440,19 @@ class BettingCommands(commands.Cog):
             if self.loan_service and lightning_total > 0:
                 try:
                     await asyncio.to_thread(
-                        self.loan_service.add_to_nonprofit_fund, guild_id, lightning_total
+                        self.loan_service.add_to_nonprofit_fund,
+                        guild_id,
+                        lightning_total,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="LIGHTNING_BOLT",
+                        reason="gamba lightning bolt reserve credit",
+                        metadata={
+                            "victim_count": lightning_count,
+                            "tax_pct": lightning_pct,
+                            "total": lightning_total,
+                        },
                     )
                 except Exception:
                     logger.warning("Failed to add lightning bolt tax to nonprofit fund")
@@ -1892,7 +1914,15 @@ class BettingCommands(commands.Cog):
             if self.loan_service and recession_total > 0:
                 try:
                     await asyncio.to_thread(
-                        self.loan_service.add_to_nonprofit_fund, guild_id, recession_total
+                        self.loan_service.add_to_nonprofit_fund,
+                        guild_id,
+                        recession_total,
+                        source="gamba",
+                        actor_id=user_id,
+                        related_type="wheel_spin",
+                        related_id="RECESSION",
+                        reason="gamba recession reserve credit",
+                        metadata={"victim_count": recession_count, "total": recession_total},
                     )
                 except Exception:
                     logger.warning("Failed to add recession losses to nonprofit fund")
@@ -1979,7 +2009,15 @@ class BettingCommands(commands.Cog):
                 if self.loan_service:
                     try:
                         await asyncio.to_thread(
-                            self.loan_service.add_to_nonprofit_fund, guild_id, abs(int(result_value))
+                            self.loan_service.add_to_nonprofit_fund,
+                            guild_id,
+                            abs(int(result_value)),
+                            source="gamba",
+                            actor_id=user_id,
+                            related_type="wheel_spin",
+                            related_id=str(result_wedge[0]),
+                            reason="gamba bankrupt wheel loss reserve credit",
+                            metadata={"wedge": str(result_wedge[0])},
                         )
                     except Exception:
                         logger.warning("Failed to add wheel loss to nonprofit fund")

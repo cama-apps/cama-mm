@@ -141,11 +141,42 @@ class LoanService(ILoanService):
         """Get the total collected in the nonprofit fund."""
         return self.loan_repo.get_nonprofit_fund(guild_id)
 
-    def add_to_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+    def add_to_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
         """Add amount to the nonprofit fund. Returns the new total."""
-        return self.loan_repo.add_to_nonprofit_fund(guild_id, amount)
+        return self.loan_repo.add_to_nonprofit_fund(
+            guild_id,
+            amount,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
 
-    def subtract_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+    def subtract_from_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
         """
         Subtract amount from the nonprofit fund (admin operation).
 
@@ -159,7 +190,16 @@ class LoanService(ILoanService):
         Raises:
             ValueError: If insufficient funds
         """
-        return self.loan_repo.deduct_from_nonprofit_fund(guild_id, amount)
+        return self.loan_repo.deduct_from_nonprofit_fund(
+            guild_id,
+            amount,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
 
     def reset_loan_cooldown(self, discord_id: int, guild_id: int | None) -> None:
         """

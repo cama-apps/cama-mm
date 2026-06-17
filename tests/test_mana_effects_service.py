@@ -514,7 +514,12 @@ class TestManaEffectsService:
         assert tithe == 5  # 5% of 100
         bal = service["player_repo"].get_balance(50001, GID)
         assert bal == 195  # 200 - 5
-        service["loan_service"].add_to_nonprofit_fund.assert_called_once_with(GID, 5)
+        service["loan_service"].add_to_nonprofit_fund.assert_called_once()
+        assert service["loan_service"].add_to_nonprofit_fund.call_args.args == (GID, 5)
+        assert (
+            service["loan_service"].add_to_nonprofit_fund.call_args.kwargs["source"]
+            == "mana"
+        )
 
     def test_apply_plains_tithe_zero_gain(self, service):
         """Plains tithe returns 0 for zero gain and does not transfer."""
