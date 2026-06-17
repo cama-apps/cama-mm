@@ -224,7 +224,7 @@ def build_wheel_result_embed(
             f"**{label}**\n\n"
             f"Lightning strikes the entire server!\n\n"
             f"**{lightning_count}** players hit for a total of **{lightning_total}** {JOPACOIN_EMOTE}\n"
-            f"All funds sent to the nonprofit fund.\n\n"
+            f"All funds sent to the Jopacoin Reserve.\n\n"
             f"{victim_lines}\n"
             f"*No one is safe.*"
         )
@@ -326,7 +326,7 @@ def build_wheel_result_embed(
             f"📉 The economy contracts. **{recession_count}** players lost a slice of their balance — "
             f"the wealthier you are, the more you bleed.\n\n"
             f"You lost **{recession_self_loss}** {JOPACOIN_EMOTE}.\n"
-            f"Total drained from the server: **{recession_total}** {JOPACOIN_EMOTE} (sent to nonprofit).\n\n"
+            f"Total drained from the server: **{recession_total}** {JOPACOIN_EMOTE} (sent to Jopacoin Reserve).\n\n"
             f"*Pride goes before the fall — and it drags the rest down with it.*"
         )
 

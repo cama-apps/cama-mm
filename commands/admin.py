@@ -582,11 +582,11 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @admin.command(name="givecoin", description="Give jopacoin to a user or nonprofit (Admin only)")
+    @admin.command(name="givecoin", description="Give jopacoin to a user or reserve (Admin only)")
     @app_commands.describe(
-        user="The user to give coins to (leave empty if targeting nonprofit)",
+        user="The user to give coins to (leave empty if targeting reserve)",
         amount="Amount to give (can be negative to take)",
-        nonprofit="Give to the nonprofit fund instead of a user",
+        nonprofit="Give to the Jopacoin Reserve instead of a user",
     )
     @require_guild
     async def givecoin(
@@ -596,7 +596,7 @@ class AdminCommands(commands.Cog):
         user: discord.Member | None = None,
         nonprofit: bool = False,
     ):
-        """Admin command to give or take jopacoin from a user or nonprofit fund."""
+        """Admin command to give or take jopacoin from a user or the reserve."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
                 "❌ Admin only! You need Administrator or Manage Server permissions.",
@@ -607,14 +607,14 @@ class AdminCommands(commands.Cog):
         # Validate target - must specify exactly one
         if nonprofit and user:
             await interaction.response.send_message(
-                "❌ Cannot specify both a user and nonprofit. Choose one target.",
+                "❌ Cannot specify both a user and the Jopacoin Reserve. Choose one target.",
                 ephemeral=True,
             )
             return
 
         if not nonprofit and not user:
             await interaction.response.send_message(
-                "❌ Must specify either a user or set nonprofit=True.",
+                "❌ Must specify either a user or set nonprofit=True for the Jopacoin Reserve.",
                 ephemeral=True,
             )
             return
@@ -641,8 +641,8 @@ class AdminCommands(commands.Cog):
                     self.loan_service.get_nonprofit_fund, guild_id
                 )
                 await interaction.response.send_message(
-                    f"✅ Added **{amount}** jopacoin to the nonprofit fund\n"
-                    f"Fund balance: {old_balance} → {new_balance}",
+                    f"✅ Added **{amount}** jopacoin to the Jopacoin Reserve\n"
+                    f"Reserve balance: {old_balance} → {new_balance}",
                     ephemeral=True,
                 )
             else:
@@ -650,7 +650,7 @@ class AdminCommands(commands.Cog):
                 abs_amount = abs(amount)
                 if old_balance < abs_amount:
                     await interaction.response.send_message(
-                        f"❌ Nonprofit fund only has {old_balance} jopacoin. Cannot take {abs_amount}.",
+                        f"❌ Jopacoin Reserve only has {old_balance} jopacoin. Cannot take {abs_amount}.",
                         ephemeral=True,
                     )
                     return
@@ -661,13 +661,13 @@ class AdminCommands(commands.Cog):
                     self.loan_service.get_nonprofit_fund, guild_id
                 )
                 await interaction.response.send_message(
-                    f"✅ Took **{abs_amount}** jopacoin from the nonprofit fund\n"
-                    f"Fund balance: {old_balance} → {new_balance}",
+                    f"✅ Took **{abs_amount}** jopacoin from the Jopacoin Reserve\n"
+                    f"Reserve balance: {old_balance} → {new_balance}",
                     ephemeral=True,
                 )
 
             logger.info(
-                f"Admin {interaction.user.id} ({interaction.user}) modified nonprofit fund by {amount}. "
+                f"Admin {interaction.user.id} ({interaction.user}) modified Jopacoin Reserve by {amount}. "
                 f"Balance: {old_balance} → {new_balance}"
             )
             return

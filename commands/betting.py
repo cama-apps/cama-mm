@@ -2296,11 +2296,11 @@ class BettingCommands(commands.Cog):
         amount: int,
     ):
         await _loan_action(self, interaction, amount)
-    @app_commands.command(name="nonprofit", description="View the Gambling Addiction Nonprofit fund")
+    @app_commands.command(name="nonprofit", description="View the Jopacoin Reserve")
     async def nonprofit(self, interaction: discord.Interaction):
         await _nonprofit_action(self, interaction)
     @app_commands.command(
-        name="disburse", description="Propose or manage nonprofit fund distribution"
+        name="disburse", description="Propose or manage Jopacoin Reserve allocation"
     )
     @app_commands.describe(action="Action to perform")
     @app_commands.choices(
@@ -2318,7 +2318,7 @@ class BettingCommands(commands.Cog):
         interaction: discord.Interaction,
         action: app_commands.Choice[str] | None = None,
     ):
-        """Propose, view, or reset nonprofit fund distribution voting."""
+        """Propose, view, or reset Jopacoin Reserve allocation voting."""
         if not self.disburse_service:
             await interaction.response.send_message(
                 "Disbursement service is not available.", ephemeral=True

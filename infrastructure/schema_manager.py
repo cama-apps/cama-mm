@@ -460,6 +460,8 @@ class SchemaManager:
                 "backfill_economy_ledger_opening_balances",
                 self._migration_backfill_economy_ledger_opening_balances,
             ),
+            # Tax Man enforcement cooldowns.
+            ("create_tax_fine_cooldowns_table", self._migration_create_tax_fine_cooldowns_table),
             # Daily Mafia subgame
             ("create_mafia_tables", self._migration_create_mafia_tables),
             # Entry-fee economy: persist fees so payout pools can be audited.
@@ -3897,6 +3899,29 @@ class SchemaManager:
                    'opening nonprofit fund at ledger creation'
             FROM openings
             WHERE opening_balance != 0
+            """
+        )
+
+    def _migration_create_tax_fine_cooldowns_table(self, cursor) -> None:
+        """Track the latest successful Tax Man fine for each guild-scoped player."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tax_fine_cooldowns (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                last_fined_at INTEGER NOT NULL,
+                last_amount INTEGER NOT NULL DEFAULT 0,
+                last_actor_id INTEGER,
+                last_reason TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tax_fine_cooldowns_guild_last
+            ON tax_fine_cooldowns(guild_id, last_fined_at DESC)
             """
         )
 

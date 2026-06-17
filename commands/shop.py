@@ -1612,7 +1612,7 @@ class ShopCommands(commands.Cog):
         app_commands.Choice(name="Green • Mid • Regrowth (25 JC) — recover 35% of last 24h losses", value="regrowth"),
         app_commands.Choice(name="Green • Ult • Overgrowth (90 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
         # White
-        app_commands.Choice(name="White • Cheap • Communion (8 JC) — donate to nonprofit, +10% next match win", value="communion"),
+        app_commands.Choice(name="White • Cheap • Communion (8 JC) — fund reserve, +10% next match win", value="communion"),
         app_commands.Choice(name="White • Mid • Aegis (35 JC) — absorb the next PvP attack", value="aegis"),
         app_commands.Choice(name="White • Ult • Sanctuary (60 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
         # Black
@@ -1920,7 +1920,7 @@ class ShopCommands(commands.Cog):
                 except Exception:
                     logger.exception("Communion blessing grant failed")
             await interaction.followup.send(
-                f"🌾🕊️ **COMMUNION** — {interaction.user.mention} gives {cost} {JOPACOIN_EMOTE} to the fund.\n"
+                f"🌾🕊️ **COMMUNION** — {interaction.user.mention} gives {cost} {JOPACOIN_EMOTE} to the Jopacoin Reserve.\n"
                 f"A blessing settles on you: +10% on your next match-win bonus.\n"
                 f"(balance: {new_balance})"
             )

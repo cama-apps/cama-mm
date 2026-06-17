@@ -1378,6 +1378,14 @@ class IBankruptcyRepository(ABC):
     def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int: ...
 
     @abstractmethod
+    def adjust_penalty_games(self, discord_id: int, guild_id: int | None, delta: int) -> int: ...
+
+    @abstractmethod
+    def set_penalty_games(
+        self, discord_id: int, guild_id: int | None, penalty_games_remaining: int
+    ) -> int: ...
+
+    @abstractmethod
     def execute_bankruptcy_atomic(
         self,
         discord_id: int,

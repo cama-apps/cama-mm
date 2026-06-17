@@ -250,7 +250,7 @@ def _build_single_embed(
     if stipend_paid > 0:
         embed.add_field(
             name="Stipend",
-            value=f"+{stipend_paid} JC (nonprofit fund)",
+            value=f"+{stipend_paid} JC (Jopacoin Reserve)",
             inline=False,
         )
     if isinstance(member, discord.Member) and member.display_avatar:

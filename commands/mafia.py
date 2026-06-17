@@ -505,7 +505,7 @@ class MafiaCommands(commands.Cog):
                 f"The pot (`roster × {ENTRY_FEE}`) is split among the winning faction, "
                 f"MVP gets +{MVP_BONUS} from the pot, and each winner is capped at "
                 f"+{MAX_WINNER_PAYOUT} {JOPACOIN_EMOTE} — anything over the cap funds the "
-                "Gambling Addiction Nonprofit. Long-run EV is 0 — play to win.\n\n"
+                "Jopacoin Reserve. Long-run EV is 0 — play to win.\n\n"
                 "Use `/mafia optout` to skip auto-roster."
             ),
             color=0x5865F2,
@@ -995,7 +995,7 @@ class MafiaCommands(commands.Cog):
         if overflow > 0:
             body_lines.append(
                 f"_{overflow} {JOPACOIN_EMOTE} over the +{MAX_WINNER_PAYOUT}/winner "
-                f"cap skimmed into the nonprofit fund._"
+                f"cap skimmed into the Jopacoin Reserve._"
             )
 
         breakdown = summary.get("vote_breakdown") or {}

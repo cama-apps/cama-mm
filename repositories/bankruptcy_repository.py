@@ -181,14 +181,22 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
         normalized_id = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            insert_games = max(0, int(delta))
             cursor.execute(
                 """
-                UPDATE bankruptcy_state
-                SET penalty_games_remaining = MAX(0, penalty_games_remaining + ?),
+                INSERT INTO bankruptcy_state (
+                    discord_id, guild_id, last_bankruptcy_at,
+                    penalty_games_remaining, bankruptcy_count, updated_at
+                )
+                VALUES (?, ?, NULL, ?, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    penalty_games_remaining = MAX(
+                        0,
+                        COALESCE(bankruptcy_state.penalty_games_remaining, 0) + ?
+                    ),
                     updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (delta, discord_id, normalized_id),
+                (discord_id, normalized_id, insert_games, delta),
             )
             cursor.execute(
                 "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
@@ -196,6 +204,29 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
             )
             row = cursor.fetchone()
             return row["penalty_games_remaining"] if row else max(delta, 0)
+
+    def set_penalty_games(
+        self, discord_id: int, guild_id: int | None, penalty_games_remaining: int
+    ) -> int:
+        """Set penalty games without incrementing bankruptcy count or cooldown."""
+        normalized_id = self.normalize_guild_id(guild_id)
+        penalty_games_remaining = max(0, int(penalty_games_remaining))
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO bankruptcy_state (
+                    discord_id, guild_id, last_bankruptcy_at,
+                    penalty_games_remaining, bankruptcy_count, updated_at
+                )
+                VALUES (?, ?, NULL, ?, 0, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    penalty_games_remaining = excluded.penalty_games_remaining,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (discord_id, normalized_id, penalty_games_remaining),
+            )
+            return penalty_games_remaining
 
     def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """

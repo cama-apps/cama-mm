@@ -14,7 +14,7 @@ A Discord bot for balanced team shuffling in Dota 2 inhouse games for the Camara
 - **Match Recording**: Record match results with Radiant/Dire team support and voting system
 - **Betting System**: Jopacoin wagering on match outcomes with leverage (2x-5x), house/pool modes
 - **Prediction Markets**: Create yes/no predictions with community resolution voting
-- **Economy Features**: Loans, bankruptcy, nonprofit fund, disbursement voting, tipping, Wheel of Fortune
+- **Economy Features**: Loans, bankruptcy, Jopacoin Reserve, disbursement voting, tipping, Wheel of Fortune
 - **Match Enrichment**: Automatic stats from OpenDota/Valve APIs (K/D/A, heroes, GPM, fantasy points)
 - **Dota 2 Reference**: Hero and ability lookup with autocomplete
 - **Trivia**: Dota 2 trivia with escalating difficulty streaks, covering heroes, items, abilities, facets, and voicelines
@@ -181,7 +181,7 @@ Show your active bet for the current match.
 Check your jopacoin balance and debt status.
 
 #### `/tip`
-Give jopacoin to another player (1% fee goes to nonprofit).
+Give jopacoin to another player (1% fee goes to the Jopacoin Reserve).
 
 **Options:**
 - `player`: The recipient
@@ -204,10 +204,10 @@ Borrow jopacoin with a 20% fee. Auto-repaid after your next match.
 - `amount`: Amount to borrow (max 100)
 
 #### `/nonprofit`
-View the Gambling Addiction Nonprofit fund status.
+View the Jopacoin Reserve, the server operations budget.
 
 #### `/disburse`
-Propose or manage nonprofit fund distribution voting.
+Propose or manage Jopacoin Reserve allocation voting.
 
 **Options:**
 - `action`: "propose", "status", or "reset"
@@ -375,10 +375,10 @@ Register another user as a player.
 - `mmr` (optional): Manual MMR if OpenDota unavailable
 
 #### `/givecoin`
-Give or take jopacoin from a user or nonprofit fund.
+Give or take jopacoin from a user or the Jopacoin Reserve.
 
 **Options:**
-- `user`: Target user (or "nonprofit")
+- `user`: Target user, or use the reserve option
 - `amount`: Amount (negative to take)
 
 #### `/setinitialrating`
