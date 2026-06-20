@@ -1022,6 +1022,224 @@ class TestMetaBetPayouts:
 
 
 # ---------------------------------------------------------------------------
+# Startup recovery for abandoned wars (bot crash/restart mid-window)
+# ---------------------------------------------------------------------------
+
+
+class TestStaleWarRecovery:
+    def test_recover_refunds_defenders_and_unblocks_incite(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """A war left in 'war' status (crash mid-battle-window) with debited
+        defender stakes must be recovered on the next recover_stale_wars call:
+        stakes refunded, status flipped to 'fizzled', and /incite unblocked.
+
+        Old behavior (no recovery sweep) leaves the war active forever — the
+        stakes burned and get_active_war blocking every future /incite — so
+        this test fails without the fix.
+        """
+        from config import REBELLION_DEFENDER_STAKE
+
+        guild_id = TEST_GUILD_ID
+        now = int(time.time())
+        inciter_id = 15001
+        _add_player(player_repo, inciter_id, balance=100, guild_id=guild_id)
+        _set_bankrupt(bankruptcy_repo, inciter_id, penalty_games=3)
+        war_id = rebellion_repo.create_war(guild_id, inciter_id, now + 900, now)
+
+        # Two defenders vote (stake debited atomically at vote time).
+        defenders = [15100, 15101]
+        for did in defenders:
+            _add_player(player_repo, did, balance=50, guild_id=guild_id)
+            rebellion_service.process_defend_vote(war_id, did, guild_id)
+        bal_after_vote = {did: player_repo.get_balance(did, guild_id) for did in defenders}
+
+        # Simulate the bot dying after the war was declared: status stuck at 'war'.
+        rebellion_repo.update_war_status(war_id, "war")
+        assert rebellion_repo.get_active_war(guild_id) is not None  # /incite is blocked
+
+        recovered = rebellion_service.recover_stale_wars(guild_id)
+        assert [r["war_id"] for r in recovered] == [war_id]
+
+        # Stakes refunded.
+        for did in defenders:
+            assert (
+                player_repo.get_balance(did, guild_id)
+                == bal_after_vote[did] + REBELLION_DEFENDER_STAKE
+            ), f"Defender {did} stake not refunded on recovery"
+
+        # War terminal and /incite unblocked.
+        war = rebellion_repo.get_war(war_id)
+        assert war["status"] == "fizzled"
+        assert rebellion_repo.get_active_war(guild_id) is None
+
+    def test_recover_refunds_unsettled_meta_bets(
+        self, rebellion_service, rebellion_repo, player_repo
+    ):
+        """Meta-bet stakes (debited at placement) on an abandoned war must be
+        refunded by recovery; without the sweep they are lost forever."""
+        guild_id = TEST_GUILD_ID
+        now = int(time.time())
+        _add_player(player_repo, 15201, balance=200, guild_id=guild_id)
+        war_id = rebellion_repo.create_war(guild_id, 15201, now + 900, now)
+        rebellion_repo.set_meta_bet_window(war_id, now + 600)  # status -> 'betting'
+
+        bettors = {15300: ("rebels", 25), 15301: ("wheel", 40)}
+        for pid, (side, amount) in bettors.items():
+            _add_player(player_repo, pid, balance=100, guild_id=guild_id)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+        bal_after_bet = {pid: player_repo.get_balance(pid, guild_id) for pid in bettors}
+
+        recovered = rebellion_service.recover_stale_wars(guild_id)
+        assert recovered and recovered[0]["meta_bets_refunded"] == 2
+
+        for pid, (_side, amount) in bettors.items():
+            assert (
+                player_repo.get_balance(pid, guild_id) == bal_after_bet[pid] + amount
+            ), f"Meta-bettor {pid} stake not refunded on recovery"
+        assert rebellion_repo.get_war(war_id)["status"] == "fizzled"
+
+    def test_recover_is_idempotent(
+        self, rebellion_service, rebellion_repo, player_repo
+    ):
+        """A second recover_stale_wars call must not double-refund anything."""
+        guild_id = TEST_GUILD_ID
+        now = int(time.time())
+        _add_player(player_repo, 15401, balance=200, guild_id=guild_id)
+        war_id = rebellion_repo.create_war(guild_id, 15401, now + 900, now)
+        _add_player(player_repo, 15402, balance=100, guild_id=guild_id)
+        rebellion_repo.place_meta_bet_atomic(war_id, guild_id, 15402, "rebels", 30, now, max_debt=500)
+
+        first = rebellion_service.recover_stale_wars(guild_id)
+        assert first  # recovered once
+        bal_after_first = player_repo.get_balance(15402, guild_id)
+
+        second = rebellion_service.recover_stale_wars(guild_id)
+        assert second == [], "war already terminal; nothing to recover"
+        assert player_repo.get_balance(15402, guild_id) == bal_after_first
+
+    def test_recover_all_guilds_when_guild_id_none(
+        self, rebellion_service, rebellion_repo, player_repo
+    ):
+        """The startup sweep passes guild_id=None to recover across all guilds."""
+        now = int(time.time())
+        guild_a, guild_b = TEST_GUILD_ID, TEST_GUILD_ID + 777
+        wars = []
+        for g in (guild_a, guild_b):
+            inciter = 15500 + g % 1000
+            _add_player(player_repo, inciter, balance=100, guild_id=g)
+            war_id = rebellion_repo.create_war(g, inciter, now + 900, now)
+            rebellion_repo.update_war_status(war_id, "war")
+            wars.append(war_id)
+
+        recovered_ids = {r["war_id"] for r in rebellion_service.recover_stale_wars(None)}
+        assert set(wars).issubset(recovered_ids)
+        for g in (guild_a, guild_b):
+            assert rebellion_repo.get_active_war(g) is None
+
+
+# ---------------------------------------------------------------------------
+# Battle resolution + meta-bet settlement atomicity
+# ---------------------------------------------------------------------------
+
+
+class TestResolutionSettlementAtomicity:
+    def _war_with_meta_bets(self, rebellion_repo, player_repo, bankruptcy_repo,
+                            rebellion_service, inciter_id, guild_id=TEST_GUILD_ID):
+        now = int(time.time())
+        _add_player(player_repo, inciter_id, balance=200, guild_id=guild_id)
+        _set_bankrupt(bankruptcy_repo, inciter_id, penalty_games=3)
+        war_id = rebellion_repo.create_war(guild_id, inciter_id, now + 900, now)
+        # A couple attackers so quorum/threshold context is realistic.
+        for i in range(4):
+            aid = 16100 + i
+            _add_player(player_repo, aid, balance=100, guild_id=guild_id)
+            bankruptcy_repo.upsert_state(
+                discord_id=aid, guild_id=guild_id,
+                last_bankruptcy_at=0, penalty_games_remaining=0,
+            )
+            rebellion_service.process_attack_vote(war_id, aid, guild_id)
+        # Meta-bets on both sides.
+        for pid, side, amount in [
+            (16200, "rebels", 30),
+            (16201, "wheel", 20),
+        ]:
+            _add_player(player_repo, pid, balance=100, guild_id=guild_id)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+        return war_id
+
+    def test_meta_bets_settled_inside_resolution_transaction(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """resolve_battle must settle the meta-bets in the SAME commit as the
+        war-status flip — so when the war is 'resolved', the bets are already
+        paid (no separate, loseable post-resolve settle step).
+
+        Before the fix, resolve_battle flipped the status and a *separate*
+        settle_meta_bets call did the payout; a crash between them left a
+        'resolved' war with debited-but-unpaid stakes. This asserts the result
+        carries the settle summary AND winners are already credited once the
+        war is resolved.
+        """
+        guild_id = TEST_GUILD_ID
+        war_id = self._war_with_meta_bets(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service, inciter_id=16001
+        )
+        rebel_bettor, wheel_bettor = 16200, 16201
+        bal_before = {
+            rebel_bettor: player_repo.get_balance(rebel_bettor, guild_id),
+            wheel_bettor: player_repo.get_balance(wheel_bettor, guild_id),
+        }
+
+        # Force attacker (rebels) win — low roll under the threshold.
+        result = rebellion_service.resolve_battle(
+            war_id, guild_id, battle_roll=1, victory_threshold=50
+        )
+        assert result["outcome"] == "attackers_win"
+
+        # War is resolved AND the settle summary rode along in the result.
+        assert rebellion_repo.get_war(war_id)["status"] == "resolved"
+        meta = result["meta_bet_result"]
+        assert meta["winning_side"] == "rebels"
+        assert meta["total_pool"] == 50  # 30 + 20
+
+        # Winner already paid the full pool; loser unchanged — all committed
+        # by the time the war reads 'resolved'.
+        assert player_repo.get_balance(rebel_bettor, guild_id) == bal_before[rebel_bettor] + 50
+        assert player_repo.get_balance(wheel_bettor, guild_id) == bal_before[wheel_bettor]
+
+        # Bets are persisted as settled (payout non-NULL), so a recovery sweep
+        # or a stray settle is a no-op — settlement can't be lost or repeated.
+        bets = rebellion_repo.get_meta_bets(war_id)
+        assert all(b["payout"] is not None for b in bets)
+        assert rebellion_repo.settle_meta_bets(war_id, "rebels").get("already_settled") is True
+
+    def test_defenders_win_settles_meta_bets_atomically(
+        self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo
+    ):
+        """The defenders-win path likewise settles meta-bets (winning_side
+        'wheel') inside the resolution transaction."""
+        guild_id = TEST_GUILD_ID
+        war_id = self._war_with_meta_bets(
+            rebellion_repo, player_repo, bankruptcy_repo, rebellion_service, inciter_id=16002
+        )
+        wheel_bettor = 16201
+        bal_before = player_repo.get_balance(wheel_bettor, guild_id)
+
+        # Force defenders (wheel) win — high roll at/above threshold.
+        result = rebellion_service.resolve_battle(
+            war_id, guild_id, battle_roll=99, victory_threshold=25
+        )
+        assert result["outcome"] == "defenders_win"
+        assert rebellion_repo.get_war(war_id)["status"] == "resolved"
+        meta = result["meta_bet_result"]
+        assert meta["winning_side"] == "wheel"
+        assert meta["total_pool"] == 50
+        # Sole wheel bettor takes the whole pool.
+        assert player_repo.get_balance(wheel_bettor, guild_id) == bal_before + 50
+
+
+# ---------------------------------------------------------------------------
 # apply_war_effects (wheel drawing utility)
 # ---------------------------------------------------------------------------
 
