@@ -1,6 +1,7 @@
 """Tests for trivia cooldown and economy integration."""
 
 import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -114,11 +115,68 @@ class TestTriviaResetCooldown:
     def test_reset_returns_false_for_missing_player(self, player_service):
         assert not player_service.reset_trivia_cooldown(999999, TEST_GUILD_ID)
 
+    def test_reset_returns_false_when_no_cooldown_set(self, player_service, registered_player):
+        """A registered player with no active cooldown has nothing to clear, so
+        reset reports False (not True from a matched-but-unchanged row)."""
+        assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) is None
+        assert not player_service.reset_trivia_cooldown(registered_player, TEST_GUILD_ID)
+
     def test_get_last_trivia_session_none_after_reset(self, player_service, registered_player):
         now = int(time.time())
         player_service.try_claim_trivia_session(registered_player, TEST_GUILD_ID, now, 21600)
         assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) == now
         player_service.reset_trivia_cooldown(registered_player, TEST_GUILD_ID)
+        assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) is None
+
+
+class TestTriviaSessionLifecycle:
+    @pytest.mark.asyncio
+    async def test_end_session_awaits_leaderboard_write(self, player_service, registered_player):
+        """_end_session must await the leaderboard write, not fire-and-forget it.
+
+        An ensure_future task can be GC'd before running, silently dropping the
+        streak. Awaiting guarantees the row is persisted (and visible on the
+        leaderboard) by the time _end_session returns.
+        """
+        import commands.trivia as trivia_mod
+
+        bot = MagicMock()
+        bot.player_service = player_service
+        cog = trivia_mod.TriviaCog(bot)
+        session = trivia_mod.TriviaSession(
+            user_id=registered_player, guild_id=TEST_GUILD_ID, user=MagicMock(), streak=5, total_jc=5
+        )
+        cog._sessions[(registered_player, TEST_GUILD_ID)] = session
+
+        await cog._end_session(session)
+
+        lb = player_service.get_trivia_leaderboard(TEST_GUILD_ID)
+        assert any(e["discord_id"] == registered_player and e["best_streak"] == 5 for e in lb)
+        assert (registered_player, TEST_GUILD_ID) not in cog._sessions
+
+    @pytest.mark.asyncio
+    async def test_failed_defer_releases_claimed_cooldown(
+        self, player_service, registered_player, monkeypatch
+    ):
+        """If the cooldown is claimed but the defer then fails, no session starts,
+        so the cooldown must be released rather than burning the player's run."""
+        import commands.trivia as trivia_mod
+
+        bot = MagicMock()
+        bot.player_service = player_service
+        cog = trivia_mod.TriviaCog(bot)
+
+        interaction = MagicMock()
+        interaction.guild.id = TEST_GUILD_ID
+        interaction.user.id = registered_player
+
+        monkeypatch.setattr(trivia_mod, "require_gamba_channel", AsyncMock(return_value=True))
+        monkeypatch.setattr(trivia_mod, "has_admin_permission", MagicMock(return_value=False))
+        monkeypatch.setattr(trivia_mod, "safe_defer", AsyncMock(return_value=False))
+
+        assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) is None
+        await cog.trivia.callback(cog, interaction)
+        # The claim was rolled back, so the player can play again immediately.
         assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) is None
 
 
