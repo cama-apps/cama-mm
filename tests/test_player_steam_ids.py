@@ -269,6 +269,62 @@ class TestPlayerSteamIds:
         steam_id = player_repository.get_steam_id(12345)
         assert steam_id == 100001
 
+    def test_remove_legacy_only_steam_id(self, player_repository):
+        """Regression: unlink must succeed for a Steam ID that lives only in the
+        legacy players.steam_id column (never in the junction table).
+
+        Before the fix, remove_steam_id only deleted from player_steam_ids and
+        returned False for a legacy-only ID, so /player unlink reported a
+        spurious failure and the steam_id was never cleared.
+        """
+        player_repository.add(
+            discord_id=12345,
+            discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
+        )
+
+        # Seed a legacy-only steam_id (junction table left empty).
+        import sqlite3
+        with sqlite3.connect(player_repository.db_path) as conn:
+            conn.execute(
+                "UPDATE players SET steam_id = ? WHERE discord_id = ?",
+                (100001, 12345),
+            )
+
+        # get_steam_ids sees it via legacy fallback, so the command lets it through.
+        assert player_repository.get_steam_ids(12345) == [100001]
+
+        removed = player_repository.remove_steam_id(12345, 100001)
+        assert removed is True
+
+        # Legacy column cleared; player now has no linked accounts.
+        assert player_repository.get_steam_id(12345) is None
+        assert player_repository.get_steam_ids(12345) == []
+
+    def test_get_steam_id_owner_detects_cross_player(self, player_repository):
+        """Regression: get_steam_id_owner is the global uniqueness source of
+        truth used by registration; it must report the owning discord_id from
+        both the junction table and the legacy column, and None when unowned.
+        """
+        player_repository.add(discord_id=111, discord_username="A", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=222, discord_username="B", guild_id=TEST_GUILD_ID)
+
+        # Junction-table ownership.
+        player_repository.add_steam_id(111, 500001, is_primary=True)
+        assert player_repository.get_steam_id_owner(500001) == 111
+
+        # Legacy-only ownership (no junction row).
+        import sqlite3
+        with sqlite3.connect(player_repository.db_path) as conn:
+            conn.execute(
+                "UPDATE players SET steam_id = ? WHERE discord_id = ?",
+                (500002, 222),
+            )
+        assert player_repository.get_steam_id_owner(500002) == 222
+
+        # Unowned.
+        assert player_repository.get_steam_id_owner(999999) is None
+
     def test_migration_existing_steam_ids(self, player_repository):
         """Test that existing steam_ids in players table work with junction table."""
         # Add player with steam_id via legacy set_steam_id

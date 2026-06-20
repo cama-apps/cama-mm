@@ -207,6 +207,88 @@ class TestMMRPromptViewSignature:
         )
 
 
+class TestRegisterSteamIdUniqueness:
+    """register_player must enforce the global Steam-ID uniqueness guarantee
+    and populate the junction table, not just the legacy column.
+
+    Before the fix, register_player wrote only players.steam_id (no UNIQUE
+    constraint, no cross-player check), so two Discord users could claim the
+    same Steam ID and corrupt the global steam->discord mapping.
+    """
+
+    @pytest.fixture
+    def test_db(self, repo_db_path):
+        return Database(repo_db_path)
+
+    @pytest.fixture
+    def player_service(self, test_db):
+        return PlayerService(PlayerRepository(test_db.db_path))
+
+    def test_duplicate_steam_id_rejected_across_players(self, test_db, player_service):
+        """A second player registering the same Steam ID is rejected."""
+        steam_id = 123456
+        player_service.register_player(
+            discord_id=1, discord_username="A", guild_id=TEST_GUILD_ID,
+            steam_id=steam_id, mmr_override=3000,
+        )
+
+        with pytest.raises(ValueError, match="already linked to another player"):
+            player_service.register_player(
+                discord_id=2, discord_username="B", guild_id=TEST_GUILD_ID,
+                steam_id=steam_id, mmr_override=3000,
+            )
+
+        # The first owner is unchanged; the second user was not created.
+        repo = PlayerRepository(test_db.db_path)
+        assert repo.get_steam_id_owner(steam_id) == 1
+        assert repo.get_by_id(2, TEST_GUILD_ID) is None
+
+    def test_register_populates_junction_table(self, test_db, player_service):
+        """The primary Steam ID is recorded in the junction table (source of
+        truth), not only the legacy column."""
+        repo = PlayerRepository(test_db.db_path)
+        player_service.register_player(
+            discord_id=7, discord_username="C", guild_id=TEST_GUILD_ID,
+            steam_id=222333, mmr_override=2500,
+        )
+
+        assert repo.get_steam_ids(7) == [222333]
+        assert repo.get_primary_steam_id(7) == 222333
+
+
+class TestRegisterSteamIdValidation:
+    """_validate_steam_id must accept the full unsigned 32-bit account-id range."""
+
+    @pytest.fixture
+    def test_db(self, repo_db_path):
+        return Database(repo_db_path)
+
+    @pytest.fixture
+    def player_service(self, test_db):
+        return PlayerService(PlayerRepository(test_db.db_path))
+
+    def test_high_uint32_account_id_accepted(self, test_db, player_service):
+        """Regression: a valid high uint32 account ID (above int32 max) must
+        register, not be rejected as 'Invalid Steam ID'."""
+        high_id = 3_000_000_000  # > 2**31 - 1, still < 2**32
+        result = player_service.register_player(
+            discord_id=9, discord_username="D", guild_id=TEST_GUILD_ID,
+            steam_id=high_id, mmr_override=4000,
+        )
+        assert result["mmr"] == 4000
+
+        repo = PlayerRepository(test_db.db_path)
+        assert repo.get_primary_steam_id(9) == high_id
+
+    def test_steam_id_at_uint32_ceiling_rejected(self, player_service):
+        """2**32 (and above) is out of range and must still be rejected."""
+        with pytest.raises(ValueError, match="Invalid Steam ID"):
+            player_service.register_player(
+                discord_id=10, discord_username="E", guild_id=TEST_GUILD_ID,
+                steam_id=2**32, mmr_override=4000,
+            )
+
+
 class TestSetRolesE2E:
     """End-to-end tests for the /setroles command flow."""
 
