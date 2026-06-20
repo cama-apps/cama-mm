@@ -276,18 +276,17 @@ async def incite_action(
     # BATTLE ROLL
     battle_roll = rebellion_service.roll_battle()
 
-    # Resolve all outcomes
+    # Resolve all outcomes. Meta-bet settlement is now folded into the same
+    # atomic transaction as the war-status flip (see RebellionService and
+    # atomic_resolve_*), so it can no longer be lost to a crash between the
+    # status flip and a separate settle call.
     resolution = await asyncio.to_thread(
         rebellion_service.resolve_battle,
         war_id, guild_id, battle_roll, victory_threshold,
     )
 
-    # Settle meta-bets
     outcome = resolution["outcome"]
-    winning_side = "rebels" if outcome == "attackers_win" else "wheel"
-    meta_bet_result = await asyncio.to_thread(
-        rebellion_service.rebellion_repo.settle_meta_bets, war_id, winning_side
-    )
+    meta_bet_result = resolution["meta_bet_result"]
 
     # Build result embed
     if outcome == "attackers_win":

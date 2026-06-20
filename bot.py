@@ -685,6 +685,31 @@ async def on_ready():
         guild_ids = [g.id for g in bot.guilds]
         asyncio.ensure_future(reminder_svc.reschedule_all(bot, guild_ids))
 
+    # Recover wheel wars abandoned by a crash/restart mid-window. The whole
+    # /incite lifecycle runs in an in-memory task, so a restart would leave the
+    # war active forever — burning defender + meta-bet stakes and blocking every
+    # future /incite in that guild. This one-shot, idempotent sweep refunds the
+    # stakes and fizzles each stale war. Run off the event loop with a
+    # done-callback so a failure surfaces in logs instead of being swallowed.
+    rebellion_svc = getattr(bot, "rebellion_service", None)
+    if rebellion_svc:
+        def _log_rebellion_recovery(t: asyncio.Task) -> None:
+            try:
+                recovered = t.result()
+                if recovered:
+                    logger.info(
+                        "Recovered %d abandoned wheel war(s): %s",
+                        len(recovered),
+                        [r["war_id"] for r in recovered],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Wheel war recovery sweep failed: %s", exc, exc_info=True)
+
+        recovery_task = bot.loop.create_task(
+            asyncio.to_thread(rebellion_svc.recover_stale_wars)
+        )
+        recovery_task.add_done_callback(_log_rebellion_recovery)
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):

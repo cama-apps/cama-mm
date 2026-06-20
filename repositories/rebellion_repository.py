@@ -29,6 +29,131 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def get_stale_wars(self, guild_id: int | None = None) -> list[dict]:
+        """Return wars stuck in a non-terminal status (voting/betting/war).
+
+        With ``guild_id=None`` this spans all guilds — used by the startup
+        recovery sweep. These are the wars an in-memory ``incite_action`` task
+        was driving; if the bot restarted mid-window they would otherwise sit
+        active forever, burning stakes and blocking every future /incite.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            if guild_id is None:
+                cursor.execute(
+                    "SELECT * FROM wheel_wars WHERE status IN ('voting', 'betting', 'war')"
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM wheel_wars "
+                    "WHERE guild_id = ? AND status IN ('voting', 'betting', 'war')",
+                    (self.normalize_guild_id(guild_id),),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def recover_stale_war_atomic(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        defender_ids: list[int],
+        defender_stake: int,
+        resolved_at: int,
+    ) -> dict:
+        """Resolve one abandoned war: refund defenders, refund any unsettled
+        meta-bets, and flip the war to 'fizzled' — all in one BEGIN IMMEDIATE.
+
+        Idempotent and self-guarding:
+          - re-reads the war's status inside the lock and no-ops if it is no
+            longer one of the recoverable statuses (another worker won the
+            race or it was already recovered);
+          - refunds only meta-bets whose ``payout IS NULL`` (so a half-applied
+            recovery or a later settle can never double-pay).
+
+        Returns ``{"recovered": bool, "defenders_refunded": [...],
+        "meta_bets_refunded": int}``.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT status FROM wheel_wars WHERE war_id = ?", (war_id,)
+            )
+            row = cursor.fetchone()
+            if not row or row["status"] not in ("voting", "betting", "war"):
+                return {"recovered": False, "defenders_refunded": [], "meta_bets_refunded": 0}
+
+            # Refund defender stakes (debited at vote time).
+            if defender_ids:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war abandoned: defend stake refund",
+                    metadata={"defender_count": len(defender_ids)},
+                )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [(defender_stake, did, normalized_guild) for did in defender_ids],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            # Refund any committed-but-unsettled meta-bets. Marking payout =
+            # amount records the refund and trips the payout-IS-NULL guard so
+            # neither a re-run nor a stray settle can pay twice.
+            cursor.execute(
+                "SELECT bet_id, discord_id, amount, guild_id FROM war_bets "
+                "WHERE war_id = ? AND payout IS NULL",
+                (war_id,),
+            )
+            unsettled = [dict(r) for r in cursor.fetchall()]
+            for bet in unsettled:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="rebellion_bet",
+                    related_type="wheel_war",
+                    related_id=war_id,
+                    reason="wheel war abandoned: meta-bet refund",
+                    metadata={"bet_id": bet["bet_id"], "amount": bet["amount"]},
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players SET jopacoin_balance = jopacoin_balance + ?
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (bet["amount"], bet["discord_id"], bet["guild_id"]),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+                cursor.execute(
+                    "UPDATE war_bets SET payout = ? WHERE bet_id = ?",
+                    (bet["amount"], bet["bet_id"]),
+                )
+
+            cursor.execute(
+                """
+                UPDATE wheel_wars
+                SET status = 'fizzled', outcome = 'fizzled', resolved_at = ?
+                WHERE war_id = ?
+                """,
+                (resolved_at, war_id),
+            )
+
+            return {
+                "recovered": True,
+                "defenders_refunded": list(defender_ids),
+                "meta_bets_refunded": len(unsettled),
+            }
+
     def get_war(self, war_id: int) -> dict | None:
         """Get a specific wheel war by ID."""
         with self.connection() as conn:
@@ -279,15 +404,22 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
         wheel_effect_spins: int,
         inciter_cooldown_until: int,
         resolved_at: int,
-    ) -> None:
+        meta_bet_winning_side: str,
+    ) -> dict:
         """Apply the full defenders-win outcome atomically.
 
         Credits every defender by ``per_defender_credit``, adds the extra
         ``first_defender_bonus`` to ``first_defender_id``, bumps the inciter's
         penalty_games_remaining by +1 (preserving the upsert_state increment
-        of bankruptcy_count for bug-compat), and flips wheel_wars to
-        resolved/defenders_win with the wheel-effect spins, resolved_at, and
-        inciter cooldown — all inside one BEGIN IMMEDIATE.
+        of bankruptcy_count for bug-compat), settles the meta-bets, and flips
+        wheel_wars to resolved/defenders_win with the wheel-effect spins,
+        resolved_at, and inciter cooldown — all inside one BEGIN IMMEDIATE.
+
+        Folding the meta-bet settlement into the same transaction as the
+        status flip means a crash can no longer leave a 'resolved' war with
+        unsettled (debited-but-unpaid) meta-bet stakes; both commit together.
+
+        Returns ``{"meta_bet_result": <settle summary>}``.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
@@ -386,6 +518,11 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                 ),
             )
 
+            meta_bet_result = self._settle_meta_bets_on_cursor(
+                cursor, war_id, meta_bet_winning_side
+            )
+            return {"meta_bet_result": meta_bet_result}
+
     def atomic_resolve_attackers_win(
         self,
         *,
@@ -402,18 +539,24 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
         celebration_expires_at: int,
         inciter_cooldown_until: int,
         resolved_at: int,
+        meta_bet_winning_side: str,
     ) -> dict:
         """Apply the full attackers-win outcome atomically.
 
         Credits the inciter (+ ``inciter_flat_reward``), credits each attacker
         by ``per_attacker_credit``, halves the inciter's
         penalty_games_remaining if > 0 (preserving upsert_state's
-        bankruptcy_count bump for bug-compat), and flips wheel_wars to
-        resolved/attackers_win with war_scar, celebration_spin, and inciter
-        cooldown — all inside one BEGIN IMMEDIATE.
+        bankruptcy_count bump for bug-compat), settles the meta-bets, and flips
+        wheel_wars to resolved/attackers_win with war_scar, celebration_spin,
+        and inciter cooldown — all inside one BEGIN IMMEDIATE.
 
-        Returns ``{"inciter_penalty_before": int, "inciter_penalty_after": int}``
-        so the service can build its response payload.
+        Folding the meta-bet settlement into the same transaction as the
+        status flip means a crash can no longer leave a 'resolved' war with
+        unsettled (debited-but-unpaid) meta-bet stakes; both commit together.
+
+        Returns ``{"inciter_penalty_before": int, "inciter_penalty_after": int,
+        "meta_bet_result": <settle summary>}`` so the service can build its
+        response payload.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
@@ -522,9 +665,14 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                 ),
             )
 
+            meta_bet_result = self._settle_meta_bets_on_cursor(
+                cursor, war_id, meta_bet_winning_side
+            )
+
             return {
                 "inciter_penalty_before": inciter_penalty_before,
                 "inciter_penalty_after": new_penalty,
+                "meta_bet_result": meta_bet_result,
             }
 
     def set_inciter_veteran_weight(
@@ -684,92 +832,110 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def settle_meta_bets(self, war_id: int, winning_side: str) -> dict:
-        """Settle meta-bets parimutuel. Returns payout summary."""
+        """Settle meta-bets parimutuel in its own txn. Returns payout summary.
+
+        Standalone entry point (used by startup recovery and tests). The live
+        resolution path settles inside the battle-resolution transaction via
+        ``_settle_meta_bets_on_cursor`` so settlement can't be lost if a
+        crash lands between the status flip and a separate settle call.
+        """
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM war_bets WHERE war_id = ?", (war_id,))
-            bets = [dict(row) for row in cursor.fetchall()]
+            return self._settle_meta_bets_on_cursor(cursor, war_id, winning_side)
 
-            if not bets:
-                return {"total_pool": 0, "winning_side": winning_side, "payouts": []}
+    def _settle_meta_bets_on_cursor(
+        self, cursor, war_id: int, winning_side: str
+    ) -> dict:
+        """Settle meta-bets parimutuel on an existing transaction cursor.
 
-            # Idempotency guard: payout is NULL until settled, so any non-NULL
-            # payout means this war was already settled. Re-running inside the
-            # txn would re-pay winners, so bail with a no-op summary.
-            if any(b["payout"] is not None for b in bets):
-                return {
-                    "total_pool": sum(b["amount"] for b in bets),
-                    "winning_side": winning_side,
-                    "winning_pool": 0,
-                    "payouts": [],
-                    "already_settled": True,
-                }
+        Does NOT open or commit a transaction — the caller owns the
+        ``BEGIN IMMEDIATE`` so settlement commits atomically with whatever
+        else the caller is doing (e.g. the war-status flip). Idempotent:
+        bails to a no-op when any bet already has a non-NULL payout.
+        """
+        cursor.execute("SELECT * FROM war_bets WHERE war_id = ?", (war_id,))
+        bets = [dict(row) for row in cursor.fetchall()]
 
-            total_pool = sum(b["amount"] for b in bets)
-            winning_bets = [b for b in bets if b["side"] == winning_side]
-            winning_pool = sum(b["amount"] for b in winning_bets)
+        if not bets:
+            return {"total_pool": 0, "winning_side": winning_side, "payouts": []}
 
-            # Floor each winner's parimutuel share, then fold the rounding
-            # remainder into the largest stake so the whole pool is paid out
-            # instead of being silently destroyed (deterministic tie-break by
-            # bet_id).
-            shares: list[list] = []
-            for bet in winning_bets:
-                if winning_pool > 0:
-                    share = int(bet["amount"] / winning_pool * total_pool)
-                else:
-                    share = bet["amount"]
-                shares.append([bet, share])
-
-            remainder = total_pool - sum(s for _, s in shares)
-            if remainder > 0 and shares:
-                top = max(shares, key=lambda bs: (bs[0]["amount"], -bs[0]["bet_id"]))
-                top[1] += remainder
-
-            payouts = []
-            for bet, payout in shares:
-                cursor.execute(
-                    "UPDATE war_bets SET payout = ? WHERE bet_id = ?",
-                    (payout, bet["bet_id"]),
-                )
-                self._set_economy_ledger_context(
-                    cursor,
-                    source="rebellion_bet",
-                    related_type="wheel_war",
-                    related_id=war_id,
-                    reason="wheel war meta-bet payout",
-                    metadata={
-                        "side": bet["side"],
-                        "winning_side": winning_side,
-                        "bet_id": bet["bet_id"],
-                    },
-                )
-                try:
-                    cursor.execute(
-                        """
-                        UPDATE players SET jopacoin_balance = jopacoin_balance + ?
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (payout, bet["discord_id"], bet["guild_id"]),
-                    )
-                finally:
-                    self._clear_economy_ledger_context(cursor)
-                payouts.append({"discord_id": bet["discord_id"], "payout": payout})
-
-            # Mark losing bets with payout=0
-            for bet in bets:
-                if bet["side"] != winning_side:
-                    cursor.execute(
-                        "UPDATE war_bets SET payout = 0 WHERE bet_id = ?",
-                        (bet["bet_id"],),
-                    )
-
+        # Idempotency guard: payout is NULL until settled, so any non-NULL
+        # payout means this war was already settled. Re-running inside the
+        # txn would re-pay winners, so bail with a no-op summary.
+        if any(b["payout"] is not None for b in bets):
             return {
-                "total_pool": total_pool,
+                "total_pool": sum(b["amount"] for b in bets),
                 "winning_side": winning_side,
-                "winning_pool": winning_pool,
-                "payouts": payouts,
+                "winning_pool": 0,
+                "payouts": [],
+                "already_settled": True,
             }
+
+        total_pool = sum(b["amount"] for b in bets)
+        winning_bets = [b for b in bets if b["side"] == winning_side]
+        winning_pool = sum(b["amount"] for b in winning_bets)
+
+        # Floor each winner's parimutuel share, then fold the rounding
+        # remainder into the largest stake so the whole pool is paid out
+        # instead of being silently destroyed (deterministic tie-break by
+        # bet_id).
+        shares: list[list] = []
+        for bet in winning_bets:
+            if winning_pool > 0:
+                share = int(bet["amount"] / winning_pool * total_pool)
+            else:
+                share = bet["amount"]
+            shares.append([bet, share])
+
+        remainder = total_pool - sum(s for _, s in shares)
+        if remainder > 0 and shares:
+            top = max(shares, key=lambda bs: (bs[0]["amount"], -bs[0]["bet_id"]))
+            top[1] += remainder
+
+        payouts = []
+        for bet, payout in shares:
+            cursor.execute(
+                "UPDATE war_bets SET payout = ? WHERE bet_id = ?",
+                (payout, bet["bet_id"]),
+            )
+            self._set_economy_ledger_context(
+                cursor,
+                source="rebellion_bet",
+                related_type="wheel_war",
+                related_id=war_id,
+                reason="wheel war meta-bet payout",
+                metadata={
+                    "side": bet["side"],
+                    "winning_side": winning_side,
+                    "bet_id": bet["bet_id"],
+                },
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players SET jopacoin_balance = jopacoin_balance + ?
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (payout, bet["discord_id"], bet["guild_id"]),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
+            payouts.append({"discord_id": bet["discord_id"], "payout": payout})
+
+        # Mark losing bets with payout=0
+        for bet in bets:
+            if bet["side"] != winning_side:
+                cursor.execute(
+                    "UPDATE war_bets SET payout = 0 WHERE bet_id = ?",
+                    (bet["bet_id"],),
+                )
+
+        return {
+            "total_pool": total_pool,
+            "winning_side": winning_side,
+            "winning_pool": winning_pool,
+            "payouts": payouts,
+        }
 
     def consume_war_spin(self, war_id: int, discord_id: int) -> int:
         """Decrement wheel_effect_spins_remaining. Returns new count."""

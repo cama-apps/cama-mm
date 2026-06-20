@@ -317,6 +317,42 @@ class RebellionService:
         }
 
     # ------------------------------------------------------------------
+    # Startup recovery
+    # ------------------------------------------------------------------
+
+    def recover_stale_wars(self, guild_id: int | None = None) -> list[dict]:
+        """Resolve wars left active (voting/betting/war) by a crash/restart.
+
+        The whole war lifecycle is driven by an in-memory ``incite_action``
+        task. If the bot dies mid-window the war stays active forever: the
+        debited defender + meta-bet stakes are never returned, and
+        ``get_active_war`` blocks every future /incite in that guild. This
+        sweep refunds those stakes and fizzles each stale war so the guild is
+        unblocked. Idempotent — already-settled bets and terminal statuses are
+        skipped — so it is safe to run on every startup.
+
+        With ``guild_id=None`` it sweeps every guild. Returns a list of
+        per-war recovery summaries (only wars actually recovered).
+        """
+        import json
+
+        now = int(time.time())
+        stale = self.rebellion_repo.get_stale_wars(guild_id)
+        recovered: list[dict] = []
+        for war in stale:
+            defend_voters = json.loads(war.get("defend_voter_ids") or "[]")
+            result = self.rebellion_repo.recover_stale_war_atomic(
+                war_id=war["war_id"],
+                guild_id=war["guild_id"],
+                defender_ids=defend_voters,
+                defender_stake=REBELLION_DEFENDER_STAKE,
+                resolved_at=now,
+            )
+            if result.get("recovered"):
+                recovered.append({"war_id": war["war_id"], **result})
+        return recovered
+
+    # ------------------------------------------------------------------
     # Battle
     # ------------------------------------------------------------------
 
@@ -421,7 +457,7 @@ class RebellionService:
         double-pay the defenders; the status flip commits with the payouts.
         """
         first_defender_id = defend_discord_ids[0] if defend_discord_ids else None
-        self.rebellion_repo.atomic_resolve_defenders_win(
+        resolve_result = self.rebellion_repo.atomic_resolve_defenders_win(
             war_id=war_id,
             guild_id=guild_id,
             inciter_id=inciter_id,
@@ -434,6 +470,7 @@ class RebellionService:
             wheel_effect_spins=REBELLION_WHEEL_EFFECT_SPINS,
             inciter_cooldown_until=cooldown_until,
             resolved_at=now,
+            meta_bet_winning_side="wheel",
         )
 
         return {
@@ -442,6 +479,7 @@ class RebellionService:
             "first_defender_id": first_defender_id,
             "attackers_penalized": attack_discord_ids,
             "wheel_effects": ["WAR_TROPHY", "RETRIBUTION", "BANKRUPT_STRENGTHEN"],
+            "meta_bet_result": resolve_result["meta_bet_result"],
         }
 
     def _resolve_attackers_win(
@@ -491,6 +529,7 @@ class RebellionService:
             celebration_expires_at=celebration_expires,
             inciter_cooldown_until=cooldown_until,
             resolved_at=now,
+            meta_bet_winning_side="rebels",
         )
 
         return {
@@ -503,6 +542,7 @@ class RebellionService:
             "war_scar_label": war_scar_label,
             "celebration_spin_expires_at": celebration_expires,
             "wheel_effects": ["WAR_SCAR", "BANKRUPT_WEAKEN", "CELEBRATION_SPINS"],
+            "meta_bet_result": penalty_info["meta_bet_result"],
         }
 
     def _pick_war_scar_wedge(self) -> str:
