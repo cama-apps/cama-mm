@@ -952,9 +952,11 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         """Realized P&L and W/L over a user's resolved order-book markets.
 
         Per resolved market: payout = winning-side contracts * PREDICTION_CONTRACT_VALUE,
-        cost = total cost basis (both sides), pnl = payout - cost. Open and
-        cancelled markets are excluded — cancelled markets refund cost basis and
-        delete their position rows, so they net to zero either way.
+        cost = total cost basis (both sides), pnl = payout - cost - bankruptcy_penalty
+        (the penalty withheld at settlement, so the figure matches the JC actually
+        credited). Open and cancelled markets are excluded — cancelled markets
+        refund cost basis and delete their position rows, so they net to zero
+        either way.
         """
         from config import PREDICTION_CONTRACT_VALUE
 
@@ -966,7 +968,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 SELECT p.outcome AS outcome,
                        pp.yes_contracts AS yes_contracts,
                        pp.no_contracts AS no_contracts,
-                       pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost
+                       pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
+                       COALESCE(pp.bankruptcy_penalty, 0) AS penalty
                 FROM prediction_positions pp
                 JOIN predictions p ON pp.prediction_id = p.prediction_id
                 WHERE pp.discord_id = ? AND p.guild_id = ? AND p.status = 'resolved'
@@ -980,7 +983,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         losses = 0
         for row in rows:
             won = row["yes_contracts"] if row["outcome"] == "yes" else row["no_contracts"]
-            pnl = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"])
+            # Net out any bankruptcy penalty withheld at settlement so the
+            # reported P&L equals the JC actually credited, not the gross payout.
+            pnl = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"]) - int(row["penalty"])
             realized_pnl += pnl
             if pnl > 0:
                 wins += 1
@@ -1000,7 +1005,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
         One row per resolved order-book market the player held a position in:
         ``{prediction_id, settle_time, delta}``, where delta = winning-side
-        payout - total cost basis. Feeds the profile economy balance chart.
+        payout - total cost basis - bankruptcy_penalty (netting the penalty
+        withheld at settlement so the chart matches the JC actually credited).
+        Feeds the profile economy balance chart.
         """
         from config import PREDICTION_CONTRACT_VALUE
 
@@ -1014,7 +1021,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                        p.outcome AS outcome,
                        pp.yes_contracts AS yes_contracts,
                        pp.no_contracts AS no_contracts,
-                       pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost
+                       pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
+                       COALESCE(pp.bankruptcy_penalty, 0) AS penalty
                 FROM prediction_positions pp
                 JOIN predictions p ON pp.prediction_id = p.prediction_id
                 WHERE pp.discord_id = ? AND p.guild_id = ? AND p.status = 'resolved'
@@ -1027,7 +1035,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         history = []
         for row in rows:
             won = row["yes_contracts"] if row["outcome"] == "yes" else row["no_contracts"]
-            delta = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"])
+            # Net out the withheld bankruptcy penalty so the chart delta matches
+            # the JC actually credited at settlement.
+            delta = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"]) - int(row["penalty"])
             history.append(
                 {
                     "prediction_id": row["prediction_id"],
@@ -1375,6 +1385,16 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         )
                     finally:
                         self._clear_economy_ledger_context(cursor)
+                    # Persist the withheld penalty on the position row so the
+                    # realized-P&L stats / balance-chart reads net it out and
+                    # match the JC actually credited (payout - penalty).
+                    if penalty:
+                        cursor.execute(
+                            "UPDATE prediction_positions "
+                            "SET bankruptcy_penalty = ? "
+                            "WHERE prediction_id = ? AND discord_id = ?",
+                            (penalty, prediction_id, p["discord_id"]),
+                        )
                     total_payout += payout
                     winner = {
                         "discord_id": int(p["discord_id"]),

@@ -476,6 +476,10 @@ class SchemaManager:
             # Continuous cadence: games start back-to-back, so more than one can
             # share a calendar start-date — drop the per-date unique constraint.
             ("rebuild_mafia_games_drop_date_unique", self._migration_rebuild_mafia_games_drop_date_unique),
+            # Persist the bankruptcy penalty withheld at order-book settlement so
+            # realized-P&L stats / balance-chart deltas match the JC actually
+            # credited (mirrors match_participants.bonus_jc).
+            ("add_bankruptcy_penalty_to_prediction_positions", self._migration_add_bankruptcy_penalty_to_prediction_positions),
         ]
 
     # --- Migrations ---
@@ -1216,6 +1220,15 @@ class SchemaManager:
         of recomputing from the current config constants."""
         self._add_column_if_not_exists(
             cursor, "match_participants", "bonus_jc", "INTEGER"
+        )
+
+    def _migration_add_bankruptcy_penalty_to_prediction_positions(self, cursor) -> None:
+        """Snapshot the bankruptcy penalty withheld from a penalized winner's
+        order-book settlement credit so realized-P&L stats and the balance-chart
+        delta report the JC actually credited (gross payout - cost - penalty)
+        instead of the gross figure. Mirrors match_participants.bonus_jc."""
+        self._add_column_if_not_exists(
+            cursor, "prediction_positions", "bankruptcy_penalty", "INTEGER NOT NULL DEFAULT 0"
         )
 
     def _migration_dig_boss_revamp_columns(self, cursor) -> None:
