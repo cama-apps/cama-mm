@@ -1218,8 +1218,21 @@ class DraftCommands(commands.Cog):
             await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
-        # Delete captain ping message (first choice made)
+        if state.phase != DraftPhase.WINNER_CHOICE:
+            await interaction.response.send_message(
+                "❌ That choice has already been made.", ephemeral=True
+            )
+            return
+
+        # Delete captain ping message (first choice made). This awaits a network
+        # round-trip, so a double-click could re-enter here before the phase
+        # advances; re-check the phase afterward so the second click is rejected.
         await self._delete_captain_ping_message(interaction, state)
+        if state.phase != DraftPhase.WINNER_CHOICE:
+            await interaction.response.send_message(
+                "❌ That choice has already been made.", ephemeral=True
+            )
+            return
 
         state.winner_choice_type = "side"
         state.phase = DraftPhase.WINNER_SIDE_CHOICE
@@ -1255,8 +1268,21 @@ class DraftCommands(commands.Cog):
             await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
             return
 
-        # Delete captain ping message (first choice made)
+        if state.phase != DraftPhase.WINNER_CHOICE:
+            await interaction.response.send_message(
+                "❌ That choice has already been made.", ephemeral=True
+            )
+            return
+
+        # Delete captain ping message (first choice made). This awaits a network
+        # round-trip, so a double-click could re-enter here before the phase
+        # advances; re-check the phase afterward so the second click is rejected.
         await self._delete_captain_ping_message(interaction, state)
+        if state.phase != DraftPhase.WINNER_CHOICE:
+            await interaction.response.send_message(
+                "❌ That choice has already been made.", ephemeral=True
+            )
+            return
 
         state.winner_choice_type = "hero_pick"
         state.phase = DraftPhase.WINNER_HERO_CHOICE
@@ -1848,8 +1874,12 @@ class DraftCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        # Attempt to pick the player
-        success = state.pick_player(player_id)
+        # Attempt to pick the player. safe_defer above yields the event loop, so a
+        # second button callback from the same captain (discord.py dispatches each
+        # click as its own task) could have advanced the draft in the meantime.
+        # pick_player re-checks turn ownership and availability synchronously with
+        # no awaits, so only one of two interleaved picks can land.
+        success = state.pick_player(player_id, picker_id=interaction.user.id)
         if not success:
             with contextlib.suppress(Exception):
                 await interaction.followup.send(
