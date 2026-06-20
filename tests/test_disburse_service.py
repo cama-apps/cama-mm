@@ -146,16 +146,29 @@ class TestProportionalDistribution:
         assert sum(amounts.values()) == 100
 
     def test_proportional_distribution_capped(self, disburse_service):
-        """Test proportional distribution capped at debt."""
+        """Test proportional distribution caps a small debtor and routes the freed
+        headroom to the larger uncapped debtor.
+
+        With debts of 10 and 1000 and a 100 fund, the proportional shares are
+        ~1 and ~99. The fix must distribute the FULL 100 (not leave it stranded)
+        and the uncapped debtor (1002) must absorb the larger remainder. Exact
+        amounts are asserted so a degenerate all-zeros (or under-distributing)
+        result can't pass.
+        """
         debtors = [
-            {"discord_id": 1001, "balance": -10},   # Would get 50% but only needs 10
-            {"discord_id": 1002, "balance": -1000},  # Gets the rest
+            {"discord_id": 1001, "balance": -10},   # capped at its 10 debt
+            {"discord_id": 1002, "balance": -1000},  # absorbs the remainder
         ]
         distributions = disburse_service._calculate_proportional_distribution(100, debtors)
 
         amounts = {d[0]: d[1] for d in distributions}
-        assert amounts[1001] <= 10  # Capped at debt
-        assert sum(amounts.values()) <= 100
+        # Whole fund is distributed -- no stranded headroom.
+        assert sum(amounts.values()) == 100
+        # Small debtor is capped at (well under) its 10 debt; the large debtor
+        # receives the freed-up headroom.
+        assert amounts[1001] == 1
+        assert amounts[1002] == 99
+        assert amounts[1001] <= 10  # never exceeds its debt
 
 
 class TestNeediestDistribution:
@@ -308,7 +321,12 @@ class TestQuorumAndExecution:
     def test_execute_disbursement(
         self, disburse_service, player_repo, setup_players, setup_nonprofit_fund
     ):
-        """Test full disbursement execution."""
+        """Test full disbursement execution with recipient-side conservation."""
+        # Record exact balances before so we can assert the deltas sum to the
+        # total distributed (not just that balances moved in the right direction).
+        before_1001 = player_repo.get_balance(1001, TEST_GUILD_ID)
+        before_1002 = player_repo.get_balance(1002, TEST_GUILD_ID)
+
         disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
         # Vote for even split
@@ -327,6 +345,96 @@ class TestQuorumAndExecution:
         debtor2_balance = player_repo.get_balance(1002, TEST_GUILD_ID)
         assert debtor1_balance > -100  # Was -100
         assert debtor2_balance > -50   # Was -50
+
+        # Recipient-side conservation: the sum of every recipient's balance delta
+        # must equal the reported total_disbursed. A bug that credited nobody
+        # (e.g. a missing player row silently swallowing a share) would leave the
+        # deltas summing to less than total_disbursed and fail here.
+        delta_sum = (debtor1_balance - before_1001) + (debtor2_balance - before_1002)
+        assert delta_sum == result["total_disbursed"]
+        # And the reported per-recipient distribution must match the same total.
+        assert sum(amount for _, amount in result["distributions"]) == result["total_disbursed"]
+
+    def test_execute_disbursement_aborts_on_missing_recipient(
+        self, disburse_repo, loan_repo, player_repo
+    ):
+        """A recipient whose player row is missing must roll back the whole op.
+
+        Regression for the silent-burn bug: complete_and_disburse_atomic debited
+        the fund by the full total, then credited each recipient via executemany.
+        If a recipient row no longer exists, that UPDATE matches 0 rows -- the
+        fund is debited but the share is credited to nobody, destroying the JC.
+        The fix raises inside the BEGIN IMMEDIATE when fewer rows update than
+        distributions, rolling everything back (all-or-nothing).
+        """
+        # One real recipient + one phantom id with no players row.
+        player_repo.add(discord_id=2001, discord_username="Real", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(2001, TEST_GUILD_ID, -100)
+        loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=300)
+
+        # Stand up an active proposal reserving the full fund (so the atomic path
+        # has a proposal to complete and a reserve to return).
+        disburse_repo.create_proposal(
+            guild_id=TEST_GUILD_ID, proposal_id=999, fund_amount=300, quorum_required=1
+        )
+        fund_before = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)  # reserve held -> 0
+        bal_before = player_repo.get_balance(2001, TEST_GUILD_ID)
+
+        with pytest.raises(ValueError, match="recipient row is missing"):
+            disburse_repo.complete_and_disburse_atomic(
+                guild_id=TEST_GUILD_ID,
+                fund_amount_to_return=300,
+                distributions=[(2001, 150), (424242, 150)],  # 424242 has no row
+                method="even",
+            )
+
+        # All-or-nothing: nothing moved. The real recipient was NOT credited,
+        # the fund was NOT debited, and the proposal stays active.
+        assert player_repo.get_balance(2001, TEST_GUILD_ID) == bal_before
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == fund_before
+        assert disburse_repo.get_active_proposal(TEST_GUILD_ID) is not None
+        # No history row was recorded.
+        assert disburse_repo.get_last_disbursement(TEST_GUILD_ID) is None
+
+    def test_execute_proportional_conserves_recipient_total(
+        self, disburse_service, player_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Proportional live-execute: recipient balance deltas sum to total_disbursed."""
+        before = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (1001, 1002)}
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="proportional")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1004, method="proportional")
+
+        result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+
+        assert result["method"] == "proportional"
+        delta_sum = sum(
+            player_repo.get_balance(pid, TEST_GUILD_ID) - before[pid] for pid in before
+        )
+        assert delta_sum == result["total_disbursed"]
+        assert sum(amount for _, amount in result["distributions"]) == result["total_disbursed"]
+
+    def test_execute_neediest_conserves_recipient_total(
+        self, disburse_service, player_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Neediest live-execute: the single recipient's delta equals total_disbursed."""
+        # Debtor1 has -100 (most debt), so it is the neediest and receives funds.
+        before = player_repo.get_balance(1001, TEST_GUILD_ID)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="neediest")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1004, method="neediest")
+
+        result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+
+        assert result["method"] == "neediest"
+        assert result["recipient_count"] == 1
+        recipient_id, amount = result["distributions"][0]
+        assert recipient_id == 1001  # most-indebted player
+        # The recipient's actual on-ledger delta matches the reported amount/total.
+        assert player_repo.get_balance(1001, TEST_GUILD_ID) - before == amount
+        assert amount == result["total_disbursed"]
 
     def test_disbursement_marks_complete(
         self, disburse_service, setup_players, setup_nonprofit_fund

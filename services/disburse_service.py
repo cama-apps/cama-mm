@@ -717,7 +717,7 @@ class DisburseService:
 
         return [(richest["discord_id"], fund)]
 
-    def get_individual_votes(self, guild_id: int | None) -> dict[int, str]:
+    def get_individual_votes(self, guild_id: int | None) -> list[dict]:
         """
         Get individual votes for the active proposal in a guild.
 
@@ -725,6 +725,8 @@ class DisburseService:
             guild_id: Guild ID
 
         Returns:
-            Dict mapping discord_id -> vote method
+            List of dicts, one per vote, each with keys ``discord_id``,
+            ``vote_method``, and ``voted_at`` (Unix timestamp), ordered by
+            ``voted_at`` ascending. Empty list when there is no active proposal.
         """
         return self.disburse_repo.get_individual_votes(guild_id)
