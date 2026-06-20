@@ -243,6 +243,28 @@ class TestRegisterSteamIdUniqueness:
         assert repo.get_steam_id_owner(steam_id) == 1
         assert repo.get_by_id(2, TEST_GUILD_ID) is None
 
+    def test_register_rolls_back_player_on_steam_link_failure(
+        self, test_db, player_service, monkeypatch
+    ):
+        """If add_steam_id raises after the player row is created (a concurrent
+        registration won the race for the same Steam ID between the pre-check and
+        the junction insert), register_player must roll back the just-created
+        player row — no half-registered player left with no Steam mapping."""
+
+        def _boom(*args, **kwargs):
+            raise ValueError("Steam ID 98765 is already linked to another player")
+
+        monkeypatch.setattr(player_service.player_repo, "add_steam_id", _boom)
+
+        with pytest.raises(ValueError, match="already linked to another player"):
+            player_service.register_player(
+                discord_id=42, discord_username="racer", guild_id=TEST_GUILD_ID,
+                steam_id=98765, mmr_override=3000,
+            )
+
+        repo = PlayerRepository(test_db.db_path)
+        assert repo.get_by_id(42, TEST_GUILD_ID) is None
+
     def test_register_populates_junction_table(self, test_db, player_service):
         """The primary Steam ID is recorded in the junction table (source of
         truth), not only the legacy column."""

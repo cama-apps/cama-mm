@@ -233,10 +233,11 @@ class TestConcurrencyGuard:
         pending row survived and a user retry re-ran the atomic core — producing
         a DUPLICATE matches row plus a second win/loss for every player.
 
-        The fix deletes the pending row inside the atomic txn (and keys the
-        matches row on the pending match for idempotency). After a simulated
-        post-core failure, the retry finds no pending shuffle and exactly one
-        match exists with wins/losses applied once.
+        The fix keys the matches row on the pending match: a retry re-enters
+        record_match, the idempotency guard returns the already-recorded match
+        (no duplicate, no second win/loss), and the post-core money steps re-run
+        to settle what the failure stranded — the pending row is kept until those
+        steps succeed. Exactly one match exists with wins/losses applied once.
         """
         match_repo = MatchRepository(test_db.db_path)
         match_service = MatchService(
@@ -257,10 +258,13 @@ class TestConcurrencyGuard:
             match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Restore the real post-core step and retry, exactly as a user would
-        # after the bot told them to "try again".
+        # after the bot told them to "try again". The pending shuffle still
+        # exists (it is cleared only once the post-core steps succeed), so the
+        # retry re-enters record_match, the idempotency guard returns the
+        # already-recorded match (no duplicate, no second win/loss), and the
+        # post-core money steps re-run to recover — instead of stranding.
         match_service._repay_outstanding_loans = original_repay
-        with pytest.raises(ValueError, match="No recent shuffle found"):
-            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Exactly one match recorded — not two.
         conn = test_db.get_connection()

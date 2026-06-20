@@ -2159,11 +2159,13 @@ class BossCombatMixin:
         # *validated* at start_boss_duel, never escrowed, so a player who
         # spent JC during a mid-fight pause (or whose balance otherwise
         # dropped below the wager) could be driven negative here. Re-read the
-        # live balance and clamp so the loss can never push it below zero.
+        # live balance and clamp the debit to the player's *positive* balance:
+        # a loss can never push it below zero, and — crucially — must never
+        # CREDIT a player whose balance is already negative (in which case
+        # -current_balance would be positive, minting coins on a loss).
         if jc_delta < 0:
             current_balance = self.player_repo.get_balance(discord_id, guild_id)
-            if current_balance + jc_delta < 0:
-                jc_delta = -current_balance
+            jc_delta = max(jc_delta, -max(0, current_balance))
         # Extended cooldown (stinger + flat loss penalty) pushes the timer forward.
         last_dig_effective = now + extra_cd + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 

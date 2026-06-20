@@ -691,8 +691,14 @@ async def on_ready():
     # future /incite in that guild. This one-shot, idempotent sweep refunds the
     # stakes and fizzles each stale war. Run off the event loop with a
     # done-callback so a failure surfaces in logs instead of being swallowed.
+    #
+    # on_ready fires on every gateway reconnect, not just process startup, so
+    # gate the sweep behind a once-per-process flag. A reconnect does NOT kill
+    # the in-memory incite_action tasks, so re-running it would fizzle wars that
+    # are still legitimately live.
     rebellion_svc = getattr(bot, "rebellion_service", None)
-    if rebellion_svc:
+    if rebellion_svc and not getattr(bot, "_rebellion_recovery_started", False):
+        bot._rebellion_recovery_started = True
         def _log_rebellion_recovery(t: asyncio.Task) -> None:
             try:
                 recovered = t.result()

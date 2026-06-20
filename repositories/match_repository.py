@@ -458,18 +458,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     (match_id, normalized_guild, pending_match_id),
                 )
 
-            # 13. Delete the pending_matches row inside this SAME transaction so
-            # the match and the clearing of its pending state commit atomically.
-            # Previously the clear happened only after the (unguarded) post-core
-            # money steps, leaving a window where a post-core failure stranded
-            # the pending row and let a retry re-record. With the deletion here,
-            # a retry's get_last_shuffle finds nothing and the idempotency guard
-            # above is a second line of defense.
-            if pending_match_id is not None:
-                cursor.execute(
-                    "DELETE FROM pending_matches WHERE pending_match_id = ? AND guild_id = ?",
-                    (pending_match_id, normalized_guild),
-                )
+            # 13. Do NOT delete the pending_matches row here. The idempotency
+            # guard at the top (it returns the existing match_id if this
+            # pending_match_id was already recorded) is what prevents a retry
+            # from double-recording. The pending row must survive until the
+            # post-core money steps (bet settlement / loan repayment) succeed:
+            # those re-derive pending_match_id from it and are themselves
+            # idempotent, so a retry after a post-core failure re-settles the
+            # still-pending bets instead of stranding them. clear_last_shuffle
+            # removes the pending row only once recording fully succeeds.
 
             return match_id
 
