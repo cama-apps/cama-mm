@@ -306,9 +306,13 @@ class SQLQueryService:
                 sql=sql,
             )
 
-        # 5. Execute the query
+        # 5. Execute the query, scoped to the asking guild at the data layer.
+        # The model never sees guild_id (it is a blocked column), so isolation is
+        # enforced here via per-guild views rather than by trusting the SQL.
         try:
-            rows = await asyncio.to_thread(self.ai_query_repo.execute_readonly, sql, max_rows=25)
+            rows = await asyncio.to_thread(
+                self.ai_query_repo.execute_readonly_guild_scoped, sql, guild_id, max_rows=25
+            )
             logger.info(f"Query executed successfully, {len(rows)} rows returned")
             return QueryResult(
                 success=True,
@@ -417,43 +421,135 @@ class SQLQueryService:
         if not sql or not sql.strip():
             return False, "Empty query"
 
-        sql_upper = sql.upper().strip()
+        # Mask the *contents* of string literals before any structural check, so
+        # the keyword/statement/table/column scans operate on SQL structure, not
+        # on data that merely looks like SQL. This both prevents false rejections
+        # (a name like 'a;b' or a value of 'DROP') and stops a literal from
+        # hiding a real second statement.
+        masked = self._mask_string_literals(sql)
+        masked_upper = masked.upper().strip()
 
         # 1. Must start with SELECT
-        if not sql_upper.startswith("SELECT"):
+        if not masked_upper.startswith("SELECT"):
             return False, "Only SELECT queries are allowed"
 
         # 2. Check for dangerous keywords
         for keyword in DANGEROUS_KEYWORDS:
             # Use word boundary matching to avoid false positives
-            if re.search(rf"\b{keyword}\b", sql_upper):
+            if re.search(rf"\b{keyword}\b", masked_upper):
                 return False, f"Forbidden keyword: {keyword}"
 
-        # 3. Check for multiple statements (semicolon followed by more SQL)
-        # Allow trailing semicolon but not multiple statements
-        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        # 3. Check for multiple statements (semicolon followed by more SQL).
+        # Operates on the masked SQL so a semicolon inside a string literal does
+        # not count as a statement separator. Allow a trailing semicolon.
+        statements = [s.strip() for s in masked.split(";") if s.strip()]
         if len(statements) > 1:
             return False, "Multiple statements not allowed"
 
         # 4. Reject SELECT * — wildcard bypasses the column blocklist and
         # would expose PII columns like discord_id and steam_id.
         # Matches `SELECT *` and `SELECT table.*` (including DISTINCT/ALL).
-        if re.search(r"\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?(?:\w+\s*\.\s*)?\*", sql_upper):
+        if re.search(r"\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?(?:\w+\s*\.\s*)?\*", masked_upper):
             return False, "SELECT * is not allowed; list explicit columns"
 
+        # 4b. Reject schema-qualified references (main./temp.). Guild isolation is
+        # enforced by per-guild TEMP VIEWS that shadow the base tables; a query
+        # that reaches past them via `main.players` would read every guild's rows.
+        if re.search(r"\b(?:main|temp)\s*\.\s*\w", masked, re.IGNORECASE):
+            return False, "Schema-qualified table references are not allowed"
+
         # 5. Extract and validate table names against blocklist
-        tables = self._extract_tables(sql)
+        tables = self._extract_tables(masked)
         blocked_tables_lower = {t.lower() for t in BLOCKED_TABLES}
         for table in tables:
             if table.lower() in blocked_tables_lower:
                 return False, f"Table not allowed: {table}"
 
-        # 6. Extract and check for blocked columns in SELECT
-        blocked = self._check_blocked_columns(sql)
+        # 6. Extract and check for blocked columns in every SELECT projection
+        # (top-level, UNION branches, and projected subqueries).
+        blocked = self._check_blocked_columns(masked)
         if blocked:
             return False, f"Blocked column(s): {', '.join(blocked)}"
 
         return True, ""
+
+    @staticmethod
+    def _mask_string_literals(sql: str) -> str:
+        """Replace the contents of single/double quoted string literals with a
+        neutral placeholder, keeping the surrounding quotes.
+
+        Lets structural validation treat string data as opaque, so a value like
+        'a;b' or 'DROP' can neither trigger a false rejection nor hide a second
+        statement. Handles SQL doubled-quote escaping (e.g. 'it''s').
+        """
+        out: list[str] = []
+        i = 0
+        n = len(sql)
+        while i < n:
+            ch = sql[i]
+            if ch == "'" or ch == '"':
+                quote = ch
+                out.append(quote)
+                i += 1
+                while i < n:
+                    if sql[i] == quote:
+                        # Doubled quote = an escaped quote inside the literal.
+                        if i + 1 < n and sql[i + 1] == quote:
+                            out.append("xx")
+                            i += 2
+                            continue
+                        out.append(quote)
+                        i += 1
+                        break
+                    out.append("x")
+                    i += 1
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+
+    @staticmethod
+    def _projection_lists(masked_lower: str) -> list[str]:
+        """Return the output-column text of every SELECT, scoped to that SELECT's
+        own nesting level.
+
+        For each ``SELECT`` the projection runs to the ``FROM`` that closes it at
+        the same parenthesis depth (or to end / an enclosing ``)`` for a
+        FROM-less SELECT). Text inside nested subqueries is skipped, so a blocked
+        column is detected when it is actually projected — at top level, in a
+        UNION branch, or as a projected subquery's own output — but not when it
+        appears only inside a subquery's WHERE/JOIN.
+        """
+        n = len(masked_lower)
+        projections: list[str] = []
+        for m in re.finditer(r"\bselect\b", masked_lower):
+            depth = 0
+            buf: list[str] = []
+            j = m.end()
+            while j < n:
+                c = masked_lower[j]
+                if c == "(":
+                    depth += 1
+                    j += 1
+                    continue
+                if c == ")":
+                    if depth == 0:
+                        break  # closing paren of an enclosing subquery
+                    depth -= 1
+                    j += 1
+                    continue
+                if (
+                    depth == 0
+                    and masked_lower.startswith("from", j)
+                    and (j == 0 or not (masked_lower[j - 1].isalnum() or masked_lower[j - 1] == "_"))
+                    and (j + 4 >= n or not (masked_lower[j + 4].isalnum() or masked_lower[j + 4] == "_"))
+                ):
+                    break  # FROM closing this SELECT's column list
+                if depth == 0:
+                    buf.append(c)
+                j += 1
+            projections.append("".join(buf))
+        return projections
 
     def _extract_tables(self, sql: str) -> list[str]:
         """
@@ -479,32 +575,25 @@ class SQLQueryService:
 
         return list(set(tables))
 
-    def _check_blocked_columns(self, sql: str) -> list[str]:
+    def _check_blocked_columns(self, masked_sql: str) -> list[str]:
         """
-        Check if any blocked columns are in the SELECT clause.
+        Return blocked columns that appear in any SELECT projection.
 
-        Only checks SELECT clause - allows blocked columns in JOIN/WHERE.
-        Returns list of blocked columns found in SELECT.
+        ``masked_sql`` must already have string-literal contents masked. Every
+        projection is scanned — top-level, UNION/INTERSECT/EXCEPT branches, and
+        projected subqueries — so the blocklist cannot be bypassed with a UNION
+        or a subquery placed after the first FROM. Blocked columns used only in a
+        JOIN/WHERE (i.e. not projected) are still allowed.
         """
-        found_blocked = []
-        sql_lower = sql.lower()
+        found_blocked: set[str] = set()
+        for proj in self._projection_lists(masked_sql.lower()):
+            for col in BLOCKED_COLUMNS:
+                col_l = col.lower()
+                patterns = [
+                    rf"\b{re.escape(col_l)}\b",  # Simple reference
+                    rf"\.\s*{re.escape(col_l)}\b",  # table.column
+                ]
+                if any(re.search(p, proj) for p in patterns):
+                    found_blocked.add(col)
 
-        # Extract just the SELECT clause (before FROM)
-        from_match = re.search(r'\bfrom\b', sql_lower)
-        if from_match:
-            select_clause = sql_lower[:from_match.start()]
-        else:
-            select_clause = sql_lower
-
-        for col in BLOCKED_COLUMNS:
-            # Check for column in SELECT clause only
-            patterns = [
-                rf"\b{col.lower()}\b",  # Simple reference
-                rf"\.\s*{col.lower()}\b",  # table.column
-            ]
-            for pattern in patterns:
-                if re.search(pattern, select_clause):
-                    found_blocked.append(col)
-                    break
-
-        return found_blocked
+        return sorted(found_blocked)
