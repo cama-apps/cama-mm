@@ -330,7 +330,7 @@ class TriviaView(discord.ui.View):
                     await interaction.followup.send(embed=over_embed)
                 except discord.HTTPException:
                     pass
-                self.cog._end_session(self.session)
+                await self.cog._end_session(self.session)
                 return
 
             next_num = self.question_num + 1
@@ -345,7 +345,7 @@ class TriviaView(discord.ui.View):
                 self.session.message = msg
             except discord.HTTPException:
                 logger.exception("Failed to send next trivia question")
-                self.cog._end_session(self.session)
+                await self.cog._end_session(self.session)
         else:
             # Wrong answer — delete previous "Correct!" message, game over
             if self.session.prev_message:
@@ -360,7 +360,7 @@ class TriviaView(discord.ui.View):
                 await interaction.response.edit_message(embed=over_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
-            self.cog._end_session(self.session)
+            await self.cog._end_session(self.session)
 
     async def on_timeout(self):
         """Handle timeout — end the session."""
@@ -383,7 +383,7 @@ class TriviaView(discord.ui.View):
                 await self.session.message.edit(embed=over_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
-        self.cog._end_session(self.session)
+        await self.cog._end_session(self.session)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.session.user_id
@@ -397,22 +397,23 @@ class TriviaCog(commands.Cog):
         # Active sessions: (user_id, guild_id) -> TriviaSession
         self._sessions: dict[tuple[int, int], TriviaSession] = {}
 
-    def _end_session(self, session: TriviaSession) -> None:
+    async def _end_session(self, session: TriviaSession) -> None:
         session.active = False
         self._sessions.pop((session.user_id, session.guild_id), None)
 
-        # Record session for leaderboard (skip zero-streak to reduce noise)
+        # Record session for leaderboard (skip zero-streak to reduce noise).
+        # Await the write rather than fire-and-forget: an ensure_future task can
+        # be GC'd before it runs and swallows its own exceptions, silently losing
+        # the streak that is the trivia leaderboard's only source of truth.
         if session.streak > 0:
             try:
                 player_service = self.bot.player_service
-                asyncio.ensure_future(
-                    asyncio.to_thread(
-                        player_service.record_trivia_session,
-                        session.user_id,
-                        session.guild_id,
-                        session.streak,
-                        session.total_jc,
-                    )
+                await asyncio.to_thread(
+                    player_service.record_trivia_session,
+                    session.user_id,
+                    session.guild_id,
+                    session.streak,
+                    session.total_jc,
                 )
             except Exception:
                 logger.exception("Failed to record trivia session")
@@ -474,6 +475,10 @@ class TriviaCog(commands.Cog):
                 )
 
         if not await safe_defer(interaction):
+            # The cooldown was already claimed above; a failed defer means no
+            # session starts, so release it rather than burning the player's run.
+            if not is_admin:
+                await asyncio.to_thread(player_service.reset_trivia_cooldown, user_id, guild_id)
             return
 
         # Create session
@@ -484,7 +489,7 @@ class TriviaCog(commands.Cog):
         question = await asyncio.to_thread(generate_question, 0, [])
         if question is None:
             await safe_followup(interaction, content="Failed to generate a trivia question. Try again later.", ephemeral=True)
-            self._end_session(session)
+            await self._end_session(session)
             return
 
         embed = _question_embed(question, 1, 0, 0, interaction.user)

@@ -3353,12 +3353,18 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return cursor.rowcount > 0
 
     def reset_trivia_cooldown(self, discord_id: int, guild_id: int) -> bool:
-        """Reset a player's trivia cooldown by clearing last_trivia_session."""
+        """Reset a player's trivia cooldown by clearing last_trivia_session.
+
+        Returns True only when a cooldown was actually cleared. The
+        ``last_trivia_session IS NOT NULL`` guard stops rowcount from counting a
+        matched-but-unchanged player row, so a no-op reset reports False.
+        """
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE players SET last_trivia_session = NULL WHERE discord_id = ? AND guild_id = ?",
+                "UPDATE players SET last_trivia_session = NULL "
+                "WHERE discord_id = ? AND guild_id = ? AND last_trivia_session IS NOT NULL",
                 (discord_id, guild_id),
             )
             return cursor.rowcount > 0
