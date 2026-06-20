@@ -348,6 +348,106 @@ class TestSQLQueryService:
             is_valid, error = service._validate_sql(query)
             assert is_valid, f"Should allow: {query}, got error: {error}"
 
+    def test_validate_sql_rejects_blocked_columns_via_union(self):
+        """A blocked column smuggled into a UNION branch must still be rejected.
+
+        Regression for the column-blocklist bypass where validation only scanned
+        the projection before the first FROM, so the second SELECT of a UNION
+        leaked PII (discord_id / steam_id) into the visible results.
+        """
+        service = SQLQueryService.__new__(SQLQueryService)
+
+        for query in [
+            "SELECT discord_username FROM players UNION SELECT discord_id FROM players",
+            "SELECT discord_username FROM players UNION ALL SELECT steam_id FROM player_steam_ids",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"UNION must not bypass the blocklist: {query}"
+            assert "blocked column" in error.lower()
+
+    def test_validate_sql_rejects_blocked_columns_via_subquery(self):
+        """A blocked column after a projected subquery's FROM must be rejected.
+
+        Regression for the bypass where a subquery before the target column moved
+        the first FROM, hiding a projected discord_id from the prefix-only scan.
+        Also covers a subquery whose own output is a blocked column under an alias.
+        """
+        service = SQLQueryService.__new__(SQLQueryService)
+
+        for query in [
+            "SELECT (SELECT 1 FROM matches LIMIT 1) AS a, discord_id FROM players",
+            "SELECT (SELECT discord_id FROM players LIMIT 1) AS x FROM matches",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"Subquery must not bypass the blocklist: {query}"
+            assert "blocked column" in error.lower()
+
+    def test_validate_sql_allows_blocked_column_only_in_subquery_where(self):
+        """Blocked columns used only in a subquery WHERE (not projected) stay allowed.
+
+        Guards against the per-SELECT projection scan over-blocking legitimate
+        correlated subqueries — discord_id here is a join predicate, not output.
+        """
+        service = SQLQueryService.__new__(SQLQueryService)
+
+        query = (
+            "SELECT (SELECT COUNT(*) FROM bets WHERE discord_id = p.discord_id) AS bet_count, "
+            "discord_username FROM players p"
+        )
+        is_valid, error = service._validate_sql(query)
+        assert is_valid, f"Should allow blocked column used only in a subquery WHERE: {error}"
+
+    def test_validate_sql_allows_semicolon_inside_string_literal(self):
+        """A semicolon inside a string literal is data, not a statement separator.
+
+        Regression for the multi-statement guard splitting on ';' naively and
+        falsely rejecting a legitimate single SELECT whose value contains ';'.
+        """
+        service = SQLQueryService.__new__(SQLQueryService)
+
+        is_valid, error = service._validate_sql(
+            "SELECT discord_username FROM players WHERE discord_username = 'a;b'"
+        )
+        assert is_valid, f"Semicolon inside a literal should not be rejected: {error}"
+
+    def test_validate_sql_literal_value_does_not_trip_keyword_guard(self):
+        """A dangerous keyword appearing only as a string value is harmless data."""
+        service = SQLQueryService.__new__(SQLQueryService)
+
+        is_valid, error = service._validate_sql(
+            "SELECT discord_username FROM players WHERE discord_username = 'DROP'"
+        )
+        assert is_valid, f"Keyword inside a literal should not be rejected: {error}"
+
+    def test_validate_sql_rejects_schema_qualified_references(self):
+        """Schema-qualified references (main./temp.) bypass the per-guild views.
+
+        Guild isolation for AI queries is enforced by TEMP VIEWS that shadow the
+        base tables; ``main.players`` would read past them into every guild's
+        rows, so such references must be rejected. Alias-qualified refs (``p.``)
+        and a literal value of 'main' must still be allowed.
+        """
+        service = SQLQueryService.__new__(SQLQueryService)
+
+        for query in [
+            "SELECT discord_username FROM main.players",
+            "SELECT discord_username FROM temp.players",
+            "SELECT p.discord_username FROM main.players p",
+        ]:
+            is_valid, _ = service._validate_sql(query)
+            assert not is_valid, f"Schema-qualified ref must be rejected: {query}"
+
+        # alias-qualified references and a 'main' literal value remain valid
+        ok_alias, _ = service._validate_sql(
+            "SELECT p.discord_username FROM players p "
+            "JOIN loan_state l ON p.discord_id = l.discord_id"
+        )
+        assert ok_alias
+        ok_literal, _ = service._validate_sql(
+            "SELECT discord_username FROM players WHERE discord_username = 'main'"
+        )
+        assert ok_literal
+
     def test_blocked_tables_blocklist(self):
         """Test that sensitive tables are in the blocklist."""
         assert "sqlite_sequence" in BLOCKED_TABLES
@@ -542,6 +642,67 @@ class TestAIQueryRepository:
         with pytest.raises(sqlite3.Error):
             ai_query_repo.execute_readonly(
                 "INSERT INTO players (discord_id, discord_username) VALUES (999, 'Hacker')"
+            )
+
+    def test_get_guild_scoped_tables(self, ai_query_repo):
+        """Tables with a guild_id are scoped; the intentionally-global steam-id
+        table is not (Steam accounts are unique across guilds by design)."""
+        scoped = ai_query_repo.get_guild_scoped_tables()
+        assert "players" in scoped
+        assert "matches" in scoped
+        assert "player_steam_ids" not in scoped
+
+    def test_execute_readonly_guild_scoped_isolates_guilds(self, ai_query_repo):
+        """Guild-isolation invariant: an AI query for one guild must never read
+        another guild's rows. Enforced at the data layer (per-guild temp views),
+        since the model never sees guild_id and cannot be trusted to scope."""
+        conn = sqlite3.connect(ai_query_repo.db_path)
+        conn.executemany(
+            "INSERT INTO players (discord_id, guild_id, discord_username) VALUES (?, ?, ?)",
+            [(1, 100, "alice"), (2, 100, "bob"), (3, 200, "eve")],
+        )
+        conn.commit()
+        conn.close()
+
+        names_100 = [
+            r["discord_username"]
+            for r in ai_query_repo.execute_readonly_guild_scoped(
+                "SELECT discord_username FROM players ORDER BY discord_username", guild_id=100
+            )
+        ]
+        assert names_100 == ["alice", "bob"]
+        assert "eve" not in names_100  # guild 200's player must not leak into guild 100
+
+        names_200 = [
+            r["discord_username"]
+            for r in ai_query_repo.execute_readonly_guild_scoped(
+                "SELECT discord_username FROM players", guild_id=200
+            )
+        ]
+        assert names_200 == ["eve"]
+
+    def test_execute_readonly_guild_scoped_reads_global_tables_unscoped(self, ai_query_repo):
+        """A table without a guild_id column (player_steam_ids) is global and must
+        remain readable regardless of the asking guild."""
+        conn = sqlite3.connect(ai_query_repo.db_path)
+        conn.execute(
+            "INSERT INTO player_steam_ids (discord_id, steam_id, is_primary, added_at) "
+            "VALUES (1, 111, 1, '2026-01-01T00:00:00')"
+        )
+        conn.commit()
+        conn.close()
+
+        rows = ai_query_repo.execute_readonly_guild_scoped(
+            "SELECT steam_id FROM player_steam_ids", guild_id=999999
+        )
+        assert len(rows) == 1
+        assert rows[0]["steam_id"] == 111
+
+    def test_execute_readonly_guild_scoped_rejects_writes(self, ai_query_repo):
+        """Writes remain blocked on the guild-scoped connection too."""
+        with pytest.raises(sqlite3.Error):
+            ai_query_repo.execute_readonly_guild_scoped(
+                "UPDATE players SET discord_username = 'x'", guild_id=100
             )
 
 

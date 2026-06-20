@@ -25,6 +25,10 @@ class AIQueryRepository(BaseRepository, IAIQueryRepository):
     Enforces read-only access via PRAGMA query_only and limits result sets.
     """
 
+    def __init__(self, db_path: str):
+        super().__init__(db_path)
+        self._guild_scoped_tables: set[str] | None = None
+
     @contextmanager
     def readonly_connection(self):
         """
@@ -36,6 +40,61 @@ class AIQueryRepository(BaseRepository, IAIQueryRepository):
         conn.row_factory = sqlite3.Row
         try:
             # Enable read-only mode at the connection level
+            conn.execute("PRAGMA query_only = ON")
+            yield conn
+        finally:
+            conn.close()
+
+    def get_guild_scoped_tables(self) -> set[str]:
+        """
+        Return the set of base tables that carry a guild_id column.
+
+        These are the tables AI queries must be restricted to the asking guild.
+        Tables without a guild_id (intentionally global, e.g. player_steam_ids)
+        are excluded. Result is cached — the schema is static at runtime.
+        """
+        if self._guild_scoped_tables is not None:
+            return self._guild_scoped_tables
+
+        scoped: set[str] = set()
+        with self.readonly_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            tables = [row["name"] for row in cursor.fetchall()]
+            for table in tables:
+                cursor.execute(f"PRAGMA table_info({table})")
+                if any(col["name"] == "guild_id" for col in cursor.fetchall()):
+                    scoped.add(table)
+
+        self._guild_scoped_tables = scoped
+        return scoped
+
+    @contextmanager
+    def _guild_scoped_connection(self, guild_id: int):
+        """
+        Read-only connection where every guild-scoped base table is shadowed by a
+        TEMP VIEW filtered to ``guild_id``.
+
+        Unqualified table references (the only kind the validator permits) resolve
+        to the views, so the query sees only the asking guild's rows. Views are
+        created BEFORE ``PRAGMA query_only = ON`` because query_only forbids
+        creating them.
+        """
+        gid = int(guild_id)
+        scoped_tables = self.get_guild_scoped_tables()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            for table in scoped_tables:
+                # Table names come from sqlite_master introspection (trusted, not
+                # user input) and gid is coerced to int, so both are safe to
+                # interpolate into the view definition (which cannot be parameterized).
+                conn.execute(
+                    f'CREATE TEMP VIEW "{table}" AS '
+                    f'SELECT * FROM main."{table}" WHERE guild_id = {gid}'
+                )
             conn.execute("PRAGMA query_only = ON")
             yield conn
         finally:
@@ -70,6 +129,43 @@ class AIQueryRepository(BaseRepository, IAIQueryRepository):
                 return [dict(row) for row in rows]
             except sqlite3.Error as e:
                 logger.error(f"Read-only query failed: {e}\nSQL: {sql}")
+                raise
+
+    def execute_readonly_guild_scoped(
+        self,
+        sql: str,
+        guild_id: int | None,
+        params: tuple = (),
+        max_rows: int = 25,
+    ) -> list[dict]:
+        """
+        Execute a validated SELECT with rows restricted to ``guild_id``.
+
+        Guild isolation is enforced at the data layer (per-guild temp views), not
+        by trusting the generated SQL — the model never sees the guild_id column.
+        Tables without a guild_id column (intentionally global) are read unscoped.
+
+        Args:
+            sql: The SQL query to execute (must be pre-validated)
+            guild_id: Asking guild; None is normalized to 0
+            params: Query parameters for parameterized queries
+            max_rows: Maximum number of rows to return
+
+        Returns:
+            List of dicts with column names as keys
+
+        Raises:
+            sqlite3.Error: If the query fails or attempts to write
+        """
+        normalized_guild = guild_id if guild_id is not None else 0
+        with self._guild_scoped_connection(normalized_guild) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(sql, params)
+                rows = cursor.fetchmany(max_rows)
+                return [dict(row) for row in rows]
+            except sqlite3.Error as e:
+                logger.error(f"Guild-scoped read-only query failed: {e}\nSQL: {sql}")
                 raise
 
     def get_table_schema(self, table_name: str) -> list[dict]:
