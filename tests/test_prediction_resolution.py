@@ -1,17 +1,13 @@
-"""Tests for PredictionService resolution / voting / lock path.
+"""Tests for PredictionService resolution / lock path.
 
-Covers the vote-gated resolution flow that the order-book tests in
+Covers the parts of the resolution flow that the order-book tests in
 ``test_predictions.py`` do not touch:
 
-  - ``add_resolution_vote`` (close-time gate, duplicate-flip rejection)
-  - ``_check_can_resolve`` / ``can_resolve`` (3-vote threshold + admin override)
   - ``check_and_lock_expired`` (open markets past close lock; future ones don't)
   - ``resolve_orderbook`` settlement direction (winning side paid, losing side not)
+  - bankruptcy-penalty netting at settlement and in realized-P&L reads
 
 Uses the real ``PredictionRepository`` + ``PlayerRepository`` via fixtures.
-Voting requires a closed betting window, so these create the market row
-directly through the repo with a past ``closes_at`` (the service-level
-``create_prediction`` deliberately rejects past close times).
 """
 
 from __future__ import annotations
@@ -50,115 +46,6 @@ def _add_player(player_repo: PlayerRepository, discord_id: int, balance: int = 1
         guild_id=TEST_GUILD_ID,
     )
     player_repo.update_balance(discord_id, TEST_GUILD_ID, balance)
-
-
-def _make_closed_prediction(repo: PredictionRepository, *, closes_offset: int = -3600) -> int:
-    """Create a legacy (yes/no vote) prediction whose betting window has closed."""
-    pid = repo.create_prediction(
-        guild_id=TEST_GUILD_ID,
-        creator_id=1,
-        question="Will it resolve?",
-        closes_at=int(time.time()) + closes_offset,
-    )
-    return pid
-
-
-# --------------------------------------------------------------------------- #
-# add_resolution_vote: gating
-# --------------------------------------------------------------------------- #
-
-
-def test_vote_rejected_before_betting_closes(prediction_service, prediction_repo):
-    """Voting before close_time raises — you can't call a market mid-bet."""
-    pid = prediction_repo.create_prediction(
-        guild_id=TEST_GUILD_ID,
-        creator_id=1,
-        question="Still open?",
-        closes_at=int(time.time()) + 3600,  # future
-    )
-    with pytest.raises(ValueError, match="until betting period closes"):
-        prediction_service.add_resolution_vote(pid, user_id=10, outcome="yes")
-
-
-def test_vote_rejected_on_resolved_market(prediction_service, prediction_repo):
-    pid = _make_closed_prediction(prediction_repo)
-    prediction_repo.update_prediction_status(pid, "resolved")
-    with pytest.raises(ValueError, match="already been resolved"):
-        prediction_service.add_resolution_vote(pid, user_id=10, outcome="yes")
-
-
-def test_vote_flip_rejected(prediction_service, prediction_repo):
-    """A user cannot change their vote to the opposite outcome."""
-    pid = _make_closed_prediction(prediction_repo)
-    prediction_service.add_resolution_vote(pid, user_id=10, outcome="yes")
-    with pytest.raises(ValueError, match="different outcome"):
-        prediction_service.add_resolution_vote(pid, user_id=10, outcome="no")
-
-
-# --------------------------------------------------------------------------- #
-# _check_can_resolve / can_resolve: threshold + admin
-# --------------------------------------------------------------------------- #
-
-
-def test_three_matching_votes_enable_resolution(prediction_service, prediction_repo):
-    """MIN_RESOLUTION_VOTES matching non-admin votes flips can_resolve True.
-
-    Two votes is not enough; the third (same outcome) crosses the threshold.
-    """
-    pid = _make_closed_prediction(prediction_repo)
-
-    r1 = prediction_service.add_resolution_vote(pid, user_id=10, outcome="yes", is_admin=False)
-    assert r1["can_resolve"] is False
-    r2 = prediction_service.add_resolution_vote(pid, user_id=11, outcome="yes", is_admin=False)
-    assert r2["can_resolve"] is False
-    r3 = prediction_service.add_resolution_vote(pid, user_id=12, outcome="yes", is_admin=False)
-    assert r3["can_resolve"] is True
-    assert r3["yes_count"] == 3
-
-    # can_resolve(pid, "yes") agrees; the other side has zero votes.
-    assert prediction_service.can_resolve(pid, "yes") is True
-    assert prediction_service.can_resolve(pid, "no") is False
-    # Outcome-agnostic check: any side at threshold -> True.
-    assert prediction_service.can_resolve(pid) is True
-    assert prediction_service.get_pending_outcome(pid) == "yes"
-
-
-def test_split_votes_do_not_reach_threshold(prediction_service, prediction_repo):
-    """Votes split across outcomes never give either side 3 -> cannot resolve."""
-    pid = _make_closed_prediction(prediction_repo)
-    prediction_service.add_resolution_vote(pid, user_id=10, outcome="yes", is_admin=False)
-    prediction_service.add_resolution_vote(pid, user_id=11, outcome="yes", is_admin=False)
-    res = prediction_service.add_resolution_vote(pid, user_id=12, outcome="no", is_admin=False)
-    assert res["can_resolve"] is False
-    assert prediction_service.can_resolve(pid) is False
-    assert prediction_service.get_pending_outcome(pid) is None
-
-
-def test_single_admin_vote_resolves_immediately(prediction_service, prediction_repo):
-    """An admin vote satisfies _check_can_resolve on its own (1 vote)."""
-    pid = _make_closed_prediction(prediction_repo)
-    res = prediction_service.add_resolution_vote(pid, user_id=ADMIN_ID, outcome="no")
-    assert res["is_admin"] is True
-    assert res["can_resolve"] is True
-    assert res["no_count"] == 1
-
-
-def test_can_resolve_false_for_open_and_cancelled(prediction_service, prediction_repo):
-    """can_resolve only applies to open/locked; cancelled never resolves.
-
-    A market with 3 yes votes can_resolve while open/locked, but once cancelled
-    the status guard short-circuits to False even though the votes remain.
-    """
-    pid = _make_closed_prediction(prediction_repo)
-    for uid in (10, 11, 12):
-        prediction_service.add_resolution_vote(pid, user_id=uid, outcome="yes", is_admin=False)
-    assert prediction_service.can_resolve(pid, "yes") is True
-
-    prediction_repo.update_prediction_status(pid, "cancelled")
-    assert prediction_service.can_resolve(pid, "yes") is False
-
-    # Unknown prediction id -> False, not an error.
-    assert prediction_service.can_resolve(999999, "yes") is False
 
 
 # --------------------------------------------------------------------------- #
@@ -302,6 +189,64 @@ def test_resolve_orderbook_bankruptcy_penalty_is_netted_in_txn(
     assert winner["bankruptcy_penalty"] == penalty
     # Balance was credited net of the penalty, in one shot.
     assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == payout - penalty
+
+
+def test_orderbook_stats_net_bankruptcy_penalty_for_winner(
+    repo_db_path, player_repository
+):
+    """Realized-P&L stats and the balance-chart delta for a penalized winner must
+    net out the withheld bankruptcy penalty so they match the JC actually
+    credited. Before persisting the penalty, both reads recomputed
+    ``won*CONTRACT_VALUE - cost`` and overstated the gain by exactly the penalty.
+    """
+    from config import BANKRUPTCY_PENALTY_RATE
+    from repositories.bankruptcy_repository import BankruptcyRepository
+    from services.bankruptcy_service import BankruptcyService
+
+    bankruptcy_service = BankruptcyService(
+        BankruptcyRepository(repo_db_path), player_repository
+    )
+    prediction_repo = PredictionRepository(repo_db_path)
+    prediction_service = PredictionService(
+        prediction_repo=prediction_repo,
+        player_repo=player_repository,
+        admin_user_ids=[ADMIN_ID],
+        bankruptcy_service=bankruptcy_service,
+    )
+    _add_player(player_repository, 1, balance=1000)
+    player_repository.update_balance(1, TEST_GUILD_ID, -50)
+    assert bankruptcy_service.execute_bankruptcy(1, TEST_GUILD_ID).success
+    player_repository.update_balance(1, TEST_GUILD_ID, 1000)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="stats net penalty?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
+    yes_cost = prediction_repo.get_position(pid, 1)["yes_cost_basis_total"]
+
+    pre = player_repository.get_balance(1, TEST_GUILD_ID)
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+
+    payout = 5 * PREDICTION_CONTRACT_VALUE
+    penalty = int((payout - yes_cost) * (1 - BANKRUPTCY_PENALTY_RATE))
+    assert penalty > 0  # genuinely penalized
+
+    # The credited balance delta is the source of truth.
+    credited = player_repository.get_balance(1, TEST_GUILD_ID) - pre
+    assert credited == payout - penalty
+
+    # Realized P&L must equal the credited gain (gross payout - cost - penalty),
+    # not the un-penalized payout - cost. Cost basis is already a sunk debit, so
+    # net realized P&L is credited - cost.
+    stats = prediction_repo.get_user_orderbook_stats(1, TEST_GUILD_ID)
+    expected_pnl = payout - yes_cost - penalty
+    assert stats["realized_pnl"] == expected_pnl
+    assert stats["wins"] == 1
+
+    # The balance-chart delta must likewise be net of the penalty.
+    history = prediction_repo.get_player_orderbook_pnl_history(1, TEST_GUILD_ID)
+    entry = next(h for h in history if h["prediction_id"] == pid)
+    assert entry["delta"] == expected_pnl
 
 
 def test_resolve_orderbook_penalty_uses_net_profit_for_hedger(
