@@ -174,17 +174,26 @@ class DraftState:
         """Check if all 8 picks have been made."""
         return self.current_pick_index >= 8
 
-    def pick_player(self, player_id: int) -> bool:
+    def pick_player(self, player_id: int, picker_id: int | None = None) -> bool:
         """
         Pick a player for the current captain's team.
 
         Args:
             player_id: Discord ID of player to pick
+            picker_id: Discord ID of the captain attempting the pick. When
+                provided, the pick is rejected unless it is that captain's turn.
+                This guard runs synchronously (no awaits between the check and the
+                state mutation), so concurrent button callbacks for the same
+                captain can never both land — the first pick advances the snake
+                order and changes ``current_captain_id``, so the second's
+                ``picker_id`` no longer matches.
 
         Returns:
             True if pick was successful, False otherwise
         """
         if self.phase != DraftPhase.DRAFTING:
+            return False
+        if picker_id is not None and picker_id != self.current_captain_id:
             return False
         if player_id not in self.available_player_ids:
             return False

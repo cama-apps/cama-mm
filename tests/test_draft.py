@@ -2,10 +2,11 @@
 Tests for Immortal Draft functionality.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -152,6 +153,39 @@ class TestDraftState:
 
         result = state.pick_player(999)  # Not in pool
         assert result is False
+
+    def test_pick_player_rejects_wrong_picker(self):
+        """pick_player(picker_id=...) refuses a captain who isn't on the clock.
+
+        This is the synchronous turn guard that closes the concurrent-pick race
+        (finding 1): two button callbacks from the same captain both pass the
+        async pre-defer turn check, then both reach pick_player. The first
+        advances the snake order; the second must be rejected here because it is
+        no longer that captain's turn.
+        """
+        state = DraftState(guild_id=123)
+        state.phase = DraftPhase.DRAFTING
+        state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        state.radiant_captain_id = 100
+        state.dire_captain_id = 200
+        state.player_draft_first_captain_id = 100  # Radiant (100) picks at index 0
+
+        # Index 0 belongs to captain 100. Captain 200 may not pick out of turn.
+        assert state.current_captain_id == 100
+        assert state.pick_player(5, picker_id=200) is False
+        assert 5 not in state.dire_player_ids
+        assert state.current_pick_index == 0  # nothing advanced
+
+        # The captain on the clock succeeds, which advances to captain 200's turn.
+        assert state.pick_player(5, picker_id=100) is True
+        assert state.current_pick_index == 1
+        assert state.current_captain_id == 200
+
+        # A stale second click from captain 100 (the race) is now rejected: it is
+        # no longer their turn, so the pick cannot land on the wrong team.
+        assert state.pick_player(6, picker_id=100) is False
+        assert 6 not in state.radiant_player_ids
+        assert state.current_pick_index == 1
 
     def test_draft_complete(self):
         """Draft is complete after 8 picks."""
@@ -1779,6 +1813,162 @@ class TestHandlePlayerPick:
         assert match_service.message_info["message_id"] == interaction.message.id
         assert match_service.message_info["channel_id"] == interaction.channel.id
         lobby_manager.reset_lobby.assert_called_once_with(guild_id)
+
+    async def test_pick_rejected_when_turn_passes_during_defer(self, player_repository):
+        """A pick that passed the pre-defer turn check is dropped if the turn
+        advances while safe_defer is awaited.
+
+        Regression for finding 1: handle_player_pick validates current_captain_id,
+        then awaits safe_defer (a network round-trip that yields the event loop),
+        then mutates state. discord.py runs each button callback as its own task,
+        so a double-click lets a second callback pass the turn check before the
+        first finishes. This test reproduces that window directly: the captain's
+        turn is advanced *during* safe_defer (as a concurrent pick would do), so
+        without the post-defer picker_id guard the stale pick would land on a team
+        it no longer controls. With the guard it is rejected.
+        """
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        captain1, captain2 = player_ids[0], player_ids[1]
+        stale_target = player_ids[3]
+
+        bot = SimpleNamespace(betting_service=None, lobby_service=None, get_cog=lambda _n: None)
+        cog = DraftCommands(
+            bot=bot,
+            player_repo=player_repository,
+            lobby_manager=MagicMock(),
+            draft_state_manager=DraftStateManager(),
+            draft_service=DraftService(),
+            match_service=_FakeDraftMatchService(),
+        )
+
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.phase = DraftPhase.DRAFTING
+        state.player_pool_ids = player_ids
+        state.captain1_id = captain1
+        state.captain2_id = captain2
+        state.radiant_captain_id = captain1
+        state.dire_captain_id = captain2
+        state.player_draft_first_captain_id = captain1  # captain1 picks at index 0
+        state.radiant_hero_pick_order = 1
+        state.dire_hero_pick_order = 2
+        state.draft_channel_id = 555_000
+        state.draft_message_id = 9_000_001
+        state.radiant_player_ids = [captain1]
+        state.dire_player_ids = [captain2]
+        # captain1 owns index 0; index 1 belongs to captain2 (SNAKE_DRAFT_ORDER[1] == 1).
+        assert state.current_captain_id == captain1
+        assert SNAKE_DRAFT_ORDER[1] == 1
+
+        interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
+
+        # Simulate the concurrent winning pick by advancing the draft during the
+        # defer round-trip, exactly when a second discord.py task would mutate
+        # state. Uses the plain pick_player signature so the simulation does not
+        # itself depend on the fix under test (captain1 is on the clock here, so
+        # this advances the turn to captain2).
+        async def _defer_then_advance(inter, **kwargs):
+            inter.response.deferred = True
+            assert state.pick_player(player_ids[2]) is True  # the "other" click
+            return True
+
+        with patch("commands.draft.safe_defer", _defer_then_advance):
+            await cog.handle_player_pick(interaction, guild_id, stale_target)
+
+        # The stale pick must NOT have landed: it's captain2's turn now, and
+        # captain1's button can't drop a player onto captain2's clock.
+        assert stale_target not in state.radiant_player_ids
+        assert stale_target not in state.dire_player_ids
+        assert state.current_pick_index == 1  # only the concurrent pick advanced it
+        assert state.current_captain_id == captain2
+        # The rejected click was told the pick failed instead of corrupting state.
+        assert len(interaction.followup.messages) == 1
+        assert interaction.followup.messages[0].content.startswith("❌")
+
+
+class _FakeWinnerChoiceResponse:
+    """Records edit_message / send_message for the pre-draft choice handlers."""
+
+    def __init__(self):
+        self.edit_message_calls = []
+        self.sent_messages = []
+
+    async def edit_message(self, **kwargs):
+        self.edit_message_calls.append(kwargs)
+
+    async def send_message(self, content=None, **kwargs):
+        self.sent_messages.append({"content": content, **kwargs})
+
+
+class _FakePingChannel:
+    """Channel whose fetch_message yields control, mimicking a network round-trip."""
+
+    def __init__(self):
+        self.id = 555_000
+
+    async def fetch_message(self, message_id):
+        await asyncio.sleep(0)
+        return SimpleNamespace(delete=AsyncMock())
+
+
+class _FakeWinnerChoiceInteraction:
+    def __init__(self, guild_id, user_id):
+        self.guild = _FakeGuild(guild_id)
+        self.guild_id = guild_id
+        self.user = SimpleNamespace(id=user_id)
+        self.channel = _FakePingChannel()
+        self.response = _FakeWinnerChoiceResponse()
+
+
+class TestPreDraftChoiceDoubleClick:
+    """Regression for finding 18: a double-clicked pre-draft choice is rejected."""
+
+    def _make_winner_choice_state(self, cog, guild_id, winner_id):
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.phase = DraftPhase.WINNER_CHOICE
+        state.player_pool_ids = [winner_id, winner_id + 1] + list(range(1, 9))
+        state.captain1_id = winner_id
+        state.captain2_id = winner_id + 1
+        state.coinflip_winner_id = winner_id
+        # A ping message id makes _delete_captain_ping_message await a fetch (the yield).
+        state.captain_ping_message_id = 777_000
+        return state
+
+    async def test_double_click_winner_chose_side_only_advances_once(self, player_repository):
+        """Two concurrent 'choose side' clicks must advance the phase exactly once.
+
+        handle_winner_chose_side awaits _delete_captain_ping_message (a network
+        round-trip) between reading the phase and mutating it. A double-click
+        lets both callbacks pass interaction_check and read phase WINNER_CHOICE;
+        without a post-yield re-check both would mutate state. The second click
+        must instead be rejected with an ephemeral 'already made' message.
+        """
+        guild_id = TEST_GUILD_ID
+        winner_id = 50_001  # registered by the fixture below
+        _register_draft_players(player_repository, guild_id, 10)
+        cog = _make_draft_cog(player_repository)
+        state = self._make_winner_choice_state(cog, guild_id, winner_id)
+
+        inter_a = _FakeWinnerChoiceInteraction(guild_id, user_id=winner_id)
+        inter_b = _FakeWinnerChoiceInteraction(guild_id, user_id=winner_id)
+
+        await asyncio.gather(
+            cog.handle_winner_chose_side(inter_a, guild_id),
+            cog.handle_winner_chose_side(inter_b, guild_id),
+        )
+
+        # The phase advanced exactly once...
+        assert state.phase == DraftPhase.WINNER_SIDE_CHOICE
+        assert state.winner_choice_type == "side"
+        # ...one click edited the message to show the side choice...
+        total_edits = len(inter_a.response.edit_message_calls) + len(
+            inter_b.response.edit_message_calls
+        )
+        assert total_edits == 1
+        # ...and the losing click was told the choice was already made.
+        rejections = inter_a.response.sent_messages + inter_b.response.sent_messages
+        assert len(rejections) == 1
+        assert "already been made" in rejections[0]["content"]
 
 
 class TestShuffleDraftRedirect:
