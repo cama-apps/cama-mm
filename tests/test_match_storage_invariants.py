@@ -221,6 +221,67 @@ class TestConcurrencyGuard:
         with pytest.raises(ValueError, match="No recent shuffle found"):
             match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
+    def test_no_double_record_when_post_core_step_fails(
+        self, test_db, player_repo, test_players
+    ):
+        """Regression: a post-core failure must not let a retry double-record.
+
+        record_match commits the match (matches row + win/loss + rating writes)
+        in record_match_core_atomic, then runs the money side (bet settlement,
+        loan repayment) AFTER that txn. Previously the pending shuffle was only
+        cleared after those unguarded post-core steps, so if one raised, the
+        pending row survived and a user retry re-ran the atomic core — producing
+        a DUPLICATE matches row plus a second win/loss for every player.
+
+        The fix deletes the pending row inside the atomic txn (and keys the
+        matches row on the pending match for idempotency). After a simulated
+        post-core failure, the retry finds no pending shuffle and exactly one
+        match exists with wins/losses applied once.
+        """
+        match_repo = MatchRepository(test_db.db_path)
+        match_service = MatchService(
+            player_repo=player_repo, match_repo=match_repo, use_glicko=True
+        )
+
+        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+
+        # Simulate a post-core step raising AFTER the atomic core commits. The
+        # atomic match/win-loss/rating writes have already landed at this point.
+        original_repay = match_service._repay_outstanding_loans
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated post-core failure (loan repayment)")
+
+        match_service._repay_outstanding_loans = _boom
+        with pytest.raises(RuntimeError, match="simulated post-core failure"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        # Restore the real post-core step and retry, exactly as a user would
+        # after the bot told them to "try again".
+        match_service._repay_outstanding_loans = original_repay
+        with pytest.raises(ValueError, match="No recent shuffle found"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        # Exactly one match recorded — not two.
+        conn = test_db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS c FROM matches WHERE guild_id = ?", (TEST_GUILD_ID,)
+        )
+        match_count = cursor.fetchone()["c"]
+        conn.close()
+        assert match_count == 1, "post-core failure + retry must not double-record"
+
+        # Win/loss applied exactly once per player (5 wins on radiant, 5 losses).
+        players = [player_repo.get_by_id(pid, TEST_GUILD_ID) for pid in test_players]
+        for pid, player in zip(test_players, players, strict=True):
+            assert player.wins + player.losses == 1, (
+                f"player {pid} should have exactly one game, "
+                f"got {player.wins}W/{player.losses}L"
+            )
+        assert sum(p.wins for p in players) == 5
+        assert sum(p.losses for p in players) == 5
+
     def test_consume_pending_match_atomic(self, test_db):
         """Test that consume_pending_match is atomic."""
         # Save a pending match

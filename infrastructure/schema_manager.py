@@ -483,6 +483,10 @@ class SchemaManager:
             # Immutable package-deal purchase log so year-in-review counts deals
             # even after they are consumed/deleted.
             ("create_package_deal_purchases_table", self._migration_create_package_deal_purchases_table),
+            # Idempotency key for match recording: stamp the originating pending
+            # match on the matches row so a retry after a post-core failure
+            # (bet settlement / loan repayment raising) can't double-record.
+            ("add_pending_match_id_to_matches", self._migration_add_pending_match_id_to_matches),
         ]
 
     # --- Migrations ---
@@ -1223,6 +1227,26 @@ class SchemaManager:
         of recomputing from the current config constants."""
         self._add_column_if_not_exists(
             cursor, "match_participants", "bonus_jc", "INTEGER"
+        )
+
+    def _migration_add_pending_match_id_to_matches(self, cursor) -> None:
+        """Stamp the originating pending match on the recorded matches row and
+        enforce one match per pending match.
+
+        record_match_core_atomic commits the match (and its win/loss + rating
+        writes) before the post-core money side (bet settlement, loan
+        repayment) runs. If a post-core step raised, the pending shuffle was
+        never cleared, so a user retry re-ran the atomic core and produced a
+        duplicate matches row plus a second win/loss + rating update for every
+        player. The column plus a partial unique index make the atomic core
+        idempotent: the retry finds the existing row and no-ops."""
+        self._add_column_if_not_exists(cursor, "matches", "pending_match_id", "INTEGER")
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_matches_guild_pending_match
+            ON matches(guild_id, pending_match_id)
+            WHERE pending_match_id IS NOT NULL
+            """
         )
 
     def _migration_add_bankruptcy_penalty_to_prediction_positions(self, cursor) -> None:

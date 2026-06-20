@@ -972,13 +972,17 @@ class TestBettingEndToEnd:
         for pid in excluded_ids:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == JOPACOIN_EXCLUSION_REWARD
 
-        # Included players got participation (loser) or win bonus (winner).
-        # Either way, their balance must NOT match the exclusion-bonus path.
+        # Included players got the win bonus (radiant won) or participation
+        # (dire lost). Pin each player's exact reward by the side they landed
+        # on so the assertion catches a regression that pays winners the loser
+        # reward or vice versa (which the prior {win, lose} membership check
+        # silently accepted).
         from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
-        allowed_for_included = {JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD}
+        radiant_ids = set(pending.radiant_team_ids)
         included_ids = set(player_ids) - set(excluded_ids)
         for pid in included_ids:
-            assert player_repo.get_balance(pid, TEST_GUILD_ID) in allowed_for_included
+            expected = JOPACOIN_WIN_REWARD if pid in radiant_ids else JOPACOIN_PER_GAME
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == expected
 
     def test_max_lobby_14_players_4_excluded(self, test_db):
         """
@@ -1415,15 +1419,21 @@ class TestLoanRepaymentOnMatchRecord:
         # Match 2: Now spectator plays and loan is repaid
         new_players = test_players[:9] + [spectator_id]  # Replace one player with spectator
         match_service.shuffle_players(new_players, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending2 = match_service.get_last_shuffle(TEST_GUILD_ID)
+        spectator_won = spectator_id in pending2.radiant_team_ids  # radiant wins below
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Loan repaid now
         state = loan_service.get_state(spectator_id, guild_id=TEST_GUILD_ID)
         assert not state.has_outstanding_loan
 
-        # Balance: 130 - 120 repayment + (participation if lost, win reward if won)
+        # Balance: 130 - 120 repayment + the exact match reward for the side the
+        # spectator actually landed on (win reward if on radiant, else participation).
+        # Pinning the branch catches a regression that pays winners the loser
+        # reward (or vice versa).
+        expected_reward = JOPACOIN_WIN_REWARD if spectator_won else JOPACOIN_PER_GAME
         balance = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
-        assert balance in [10 + JOPACOIN_PER_GAME, 10 + JOPACOIN_WIN_REWARD]
+        assert balance == 10 + expected_reward
 
     def test_loan_repayment_pushes_into_debt(self, services, test_players):
         """Loan repayment can push player into debt when they've spent the money."""
@@ -1443,15 +1453,20 @@ class TestLoanRepaymentOnMatchRecord:
 
         # Play a match
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        borrower_won = borrower_id in pending.radiant_team_ids  # radiant wins below
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Loan repaid, player in debt
         state = loan_service.get_state(borrower_id, guild_id=TEST_GUILD_ID)
         assert not state.has_outstanding_loan
 
-        # Balance: 0 - 120 + (participation if lost, win reward if won)
+        # Balance: 0 - 120 + the exact reward for the side the borrower landed
+        # on. Pinning the branch (instead of accepting either reward) catches a
+        # regression that pays winners the loser reward or vice versa.
+        expected_reward = JOPACOIN_WIN_REWARD if borrower_won else JOPACOIN_PER_GAME
         balance = player_repo.get_balance(borrower_id, TEST_GUILD_ID)
-        assert balance in [-120 + JOPACOIN_PER_GAME, -120 + JOPACOIN_WIN_REWARD]
+        assert balance == -120 + expected_reward
 
     def test_multiple_players_with_loans(self, services, test_players):
         """Multiple players have loans, all repaid after match."""
@@ -1471,18 +1486,24 @@ class TestLoanRepaymentOnMatchRecord:
 
         # Shuffle and record
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        b1_won = borrower1 in pending.radiant_team_ids  # radiant wins below
+        b2_won = borrower2 in pending.radiant_team_ids
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Both loans repaid
         assert not loan_service.get_state(borrower1, guild_id=TEST_GUILD_ID).has_outstanding_loan
         assert not loan_service.get_state(borrower2, guild_id=TEST_GUILD_ID).has_outstanding_loan
 
-        # Balances: loan - repayment + reward (win reward if won, participation if lost)
+        # Balances: loan - repayment + the exact reward for each borrower's side.
+        # Pinning each branch catches a regression that swaps win/participation rewards.
+        b1_reward = JOPACOIN_WIN_REWARD if b1_won else JOPACOIN_PER_GAME
+        b2_reward = JOPACOIN_WIN_REWARD if b2_won else JOPACOIN_PER_GAME
         b1_balance = player_repo.get_balance(borrower1, TEST_GUILD_ID)
         b2_balance = player_repo.get_balance(borrower2, TEST_GUILD_ID)
 
-        assert b1_balance in [-10 + JOPACOIN_PER_GAME, -10 + JOPACOIN_WIN_REWARD]
-        assert b2_balance in [-20 + JOPACOIN_PER_GAME, -20 + JOPACOIN_WIN_REWARD]
+        assert b1_balance == -10 + b1_reward
+        assert b2_balance == -20 + b2_reward
 
     def test_loan_repayment_fee_goes_to_nonprofit(self, services, test_players):
         """Verify the loan fee is added to nonprofit fund on repayment."""
