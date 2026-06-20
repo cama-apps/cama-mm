@@ -454,13 +454,22 @@ class TestWarFlow:
             REBELLION_DEFENDER_STAKE,
             REBELLION_INCITER_FLAT_REWARD,
         )
-        inciter_bal_after = player_repo.get_balance(inciter_id, guild_id)
-        assert inciter_bal_after >= inciter_bal_before + REBELLION_INCITER_FLAT_REWARD
-
         # Non-inciter attackers get flat + stake share
         n_defenders = len(defend_voters)
         stake_pool = n_defenders * REBELLION_DEFENDER_STAKE
         stake_share = stake_pool // (len(attack_voters) - 1)  # inciter excluded from the pool share
+
+        # The inciter is paid exactly the flat reward plus any pool remainder
+        # that didn't divide evenly among the non-inciter attackers (the service
+        # folds the remainder into the inciter so the full pool is conserved).
+        # With this setup (pool=20, 4 non-inciter attackers) the remainder is 0,
+        # so the inciter gets exactly the flat reward — assert it exactly so an
+        # over-credit (e.g. a stray per-attacker share) is caught.
+        stake_remainder = stake_pool - stake_share * (len(attack_voters) - 1)
+        inciter_bal_after = player_repo.get_balance(inciter_id, guild_id)
+        assert inciter_bal_after == (
+            inciter_bal_before + REBELLION_INCITER_FLAT_REWARD + stake_remainder
+        )
 
         for voter in attack_voters:
             if voter["discord_id"] == inciter_id:

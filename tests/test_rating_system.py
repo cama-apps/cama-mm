@@ -74,6 +74,9 @@ class TestRatingSystemEdgeCases:
         very_high_player = rating_system.create_player_from_rating(2800.0, 50.0, 0.06)
         very_low_player = rating_system.create_player_from_rating(200.0, 50.0, 0.06)
 
+        high_initial = very_high_player.rating
+        low_initial = very_low_player.rating
+
         # Simulate a match where high-rated player wins
         very_high_player.update_player(
             [very_low_player.rating],
@@ -81,16 +84,20 @@ class TestRatingSystemEdgeCases:
             [1.0],  # High player wins
         )
 
-        # High player's rating should increase (or stay high)
+        # The winner's rating must move UP (even a heavily-favored winner gains
+        # a sliver). A sign/direction regression would flip this.
+        assert very_high_player.rating > high_initial, "Winner's rating should increase"
         assert very_high_player.rating > 0, "Rating should remain positive"
 
-        # Low player's rating should decrease (or stay low)
+        # Low player loses to the (post-update) high player.
         very_low_player.update_player(
             [very_high_player.rating],
             [very_high_player.rd],
             [0.0],  # Low player loses
         )
 
+        # The loser's rating must move DOWN.
+        assert very_low_player.rating < low_initial, "Loser's rating should decrease"
         assert very_low_player.rating >= 0, "Rating should remain >= 0"
 
     def test_rating_update_new_player_vs_experienced(self):

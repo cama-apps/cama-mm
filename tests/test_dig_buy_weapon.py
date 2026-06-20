@@ -32,6 +32,14 @@ def _register(player_repository, discord_id=10001, guild_id=12345, balance=10_00
         player_repository.update_balance(discord_id, guild_id, balance)
 
 
+from services.dig_data.items import _PICKAXE_TIERS_DEF
+
+# Stone is tier 1: the first paid upgrade from the Wooden starter.
+STONE_TIER = _PICKAXE_TIERS_DEF[1]
+STONE_COST = STONE_TIER.jc_cost
+STONE_DEPTH = STONE_TIER.depth_required
+
+
 class TestUpgradePickaxeToTier:
     def test_buy_next_tier_succeeds(self, dig_service, dig_repo, player_repository, guild_id):
         _register(player_repository)
@@ -41,6 +49,47 @@ class TestUpgradePickaxeToTier:
         result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 1)
         assert result["success"]
         assert result["tier"] == 1
+
+    def test_buy_next_tier_debits_exact_cost_and_grants_tier(
+        self, dig_service, dig_repo, player_repository, guild_id
+    ):
+        """A successful upgrade debits exactly the tier's JC cost and equips the
+        new pickaxe tier in both the tunnel column and the equipped weapon."""
+        start_balance = 10_000
+        _register(player_repository, balance=start_balance)
+        dig_repo.create_tunnel(10001, guild_id, "TestTunnel")
+        dig_repo.update_tunnel(10001, guild_id, depth=STONE_DEPTH, pickaxe_tier=0)
+        assert STONE_COST > 0, "this test only proves the debit if the tier costs JC"
+
+        result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 1)
+        assert result["success"]
+        assert result["tier"] == 1
+        assert result["cost"] == STONE_COST
+
+        # Balance debited by exactly the upgrade cost — nothing more, nothing less.
+        assert (
+            player_repository.get_balance(10001, guild_id) == start_balance - STONE_COST
+        )
+        # Tier 1 is actually granted: both the legacy tunnel column and the
+        # equipped weapon row reflect Stone.
+        assert dig_repo.get_tunnel(10001, guild_id)["pickaxe_tier"] == 1
+        assert dig_repo.get_equipped_gear(10001, guild_id)["weapon"]["tier"] == 1
+
+    def test_buy_next_tier_insufficient_funds_rejected_debits_nothing(
+        self, dig_service, dig_repo, player_repository, guild_id
+    ):
+        """An upgrade the player can't afford is rejected and debits nothing,
+        leaving the pickaxe tier unchanged."""
+        poor_balance = STONE_COST - 1
+        _register(player_repository, balance=poor_balance)
+        dig_repo.create_tunnel(10001, guild_id, "TestTunnel")
+        dig_repo.update_tunnel(10001, guild_id, depth=STONE_DEPTH, pickaxe_tier=0)
+
+        result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 1)
+        assert not result["success"]
+        # Balance untouched and the pickaxe tier is NOT advanced.
+        assert player_repository.get_balance(10001, guild_id) == poor_balance
+        assert dig_repo.get_tunnel(10001, guild_id)["pickaxe_tier"] == 0
 
     def test_skip_tier_rejected(self, dig_service, dig_repo, player_repository, guild_id):
         _register(player_repository)
