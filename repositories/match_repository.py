@@ -152,15 +152,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
+            # 0. Idempotency guard. The post-core money side (bet settlement,
+            # loan repayment) runs AFTER this transaction commits and is not
+            # rolled back with it. If one of those steps raised, the caller
+            # tells the user to retry — but the shuffle was never cleared, so a
+            # retry would re-run this core and double the matches row plus every
+            # win/loss + rating update. Keying the matches row on the pending
+            # match lets the retry detect the already-recorded match and no-op,
+            # returning the original match_id. Only applies when we have a
+            # pending_match_id (real /record flow); raw seeding passes None.
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT match_id FROM matches
+                    WHERE guild_id = ? AND pending_match_id = ?
+                    """,
+                    (normalized_guild, pending_match_id),
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    return existing["match_id"]
+
             # 1. matches row
             cursor.execute(
                 """
                 INSERT INTO matches (
                     guild_id, team1_players, team2_players, winning_team,
                     dotabuff_match_id, lobby_type, balancing_rating_system,
-                    betting_mode
+                    betting_mode, pending_match_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_guild,
@@ -171,6 +192,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     lobby_type,
                     balancing_rating_system,
                     betting_mode,
+                    pending_match_id,
                 ),
             )
             match_id = cursor.lastrowid
@@ -434,6 +456,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
                       AND status = 'pending'
                     """,
                     (match_id, normalized_guild, pending_match_id),
+                )
+
+            # 13. Delete the pending_matches row inside this SAME transaction so
+            # the match and the clearing of its pending state commit atomically.
+            # Previously the clear happened only after the (unguarded) post-core
+            # money steps, leaving a window where a post-core failure stranded
+            # the pending row and let a retry re-record. With the deletion here,
+            # a retry's get_last_shuffle finds nothing and the idempotency guard
+            # above is a second line of defense.
+            if pending_match_id is not None:
+                cursor.execute(
+                    "DELETE FROM pending_matches WHERE pending_match_id = ? AND guild_id = ?",
+                    (pending_match_id, normalized_guild),
                 )
 
             return match_id
