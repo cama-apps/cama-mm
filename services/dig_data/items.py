@@ -67,14 +67,6 @@ GEAR_BOSS_DROP_RATE: float = 0.07
 # missing from this map (25/50/75) drop nothing; players buy low-tier
 # shop gear there instead.
 GEAR_DROP_DEPTH_TIER_MAP: dict[int, int] = {100: 4, 150: 5, 200: 6, 275: 7}
-# One-shot grants the first time a player crosses these depths (slot,
-# tier). Implementation reads this lazily in dig advance flow; the user
-# only ever sees one of each.
-GEAR_MILESTONE_GRANTS: dict[int, tuple[str, int]] = {
-    50: ("armor", 1),    # Stone Cuirass at depth 50
-    100: ("boots", 2),   # Iron Sabatons at depth 100
-    200: ("armor", 3),   # Diamond Breastplate at depth 200
-}
 
 # Weapon = pickaxe. Tier-by-tier the dig stats here mirror PICKAXE_TIERS
 # above so weapon and pickaxe collapse to the same item; the new boss

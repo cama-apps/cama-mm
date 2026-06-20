@@ -227,12 +227,21 @@ class DigCoreMixin:
 
     def _resolve_queued_items(
         self, discord_id: int, guild_id
-    ) -> tuple[list[str], list[str], dict[str, bool]]:
-        """Pop queued items from the inventory and return display names, ids, and
-        a flag-map (one ``has_<item>`` key per consumable) for the main dig loop."""
+    ) -> tuple[list[str], list[str], dict[str, bool], list[int]]:
+        """Read queued items and return display names, item-type ids, a flag-map
+        (one ``has_<item>`` key per consumable), and the inventory ROW ids to
+        consume.
+
+        This method only READS — it does NOT delete the rows. The caller must
+        fold the returned row ids into its final atomic commit (via
+        ``atomic_tunnel_balance_update(consume_inventory_item_ids=...)``) so the
+        item burn commits-or-rolls-back together with the dig result. An earlier
+        version deleted here, which permanently destroyed consumables if the dig
+        raised before its commit."""
         queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
         items_used: list[str] = []
         items_used_ids: list[str] = []
+        consumed_row_ids: list[int] = []
         flags = {
             "has_dynamite": False,
             "has_hard_hat": False,
@@ -264,13 +273,11 @@ class DigCoreMixin:
                 flags[flag_key] = True
             if itype:
                 items_used_ids.append(itype)
+            row_id = item.get("id")
+            if row_id is not None:
+                consumed_row_ids.append(int(row_id))
 
-        if queued:
-            for item in queued:
-                self.dig_repo.remove_inventory_item(discord_id, guild_id, item.get("type"))
-            self.dig_repo.unqueue_all(discord_id, guild_id)
-
-        return items_used, items_used_ids, flags
+        return items_used, items_used_ids, flags, consumed_row_ids
 
     def _apply_cave_in_consequence(
         self,
@@ -616,6 +623,7 @@ class DigCoreMixin:
                 discord_id, guild_id,
                 balance_delta=net_delta,
                 tunnel_updates=tunnel_updates,
+                consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -897,6 +905,7 @@ class DigCoreMixin:
                 "current_run_artifacts": run_artifacts,
                 "current_run_events": run_events_count,
             },
+            consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
         )
         if self.buff_service is not None and jc_earned > 0:
             try:
@@ -1083,6 +1092,7 @@ class DigCoreMixin:
                 discord_id, guild_id,
                 balance_delta=cave_in_balance_delta,
                 tunnel_updates=cave_in_tunnel_updates,
+                consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -1288,6 +1298,7 @@ class DigCoreMixin:
                     "current_run_artifacts": run_artifacts,
                     "current_run_events": run_events_count,
                 },
+                consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
             )
             if self.buff_service is not None and jc_earned > 0:
                 try:

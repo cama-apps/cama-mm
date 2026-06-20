@@ -620,6 +620,47 @@ class TestAbandonedDuelCleanup:
         row = dig_repo.get_gear_by_id(gid)
         assert row["durability"] <= 19
 
+    def test_stale_cleanup_ticks_snapshot_gear_not_current_gear(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Finding-21: the stale-duel cleanup must tick the gear that fought
+        the abandoned duel (its start-time snapshot), NOT the player's current
+        equipment.
+
+        Old behavior called tick_gear_durability (current equipped loadout),
+        so a player who swapped/repaired gear during the abandoned pause would
+        have the WRONG pieces ticked — the snapshot pieces that actually fought
+        escape wear, while a freshly-equipped piece is wrongly worn. The fix
+        ticks the gear_snapshot_ids recorded with the duel. This test fails on
+        the old path (snapshot piece untouched) and passes on the fix."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        # The piece that "fought" the stale duel — recorded in the snapshot but
+        # NOT currently equipped (the player swapped it out during the pause).
+        snapshot_gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        # No gear is equipped now, so the old current-loadout tick bites nothing.
+
+        state = {
+            "boss_id": "grothak", "tier": 25, "mechanic_id": "fake_mechanic",
+            "risk_tier": "cautious", "wager": 0, "player_hp": 5, "boss_hp": 5,
+            "round_num": 3, "round_log": "[]", "pending_prompt": "{}",
+            "rng_state": "",
+            "status_effects": json.dumps({"gear_snapshot_ids": [snapshot_gid]}),
+            "echo_applied": 0, "echo_killer_id": None,
+            "player_hit": 0.6, "player_dmg": 1, "boss_hit": 0.3, "boss_dmg": 1,
+        }
+        dig_repo.save_active_duel(10001, TEST_GUILD_ID, state)
+
+        durability_before = dig_repo.get_gear_by_id(snapshot_gid)["durability"]
+        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=0)
+
+        # The snapshot piece (the one that actually fought) lost durability,
+        # even though it is unequipped — only tick_gear_durability_ids reaches
+        # an unequipped piece, so this proves the cleanup ticked the snapshot.
+        durability_after = dig_repo.get_gear_by_id(snapshot_gid)["durability"]
+        assert durability_after == durability_before - 1, (
+            "stale cleanup did not tick the snapshot gear that fought the duel"
+        )
+
     def test_no_stale_row_means_no_cleanup_tick(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
@@ -739,6 +780,44 @@ class TestPhaseTransitionEvents:
         # Applied: void_pull starts both fighters 2 HP lighter (rolls pinned, no hits).
         assert evt["round_log"][0]["boss_hp"] == base["round_log"][0]["boss_hp"] - 2
         assert evt["round_log"][0]["player_hp"] == base["round_log"][0]["player_hp"] - 2
+
+    def test_consumed_phase_event_not_resurrected_on_auto_resolve_loss(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Finding-12: a phase event consumed at start_boss_duel must stay
+        consumed after an auto-resolved LOSS.
+
+        start_boss_duel consumes pending_phase_event_id (writing boss_progress
+        to DB) but does NOT refresh the in-memory tunnel. The loss branch of
+        _resolve_duel_outcome used to re-read boss_progress from that stale
+        tunnel and persist it back — re-arming the one-shot so it re-fires on
+        the next fight. The fix persists from the already-consumed boss_progress
+        argument instead. This test fails on the old path (the event survives
+        the loss) and passes on the fix."""
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+        _at_phase2(dig_service, dig_repo, player_repository, monkeypatch, 10003,
+                   pending_event="void_pull")
+        # Pre-condition: the pending event is present before the fight.
+        entry_before = json.loads(
+            dig_repo.get_tunnel(10003, TEST_GUILD_ID)["boss_progress"]
+        )["25"]
+        assert entry_before.get("pending_phase_event_id") == "void_pull"
+
+        # Force an auto-resolved loss (no mechanic pause, no hits land).
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = dig_service.start_boss_duel(10003, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["success"]
+        assert result["won"] is False
+        # No duel paused — this was a clean auto-resolve.
+        assert dig_repo.get_active_duel(10003, TEST_GUILD_ID) is None
+
+        # The one-shot must NOT be re-armed by the loss-path persist.
+        entry_after = json.loads(
+            dig_repo.get_tunnel(10003, TEST_GUILD_ID)["boss_progress"]
+        )["25"]
+        assert "pending_phase_event_id" not in entry_after, (
+            "consumed phase event was resurrected on the auto-resolve loss path"
+        )
 
     def test_start_boss_duel_consumes_event_even_when_fight_pauses(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -993,3 +1072,114 @@ class TestLiveDuelPathWagerAtomicity:
             "zero-wager loss should charge the flat repair bill"
         )
         assert result["jc_delta"] == -BOSS_LOSS_REPAIR_BILL
+
+
+# ---------------------------------------------------------------------------
+# Finding-5: a boss-duel loss can never drive the balance negative.
+#
+# The wager is only *validated* at start_boss_duel, never escrowed. A player
+# who spends JC during a mid-fight pause can reach resolution with a balance
+# below the wager; the loss debit must be floored at the current balance so
+# it can never go negative. (Behavior: the loss debit is clamped, not the
+# stake escrowed — see the fix note in _resolve_duel_outcome.)
+# ---------------------------------------------------------------------------
+
+
+def _seed_loss_bound_duel(dig_repo, discord_id, guild_id, *, wager):
+    """Seed a paused duel rigged to resolve to a LOSS on resume.
+
+    player_hp=1 with boss_hit pinned high and player_hit=0 means the player
+    dies in the continued auto-rounds (random pinned to 0.99 by the caller),
+    so the resume resolves as a loss with the given wager forfeited.
+    """
+    from domain.models.boss_mechanics import MECHANIC_REGISTRY as _MECHS
+
+    mechanic_id = next(iter(_MECHS))
+    mech = _MECHS[mechanic_id]
+    pp = {
+        "mechanic_id": mechanic_id,
+        "prompt_title": mech.prompt_title,
+        "prompt_description": mech.prompt_description,
+        "options": [
+            {"option_idx": i, "label": o.label} for i, o in enumerate(mech.options)
+        ],
+        "safe_option_idx": mech.safe_option_idx,
+    }
+    state = {
+        "boss_id": "grothak", "tier": 25, "mechanic_id": mechanic_id,
+        "risk_tier": "cautious", "wager": wager,
+        "player_hp": 1, "boss_hp": 50, "round_num": 2,
+        "round_log": "[]", "pending_prompt": json.dumps(pp), "rng_state": "",
+        "status_effects": json.dumps({
+            "attempts_this_fight": 1, "initial_win_chance": 0.5, "multiplier": 2.0,
+        }),
+        "echo_applied": 0, "echo_killer_id": None,
+        "player_hit": 0.0, "player_dmg": 1, "boss_hit": 1.0, "boss_dmg": 5,
+    }
+    dig_repo.save_active_duel(discord_id, guild_id, state)
+    return mech.safe_option_idx
+
+
+class TestLossCannotGoNegative:
+    """Finding-5: a wagered loss must floor the debit at the current balance."""
+
+    def test_loss_after_spending_during_pause_floors_at_zero(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Player wagers 100, the fight pauses, they spend down to 30 during the
+        pause, then the resumed fight is lost. The 100-JC wager debit must be
+        floored to 30 so the balance lands at 0, never negative.
+
+        Fails on the old path (balance goes to -70) and passes on the fix."""
+        uid = _register(player_repository, discord_id=40001, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(uid, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            uid, TEST_GUILD_ID, depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+
+        safe_idx = _seed_loss_bound_duel(dig_repo, uid, TEST_GUILD_ID, wager=100)
+        # Simulate spending during the pause: balance drops below the wager.
+        player_repository.update_balance(uid, TEST_GUILD_ID, 30)
+
+        result = dig_service.resume_boss_duel(uid, TEST_GUILD_ID, option_idx=safe_idx)
+        assert result["success"]
+        assert result["won"] is False
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        assert balance_after >= 0, (
+            f"loss drove balance negative: {balance_after}"
+        )
+        assert balance_after == 0, (
+            f"loss debit should floor to the available 30 JC, leaving 0; got {balance_after}"
+        )
+
+    def test_loss_with_sufficient_balance_debits_full_wager(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Control: when the player can afford the wager, the full amount is
+        still debited — the floor must not under-charge a solvent player."""
+        uid = _register(player_repository, discord_id=40002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(uid, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            uid, TEST_GUILD_ID, depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+
+        safe_idx = _seed_loss_bound_duel(dig_repo, uid, TEST_GUILD_ID, wager=100)
+        balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
+
+        result = dig_service.resume_boss_duel(uid, TEST_GUILD_ID, option_idx=safe_idx)
+        assert result["success"]
+        assert result["won"] is False
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        assert balance_after == balance_before - 100, (
+            "solvent loss should debit the full wager"
+        )

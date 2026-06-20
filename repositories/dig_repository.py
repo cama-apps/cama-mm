@@ -868,11 +868,12 @@ class DigRepository(BaseRepository, IDigRepository):
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
         add_relic_artifact_id: str | None = None,
+        consume_inventory_item_ids: list[int] | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None:
         """Apply a balance delta + tunnel update + optional inventory/relic add +
-        optional audit log in one BEGIN IMMEDIATE.
+        optional inventory consumption + optional audit log in one BEGIN IMMEDIATE.
 
         Covers the common "debit balance, then mutate the actor's tunnel
         row" two-step pattern (upgrade_pickaxe, set_trap, buy_insurance,
@@ -880,7 +881,11 @@ class DigRepository(BaseRepository, IDigRepository):
         tunnel mutation leaves the player with coins deducted and nothing
         to show for it. ``add_relic_artifact_id`` fuses a relic drop into the
         same txn (pinnacle victory) so a crash can't mint a relic without also
-        marking the boss defeated and paying out.
+        marking the boss defeated and paying out. ``consume_inventory_item_ids``
+        deletes queued consumable rows inside the same txn so a dig's item burn
+        commits-or-rolls-back together with the dig result — an exception
+        between resolving queued items and the final commit can no longer
+        destroy consumables with no depth/JC to show for them.
 
         Returns the ``id`` of the newly inserted relic row (when
         ``add_relic_artifact_id`` is given), else the inventory row id (when
@@ -936,6 +941,17 @@ class DigRepository(BaseRepository, IDigRepository):
                     (discord_id, gid, add_inventory_item, int(time.time())),
                 )
                 inventory_id = cursor.lastrowid
+
+            if consume_inventory_item_ids:
+                # Delete the specific queued rows that fed this dig. Scoped to
+                # the actor so a stale id can't reach into another player's
+                # inventory. The unqueue is implicit — the rows are gone.
+                placeholders = ",".join("?" for _ in consume_inventory_item_ids)
+                cursor.execute(
+                    f"DELETE FROM dig_inventory "
+                    f"WHERE discord_id = ? AND guild_id = ? AND id IN ({placeholders})",
+                    (discord_id, gid, *[int(i) for i in consume_inventory_item_ids]),
+                )
 
             relic_id: int | None = None
             if add_relic_artifact_id is not None:
