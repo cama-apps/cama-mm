@@ -982,9 +982,15 @@ class MafiaCommands(commands.Cog):
                 f"{payout} each to {mention_list}{extra}"
             )
         if mvp_id is not None:
-            body_lines.append(
-                f"**MVP:** <@{mvp_id}> (+{MVP_BONUS} {JOPACOIN_EMOTE})"
-            )
+            # Show the bonus actually awarded (clamped to the faction pot), not a
+            # flat MVP_BONUS the small-pot case may never have paid.
+            mvp_bonus = summary.get("mvp_bonus", MVP_BONUS)
+            if mvp_bonus > 0:
+                body_lines.append(
+                    f"**MVP:** <@{mvp_id}> (+{mvp_bonus} {JOPACOIN_EMOTE})"
+                )
+            else:
+                body_lines.append(f"**MVP:** <@{mvp_id}>")
         bookie_id = summary.get("bookie_id")
         if bookie_id is not None:
             body_lines.append(

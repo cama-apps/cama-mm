@@ -145,7 +145,7 @@ class QueriesMixin:
         Returns:
             True if match was found and wiped, False otherwise
         """
-        return self.match_repo.wipe_match_enrichment(match_id)
+        return self.match_repo.wipe_match_enrichment(match_id, guild_id)
 
     def get_player_openskill_history(
         self, discord_id: int, guild_id: int, limit: int = 10

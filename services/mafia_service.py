@@ -475,6 +475,11 @@ class MafiaService:
             "winner": winner.value,
             "lynched_id": lynched_id,
             "mvp_id": mvp_id,
+            # Bonus actually awarded to the MVP (clamped to the faction pot), so
+            # the embed can report the real amount instead of a hardcoded MVP_BONUS.
+            "mvp_bonus": (deltas.get(mvp_id, 0) - payout_per_winner)
+            if (mvp_id is not None and mvp_id in winning_ids)
+            else 0,
             "payout_per_winner": payout_per_winner,
             "pot_total": pot_total,
             "entry_fee": entry_fee,
@@ -582,6 +587,9 @@ class MafiaService:
             "winner": winner.value,
             "lynched_id": None,
             "mvp_id": mvp_id,
+            "mvp_bonus": (deltas.get(mvp_id, 0) - payout_per_winner)
+            if (mvp_id is not None and mvp_id in winning_ids)
+            else 0,
             "payout_per_winner": payout_per_winner,
             "pot_total": pot_total,
             "entry_fee": entry_fee,
