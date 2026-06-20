@@ -294,10 +294,14 @@ class TestShuffler:
         value1 = team1.get_team_value(use_glicko=False, off_role_multiplier=1.0)
         value2 = team2.get_team_value(use_glicko=False, off_role_multiplier=1.0)
 
-        # Teams should be relatively balanced (within reasonable range)
         diff = abs(value1 - value2)
-        # Total value is 15500, so difference should be much less than that
-        assert diff < 1000  # Reasonable threshold
+        # The optimal split of {2000,1900,...,1100} into two teams of five is a
+        # 100-point gap (e.g. 7800 vs 7700); the next-best achievable split is
+        # 300. A correct optimizer must find the optimum here, so any diff above
+        # 100 means it degraded to a sub-optimal split. (The old <1000 bound
+        # tolerated the 9th-worst split.) Deterministic: the shuffle has no role
+        # preferences to randomize and the search is exhaustive at this size.
+        assert diff <= 100, f"shuffle degraded: team diff {diff} > optimal 100"
 
     def test_shuffle_with_roles(self):
         """Test shuffling with role preferences."""

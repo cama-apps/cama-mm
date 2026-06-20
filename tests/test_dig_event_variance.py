@@ -177,15 +177,42 @@ class TestEventVariance:
                 "a positive-base success"
             )
 
-    def test_negative_jc_stays_negative(self):
-        """A negative JC base must roll negative — int(round(neg * x))
-        preserves sign for any x in [0.5, 1.5]."""
-        for base in (-1, -5, -15, -100):
-            for _ in range(50):
-                rolled = int(round(base * random.uniform(0.5, 1.5)))
-                assert rolled < 0, (
-                    f"base {base} rolled to {rolled} (positive after jitter)"
-                )
+    def test_negative_jc_stays_negative(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """End-to-end: a failure outcome carrying a negative base JC must
+        always credit the digger a *negative* jc_delta — the ±50% jitter
+        (and the NEGATIVE_EVENT_JC_MULTIPLIER applied before it) preserve the
+        sign of a loss. Drives the real ``resolve_event`` jitter path so a
+        regression that floored or flipped negative payouts is caught."""
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        _seed_tunnel(dig_service, dig_repo, player_repository)
+        inject_event(_threat_event(
+            "variance_neg_jc",
+            {"description": "Robbed.", "advance": 0, "jc": -10,
+             "cave_in": False, "streak_loss": 0, "curse": None},
+        ))
+
+        deltas = set()
+        for i in range(60):
+            random.seed(i + 1)
+            dig_repo.update_tunnel(10001, 12345, depth=30)
+            # Force the risky pick to FAIL so the negative-jc outcome fires.
+            monkeypatch.setattr(
+                "services.dig.events_mixin.random.random", lambda: 0.99,
+            )
+            r = dig_service.resolve_event(10001, 12345, "variance_neg_jc", "risky")
+            assert r["success"]
+            deltas.add(r.get("jc_delta"))
+        assert deltas, "no resolutions ran"
+        assert all(d < 0 for d in deltas), (
+            f"a negative-base outcome credited a non-negative jc_delta: "
+            f"{sorted(deltas)}"
+        )
+        assert len(deltas) >= 3, (
+            f"jitter not firing on the negative payout — only {len(deltas)} "
+            "unique deltas"
+        )
 
     def test_jitter_actually_varies_across_seeds(
         self, dig_service, dig_repo, player_repository, monkeypatch,

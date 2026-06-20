@@ -203,47 +203,72 @@ class TestConcurrentShuffleScenario:
     """Integration-style tests for concurrent shuffle scenarios."""
 
     @pytest.mark.asyncio
-    async def test_concurrent_shuffle_simulation(self, lobby_manager):
-        """Simulate two shuffles happening concurrently."""
-        guild_id = 88888
-        results = []
+    async def test_concurrent_shuffle_mutual_exclusion(self, lobby_manager):
+        """Drive two concurrent shuffles through the EXACT production lock
+        protocol (``commands/match.py``: stale-check -> get_shuffle_lock ->
+        reject-if-locked -> wait_for(acquire) -> record -> work -> clear +
+        release) and assert the property the production lock *guarantees*: the
+        two critical sections never overlap.
 
-        async def simulate_shuffle(shuffle_id: int):
-            """Simulate a shuffle operation."""
+        Unlike the previous version, the pass/fail here is decided by the real
+        ``asyncio.Lock`` object handed out by ``get_shuffle_lock`` — a shared
+        ``in_critical_section`` counter would exceed 1 the instant the lock
+        stopped excluding, so neutering the production locking (e.g. handing
+        back a fresh unlocked lock per call, or dropping the ``.locked()``
+        gate) flips this test red rather than leaving it green.
+
+        Limitation: the full ``/shuffle`` command needs a live Discord
+        interaction, so this exercises the production *locking helpers* in the
+        production order rather than ``_execute_shuffle`` itself. The protocol
+        below is a line-for-line mirror of the guard in ``commands/match.py``;
+        if that guard changes, this test must change with it.
+        """
+        guild_id = 88888
+        results: list[str] = []
+        in_critical_section = 0
+        max_concurrent = 0
+
+        async def run_shuffle(shuffle_id: int):
+            nonlocal in_critical_section, max_concurrent
+            # --- begin production lock protocol (commands/match.py:407-428) ---
             lobby_manager._check_stale_lock(guild_id)
             lock = lobby_manager.get_shuffle_lock(guild_id)
-
             if lock.locked():
                 results.append(f"shuffle_{shuffle_id}_rejected")
                 return
-
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=0.5)
             except TimeoutError:
                 results.append(f"shuffle_{shuffle_id}_timeout")
                 return
-
             lobby_manager.record_lock_acquired(guild_id)
             try:
-                # Simulate shuffle work. sleep(0) yields the event loop while
-                # the lock is held (acquire completes synchronously on a free
-                # lock, before this yield), so the second shuffle still
-                # observes the contention without wall-clock cost.
+                # Critical section: observe how many coroutines are inside it.
+                in_critical_section += 1
+                max_concurrent = max(max_concurrent, in_critical_section)
+                # Yield the event loop while holding the lock so a second
+                # contender gets a chance to (try to) enter concurrently.
                 await asyncio.sleep(0)
+                in_critical_section -= 1
                 results.append(f"shuffle_{shuffle_id}_success")
             finally:
                 lobby_manager.clear_lock_time(guild_id)
                 lock.release()
+            # --- end production lock protocol ---
 
-        # Run two shuffles concurrently
-        await asyncio.gather(
-            simulate_shuffle(1),
-            simulate_shuffle(2),
+        await asyncio.gather(run_shuffle(1), run_shuffle(2))
+
+        # The production lock must have serialized the two critical sections:
+        # at no instant were both coroutines inside it.
+        assert max_concurrent == 1, (
+            f"shuffle lock failed to exclude: {max_concurrent} coroutines were "
+            "in the critical section at once"
         )
-
-        # One should succeed, one should be rejected/timeout
+        # Exactly one ran the work; the other was turned away by the real lock.
         success_count = sum(1 for r in results if "success" in r)
         rejected_count = sum(1 for r in results if "rejected" in r or "timeout" in r)
-
         assert success_count == 1, f"Expected exactly 1 success, got: {results}"
         assert rejected_count == 1, f"Expected exactly 1 rejection, got: {results}"
+        # The lock is fully released and its time-tracking cleared afterward.
+        assert lobby_manager.get_shuffle_lock(guild_id).locked() is False
+        assert guild_id not in lobby_manager._shuffle_lock_times
