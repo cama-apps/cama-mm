@@ -1436,17 +1436,24 @@ class WrappedService:
         )
 
     def get_package_deal_wrapped(
-        self, discord_id: int, guild_id: int | None = None
+        self, discord_id: int, year: int, guild_id: int | None = None
     ) -> PackageDealWrapped | None:
-        """Get anonymized package deal stats for wrapped."""
+        """Get anonymized package deal stats for the given calendar year.
+
+        Reads the immutable purchase log so deals bought during the year are
+        counted even after they have been consumed and deleted.
+        """
         if not self.package_deal_service:
             return None
 
         repo = self.package_deal_service.package_deal_repo
+        start_ts, end_ts = self._get_year_timestamps(year)
 
-        # Get all deals involving this player (as buyer or partner)
-        deals = repo.get_deals_involving_player(guild_id, discord_id)
-        if not deals:
+        # Get all purchases involving this player (as buyer or partner) in-year.
+        purchases = repo.get_purchases_involving_player(
+            guild_id, discord_id, start_ts, end_ts
+        )
+        if not purchases:
             return None
 
         times_bought = 0
@@ -1456,15 +1463,15 @@ class WrappedService:
         jc_spent_on_you = 0
         total_games = 0
 
-        for deal in deals:
-            total_games += deal.games_remaining
-            if deal.buyer_discord_id == discord_id:
+        for purchase in purchases:
+            total_games += purchase.games_committed
+            if purchase.buyer_discord_id == discord_id:
                 times_bought += 1
-                jc_spent += deal.cost_paid
-            if deal.partner_discord_id == discord_id:
+                jc_spent += purchase.jc_spent
+            if purchase.partner_discord_id == discord_id:
                 times_bought_on_you += 1
-                jc_spent_on_you += deal.cost_paid
-                buyer_ids.add(deal.buyer_discord_id)
+                jc_spent_on_you += purchase.jc_spent
+                buyer_ids.add(purchase.buyer_discord_id)
 
         return PackageDealWrapped(
             times_bought=times_bought,

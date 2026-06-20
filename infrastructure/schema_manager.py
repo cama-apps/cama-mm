@@ -480,6 +480,9 @@ class SchemaManager:
             # realized-P&L stats / balance-chart deltas match the JC actually
             # credited (mirrors match_participants.bonus_jc).
             ("add_bankruptcy_penalty_to_prediction_positions", self._migration_add_bankruptcy_penalty_to_prediction_positions),
+            # Immutable package-deal purchase log so year-in-review counts deals
+            # even after they are consumed/deleted.
+            ("create_package_deal_purchases_table", self._migration_create_package_deal_purchases_table),
         ]
 
     # --- Migrations ---
@@ -1940,6 +1943,37 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_package_deals_guild_active "
             "ON package_deals(guild_id, games_remaining)"
+        )
+
+    def _migration_create_package_deal_purchases_table(self, cursor) -> None:
+        """Create an immutable purchase log for package deals.
+
+        The active ``package_deals`` rows are mutated (games_remaining
+        decremented) and DELETEd once consumed, so year-in-review stats that
+        read them silently undercount the year. This append-only log records
+        every purchase at creation time and survives consumption/deletion.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS package_deal_purchases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                buyer_discord_id INTEGER NOT NULL,
+                partner_discord_id INTEGER NOT NULL,
+                jc_spent INTEGER NOT NULL,
+                games_committed INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        # Index for looking up a player's purchases (buyer or partner) by time.
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_deal_purchases_buyer "
+            "ON package_deal_purchases(guild_id, buyer_discord_id, created_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_deal_purchases_partner "
+            "ON package_deal_purchases(guild_id, partner_discord_id, created_at)"
         )
 
     def _migration_add_is_bankrupt_to_wheel_spins(self, cursor) -> None:

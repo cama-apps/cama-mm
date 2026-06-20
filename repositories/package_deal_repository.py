@@ -25,6 +25,22 @@ class PackageDeal:
     updated_at: int
 
 
+@dataclass
+class PackageDealPurchase:
+    """An immutable record of a single package-deal purchase.
+
+    Unlike ``PackageDeal`` (which is mutated/deleted as games are consumed),
+    this is append-only and survives consumption, so year-in-review stats can
+    count every deal a player bought during a period.
+    """
+    guild_id: int
+    buyer_discord_id: int
+    partner_discord_id: int
+    jc_spent: int
+    games_committed: int
+    created_at: int
+
+
 class PackageDealRepository(BaseRepository, IPackageDealRepository):
     """Repository for package deal feature."""
 
@@ -68,6 +84,17 @@ class PackageDealRepository(BaseRepository, IPackageDealRepository):
                     updated_at = excluded.updated_at
                 """,
                 (normalized_guild, buyer_id, partner_id, games, cost, now, now),
+            )
+
+            # Append an immutable purchase-log row in the SAME transaction so the
+            # year-in-review stats survive consumption/deletion of the active deal.
+            cursor.execute(
+                """
+                INSERT INTO package_deal_purchases
+                    (guild_id, buyer_discord_id, partner_discord_id, jc_spent, games_committed, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (normalized_guild, buyer_id, partner_id, cost, games, now),
             )
 
             # Fetch the resulting row to return complete deal data
@@ -184,6 +211,51 @@ class PackageDealRepository(BaseRepository, IPackageDealRepository):
                 cost_paid=row["cost_paid"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def get_purchases_involving_player(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+        start_ts: int,
+        end_ts: int,
+    ) -> list[PackageDealPurchase]:
+        """
+        Get all package-deal purchases where the player is buyer OR partner,
+        created within [start_ts, end_ts).
+
+        Reads the immutable purchase log (not ``package_deals``), so consumed and
+        deleted deals are still counted. Used for year-in-review stats.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT guild_id, buyer_discord_id, partner_discord_id,
+                       jc_spent, games_committed, created_at
+                FROM package_deal_purchases
+                WHERE guild_id = ?
+                  AND (buyer_discord_id = ? OR partner_discord_id = ?)
+                  AND created_at >= ?
+                  AND created_at < ?
+                ORDER BY created_at DESC
+                """,
+                (normalized_guild, discord_id, discord_id, start_ts, end_ts),
+            )
+            rows = cursor.fetchall()
+
+        return [
+            PackageDealPurchase(
+                guild_id=row["guild_id"],
+                buyer_discord_id=row["buyer_discord_id"],
+                partner_discord_id=row["partner_discord_id"],
+                jc_spent=row["jc_spent"],
+                games_committed=row["games_committed"],
+                created_at=row["created_at"],
             )
             for row in rows
         ]

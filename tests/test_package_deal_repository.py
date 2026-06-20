@@ -182,3 +182,39 @@ class TestPackageDealRepository:
         # Can also retrieve with guild_id=None
         deals = repo.get_user_deals(None, 100)
         assert len(deals) == 1
+
+    def test_purchase_log_survives_consumption_and_deletion(self, repo):
+        """The immutable purchase log records each purchase and survives the
+        decrement-to-zero + delete_expired_deals cleanup that drops the active
+        deal row (the year-in-review undercount bug)."""
+        deal = repo.create_or_extend_deal(
+            guild_id=123, buyer_id=100, partner_id=200, games=3, cost=90
+        )
+
+        # Consume fully, then run cleanup that DELETEs the active deal.
+        for _ in range(3):
+            repo.decrement_deals(123, [deal.id])
+        repo.delete_expired_deals(123)
+        assert repo.get_deals_involving_player(123, 100) == []
+
+        # The purchase log still has the original purchase (initial games=3).
+        purchases = repo.get_purchases_involving_player(123, 100, 0, 2**63 - 1)
+        assert len(purchases) == 1
+        assert purchases[0].buyer_discord_id == 100
+        assert purchases[0].partner_discord_id == 200
+        assert purchases[0].games_committed == 3
+        assert purchases[0].jc_spent == 90
+
+    def test_purchase_log_time_window_filter(self, repo):
+        """get_purchases_involving_player respects the [start, end) window."""
+        deal = repo.create_or_extend_deal(
+            guild_id=123, buyer_id=100, partner_id=200, games=5, cost=40
+        )
+        created = deal.created_at
+
+        # Inside the window (inclusive start, exclusive end).
+        assert len(repo.get_purchases_involving_player(123, 100, created, created + 1)) == 1
+        # Window entirely after the purchase -> excluded.
+        assert repo.get_purchases_involving_player(123, 100, created + 1, created + 10) == []
+        # Window entirely before the purchase -> excluded (end is exclusive).
+        assert repo.get_purchases_involving_player(123, 100, created - 10, created) == []
