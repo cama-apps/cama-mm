@@ -9,9 +9,16 @@ from tests.conftest import TEST_GUILD_ID
 class FakeRepo:
     def __init__(self):
         self.add_calls = []
+        self.steam_links = []
 
     def get_by_id(self, _discord_id, _guild_id):
         return None
+
+    def get_steam_id_owner(self, _steam_id):
+        return None
+
+    def add_steam_id(self, discord_id, steam_id, is_primary=False):
+        self.steam_links.append((discord_id, steam_id, is_primary))
 
     def add(
         self,

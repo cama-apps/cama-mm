@@ -13,6 +13,12 @@ class FakeRepo:
     def get_by_id(self, _discord_id, _guild_id):
         return None
 
+    def get_steam_id_owner(self, _steam_id):
+        return None
+
+    def add_steam_id(self, discord_id, steam_id, is_primary=False):
+        pass
+
     def add(
         self,
         discord_id: int,

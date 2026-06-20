@@ -2790,6 +2790,34 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return []
 
+    def get_steam_id_owner(self, steam_id: int) -> int | None:
+        """
+        Return the discord_id that globally owns ``steam_id``, or None.
+
+        Mirrors the conflict check in :meth:`add_steam_id`: the junction
+        table is authoritative (its ``UNIQUE(steam_id)`` is the global
+        guarantee), with a fallback to the legacy ``players.steam_id`` column
+        for rows not yet migrated. Steam accounts are globally unique (not
+        per-guild), so this lookup is intentionally cross-guild.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT discord_id FROM player_steam_ids WHERE steam_id = ?",
+                (steam_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row["discord_id"]
+
+            # Fallback to legacy column for players not in the junction table.
+            cursor.execute(
+                "SELECT discord_id FROM players WHERE steam_id = ?",
+                (steam_id,),
+            )
+            row = cursor.fetchone()
+            return row["discord_id"] if row else None
+
     def add_steam_id(self, discord_id: int, steam_id: int, is_primary: bool = False) -> None:
         """
         Add a Steam ID to a player.
@@ -2877,7 +2905,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
 
             if cursor.rowcount == 0:
-                return False
+                # Not in the junction table. Handle a legacy-only Steam ID that
+                # lives solely in players.steam_id (never migrated/relinked):
+                # clear it so /player unlink succeeds instead of reporting a
+                # spurious failure.
+                cursor.execute(
+                    "UPDATE players SET steam_id = NULL, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE discord_id = ? AND steam_id = ?",
+                    (discord_id, steam_id),
+                )
+                return cursor.rowcount > 0
 
             # If it was primary, promote another steam_id or clear legacy column
             if was_primary:

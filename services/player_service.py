@@ -27,7 +27,9 @@ class PlayerService:
 
     @staticmethod
     def _validate_steam_id(steam_id: int):
-        if steam_id <= 0 or steam_id > 2147483647:
+        # Steam32 account IDs span the full unsigned 32-bit range. Bounding at
+        # int32 max (2**31 - 1) wrongly rejected valid high account IDs.
+        if steam_id <= 0 or steam_id >= 2**32:
             raise ValueError("Invalid Steam ID. Must be Steam32 (positive, 32-bit).")
 
     def register_player(
@@ -49,6 +51,15 @@ class PlayerService:
         existing = self.player_repo.get_by_id(discord_id, guild_id)
         if existing:
             raise ValueError("Player already registered.")
+
+        # Enforce the global Steam-ID uniqueness guarantee up front, using the
+        # same source of truth as /player link (the player_steam_ids junction
+        # table, falling back to the legacy column). Without this, two Discord
+        # users could register the same Steam ID and corrupt the global
+        # steam->discord mapping.
+        owner = self.player_repo.get_steam_id_owner(steam_id)
+        if owner is not None and owner != discord_id:
+            raise ValueError(f"Steam ID {steam_id} is already linked to another player.")
 
         mmr: int | None = None
         if mmr_override is not None:
@@ -92,7 +103,6 @@ class PlayerService:
             discord_username=discord_username,
             guild_id=guild_id,
             dotabuff_url=dotabuff_url,
-            steam_id=steam_id,
             initial_mmr=mmr,
             glicko_rating=glicko_player.rating,
             glicko_rd=glicko_player.rd,
@@ -100,6 +110,13 @@ class PlayerService:
             os_mu=os_mu,
             os_sigma=os_sigma,
         )
+
+        # Route the primary Steam ID through the junction table so the
+        # UNIQUE(steam_id) constraint is the single source of truth. With
+        # is_primary=True this also syncs the legacy players.steam_id column.
+        # The owner pre-check above already guards against a cross-player
+        # conflict (and a re-raise here would leave a half-registered row).
+        self.player_repo.add_steam_id(discord_id, steam_id, is_primary=True)
 
         # Best-effort: cache the player's server region from OpenDota play so the
         # shuffle/draft embeds can recommend a server. Only on the non-override path

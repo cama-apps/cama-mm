@@ -18,6 +18,12 @@ class FakeRepo:
     def get_by_id(self, _discord_id, _guild_id):
         return None  # treat as a new registration
 
+    def get_steam_id_owner(self, _steam_id):
+        return None
+
+    def add_steam_id(self, discord_id, steam_id, is_primary=False):
+        pass
+
     def add(self, discord_id, discord_username, guild_id, dotabuff_url=None, steam_id=None,
             initial_mmr=None, preferred_roles=None, main_role=None, glicko_rating=None,
             glicko_rd=None, glicko_volatility=None, os_mu=None, os_sigma=None):
