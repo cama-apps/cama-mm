@@ -2022,18 +2022,26 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "top_heroes": top_heroes,
             }
 
-    def wipe_match_enrichment(self, match_id: int) -> bool:
+    def wipe_match_enrichment(self, match_id: int, guild_id: int | None = None) -> bool:
         """
         Clear all enrichment data for a specific match.
 
-        Returns True if match was found and wiped, False otherwise.
+        When guild_id is provided the wipe is scoped to that guild, so an admin
+        cannot clear another guild's match by raw match_id. Returns True if a
+        match was found (in that guild) and wiped, False otherwise.
         """
+        match_filter = "WHERE match_id = ?"
+        match_params: tuple = (match_id,)
+        if guild_id is not None:
+            match_filter += " AND guild_id = ?"
+            match_params = (match_id, self.normalize_guild_id(guild_id))
+
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            # Clear match-level enrichment
+            # Clear match-level enrichment (guild-scoped when guild_id given)
             cursor.execute(
-                """
+                f"""
                 UPDATE matches
                 SET valve_match_id = NULL,
                     duration_seconds = NULL,
@@ -2043,9 +2051,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     enrichment_data = NULL,
                     enrichment_source = NULL,
                     enrichment_confidence = NULL
-                WHERE match_id = ?
+                {match_filter}
                 """,
-                (match_id,),
+                match_params,
             )
 
             if cursor.rowcount == 0:

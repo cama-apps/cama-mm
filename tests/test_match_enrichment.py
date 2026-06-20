@@ -3,12 +3,47 @@ Tests for MatchEnrichmentService and related functionality.
 """
 
 import json
+import sqlite3
 from unittest.mock import Mock
 
 import pytest
 
+from repositories.match_repository import MatchRepository
 from services.match_enrichment_service import MatchEnrichmentService
 from tests.conftest import TEST_GUILD_ID
+
+
+class TestWipeMatchEnrichmentGuildScoping:
+    """wipe_match_enrichment must not let an admin clear another guild's match."""
+
+    def test_wipe_is_scoped_to_guild(self, repo_db_path):
+        repo = MatchRepository(repo_db_path)
+        conn = sqlite3.connect(repo_db_path)
+        conn.executemany(
+            "INSERT INTO matches (match_id, team1_players, team2_players, guild_id, "
+            "valve_match_id, enrichment_source) VALUES (?, '[]', '[]', ?, ?, 'auto')",
+            [(501, 100, 999), (502, 200, 888)],
+        )
+        conn.commit()
+        conn.close()
+
+        # An admin in guild 100 cannot wipe guild 200's match by raw match_id.
+        assert repo.wipe_match_enrichment(502, guild_id=100) is False
+        conn = sqlite3.connect(repo_db_path)
+        row = conn.execute(
+            "SELECT valve_match_id, enrichment_source FROM matches WHERE match_id = 502"
+        ).fetchone()
+        conn.close()
+        assert row == (888, "auto")  # untouched
+
+        # Scoped to the owning guild, the wipe goes through.
+        assert repo.wipe_match_enrichment(502, guild_id=200) is True
+        conn = sqlite3.connect(repo_db_path)
+        row = conn.execute(
+            "SELECT valve_match_id, enrichment_source FROM matches WHERE match_id = 502"
+        ).fetchone()
+        conn.close()
+        assert row == (None, None)
 
 
 class TestMatchEnrichmentService:

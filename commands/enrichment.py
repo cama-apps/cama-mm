@@ -878,7 +878,12 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        success = await asyncio.to_thread(self.match_service.wipe_match_enrichment, match_id)
+        # Scope the wipe to this guild so an admin can't clear another guild's
+        # match by raw match_id.
+        guild_id = interaction.guild.id if interaction.guild else None
+        success = await asyncio.to_thread(
+            self.match_service.wipe_match_enrichment, match_id, guild_id
+        )
 
         if success:
             await safe_followup(

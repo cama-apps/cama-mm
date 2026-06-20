@@ -676,6 +676,20 @@ def test_payout_cap_overflow(mafia_service):
     assert overflow > 0
 
 
+def test_mvp_bonus_clamped_to_small_faction_pot(mafia_service):
+    # Bookie takes the 50-coin cap off a 60 pot, leaving only 10 for the faction.
+    # The MVP bonus must clamp to that 10 (not a flat MVP_BONUS=20), and that
+    # clamped value — deltas[mvp] - payout_per_winner — is exactly what the
+    # resolution embed now reports, instead of overstating a +20 never paid.
+    deltas, payout_per_winner, overflow = mafia_service._compute_payout_deltas(
+        pot_total=60, winning_ids=[1, 2, 3], mvp_id=1, bookie_id=9
+    )
+    mvp_extra = deltas[1] - payout_per_winner
+    assert mvp_extra == 10
+    assert mvp_extra < MVP_BONUS  # clamped, so the embed must not show +MVP_BONUS
+    assert sum(deltas.values()) + overflow == 60  # and nothing was minted
+
+
 # ── Multi-cycle engine (continuous cadence) ───────────────────────────────
 
 
