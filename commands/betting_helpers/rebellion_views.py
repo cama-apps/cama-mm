@@ -9,7 +9,6 @@ import time
 import discord
 
 from config import (
-    MAX_DEBT,
     REBELLION_DEFENDER_STAKE,
     REBELLION_META_BET_MAX,
     REBELLION_VOTE_WINDOW_SECONDS,
@@ -155,7 +154,6 @@ class WarBetAmountModal(discord.ui.Modal):
                 self.side,
                 bet_amount,
                 int(time.time()),
-                MAX_DEBT,
             )
             side_name = "REBELS ⚔️" if self.side == "rebels" else "THE WHEEL ⚙️"
             await interaction.response.send_message(

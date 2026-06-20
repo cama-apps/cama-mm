@@ -778,7 +778,6 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
         side: str,
         amount: int,
         created_at: int,
-        max_debt: int,
     ) -> int:
         """Atomically place a meta-bet (debit balance + insert). Returns bet_id."""
         normalized = self.normalize_guild_id(guild_id)

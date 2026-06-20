@@ -2045,9 +2045,6 @@ class BossCombatMixin:
                 }
             # Carried wager is settled by the payout below; drop the markers.
             self._clear_carried_wager(boss_progress, at_boss)
-            stat_point_awarded = self._award_boss_stat_point_if_first(
-                discord_id, guild_id, tunnel, at_boss,
-            )
             prev_max_depth = tunnel.get("max_depth", 0) or 0
             tunnel_updates = {
                 "depth": new_depth,
@@ -2057,6 +2054,15 @@ class BossCombatMixin:
                 "cheer_data": None,
                 "last_dig_at": now,
             }
+            # Fold the first-clear stat-point award into the atomic victory
+            # write (mirroring fight_boss) instead of a separate update_tunnel,
+            # so the award and the boss-defeated flip commit together. The award
+            # is idempotent: _boss_stat_point_award_updates returns None once the
+            # boundary is already in stat_boss_awards, so a retry never re-awards.
+            stat_award_updates = self._boss_stat_point_award_updates(tunnel, at_boss)
+            stat_point_awarded = stat_award_updates is not None
+            if stat_award_updates is not None:
+                tunnel_updates.update(stat_award_updates)
             # Every boss victory pays a flat depth-scaled base reward so a
             # win is never empty; a wagered win adds its taper-floored profit
             # on top.

@@ -9,6 +9,7 @@ import time
 import pytest
 
 from repositories.dig_repository import DigRepository
+from services.dig._common import DIG_BOSS_STAT_POINT_BONUS
 from services.dig_constants import (
     BOSS_ARCHETYPE_BY_ID,
     BOSS_ARCHETYPES,
@@ -1026,6 +1027,41 @@ class TestLiveDuelPathWagerAtomicity:
         # Reported payout must exactly match the real balance change
         assert result["payout"] == real_delta, (
             f"reported payout {result['payout']} != real balance change {real_delta}"
+        )
+
+    def test_first_clear_stat_point_commits_with_boss_clear_and_is_idempotent(
+        self, dig_service, dig_repo, player_repository, monkeypatch
+    ):
+        """A4: the first-clear S-point award must commit in the SAME atomic write
+        as the boss-defeated flip (live duel path), and must never re-award on a
+        retry. Previously the live path did its own update_tunnel for the stat
+        point BEFORE the atomic victory txn, so a crash between them could desync
+        the award from the boss-clear.
+        """
+        uid = _at_boss_for_duel(dig_service, dig_repo, player_repository, monkeypatch, uid=30009)
+        points_before = dig_repo.get_tunnel(uid, TEST_GUILD_ID)["stat_points"]
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", lambda **kw: 0.50)
+
+        result = dig_service.start_boss_duel(uid, TEST_GUILD_ID, "cautious", wager=20)
+        assert result["won"] is True
+        assert result["stat_point_awarded"] is True
+
+        tunnel_after = dig_repo.get_tunnel(uid, TEST_GUILD_ID)
+        # Both effects land in the one row that atomic_boss_full_victory wrote:
+        # the boss is flipped to defeated AND the stat point is incremented.
+        boss_progress = json.loads(tunnel_after["boss_progress"])
+        assert boss_progress["25"]["status"] == "defeated", (
+            "boss not flipped to defeated in the committed row"
+        )
+        assert tunnel_after["stat_points"] == points_before + DIG_BOSS_STAT_POINT_BONUS, (
+            "stat point not committed alongside the boss-clear"
+        )
+        # The boundary is now recorded in the same row, so the pure award helper
+        # returns None for a retry: the award is idempotent and will not re-pay.
+        assert 25 in dig_service._get_stat_boss_awards(tunnel_after)
+        assert dig_service._boss_stat_point_award_updates(tunnel_after, 25) is None, (
+            "stat point would be awarded a second time on retry"
         )
 
     def test_loss_debits_wager_atomically(self, dig_service, dig_repo, player_repository, monkeypatch):
