@@ -369,46 +369,139 @@ class TestGetPairwiseWrapped:
 class TestGetPackageDealWrapped:
     def test_returns_none_without_service(self):
         svc, _, _ = _build_service(package_deal_service=None)
-        result = svc.get_package_deal_wrapped(111, guild_id=0)
+        result = svc.get_package_deal_wrapped(111, 2026, guild_id=0)
         assert result is None
 
     def test_returns_none_when_no_deals(self):
         pkg_service = MagicMock()
-        pkg_service.package_deal_repo.get_deals_involving_player.return_value = []
+        pkg_service.package_deal_repo.get_purchases_involving_player.return_value = []
 
         svc, _, _ = _build_service(package_deal_service=pkg_service)
-        result = svc.get_package_deal_wrapped(111, guild_id=0)
+        result = svc.get_package_deal_wrapped(111, 2026, guild_id=0)
         assert result is None
 
     def test_returns_deal_data(self):
         pkg_service = MagicMock()
 
-        # Create mock PackageDeal objects
-        deal1 = MagicMock()
-        deal1.buyer_discord_id = 111  # Player bought this one
-        deal1.partner_discord_id = 222
-        deal1.games_remaining = 5
-        deal1.cost_paid = 50
+        # Create mock PackageDealPurchase objects
+        buy1 = MagicMock()
+        buy1.buyer_discord_id = 111  # Player bought this one
+        buy1.partner_discord_id = 222
+        buy1.games_committed = 5
+        buy1.jc_spent = 50
 
-        deal2 = MagicMock()
-        deal2.buyer_discord_id = 333  # Someone else bought this on player
-        deal2.partner_discord_id = 111
-        deal2.games_remaining = 3
-        deal2.cost_paid = 30
+        buy2 = MagicMock()
+        buy2.buyer_discord_id = 333  # Someone else bought this on player
+        buy2.partner_discord_id = 111
+        buy2.games_committed = 3
+        buy2.jc_spent = 30
 
-        pkg_service.package_deal_repo.get_deals_involving_player.return_value = [deal1, deal2]
+        pkg_service.package_deal_repo.get_purchases_involving_player.return_value = [buy1, buy2]
 
         svc, _, _ = _build_service(package_deal_service=pkg_service)
 
-        result = svc.get_package_deal_wrapped(111, guild_id=0)
+        result = svc.get_package_deal_wrapped(111, 2026, guild_id=0)
 
         assert result is not None
-        assert result.times_bought == 1  # deal1 (player is buyer)
-        assert result.times_bought_on_you == 1  # deal2 (player is partner)
+        assert result.times_bought == 1  # buy1 (player is buyer)
+        assert result.times_bought_on_you == 1  # buy2 (player is partner)
         assert result.unique_buyers == 1  # Only player 333
-        assert result.jc_spent == 50  # deal1 cost
-        assert result.jc_spent_on_you == 30  # deal2 cost
+        assert result.jc_spent == 50  # buy1 cost
+        assert result.jc_spent_on_you == 30  # buy2 cost
         assert result.total_games_committed == 8  # 5 + 3
+
+
+class TestGetPackageDealWrappedConsumedDeals:
+    """[T11] Regression: deals bought during the year must still be counted
+    in get_package_deal_wrapped even after they are fully consumed and the
+    active package_deals rows are DELETEd.
+
+    Before the immutable purchase-log fix, get_package_deal_wrapped read the
+    live package_deals table (filtered to games_remaining > 0), so a player who
+    bought deals that were all consumed/deleted showed ZERO -- silently
+    undercounting the year. This test fails on that old behavior.
+    """
+
+    def _build_real_service(self, repo_db_path):
+        from datetime import UTC, datetime
+
+        from repositories.package_deal_repository import PackageDealRepository
+        from services.package_deal_service import PackageDealService
+
+        pkg_repo = PackageDealRepository(repo_db_path)
+        pkg_service = PackageDealService(pkg_repo)
+        svc = WrappedService(
+            wrapped_repo=MagicMock(),
+            player_repo=MagicMock(),
+            match_repo=MagicMock(),
+            bet_repo=MagicMock(),
+            package_deal_service=pkg_service,
+        )
+        year = datetime.now(UTC).year
+        return svc, pkg_repo, year
+
+    def test_consumed_and_deleted_deals_still_counted(self, repo_db_path):
+        svc, pkg_repo, year = self._build_real_service(repo_db_path)
+        guild_id = 0
+        buyer = 111
+
+        # Player buys two distinct deals (10 games each) this year.
+        deal_a = pkg_repo.create_or_extend_deal(
+            guild_id=guild_id, buyer_id=buyer, partner_id=222, games=10, cost=50
+        )
+        deal_b = pkg_repo.create_or_extend_deal(
+            guild_id=guild_id, buyer_id=buyer, partner_id=333, games=10, cost=70
+        )
+
+        # Fully consume both deals, then run the cleanup that DELETEs them.
+        for _ in range(10):
+            pkg_repo.decrement_deals(guild_id, [deal_a.id, deal_b.id])
+        pkg_repo.delete_expired_deals(guild_id)
+
+        # Sanity: the OLD source of truth (live active deals) is now empty,
+        # which is exactly what made the old wrapped logic report zero.
+        assert pkg_repo.get_deals_involving_player(guild_id, buyer) == []
+
+        # The fix: the purchase log still has both deals, so wrapped counts them.
+        result = svc.get_package_deal_wrapped(buyer, year, guild_id=guild_id)
+
+        assert result is not None
+        assert result.times_bought == 2
+        assert result.jc_spent == 120  # 50 + 70
+        assert result.total_games_committed == 20  # 10 + 10 at purchase time
+
+    def test_partner_purchases_counted_after_deletion(self, repo_db_path):
+        svc, pkg_repo, year = self._build_real_service(repo_db_path)
+        guild_id = 0
+        target = 111
+
+        # Someone else buys a deal ON the target, which is then consumed/deleted.
+        deal = pkg_repo.create_or_extend_deal(
+            guild_id=guild_id, buyer_id=999, partner_id=target, games=10, cost=80
+        )
+        for _ in range(10):
+            pkg_repo.decrement_deals(guild_id, [deal.id])
+        pkg_repo.delete_expired_deals(guild_id)
+
+        result = svc.get_package_deal_wrapped(target, year, guild_id=guild_id)
+
+        assert result is not None
+        assert result.times_bought_on_you == 1
+        assert result.unique_buyers == 1
+        assert result.jc_spent_on_you == 80
+
+    def test_purchases_outside_year_excluded(self, repo_db_path):
+        svc, pkg_repo, year = self._build_real_service(repo_db_path)
+        guild_id = 0
+        buyer = 111
+
+        pkg_repo.create_or_extend_deal(
+            guild_id=guild_id, buyer_id=buyer, partner_id=222, games=10, cost=50
+        )
+
+        # A different calendar year must not see this purchase.
+        result = svc.get_package_deal_wrapped(buyer, year - 5, guild_id=guild_id)
+        assert result is None
 
 
 # ===========================================================================

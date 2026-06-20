@@ -403,7 +403,7 @@ class WrappedCog(commands.Cog):
         personal_summary = ws.get_personal_summary_wrapped(target_user_id, year, guild_id)
         records_wrapped = ws.get_player_records_wrapped(target_user_id, year, guild_id)
         pairwise_data = ws.get_pairwise_wrapped(target_user_id, guild_id)
-        package_deal_data = ws.get_package_deal_wrapped(target_user_id, guild_id)
+        package_deal_data = ws.get_package_deal_wrapped(target_user_id, year, guild_id)
         hero_spotlight = ws.get_hero_spotlight_wrapped(target_user_id, year, guild_id)
         role_breakdown = ws.get_role_breakdown_wrapped(target_user_id, year, guild_id)
 
