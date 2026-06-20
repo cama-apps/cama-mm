@@ -6,7 +6,7 @@ import asyncio
 import logging
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -1862,18 +1862,22 @@ class TestHandlePlayerPick:
 
         interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
 
-        # Simulate the concurrent winning pick by advancing the draft during the
-        # defer round-trip, exactly when a second discord.py task would mutate
-        # state. Uses the plain pick_player signature so the simulation does not
-        # itself depend on the fix under test (captain1 is on the clock here, so
-        # this advances the turn to captain2).
-        async def _defer_then_advance(inter, **kwargs):
-            inter.response.deferred = True
-            assert state.pick_player(player_ids[2]) is True  # the "other" click
-            return True
+        # Simulate the concurrent winning pick landing DURING the defer round-trip
+        # (the event-loop yield where a second discord.py task would mutate state).
+        # Drive it through the interaction's own defer() — which the real
+        # safe_defer calls — rather than monkeypatching the module-global
+        # safe_defer; that keeps the advance on the exact post-defer window and
+        # avoids a global-patch race that made this test flake under load.
+        # captain1 is on the clock, so this advances the turn to captain2.
+        original_defer = interaction.response.defer
 
-        with patch("commands.draft.safe_defer", _defer_then_advance):
-            await cog.handle_player_pick(interaction, guild_id, stale_target)
+        async def _defer_then_advance(**kwargs):
+            await original_defer(**kwargs)
+            assert state.pick_player(player_ids[2]) is True  # the "other" click
+
+        interaction.response.defer = _defer_then_advance
+
+        await cog.handle_player_pick(interaction, guild_id, stale_target)
 
         # The stale pick must NOT have landed: it's captain2's turn now, and
         # captain1's button can't drop a player onto captain2's clock.
