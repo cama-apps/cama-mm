@@ -901,9 +901,12 @@ class MafiaRepository(BaseRepository):
         lynched_was_mafia: bool,
         alive_count: int,
     ) -> dict[str, Any]:
-        """Pay out a successful bounty (capped at N = alive_count), drawn from the
-        nonprofit fund where the stakes were parked. Failed/other stakes stay
-        forfeited. Atomic. Returns {"paid": {contributor_id: amount}, "reward": int}.
+        """Pay out a successful bounty, drawn from the nonprofit fund where the
+        stakes were parked. The reward is capped at the coins actually staked on
+        the winning target (and additionally at N = alive_count and the fund
+        balance), so it can never pull unrelated nonprofit-fund revenue. Failed/
+        other stakes stay forfeited. Atomic.
+        Returns {"paid": {contributor_id: amount}, "reward": int}.
         """
         gid = self.normalize_guild_id(guild_id)
         paid: dict[int, int] = {}
@@ -915,22 +918,28 @@ class MafiaRepository(BaseRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT contributor_id FROM mafia_bounties
+                SELECT contributor_id, amount FROM mafia_bounties
                 WHERE game_id = ? AND day_number = ? AND target_id = ?
                 """,
                 (game_id, day_number, lynched_id),
             )
-            winners = [r["contributor_id"] for r in cursor.fetchall()]
+            bounty_rows = cursor.fetchall()
+            winners = [r["contributor_id"] for r in bounty_rows]
             if not winners:
                 return {"paid": paid, "reward": 0}
 
+            # The reward can only be funded by the coins players actually staked
+            # on THIS target — never by unrelated nonprofit-fund revenue (tax
+            # fines, capped-payout overflow, loans, disbursements). Cap by the
+            # parked stake sum, then by alive_count, then by what the fund holds.
+            parked_stake_sum = sum(r["amount"] for r in bounty_rows)
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
                 (gid,),
             )
             row = cursor.fetchone()
             available = row["total_collected"] if row else 0
-            reward_total = max(0, min(alive_count, available))
+            reward_total = max(0, min(alive_count, parked_stake_sum, available))
             if reward_total <= 0:
                 return {"paid": paid, "reward": 0}
 
