@@ -480,8 +480,13 @@ class DigService(
                 injury_state=json.dumps(injury) if injury else None,
             )
 
-        # 6. Get queued items and apply effects
-        items_used, items_used_ids, _item_flags = self._resolve_queued_items(discord_id, guild_id)
+        # 6. Get queued items and apply effects. The queued rows are NOT deleted
+        # here — their ids ride along in ``consumed_item_row_ids`` and are
+        # deleted inside the dig's final atomic commit (cave-in or success), so
+        # an exception mid-dig can't destroy consumables with nothing to show.
+        items_used, items_used_ids, _item_flags, consumed_item_row_ids = (
+            self._resolve_queued_items(discord_id, guild_id)
+        )
         has_dynamite = _item_flags["has_dynamite"]
         has_lantern = _item_flags["has_lantern"]
         has_torch = _item_flags["has_torch"]
@@ -822,6 +827,7 @@ class DigService(
                 discord_id, guild_id,
                 balance_delta=cave_in_balance_delta,
                 tunnel_updates=cave_in_tunnel_updates,
+                consume_inventory_item_ids=consumed_item_row_ids,
                 log_detail={
                     "cave_in": True, "block_loss": block_loss,
                     "detail": cave_in_detail,
@@ -1175,6 +1181,7 @@ class DigService(
             discord_id, guild_id,
             balance_delta=jc_earned,
             tunnel_updates=final_tunnel_updates,
+            consume_inventory_item_ids=consumed_item_row_ids,
             log_detail={
                 "advance": advance, "jc": jc_earned,
                 "depth_before": depth_before, "depth_after": new_depth,
@@ -1318,9 +1325,11 @@ class DigService(
                         injury_state=json.dumps(injury) if injury else None,
                     )
 
-        # Queued items
-        items_used, items_used_ids, _item_flags = self._resolve_queued_items(
-            discord_id, guild_id,
+        # Queued items. Read-only: the rows are deleted by apply_dig_outcome's
+        # atomic commit (ids threaded through the preconditions dict), so a
+        # failure between this call and the outcome commit can't destroy them.
+        items_used, items_used_ids, _item_flags, consumed_item_row_ids = (
+            self._resolve_queued_items(discord_id, guild_id)
         )
         has_dynamite = _item_flags["has_dynamite"]
         has_hard_hat = _item_flags["has_hard_hat"]
@@ -1658,6 +1667,7 @@ class DigService(
             "injury_advance_mod": injury_advance_mod,
             "items_used": items_used,
             "items_used_ids": items_used_ids,
+            "consumed_item_row_ids": consumed_item_row_ids,
             "auto_purchases": auto_purchases,
             "has_dynamite": has_dynamite,
             "has_hard_hat": has_hard_hat,

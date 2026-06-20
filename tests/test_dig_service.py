@@ -2816,6 +2816,70 @@ class TestDigAtomicity:
         assert tunnel_after["last_dig_at"] == tunnel_before["last_dig_at"]
         assert player_repository.get_balance(10001, guild_id) == balance_before
 
+    def test_queued_consumables_survive_a_failed_dig_commit(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Finding-11: a queued consumable must NOT be destroyed when the dig's
+        final commit fails.
+
+        Old behavior deleted queued items in _resolve_queued_items (its own
+        write) before the dig's atomic commit, so any exception in between
+        permanently destroyed the item with no depth/JC to show for it. The
+        fix folds the item delete INTO the final atomic_tunnel_balance_update,
+        so a failed commit rolls back the burn too. This test fails on the old
+        path (item gone after the rollback) and passes on the fix."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # suppress cave-in
+        dig_service.dig(10001, guild_id)
+
+        # Queue a dynamite for the next dig.
+        item_id = dig_repo.add_inventory_item(10001, guild_id, "dynamite")
+        dig_repo.queue_item(item_id)
+        assert len(dig_repo.get_queued_items(10001, guild_id)) == 1
+
+        # Second dig: inject a tunnel-write failure mid-transaction.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        self._inject_tunnel_update_failure(dig_repo, monkeypatch)
+        with pytest.raises(sqlite3.OperationalError):
+            dig_service.dig(10001, guild_id)
+
+        # The consumable survives: it is still in inventory AND still queued,
+        # so the player can retry the dig and actually spend it.
+        inventory = dig_repo.get_inventory(10001, guild_id)
+        assert any(i["item_type"] == "dynamite" for i in inventory), (
+            "queued dynamite was destroyed by the failed dig commit"
+        )
+        still_queued = dig_repo.get_queued_items(10001, guild_id)
+        assert any(i["item_type"] == "dynamite" for i in still_queued), (
+            "dynamite was un-queued despite the dig rolling back"
+        )
+
+    def test_queued_consumables_consumed_on_successful_dig(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Companion to the rollback test: on a SUCCESSFUL dig the queued
+        consumable must actually be consumed (deleted from inventory), proving
+        the burn moved into the commit rather than being dropped entirely."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # suppress cave-in
+        dig_service.dig(10001, guild_id)
+
+        item_id = dig_repo.add_inventory_item(10001, guild_id, "dynamite")
+        dig_repo.queue_item(item_id)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert "Dynamite" in (result.get("items_used") or [])
+
+        inventory = dig_repo.get_inventory(10001, guild_id)
+        assert not any(i["item_type"] == "dynamite" for i in inventory), (
+            "dynamite should be consumed on a successful dig"
+        )
+        assert dig_repo.get_queued_items(10001, guild_id) == []
+
     def test_prestige_rolls_back_grant_when_tunnel_reset_fails(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
@@ -2843,6 +2907,40 @@ class TestDigAtomicity:
         assert player_repository.get_balance(10001, guild_id) == balance_before
         tunnel_after = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel_after["depth"] == PINNACLE_DEPTH
+
+    def test_prestige_relic_not_minted_when_tunnel_reset_fails(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Finding-4: the prestige relic is rolled INTO the atomic tunnel-reset
+        txn, so a failed reset must leave NO relic minted.
+
+        Old behavior minted the relic via a standalone add_artifact that
+        committed before the atomic reset — on a failed reset the relic
+        persisted while prestige_level/boss_progress stayed unreset, so
+        can_prestige() stayed True and a retry rolled a SECOND relic. This
+        test fails on that old path (a relic survives the rollback) and passes
+        on the fix (the relic INSERT rolls back with the tunnel reset)."""
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        boss_progress = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        boss_progress[str(PINNACLE_DEPTH)] = "defeated"
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=PINNACLE_DEPTH,
+            boss_progress=json.dumps(boss_progress),
+        )
+        relics_before = dig_repo.get_artifacts(10001, guild_id)
+
+        self._inject_tunnel_update_failure(dig_repo, monkeypatch)
+        with pytest.raises(sqlite3.OperationalError):
+            dig_service.prestige(10001, guild_id, "advance_boost")
+
+        # No relic minted: the artifact row count is unchanged after rollback.
+        relics_after = dig_repo.get_artifacts(10001, guild_id)
+        assert len(relics_after) == len(relics_before), (
+            "prestige relic was minted despite the tunnel reset rolling back"
+        )
 
 
 # ---------------------------------------------------------------------------

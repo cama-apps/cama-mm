@@ -202,12 +202,19 @@ class PrestigeMixin:
             and r.id not in owned
         ]
         granted_relic = None
+        granted_relic_id = None
         if eligible_relic_ids:
-            relic_id = random.choice(eligible_relic_ids)
-            self.dig_repo.add_artifact(discord_id, guild_id, relic_id, is_relic=True)
-            granted_def = next(r for r in RELICS if r.id == relic_id)
+            # Roll the relic id WITHOUT inserting it here. The insert is fused
+            # into the atomic tunnel-reset/JC-grant below so the relic, the JC
+            # grant, and the prestige reset commit (or roll back) together. A
+            # standalone add_artifact that committed before a failing reset
+            # would mint the relic while leaving prestige_level/boss_progress
+            # unreset — can_prestige() stays True and a retry rolls a SECOND
+            # relic.
+            granted_relic_id = random.choice(eligible_relic_ids)
+            granted_def = next(r for r in RELICS if r.id == granted_relic_id)
             granted_relic = {
-                "id": relic_id,
+                "id": granted_relic_id,
                 "name": granted_def.name,
                 "rarity": granted_def.rarity,
             }
@@ -221,6 +228,7 @@ class PrestigeMixin:
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=prestige_jc_grant,
+            add_relic_artifact_id=granted_relic_id,
             tunnel_updates={
                 "depth": 0,
                 "boss_progress": json.dumps(boss_progress),

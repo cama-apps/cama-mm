@@ -1144,10 +1144,24 @@ class BossCombatMixin:
         # Abandoned-duel cleanup: if a previous mid-fight pause was never
         # resumed, the stale dig_active_duels row would otherwise leak the
         # durability tick for that fight. Tick once for the prior fight
-        # and clear the row before starting a fresh duel.
+        # and clear the row before starting a fresh duel. Tick the gear that
+        # actually fought the stale duel (the start-time snapshot persisted in
+        # status_effects), not the player's CURRENT loadout — they may have
+        # swapped/repaired gear during the abandoned pause, so ticking the
+        # live equipment would burn durability on pieces that never fought.
         stale = self.dig_repo.get_active_duel(discord_id, guild_id)
         if stale is not None:
-            self.dig_repo.tick_gear_durability(discord_id, guild_id)
+            stale_snapshot_ids: list[int] = []
+            try:
+                _se = json.loads(stale.get("status_effects") or "{}")
+                stale_snapshot_ids = [int(g) for g in (_se.get("gear_snapshot_ids") or [])]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                stale_snapshot_ids = []
+            if stale_snapshot_ids:
+                self.dig_repo.tick_gear_durability_ids(stale_snapshot_ids)
+            else:
+                # Legacy rows without a snapshot fall back to the live loadout.
+                self.dig_repo.tick_gear_durability(discord_id, guild_id)
             self.dig_repo.clear_active_duel(discord_id, guild_id)
 
         boss_progress = self._get_boss_progress_entries(tunnel)
@@ -2135,6 +2149,15 @@ class BossCombatMixin:
         # A loss always costs something: forfeit the wager, or charge a flat
         # repair bill on a free (no-wager) fight.
         jc_delta = -wager if wager > 0 else -BOSS_LOSS_REPAIR_BILL
+        # Floor the debit at the player's current balance. The wager was only
+        # *validated* at start_boss_duel, never escrowed, so a player who
+        # spent JC during a mid-fight pause (or whose balance otherwise
+        # dropped below the wager) could be driven negative here. Re-read the
+        # live balance and clamp so the loss can never push it below zero.
+        if jc_delta < 0:
+            current_balance = self.player_repo.get_balance(discord_id, guild_id)
+            if current_balance + jc_delta < 0:
+                jc_delta = -current_balance
         # Extended cooldown (stinger + flat loss penalty) pushes the timer forward.
         last_dig_effective = now + extra_cd + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 
@@ -2156,7 +2179,14 @@ class BossCombatMixin:
         # from the caller (start_boss_duel / resume_boss_duel) — when the
         # caller didn't track these (legacy auto-resolve path with no HP
         # info), we skip persistence and the next encounter starts fresh.
-        bp_for_persist = self._get_boss_progress_entries(tunnel)
+        #
+        # Persist from the already-consumed ``boss_progress`` ARGUMENT, not a
+        # fresh re-read of the in-memory ``tunnel``. start_boss_duel consumes
+        # ``pending_phase_event_id`` from boss_progress (and DB) but does NOT
+        # refresh tunnel["boss_progress"]; re-reading the stale tunnel here
+        # would re-persist the consumed one-shot and re-fire it next fight.
+        # The win branch already writes from this same argument.
+        bp_for_persist = dict(boss_progress)
         if ending_boss_hp is not None and boss_hp_max is not None:
             self._persist_boss_hp_after_fight(
                 bp_for_persist, at_boss, boss.boss_id if boss else "",
