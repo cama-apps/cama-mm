@@ -1206,8 +1206,11 @@ class BetRepository(BaseRepository, IBetRepository):
                 effective_bet = bet["effective_bet"]
                 # Calculate profit: won = payout - effective_bet, lost = -effective_bet
                 if bet["outcome"] == "won":
-                    # If payout stored, use it; otherwise assume house mode (2x)
-                    payout = bet["payout"] if bet["payout"] else effective_bet * 2
+                    # Use the stored payout when present. Only fall back to the
+                    # 2x house-mode estimate when the column is genuinely NULL
+                    # (unsettled/unknown) — a real stored 0 (a win that paid
+                    # nothing) must not be treated as missing.
+                    payout = bet["payout"] if bet["payout"] is not None else effective_bet * 2
                     bet["profit"] = payout - effective_bet
                 else:
                     bet["profit"] = -effective_bet
@@ -1633,14 +1636,14 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return balance_deltas
 
-    def apply_new_bet_payouts_for_correction(
+    def _compute_new_bet_payouts(
         self,
         match_id: int,
         new_winners: list[dict],
         pool_mode: bool = True,
-    ) -> dict[int, int]:
+    ) -> tuple[dict[int, int], list[tuple[int, int]]]:
         """
-        Apply new bet payouts after correction.
+        Pure computation of post-correction payouts (no DB writes).
 
         For the new winners: they get their stakes back + winnings.
         For pool mode: recalculate based on pool proportions.
@@ -1652,7 +1655,8 @@ class BetRepository(BaseRepository, IBetRepository):
             pool_mode: True for parimutuel, False for house mode
 
         Returns:
-            Dict mapping discord_id -> amount to add to their balance
+            Tuple of (balance_deltas mapping discord_id -> amount to add,
+            payout_updates list of (payout, bet_id) for the bets table).
         """
         balance_deltas: dict[int, int] = {}
         payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
@@ -1666,7 +1670,7 @@ class BetRepository(BaseRepository, IBetRepository):
             if winner_pool == 0:
                 # Edge case: no bets on winning side - this shouldn't happen
                 # but if it does, no payouts
-                return balance_deltas
+                return balance_deltas, payout_updates
 
             # Group winners by user
             winners_by_user: dict[int, list[dict]] = {}
@@ -1677,7 +1681,6 @@ class BetRepository(BaseRepository, IBetRepository):
                 winners_by_user[discord_id].append(bet)
 
             # Calculate payouts per user with single ceiling
-            import math
             for discord_id, bets in winners_by_user.items():
                 raw_total = sum((b["effective_bet"] / winner_pool) * total_pool for b in bets)
                 user_payout = math.ceil(raw_total)
@@ -1702,10 +1705,87 @@ class BetRepository(BaseRepository, IBetRepository):
                 balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + payout
                 payout_updates.append((payout, bet["bet_id"]))
 
-        # Update payout column for new winners and clear payout for new losers atomically
+        return balance_deltas, payout_updates
+
+    def settle_bet_correction_atomic(
+        self,
+        match_id: int,
+        old_winners: list[dict],
+        new_winners: list[dict],
+        guild_id: int | None,
+        pool_mode: bool = True,
+    ) -> dict[int, int]:
+        """
+        Apply a full bet-payout correction in ONE atomic transaction.
+
+        Folds three steps that must commit-or-rollback together:
+        1. Reverse old winners (subtract their stale payouts from balances).
+        2. Pay new winners (credit recalculated payouts to balances).
+        3. Rewrite the bets.payout column (set new winners, NULL everyone else).
+
+        Previously the bets-table rewrite committed in its own transaction
+        while the balance deltas were applied separately afterward; if that
+        second step failed, the bets table reflected new payouts while balances
+        were never credited, permanently stranding the new winners' payout.
+
+        Args:
+            match_id: The match being corrected
+            old_winners: Bet dicts that previously won (now losers)
+            new_winners: Bet dicts that now win
+            guild_id: Guild scope for the player balance updates
+            pool_mode: True for parimutuel, False for house mode
+
+        Returns:
+            Dict mapping discord_id -> net balance delta applied (reversal + new).
+        """
+        gid = self.normalize_guild_id(guild_id)
+
+        # Reversal is pure compute: subtract each old winner's stale payout.
+        reversal_deltas = self.reverse_bet_payouts_for_correction(match_id, old_winners)
+
+        # New payouts are pure compute too; bet-row payout updates come along.
+        new_deltas, payout_updates = self._compute_new_bet_payouts(
+            match_id, new_winners, pool_mode=pool_mode,
+        )
+
+        # Merge reversal + new into the net per-player balance delta.
+        combined_deltas: dict[int, int] = {}
+        for pid, delta in reversal_deltas.items():
+            combined_deltas[pid] = combined_deltas.get(pid, 0) + delta
+        for pid, delta in new_deltas.items():
+            combined_deltas[pid] = combined_deltas.get(pid, 0) + delta
+
         new_winner_bet_ids = {bet["bet_id"] for bet in new_winners}
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+
+            # 1+2. Apply net balance deltas to players in the SAME transaction
+            # as the bets rewrite. Mirrors PlayerRepository.add_balance_many,
+            # including lowest_balance_ever tracking for negative deltas.
+            if combined_deltas:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(delta, pid, gid) for pid, delta in combined_deltas.items()],
+                )
+                negative_ids = [pid for pid, delta in combined_deltas.items() if delta < 0]
+                if negative_ids:
+                    placeholders = ",".join("?" * len(negative_ids))
+                    cursor.execute(
+                        f"""
+                        UPDATE players
+                        SET lowest_balance_ever = jopacoin_balance
+                        WHERE discord_id IN ({placeholders}) AND guild_id = ?
+                        AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                        """,
+                        negative_ids + [gid],
+                    )
+
+            # 3. Update payout column for new winners.
             if payout_updates:
                 cursor.executemany(
                     "UPDATE bets SET payout = ? WHERE bet_id = ?",
@@ -1734,7 +1814,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     (match_id,),
                 )
 
-        return balance_deltas
+        return combined_deltas
 
     def get_bets_on_player_matches(self, target_discord_id: int, guild_id: int | None = None) -> list[dict]:
         """

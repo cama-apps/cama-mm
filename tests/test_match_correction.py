@@ -6,7 +6,9 @@ incorrectly recorded match results by reversing all effects and
 re-applying with the correct winner.
 """
 
+import sqlite3
 import time
+from unittest import mock
 
 import pytest
 
@@ -180,10 +182,13 @@ class TestMatchCorrection:
                 "Radiant player should have lost rating after correction"
 
     def test_correction_reverses_bet_payouts(self, correction_services):
-        """Test that bet payouts are properly reversed and recalculated."""
+        """Correction must credit/reverse the EXACT payouts, not merely move
+        balances in the right direction. Cross-checks each player's balance
+        against the payout independently stored in the bets table."""
         match_service = correction_services["match_service"]
         betting_service = correction_services["betting_service"]
         player_repo = correction_services["player_repo"]
+        bet_repo = correction_services["bet_repo"]
 
         player_ids = _create_players(player_repo, start_id=3000)
 
@@ -202,6 +207,7 @@ class TestMatchCorrection:
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending.radiant_team_ids
+        radiant_bettor = radiant_ids[0]
 
         # Ensure betting is open
         pending.bet_lock_until = int(time.time()) + 600
@@ -210,17 +216,25 @@ class TestMatchCorrection:
         betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
 
         # A radiant player bets on their own team
-        betting_service.place_bet(TEST_GUILD_ID, radiant_ids[0], "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, radiant_bettor, "radiant", 20, pending)
 
-        # Record with Radiant winning (spectator loses their bet)
+        # Record with Radiant winning (spectator loses, radiant bettor wins).
         match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
         result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
-        # Spectator should have lost their bet (balance unchanged from bet deduction)
+        # Capture pre-correction balances and the payout the radiant bettor was
+        # actually credited (stored on the bets table), so we can assert the
+        # reversal subtracts EXACTLY that amount.
         spectator_balance_after_wrong = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
+        radiant_balance_after_wrong = player_repo.get_balance(radiant_bettor, TEST_GUILD_ID)
+        bets_before = bet_repo.get_settled_bets_for_match(match_id)
+        radiant_old_payout = next(
+            b["payout"] for b in bets_before if b["discord_id"] == radiant_bettor
+        )
+        assert radiant_old_payout and radiant_old_payout > 0
 
-        # Correct to Dire winning (spectator should now win their bet)
+        # Correct to Dire winning (spectator now wins, radiant bettor now loses).
         match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
@@ -228,12 +242,145 @@ class TestMatchCorrection:
             corrected_by=99999,
         )
 
-        spectator_balance_after_correction = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
+        bets_after = bet_repo.get_settled_bets_for_match(match_id)
+        spectator_new_payout = next(
+            b["payout"] for b in bets_after if b["discord_id"] == spectator_id
+        )
+        radiant_bet_after = next(
+            b for b in bets_after if b["discord_id"] == radiant_bettor
+        )
 
-        # After correction, spectator (who bet on Dire) should have their payout
-        # Their bet of 50 on Dire should now pay out
-        assert spectator_balance_after_correction > spectator_balance_after_wrong, \
-            "Spectator who bet on Dire should gain balance after correction to Dire win"
+        spectator_balance_after = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
+        radiant_balance_after = player_repo.get_balance(radiant_bettor, TEST_GUILD_ID)
+
+        # New winner: credited EXACTLY the payout written to the bets table.
+        assert spectator_new_payout is not None and spectator_new_payout > 0
+        assert spectator_balance_after == spectator_balance_after_wrong + spectator_new_payout, \
+            "Spectator must be credited exactly the new winning payout"
+
+        # Former winner: payout column nulled and balance reduced by EXACTLY
+        # the stale payout it previously held — no more, no less.
+        assert radiant_bet_after["payout"] is None
+        assert radiant_balance_after == radiant_balance_after_wrong - radiant_old_payout, \
+            "Former winner must have exactly its old payout reversed"
+
+    def test_correction_bet_settlement_is_all_or_nothing(self, correction_services):
+        """If the player-balance credit fails mid-correction, the bets-table
+        payout rewrite must roll back with it — never leave bets paid-out while
+        balances were never credited (and vice versa).
+
+        Pre-fix, the bets rewrite committed in its own transaction and the
+        balance deltas were applied in a SEPARATE commit afterward, so a failure
+        during the balance write stranded the new winners' payout (bets paid,
+        balances not). The fix folds the balance UPDATE and the bets rewrite
+        into one transaction. We inject a failure on the balance UPDATE itself
+        (the `jopacoin_balance` write present in both designs): in the buggy
+        design the bets rewrite has already committed, so this test catches the
+        regression; in the fixed design the whole transaction rolls back."""
+        match_service = correction_services["match_service"]
+        betting_service = correction_services["betting_service"]
+        player_repo = correction_services["player_repo"]
+        bet_repo = correction_services["bet_repo"]
+
+        player_ids = _create_players(player_repo, start_id=6000)
+        spectator_id = 6999
+        player_repo.add(
+            discord_id=spectator_id,
+            discord_username="Spectator",
+            guild_id=TEST_GUILD_ID,
+            dotabuff_url="https://dotabuff.com/players/6999",
+            initial_mmr=1500,
+        )
+        player_repo.add_balance(spectator_id, TEST_GUILD_ID, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = pending.radiant_team_ids
+        radiant_bettor = radiant_ids[0]
+        pending.bet_lock_until = int(time.time()) + 600
+
+        betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
+        betting_service.place_bet(TEST_GUILD_ID, radiant_bettor, "radiant", 20, pending)
+
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        spectator_balance_before = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
+        radiant_balance_before = player_repo.get_balance(radiant_bettor, TEST_GUILD_ID)
+        bets_before = {b["discord_id"]: b["payout"] for b in bet_repo.get_settled_bets_for_match(match_id)}
+
+        # Make any write to players.jopacoin_balance raise. This is the balance
+        # credit step — inlined in the atomic block after the fix, and a
+        # separate post-commit step before it. We patch get_connection on BOTH
+        # repos involved in settlement so the failure is hit wherever the
+        # balance write happens.
+        def _guard(sql):
+            if "jopacoin_balance" in sql and "UPDATE" in sql.upper():
+                raise sqlite3.OperationalError("injected balance-write failure")
+
+        class _CursorProxy:
+            def __init__(self, cur):
+                self._cur = cur
+
+            def execute(self, sql, *a, **k):
+                _guard(sql)
+                return self._cur.execute(sql, *a, **k)
+
+            def executemany(self, sql, *a, **k):
+                _guard(sql)
+                return self._cur.executemany(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._cur, name)
+
+            def __iter__(self):
+                return iter(self._cur)
+
+        class _ConnProxy:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *a, **k):
+                _guard(sql)
+                return self._conn.execute(sql, *a, **k)
+
+            def executemany(self, sql, *a, **k):
+                _guard(sql)
+                return self._conn.executemany(sql, *a, **k)
+
+            def cursor(self):
+                return _CursorProxy(self._conn.cursor())
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        def make_failing_get_connection(repo):
+            real_get_conn = repo.get_connection
+
+            def _get():
+                return _ConnProxy(real_get_conn())
+            return _get
+
+        with mock.patch.object(
+            bet_repo, "get_connection", make_failing_get_connection(bet_repo)
+        ), mock.patch.object(
+            player_repo, "get_connection", make_failing_get_connection(player_repo)
+        ):
+            with pytest.raises(sqlite3.OperationalError):
+                match_service.correct_match_result(
+                    match_id=match_id,
+                    new_winning_team="dire",
+                    guild_id=TEST_GUILD_ID,
+                    corrected_by=99999,
+                )
+
+        # Nothing was half-applied: balances and bets.payout are unchanged.
+        assert player_repo.get_balance(spectator_id, TEST_GUILD_ID) == spectator_balance_before
+        assert player_repo.get_balance(radiant_bettor, TEST_GUILD_ID) == radiant_balance_before
+        bets_after = {b["discord_id"]: b["payout"] for b in bet_repo.get_settled_bets_for_match(match_id)}
+        assert bets_after == bets_before, \
+            "Bets-table payouts must be untouched when the balance credit fails"
 
     def test_correction_clears_stale_payout_on_former_winner(self, correction_services):
         """A bet that won, then becomes a loser after correction, must have its

@@ -928,3 +928,56 @@ def test_consume_and_credit_atomic_pays_once(repo_db_path):
     # Second (concurrent-style) caller loses the claim: no credit.
     assert buff_repo.consume_and_credit_atomic(buff_id, pid, TEST_GUILD_ID, bonus) is False
     assert player_repo.get_balance(pid, TEST_GUILD_ID) == bonus
+
+
+def test_bet_history_distinguishes_zero_payout_from_null(repo_db_path):
+    """get_player_bet_history must treat a stored payout of 0 as a real value
+    (a win that paid nothing → profit = -stake), NOT as missing. Only a genuine
+    SQL NULL falls back to the 2x house estimate.
+
+    Pre-fix the truthiness check (`bet["payout"] if bet["payout"] else ...`)
+    treated 0 as falsy and reported the 0-payout bet as if it had paid 2x.
+    """
+    player_repo = PlayerRepository(repo_db_path)
+    bet_repo = BetRepository(repo_db_path)
+
+    pid = 8181
+    player_repo.add(
+        discord_id=pid,
+        discord_username="ZeroPayout",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+
+    with bet_repo.connection() as conn:
+        cur = conn.cursor()
+        # Two matches, both won by Radiant; the player bet Radiant in each
+        # (so both are "won" rows on the history query).
+        cur.execute(
+            "INSERT INTO matches (match_id, team1_players, team2_players, winning_team) "
+            "VALUES (901, '[]', '[]', 1), (902, '[]', '[]', 1)"
+        )
+        # Bet A: a winning bet whose settlement paid exactly 0 (stored 0).
+        cur.execute(
+            "INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, "
+            "bet_time, leverage, payout) VALUES (?, 901, ?, 'radiant', 10, 1, 1, 0)",
+            (TEST_GUILD_ID, pid),
+        )
+        # Bet B: a winning bet that is genuinely unsettled (payout NULL).
+        cur.execute(
+            "INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, "
+            "bet_time, leverage, payout) VALUES (?, 902, ?, 'radiant', 10, 2, 1, NULL)",
+            (TEST_GUILD_ID, pid),
+        )
+
+    history = bet_repo.get_player_bet_history(pid, TEST_GUILD_ID)
+    by_match = {b["match_id"]: b for b in history}
+
+    # Stored 0 payout: profit = 0 - effective_bet(10) = -10 (NOT +10 from 2x).
+    assert by_match[901]["outcome"] == "won"
+    assert by_match[901]["profit"] == -10, \
+        "A win that paid a stored 0 must show profit = -stake, not the 2x fallback"
+
+    # NULL payout: the 2x house estimate still applies → profit = 20 - 10 = 10.
+    assert by_match[902]["profit"] == 10, \
+        "A genuinely unsettled (NULL) winning bet should keep the 2x fallback"

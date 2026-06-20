@@ -266,29 +266,25 @@ class VotingCorrectionMixin:
             corrected_by=corrected_by,
         )
 
-        # 9. Bet payout correction: reverse old winners + pay new winners, then
-        # apply combined deltas to player balances. Runs in bet_repo's own
-        # transactions; failure here leaves the match state correct but bet
-        # payouts stale — admin can rerun the correction flow. Uses the
-        # original betting_mode persisted on the match row so a match recorded
-        # in house mode is corrected with house-mode math (older pre-migration
-        # matches default to 'pool').
+        # 9. Bet payout correction: reverse old winners, pay new winners, and
+        # apply the combined balance deltas — all folded into ONE atomic
+        # transaction inside bet_repo so the bets-table payout rewrite and the
+        # player-balance credits commit-or-rollback together. If this raises,
+        # nothing is half-applied; the match state is correct and the admin can
+        # rerun the correction flow. Uses the original betting_mode persisted on
+        # the match row so a match recorded in house mode is corrected with
+        # house-mode math (older pre-migration matches default to 'pool').
         if self.betting_service and (old_winning_bets or new_winning_bets):
             bet_repo = self.betting_service.bet_repo
             all_bets_len = len(old_winning_bets) + len(new_winning_bets)
-            reversal_deltas = bet_repo.reverse_bet_payouts_for_correction(
-                match_id, old_winning_bets,
-            )
             original_betting_mode = match.get("betting_mode") or "pool"
-            new_deltas = bet_repo.apply_new_bet_payouts_for_correction(
-                match_id, new_winning_bets, pool_mode=(original_betting_mode == "pool"),
+            combined_bet_deltas = bet_repo.settle_bet_correction_atomic(
+                match_id,
+                old_winning_bets,
+                new_winning_bets,
+                guild_id,
+                pool_mode=(original_betting_mode == "pool"),
             )
-            for pid, delta in reversal_deltas.items():
-                combined_bet_deltas[pid] = combined_bet_deltas.get(pid, 0) + delta
-            for pid, delta in new_deltas.items():
-                combined_bet_deltas[pid] = combined_bet_deltas.get(pid, 0) + delta
-            if combined_bet_deltas:
-                self.player_repo.add_balance_many(combined_bet_deltas, guild_id)
             bet_correction_summary = {
                 "bets_affected": all_bets_len,
                 "old_winners_reversed": len(old_winning_bets),
