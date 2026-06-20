@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from config import CALIBRATION_RD_THRESHOLD
 from domain.models.pending_match_state import PendingMatchState
 from openskill_rating_system import CamaOpenSkillSystem
-from services.match._common import logger
+from services.match._common import coalesce_os_baseline, logger
 from utils.guild import normalize_guild_id
 
 
@@ -369,9 +369,12 @@ class RecordingMixin:
             for pid, (new_mu, new_sigma) in os_results.items():
                 old_mu, old_sigma = os_ratings.get(pid, (None, None))
                 if pid in pre_match:
-                    pre_match[pid]["os_mu_before"] = old_mu if old_mu is not None else DEFAULT_MU
+                    os_mu_before, os_sigma_before = coalesce_os_baseline(
+                        old_mu, old_sigma, DEFAULT_MU, DEFAULT_SIGMA
+                    )
+                    pre_match[pid]["os_mu_before"] = os_mu_before
                     pre_match[pid]["os_mu_after"] = new_mu
-                    pre_match[pid]["os_sigma_before"] = old_sigma if old_sigma is not None else DEFAULT_SIGMA
+                    pre_match[pid]["os_sigma_before"] = os_sigma_before
                     pre_match[pid]["os_sigma_after"] = new_sigma
 
             rating_history_rows: list[dict] = []

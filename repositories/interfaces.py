@@ -1375,13 +1375,6 @@ class ILoanRepository(ABC):
     ) -> dict | None: ...
 
     @abstractmethod
-    def disburse_fund_atomic(
-        self,
-        guild_id: int | None,
-        distributions: list[tuple[int, int]],
-    ) -> int: ...
-
-    @abstractmethod
     def get_negative_loans_bulk(self, discord_ids: list[int], guild_id: int) -> dict[int, int]: ...
 
     @abstractmethod
@@ -1491,11 +1484,6 @@ class IDisburseRepository(ABC):
         ...
 
     @abstractmethod
-    def complete_proposal(self, guild_id: int | None) -> None:
-        """Mark the active proposal as completed."""
-        ...
-
-    @abstractmethod
     def complete_and_disburse_atomic(
         self,
         guild_id: int | None,
@@ -1516,17 +1504,6 @@ class IDisburseRepository(ABC):
         self, guild_id: int | None, fund_amount_to_return: int
     ) -> bool:
         """Atomically reset the active proposal and return its reserve."""
-        ...
-
-    @abstractmethod
-    def record_disbursement(
-        self,
-        guild_id: int | None,
-        total_amount: int,
-        method: str,
-        distributions: list[tuple[int, int]],
-    ) -> int:
-        """Record a completed disbursement for history."""
         ...
 
     @abstractmethod

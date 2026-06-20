@@ -918,7 +918,7 @@ class TestMetaBetPayouts:
             (12201, "wheel", 20),
         ]:
             _add_player(player_repo, pid, balance=100, guild_id=guild_id)
-            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now)
 
         return war_id
 
@@ -984,7 +984,7 @@ class TestMetaBetPayouts:
             (14200, "wheel", 4),
         ]:
             _add_player(player_repo, pid, balance=100, guild_id=guild_id)
-            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now)
 
         result = rebellion_repo.settle_meta_bets(war_id, "rebels")
         assert result["total_pool"] == 14
@@ -1087,7 +1087,7 @@ class TestStaleWarRecovery:
         bettors = {15300: ("rebels", 25), 15301: ("wheel", 40)}
         for pid, (side, amount) in bettors.items():
             _add_player(player_repo, pid, balance=100, guild_id=guild_id)
-            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now)
         bal_after_bet = {pid: player_repo.get_balance(pid, guild_id) for pid in bettors}
 
         recovered = rebellion_service.recover_stale_wars(guild_id)
@@ -1108,7 +1108,7 @@ class TestStaleWarRecovery:
         _add_player(player_repo, 15401, balance=200, guild_id=guild_id)
         war_id = rebellion_repo.create_war(guild_id, 15401, now + 900, now)
         _add_player(player_repo, 15402, balance=100, guild_id=guild_id)
-        rebellion_repo.place_meta_bet_atomic(war_id, guild_id, 15402, "rebels", 30, now, max_debt=500)
+        rebellion_repo.place_meta_bet_atomic(war_id, guild_id, 15402, "rebels", 30, now)
 
         first = rebellion_service.recover_stale_wars(guild_id)
         assert first  # recovered once
@@ -1165,7 +1165,7 @@ class TestResolutionSettlementAtomicity:
             (16201, "wheel", 20),
         ]:
             _add_player(player_repo, pid, balance=100, guild_id=guild_id)
-            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now, max_debt=500)
+            rebellion_repo.place_meta_bet_atomic(war_id, guild_id, pid, side, amount, now)
         return war_id
 
     def test_meta_bets_settled_inside_resolution_transaction(

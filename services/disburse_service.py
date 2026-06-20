@@ -88,7 +88,7 @@ class DisburseService:
         )
         # Per-guild serialization lock for execute/force_execute/reset paths.
         # Prevents the reserve-then-distribute sequence (add_to_nonprofit_fund
-        # followed by disburse_fund_atomic) from interleaving between two
+        # followed by complete_and_disburse_atomic) from interleaving between two
         # concurrent callers, which would otherwise over-refund the pool.
         # Also closes the quorum-check -> execute TOCTOU window: once a caller
         # holds the lock, a late "cancel" vote cannot change the observed

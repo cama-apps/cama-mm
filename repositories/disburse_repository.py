@@ -254,22 +254,6 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 for row in cursor.fetchall()
             ]
 
-    def complete_proposal(self, guild_id: int | None) -> None:
-        """
-        Mark the active proposal as completed.
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE disburse_proposals
-                SET status = 'completed'
-                WHERE guild_id = ? AND status = 'active'
-                """,
-                (normalized_guild,),
-            )
-
     def complete_and_disburse_atomic(
         self,
         guild_id: int | None,
@@ -520,48 +504,6 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                     self._clear_economy_ledger_context(cursor)
 
             return proposal_id
-
-    def record_disbursement(
-        self,
-        guild_id: int | None,
-        total_amount: int,
-        method: str,
-        distributions: list[tuple[int, int]],
-    ) -> int:
-        """
-        Record a completed disbursement for history.
-
-        Args:
-            guild_id: Guild ID
-            total_amount: Total amount disbursed
-            method: 'even', 'proportional', or 'neediest'
-            distributions: List of (discord_id, amount) tuples
-
-        Returns:
-            The history record ID
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        now = int(time.time())
-        recipients_json = json.dumps(distributions)
-
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO disburse_history
-                    (guild_id, disbursed_at, total_amount, method, recipient_count, recipients)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    normalized_guild,
-                    now,
-                    total_amount,
-                    method,
-                    len(distributions),
-                    recipients_json,
-                ),
-            )
-            return cursor.lastrowid
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """
