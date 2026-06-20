@@ -1898,170 +1898,185 @@ class DraftCommands(commands.Cog):
 
         # Check if draft is complete
         if state.phase == DraftPhase.COMPLETE:
-            try:
-                # Create pending match for betting and recording
-                pending_match_id = await self._create_pending_match(guild_id, state)
-
-                if pending_match_id is None:
-                    # Failed to create pending match - don't reset lobby, show error
-                    embed = discord.Embed(
-                        title="⚠️ Draft Complete - Match Creation Failed",
-                        description=(
-                            "The draft completed but the match could not be created.\n"
-                            "This may be a configuration issue. Please contact an admin.\n\n"
-                            "The lobby has been preserved."
-                        ),
-                        color=discord.Color.orange(),
-                    )
-                    await self._edit_interaction_message(interaction, embed=embed, view=None)
-                    return
-
-                # Get pending state for betting display (use specific pending_match_id for concurrent match support)
-                pending_state = await asyncio.to_thread(
-                    self.match_service.get_last_shuffle, guild_id, pending_match_id=pending_match_id
-                )
-
-                # === NEW: Create auto-blind bets (same as shuffle mode) ===
-                betting_service = getattr(self.bot, "betting_service", None)
-                is_bomb_pot = pending_state.is_bomb_pot if pending_state else False
-                if betting_service and pending_state:
-                    try:
-                        blind_result = await asyncio.to_thread(
-                            functools.partial(
-                                betting_service.create_auto_blind_bets,
-                                guild_id=guild_id,
-                                radiant_ids=state.radiant_player_ids,
-                                dire_ids=state.dire_player_ids,
-                                shuffle_timestamp=pending_state.shuffle_timestamp,
-                                is_bomb_pot=is_bomb_pot,
-                                pending_match_id=pending_state.pending_match_id,
-                            )
-                        )
-                        spectator_result = await asyncio.to_thread(
-                            functools.partial(
-                                betting_service.create_auto_spectator_bets,
-                                guild_id=guild_id,
-                                radiant_ids=state.radiant_player_ids,
-                                dire_ids=state.dire_player_ids,
-                                shuffle_timestamp=pending_state.shuffle_timestamp,
-                                pending_match_id=pending_state.pending_match_id,
-                            )
-                        )
-                        if spectator_result:
-                            blind_result["spectator_bets"] = spectator_result
-                        if blind_result and blind_result.get("created", 0) > 0:
-                            # Store blind bets result in pending state for embed display
-                            pending_state.blind_bets_result = blind_result
-                            await asyncio.to_thread(
-                                self.match_service.set_last_shuffle, guild_id, pending_state
-                            )
-                            logger.info(
-                                f"Created {blind_result['created']} blind bets for draft"
-                                f"{' (BOMB POT)' if is_bomb_pot else ''}"
-                            )
-                            # Neon Degen Terminal: Bomb pot easter egg
-                            if is_bomb_pot:
-                                try:
-                                    neon = get_neon_service(self.bot)
-                                    if neon:
-                                        pool_total = blind_result['total_radiant'] + blind_result['total_dire']
-                                        bomb_result = await neon.on_bomb_pot(
-                                            guild_id, pool_total, blind_result['created']
-                                        )
-                                        if bomb_result:
-                                            await send_neon_result(interaction, bomb_result)
-                                except Exception as e:
-                                    logger.debug(f"neon on_bomb_pot error: {e}")
-                        if spectator_result and spectator_result.get("created", 0) > 0:
-                            if not pending_state.blind_bets_result:
-                                pending_state.blind_bets_result = blind_result
-                                await asyncio.to_thread(
-                                    self.match_service.set_last_shuffle, guild_id, pending_state
-                                )
-                            logger.info(
-                                f"Created {spectator_result['created']} spectator auto-wagers for draft"
-                            )
-                    except Exception as exc:
-                        logger.warning(f"Failed to create automatic bets for draft: {exc}")
-
-                # Decay exclusion counts for included players (same as shuffle mode)
-                included_player_ids = state.radiant_player_ids + state.dire_player_ids
-                for pid in included_player_ids:
-                    await asyncio.to_thread(self.player_repo.decay_exclusion_count, pid, guild_id)
-
-                # Save thread ID before resetting lobby
-                lobby_service = getattr(self.bot, "lobby_service", None)
-                thread_id = (
-                    await asyncio.to_thread(lobby_service.get_lobby_thread_id, guild_id=guild_id)
-                    if lobby_service
-                    else None
-                )
-
-                # Reset lobby only after successful match creation
-                await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
-
-                embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
-                draft_message = await self._edit_interaction_message(interaction, embed=embed, view=None)
-
-                # === NEW: Store message info for odds updates ===
-                try:
-                    original_message = draft_message or getattr(interaction, "message", None)
-                    if original_message is None:
-                        with contextlib.suppress(Exception):
-                            original_message = await interaction.original_response()
-                    if original_message:
-                        message_channel = getattr(original_message, "channel", None)
-                        await asyncio.to_thread(
-                            functools.partial(
-                                self.match_service.set_shuffle_message_info,
-                                guild_id,
-                                message_id=getattr(original_message, "id", None) or state.draft_message_id,
-                                channel_id=getattr(message_channel, "id", None) or state.draft_channel_id,
-                                jump_url=getattr(original_message, "jump_url", None),
-                                origin_channel_id=state.draft_channel_id,
-                                pending_match_id=pending_state.pending_match_id if pending_state else None,
-                            )
-                        )
-                except Exception as exc:
-                    logger.warning(f"Failed to store draft message info: {exc}")
-
-                # === NEW: Schedule betting reminders (same as shuffle mode) ===
-                match_cog = self.bot.get_cog("MatchCommands")
-                if match_cog and hasattr(match_cog, "_schedule_betting_reminders"):
-                    try:
-                        await match_cog._schedule_betting_reminders(
-                            guild_id,
-                            pending_state.bet_lock_until if pending_state else None,
-                            pending_match_id=pending_state.pending_match_id if pending_state else None,
-                        )
-                    except Exception as exc:
-                        logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
-
-                # Post to match thread and ping players
-                await self._post_to_match_thread(state, embed, thread_id)
-
-            except Exception as e:
-                logger.error(f"Error during draft completion for guild {guild_id}: {e}", exc_info=True)
-                try:
-                    msg = (
-                        "⚠️ Draft complete but encountered an error during match setup. "
-                        "Use `/draft start` to try again."
-                    )
-                    if interaction.response.is_done():
-                        await interaction.followup.send(msg, ephemeral=True)
-                    else:
-                        await interaction.response.send_message(msg, ephemeral=True)
-                except Exception:
-                    logger.warning(
-                        "Failed to notify user of draft completion error for guild %s",
-                        guild_id, exc_info=True,
-                    )
-            finally:
-                await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
+            await self._complete_draft(interaction, guild_id, state)
             return
 
         # Update the draft UI
         await self._show_draft_ui(interaction, guild_id, state, is_edit=True)
+
+    async def _complete_draft(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        state: DraftState,
+    ):
+        """Run the post-final-pick draft completion flow.
+
+        Extracted verbatim from handle_player_pick: creates the pending match,
+        auto-blind/spectator bets, decays exclusion counts, resets the lobby,
+        builds and posts the completion embed, stores message info, schedules
+        betting reminders, and posts to the match thread. Behavior-preserving.
+        """
+        try:
+            # Create pending match for betting and recording
+            pending_match_id = await self._create_pending_match(guild_id, state)
+
+            if pending_match_id is None:
+                # Failed to create pending match - don't reset lobby, show error
+                embed = discord.Embed(
+                    title="⚠️ Draft Complete - Match Creation Failed",
+                    description=(
+                        "The draft completed but the match could not be created.\n"
+                        "This may be a configuration issue. Please contact an admin.\n\n"
+                        "The lobby has been preserved."
+                    ),
+                    color=discord.Color.orange(),
+                )
+                await self._edit_interaction_message(interaction, embed=embed, view=None)
+                return
+
+            # Get pending state for betting display (use specific pending_match_id for concurrent match support)
+            pending_state = await asyncio.to_thread(
+                self.match_service.get_last_shuffle, guild_id, pending_match_id=pending_match_id
+            )
+
+            # === NEW: Create auto-blind bets (same as shuffle mode) ===
+            betting_service = getattr(self.bot, "betting_service", None)
+            is_bomb_pot = pending_state.is_bomb_pot if pending_state else False
+            if betting_service and pending_state:
+                try:
+                    blind_result = await asyncio.to_thread(
+                        functools.partial(
+                            betting_service.create_auto_blind_bets,
+                            guild_id=guild_id,
+                            radiant_ids=state.radiant_player_ids,
+                            dire_ids=state.dire_player_ids,
+                            shuffle_timestamp=pending_state.shuffle_timestamp,
+                            is_bomb_pot=is_bomb_pot,
+                            pending_match_id=pending_state.pending_match_id,
+                        )
+                    )
+                    spectator_result = await asyncio.to_thread(
+                        functools.partial(
+                            betting_service.create_auto_spectator_bets,
+                            guild_id=guild_id,
+                            radiant_ids=state.radiant_player_ids,
+                            dire_ids=state.dire_player_ids,
+                            shuffle_timestamp=pending_state.shuffle_timestamp,
+                            pending_match_id=pending_state.pending_match_id,
+                        )
+                    )
+                    if spectator_result:
+                        blind_result["spectator_bets"] = spectator_result
+                    if blind_result and blind_result.get("created", 0) > 0:
+                        # Store blind bets result in pending state for embed display
+                        pending_state.blind_bets_result = blind_result
+                        await asyncio.to_thread(
+                            self.match_service.set_last_shuffle, guild_id, pending_state
+                        )
+                        logger.info(
+                            f"Created {blind_result['created']} blind bets for draft"
+                            f"{' (BOMB POT)' if is_bomb_pot else ''}"
+                        )
+                        # Neon Degen Terminal: Bomb pot easter egg
+                        if is_bomb_pot:
+                            try:
+                                neon = get_neon_service(self.bot)
+                                if neon:
+                                    pool_total = blind_result['total_radiant'] + blind_result['total_dire']
+                                    bomb_result = await neon.on_bomb_pot(
+                                        guild_id, pool_total, blind_result['created']
+                                    )
+                                    if bomb_result:
+                                        await send_neon_result(interaction, bomb_result)
+                            except Exception as e:
+                                logger.debug(f"neon on_bomb_pot error: {e}")
+                    if spectator_result and spectator_result.get("created", 0) > 0:
+                        if not pending_state.blind_bets_result:
+                            pending_state.blind_bets_result = blind_result
+                            await asyncio.to_thread(
+                                self.match_service.set_last_shuffle, guild_id, pending_state
+                            )
+                        logger.info(
+                            f"Created {spectator_result['created']} spectator auto-wagers for draft"
+                        )
+                except Exception as exc:
+                    logger.warning(f"Failed to create automatic bets for draft: {exc}")
+
+            # Decay exclusion counts for included players (same as shuffle mode)
+            included_player_ids = state.radiant_player_ids + state.dire_player_ids
+            for pid in included_player_ids:
+                await asyncio.to_thread(self.player_repo.decay_exclusion_count, pid, guild_id)
+
+            # Save thread ID before resetting lobby
+            lobby_service = getattr(self.bot, "lobby_service", None)
+            thread_id = (
+                await asyncio.to_thread(lobby_service.get_lobby_thread_id, guild_id=guild_id)
+                if lobby_service
+                else None
+            )
+
+            # Reset lobby only after successful match creation
+            await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
+
+            embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
+            draft_message = await self._edit_interaction_message(interaction, embed=embed, view=None)
+
+            # === NEW: Store message info for odds updates ===
+            try:
+                original_message = draft_message or getattr(interaction, "message", None)
+                if original_message is None:
+                    with contextlib.suppress(Exception):
+                        original_message = await interaction.original_response()
+                if original_message:
+                    message_channel = getattr(original_message, "channel", None)
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.match_service.set_shuffle_message_info,
+                            guild_id,
+                            message_id=getattr(original_message, "id", None) or state.draft_message_id,
+                            channel_id=getattr(message_channel, "id", None) or state.draft_channel_id,
+                            jump_url=getattr(original_message, "jump_url", None),
+                            origin_channel_id=state.draft_channel_id,
+                            pending_match_id=pending_state.pending_match_id if pending_state else None,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to store draft message info: {exc}")
+
+            # === NEW: Schedule betting reminders (same as shuffle mode) ===
+            match_cog = self.bot.get_cog("MatchCommands")
+            if match_cog and hasattr(match_cog, "_schedule_betting_reminders"):
+                try:
+                    await match_cog._schedule_betting_reminders(
+                        guild_id,
+                        pending_state.bet_lock_until if pending_state else None,
+                        pending_match_id=pending_state.pending_match_id if pending_state else None,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
+
+            # Post to match thread and ping players
+            await self._post_to_match_thread(state, embed, thread_id)
+
+        except Exception as e:
+            logger.error(f"Error during draft completion for guild {guild_id}: {e}", exc_info=True)
+            try:
+                msg = (
+                    "⚠️ Draft complete but encountered an error during match setup. "
+                    "Use `/draft start` to try again."
+                )
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                logger.warning(
+                    "Failed to notify user of draft completion error for guild %s",
+                    guild_id, exc_info=True,
+                )
+        finally:
+            await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
 
     async def handle_side_preference(
         self,
