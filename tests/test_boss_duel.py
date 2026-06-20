@@ -335,27 +335,26 @@ class TestDuelPayout:
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         assert tunnel["last_dig_at"] == fight_time + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 
-    def test_loss_surfaces_soften_line_when_chip_damage_done(
+    def test_loss_suppresses_soften_line_when_no_chip_damage(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """Boss loss includes a soften_line showing pre-fight HP → ending HP
-        when the player chipped off at least 1 HP. The test seeds boss_progress
-        with a partial HP entry so the boss starts wounded, then forces a loss
-        — the surviving HP at loss time is what gets surfaced."""
+        """A boss loss in which the player lands NO hits must NOT surface a
+        soften_line: starting HP == ending HP, so there is nothing to report.
+
+        Deterministic: with every global roll pinned to 0.999 (above any
+        player_hit), the player never lands a hit, the boss survives at full
+        HP, and the round-cap loss fires. The soften-suppression assertion now
+        ALWAYS runs (no guard)."""
         _register(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
 
-        # Seed: a known soft boss at depth 99 (next boundary is 100 → at_boss
-        # logic kicks in at the boundary; we use 99 so the next dig triggers
-        # the boundary check via fight_boss).
-        seed_hp = 2
         seed_max = 8
         bp_seed = {
             "25": "defeated", "50": "defeated", "75": "defeated",
             "100": {
-                "hp_remaining": seed_hp, "hp_max": seed_max,
+                "hp_remaining": seed_max, "hp_max": seed_max,
                 "last_engaged_at": 1_000_000,
                 "status": "active",
             },
@@ -365,30 +364,38 @@ class TestDuelPayout:
             depth=99, boss_progress=json.dumps(bp_seed),
         )
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        # Force a loss: player never hits, boss always hits.
+        # Player never hits → boss ends untouched at full HP.
         monkeypatch.setattr(random, "random", lambda: 0.999)
 
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
-        # With no chip damage this fight (player whiffs every round), the
-        # starting and ending HP both equal seed_hp, so the soften line is
-        # suppressed. Re-run with the player landing every hit instead.
-        if result.get("soften_line"):
-            assert f"/{seed_max}" in result["soften_line"]
+        # No chip damage → boss at full HP and the soften line is suppressed.
+        assert result["boss_hp_remaining"] == seed_max
+        assert result.get("soften_line") is None
 
     def test_loss_soften_line_present_when_player_chips(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """When the player lands hits before losing, soften_line surfaces the
-        boss's HP transition."""
+        """When the player lands a hit before losing, soften_line surfaces the
+        boss's HP transition from its pre-fight HP to its surviving HP.
+
+        Deterministic roll sequence — cautious has crit_chance 0, so each round
+        consumes exactly two global rolls (player-hit, then boss-hit); the
+        Monte-Carlo win-prob estimate uses a *local* RNG and does not touch this
+        stream:
+          round 1: player 0.0 -> HIT (boss -1); boss 0.0 -> HIT (player 5->4)
+          rounds 2-5: player 0.99 -> MISS; boss 0.0 -> HIT
+        Player (5 HP, boss_dmg 1) dies at round 5 having chipped exactly 1 HP.
+        The boss is seeded with enough HP that one chip can't kill it."""
         _register(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
+        seed_max = 6
         bp_seed = {
             "25": "defeated", "50": "defeated", "75": "defeated",
             "100": {
-                "hp_remaining": 6, "hp_max": 6,
+                "hp_remaining": seed_max, "hp_max": seed_max,
                 "last_engaged_at": 1_000_000,
                 "status": "active",
             },
@@ -398,15 +405,18 @@ class TestDuelPayout:
             depth=99, boss_progress=json.dumps(bp_seed),
         )
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        # Roll low: player hits AND boss hits each round. With cautious stats
-        # (5 player_hp vs 6 boss_hp, both ~equal hit chance) the player will
-        # chip 2-3 HP off before dying.
-        monkeypatch.setattr(random, "random", lambda: 0.05)
+        # Player lands round 1, then whiffs; boss hits every round → loss at
+        # round 5 after the player has chipped exactly 1 HP off the boss.
+        rolls = iter([0.0, 0.0, 0.99, 0.0, 0.99, 0.0, 0.99, 0.0, 0.99, 0.0])
+        monkeypatch.setattr(random, "random", lambda: next(rolls))
 
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
-        if result["won"] is False and result.get("boss_hp_remaining", 6) < 6:
-            assert result.get("soften_line") is not None
-            assert "/" in result["soften_line"]
+        assert result["won"] is False
+        # Boss survived with exactly one chip taken — soften_line is present and
+        # reports the surviving HP over the max. These assertions ALWAYS run.
+        assert result["boss_hp_remaining"] == seed_max - 1
+        assert result.get("soften_line") is not None
+        assert f"{seed_max - 1}/{seed_max}" in result["soften_line"]
 
 
 class TestMilestoneAntiFarm:
@@ -603,23 +613,31 @@ class TestAbandonedDuelCleanup:
     def test_stale_row_triggers_cleanup_tick(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
+        """A stale (abandoned) duel with no gear snapshot falls back to ticking
+        the live loadout, then the row is cleared. With every roll pinned to
+        0.99 the *new* grothak fight pauses on its mechanic before it can tick
+        its own gear, so the equipped piece drops by EXACTLY the one cleanup
+        tick (20 -> 19), and the fake stale row is gone."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        # Equip a piece so a tick has something to bite
+        # Equip a piece so the legacy-fallback cleanup tick has something to bite.
         gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
         dig_repo.equip_gear(gid, 10001, TEST_GUILD_ID, "armor")
+        dur_before = dig_repo.get_gear_by_id(gid)["durability"]
+        assert dur_before == 20
         self._seed_stale_duel(dig_repo, 10001, TEST_GUILD_ID)
+        # Confirm the stale row is the fake one before the cleanup runs.
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID)["mechanic_id"] == "fake_mechanic"
 
+        # Rolls stay at 0.99 (set by _at_boss): the new fight reaches grothak's
+        # mechanic and pauses, so its own gear tick is deferred to resume.
         dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=0)
 
-        # Stale row was either cleared or replaced by a new pause record.
+        # The fake stale row was cleared/replaced — the cleanup actually ran.
         active = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
-        if active is not None:
-            assert active.get("mechanic_id") != "fake_mechanic"
-        # The cleanup tick fired against the stale fight, dropping durability
-        # from 20 to at least 19 (the new fight may also tick if it
-        # auto-resolves, dropping further).
-        row = dig_repo.get_gear_by_id(gid)
-        assert row["durability"] <= 19
+        assert active is None or active.get("mechanic_id") != "fake_mechanic"
+        # Exactly one cleanup tick landed on the live loadout (the new fight
+        # paused before ticking), so durability dropped by precisely 1.
+        assert dig_repo.get_gear_by_id(gid)["durability"] == dur_before - 1
 
     def test_stale_cleanup_ticks_snapshot_gear_not_current_gear(
         self, dig_service, dig_repo, player_repository, monkeypatch,

@@ -282,20 +282,30 @@ class TestConcurrencyGuard:
         assert sum(p.wins for p in players) == 5
         assert sum(p.losses for p in players) == 5
 
-    def test_consume_pending_match_atomic(self, test_db):
-        """Test that consume_pending_match is atomic."""
-        # Save a pending match
-        pending_match_id = test_db.save_pending_match(123, {"test": "data"})
+    def test_consume_pending_match_is_single_use_idempotent(self, test_db):
+        """consume_pending_match is single-use: the first call returns the exact
+        saved payload (plus the pending_match_id), and any later call for the
+        same guild returns None because the row was deleted in the same txn.
 
-        # First consume should return the data (with pending_match_id added)
+        This pins sequential idempotency (the consuming DELETE is committed
+        before the payload is returned). It does NOT exercise true concurrency;
+        the BEGIN IMMEDIATE write-lock that makes two simultaneous consumers
+        safe is covered by the record_match double-record guards above.
+        """
+        # Save a pending match with a distinctive multi-field payload so the
+        # round-trip can't accidentally pass on a partial/empty return.
+        payload = {"test": "data", "team": [1, 2, 3], "winning_team": 2}
+        pending_match_id = test_db.save_pending_match(123, payload)
+
+        # First consume returns EXACTLY the saved payload plus the id key —
+        # nothing dropped, nothing extra beyond pending_match_id.
         result1 = test_db.consume_pending_match(123)
-        assert result1 is not None
-        assert result1["test"] == "data"
-        assert result1["pending_match_id"] == pending_match_id
+        assert result1 == {**payload, "pending_match_id": pending_match_id}
 
-        # Second consume should return None
-        result2 = test_db.consume_pending_match(123)
-        assert result2 is None
+        # Row is gone: a second consume yields None (the DELETE committed).
+        assert test_db.consume_pending_match(123) is None
+        # And a third consume is still None — the None is sticky, not flapping.
+        assert test_db.consume_pending_match(123) is None
 
 
 class TestOldApiCompatibility:
