@@ -2262,3 +2262,59 @@ async def test_wheel_penalized_winner_is_debuffed(repo_db_path):
     # Won win_val, but kept only the configured fraction; the rest was sunk.
     net_gain = player_repo.get_balance(uid, guild_id) - start_balance
     assert net_gain == expected_kept
+
+
+def _bare_betting_cog(bot):
+    """A BettingCommands instance with only the attrs _credit_gamba_outcome reads."""
+    cog = BettingCommands.__new__(BettingCommands)
+    cog.bot = bot
+    return cog
+
+
+@pytest.mark.asyncio
+async def test_credit_gamba_outcome_garnishes_when_in_debt():
+    """In debt + garnishment service present → route through add_income.
+
+    Pins the helper's decision: it must call add_income (not a direct
+    balance adjust) and return that service's reported new_balance/garnished.
+    """
+    bot = MagicMock()
+    garnishment_service = MagicMock()
+    garnishment_service.add_income.return_value = {"new_balance": -40, "garnished": 30}
+    bot.garnishment_service = garnishment_service
+    player_service = MagicMock()
+    cog = _bare_betting_cog(bot)
+    cog.player_service = player_service
+
+    new_balance, garnished = await cog._credit_gamba_outcome(
+        1001, 123, -100, 60, "DIVIDEND", "gamba dividend credit", {"k": "v"}
+    )
+
+    assert (new_balance, garnished) == (-40, 30)
+    # Direct-credit path must NOT run.
+    player_service.adjust_balance.assert_not_called()
+    player_service.get_balance.assert_not_called()
+    _assert_gamba_income_call(garnishment_service.add_income, 1001, 60, 123)
+    assert garnishment_service.add_income.call_args.kwargs["related_id"] == "DIVIDEND"
+    assert garnishment_service.add_income.call_args.kwargs["metadata"] == {"k": "v"}
+
+
+@pytest.mark.asyncio
+async def test_credit_gamba_outcome_direct_when_solvent():
+    """Not in debt → direct adjust_balance, refresh, and garnished == 0."""
+    bot = MagicMock()
+    bot.garnishment_service = MagicMock()
+    player_service = MagicMock()
+    player_service.get_balance.return_value = 110
+    cog = _bare_betting_cog(bot)
+    cog.player_service = player_service
+
+    new_balance, garnished = await cog._credit_gamba_outcome(
+        1002, 123, 50, 60, "DIVIDEND", "gamba dividend credit", {"k": "v"}
+    )
+
+    assert (new_balance, garnished) == (110, 0)
+    # Garnishment service must NOT be touched when solvent.
+    bot.garnishment_service.add_income.assert_not_called()
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1002, 123, 60)
+    player_service.get_balance.assert_called_once_with(1002, 123)
