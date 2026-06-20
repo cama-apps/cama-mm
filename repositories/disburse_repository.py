@@ -406,6 +406,17 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                             for discord_id, amount in distributions
                         ],
                     )
+                    # Each distribution must land on exactly one player row. If a
+                    # recipient's row is missing, that UPDATE matches 0 rows: the
+                    # fund was already debited but the share is credited to nobody,
+                    # silently destroying that JC. Raising here rolls the whole
+                    # BEGIN IMMEDIATE back so the op stays all-or-nothing.
+                    if cursor.rowcount != len(distributions):
+                        raise ValueError(
+                            "Disbursement aborted: "
+                            f"{len(distributions)} recipients but {cursor.rowcount} "
+                            "player rows updated (a recipient row is missing)."
+                        )
                 finally:
                     self._clear_economy_ledger_context(cursor)
 

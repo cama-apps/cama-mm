@@ -73,6 +73,25 @@ class TaxRepository(BaseRepository):
                     }
 
             balance_before = int(player_row["balance"] or 0)
+            # Re-derive the obligation cap INSIDE the BEGIN IMMEDIATE lock. The
+            # max_amount passed in was computed from a pre-lock snapshot; if the
+            # player's obligations dropped (e.g. a loan was repaid, a dark bargain
+            # expired, a prediction position closed) between that snapshot and now,
+            # the stale cap would let the fine over-debit. Clamp to the smaller of
+            # the caller's cap and a fresh in-lock recompute so we never exceed
+            # current obligations. For the common case (nothing changed) the two
+            # agree and behavior is identical.
+            fresh_max = self._compute_obligations_in_lock(
+                cursor, discord_id, gid, balance_before, now
+            )
+            max_amount = min(max_amount, fresh_max)
+            if max_amount <= 0:
+                return {
+                    "status": "no_outstanding_obligations",
+                    "discord_id": discord_id,
+                    "guild_id": gid,
+                    "balance": balance_before,
+                }
             applied_amount = min(requested_amount, max_amount)
             balance_after = balance_before - applied_amount
             ledger_reason = f"tax fine: {reason}" if reason else "tax fine"
@@ -177,6 +196,74 @@ class TaxRepository(BaseRepository):
                 "next_fine_at": now + cooldown_seconds,
                 "capped": applied_amount != requested_amount,
             }
+
+    def _compute_obligations_in_lock(
+        self,
+        cursor,
+        discord_id: int,
+        gid: int,
+        balance: int,
+        now: int,
+    ) -> int:
+        """Recompute a player's effective obligations using the open lock cursor.
+
+        Mirrors ``TaxService.get_player_snapshot``'s ``effective_obligations``
+        (visible debt + outstanding loan + active dark-bargain dues + open
+        prediction cost basis) but reads every component through the same
+        ``BEGIN IMMEDIATE`` cursor so the cap reflects the locked-in state, not a
+        pre-lock snapshot. ``balance`` is the in-lock balance already fetched by
+        the caller.
+        """
+        visible_debt = max(0, -int(balance))
+
+        loan_row = cursor.execute(
+            """
+            SELECT COALESCE(outstanding_principal, 0) AS principal,
+                   COALESCE(outstanding_fee, 0) AS fee
+            FROM loan_state
+            WHERE discord_id = ? AND guild_id = ?
+            """,
+            (discord_id, gid),
+        ).fetchone()
+        loan_total = 0
+        if loan_row is not None:
+            loan_total = int(loan_row["principal"] or 0) + int(loan_row["fee"] or 0)
+
+        dark_bargain_row = cursor.execute(
+            """
+            SELECT data
+            FROM manashop_buffs
+            WHERE guild_id = ?
+              AND discord_id = ?
+              AND buff_type = 'dark_bargain'
+              AND triggered = 0
+              AND expires_at > ?
+            """,
+            (gid, discord_id, now),
+        ).fetchall()
+        dark_bargain_due = 0
+        for row in dark_bargain_row:
+            data = safe_json_loads(row["data"], {}, context="manashop_buffs.data")
+            dark_bargain_due += int(data.get("amount_due") or 0)
+
+        prediction_row = cursor.execute(
+            """
+            SELECT COALESCE(SUM(
+                       COALESCE(pp.yes_cost_basis_total, 0)
+                       + COALESCE(pp.no_cost_basis_total, 0)
+                   ), 0) AS cost_basis
+            FROM prediction_positions pp
+            JOIN predictions p ON p.prediction_id = pp.prediction_id
+            WHERE pp.discord_id = ?
+              AND p.guild_id = ?
+              AND p.status IN ('open', 'locked')
+              AND (pp.yes_contracts > 0 OR pp.no_contracts > 0)
+            """,
+            (discord_id, gid),
+        ).fetchone()
+        prediction_cost_basis = int(prediction_row["cost_basis"] or 0) if prediction_row else 0
+
+        return visible_debt + loan_total + dark_bargain_due + prediction_cost_basis
 
     def get_active_dark_bargain_debts(self, guild_id: int | None) -> list[dict]:
         gid = self.normalize_guild_id(guild_id)

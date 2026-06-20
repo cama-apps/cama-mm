@@ -298,6 +298,77 @@ def test_levy_fine_rejects_player_without_outstanding_obligations(tax_stack):
     assert player_repo.get_balance(TARGET_ID, TEST_GUILD_ID) == 100
 
 
+def test_levy_fine_atomic_reclamps_stale_cap_in_lock(tax_stack):
+    """levy_fine_atomic must clamp a stale max_amount to a fresh in-lock recompute.
+
+    Regression for the pre-lock-snapshot cap bug: the service derives
+    outstanding_obligations from a snapshot taken BEFORE the BEGIN IMMEDIATE
+    lock and passes it as max_amount. If obligations drop between the snapshot
+    and the atomic debit, the stale cap over-debits. Here the player's only
+    real obligation is a 30 loan, but we pass a stale max_amount=500 (as if the
+    snapshot saw far larger obligations that have since been paid down). The
+    fix recomputes the cap under the lock and clamps the fine to 30; the old
+    code applied the full 100 against the 500 stale cap.
+    """
+    player_repo = tax_stack["player_repo"]
+    loan_repo = tax_stack["loan_repo"]
+    tax_repo = tax_stack["tax_repo"]
+    _add_player(player_repo, TARGET_ID, 0)
+    loan_repo.upsert_state(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        outstanding_principal=20,
+        outstanding_fee=10,
+    )
+
+    result = tax_repo.levy_fine_atomic(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        amount=100,
+        actor_id=TAX_MAN_ID,
+        reason=None,
+        cooldown_seconds=0,
+        max_amount=500,  # stale, larger than the real 30 in-lock obligation
+        now=1_000,
+    )
+
+    assert result["status"] == "ok"
+    # In-lock recompute clamps to the true 30 obligation, not the stale 500.
+    assert result["outstanding_obligations"] == 30
+    assert result["applied_amount"] == 30
+    assert result["capped"] is True
+    assert player_repo.get_balance(TARGET_ID, TEST_GUILD_ID) == -30
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 30
+
+
+def test_levy_fine_atomic_rejects_when_obligations_vanish_in_lock(tax_stack):
+    """If obligations fully clear in-lock, the fine debits nothing and reports it.
+
+    A stale snapshot might pass a positive max_amount even though the player no
+    longer owes anything. The in-lock recompute must catch this and return
+    no_outstanding_obligations without touching the balance or the fund.
+    """
+    player_repo = tax_stack["player_repo"]
+    loan_repo = tax_stack["loan_repo"]
+    tax_repo = tax_stack["tax_repo"]
+    _add_player(player_repo, TARGET_ID, 50)  # positive balance, no loans/debts
+
+    result = tax_repo.levy_fine_atomic(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        amount=40,
+        actor_id=TAX_MAN_ID,
+        reason=None,
+        cooldown_seconds=0,
+        max_amount=100,  # stale; player actually owes 0 in-lock
+        now=1_000,
+    )
+
+    assert result["status"] == "no_outstanding_obligations"
+    assert player_repo.get_balance(TARGET_ID, TEST_GUILD_ID) == 50
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+
 def test_prediction_market_exposure_includes_cost_basis_ev_and_liability(tax_stack):
     player_repo = tax_stack["player_repo"]
     prediction_repo = tax_stack["prediction_repo"]
