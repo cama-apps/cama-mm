@@ -406,6 +406,22 @@ def _bounty(mafia_repo, gid, contributor_id, *, target_id=99, day_number=1, guil
     )
 
 
+def _seed_fund(mafia_repo, amount: int, guild_id: int = TEST_GUILD_ID) -> None:
+    """Park `amount` of unrelated revenue (tax fines / capped-payout overflow /
+    loans / disbursements) into the guild-wide nonprofit fund."""
+    with mafia_repo.connection() as conn:
+        conn.cursor().execute(
+            """
+            INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                total_collected = total_collected + excluded.total_collected,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (guild_id, amount),
+        )
+
+
 def test_add_bounty_debits_contributor_and_parks_in_fund(mafia_repo):
     gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
     _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=5)
@@ -492,6 +508,38 @@ def test_resolve_day_bounties_caps_reward_at_alive_count(mafia_repo):
     assert result["reward"] == 2
     assert sum(result["paid"].values()) == 2
     assert _fund(mafia_repo) == 3  # 5 parked − 2 paid
+
+
+def test_resolve_day_bounties_cannot_drain_unrelated_fund_revenue(mafia_repo):
+    """A bounty reward must be capped to the coins ACTUALLY staked on the target,
+    never the whole guild-wide nonprofit fund (which also holds tax fines, capped-
+    payout overflow, loans, and disbursements).
+
+    Regression guard: before the fix, reward = min(alive_count, total_fund), so a
+    single 1-JC bounty with a large pre-existing fund paid out up to alive_count
+    coins drawn from unrelated revenue. Now reward = min(alive_count, parked
+    stake, fund).
+    """
+    gid = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.DAY, 0, 5, None)
+    _seed_registered_player(mafia_repo, discord_id=10, guild_id=TEST_GUILD_ID, balance=5)
+    assert _bounty(mafia_repo, gid, 10)["ok"] is True  # 1 JC parked on target 99
+    # Unrelated revenue floods the same guild-wide fund (tax/overflow/loan/etc.).
+    _seed_fund(mafia_repo, 50)
+    assert _fund(mafia_repo) == 51  # 1 stake + 50 unrelated
+    bal_before = _balance(mafia_repo, 10)
+
+    # 8 alive: old behavior would pay min(8, 51) = 8, looting 7 coins of
+    # unrelated revenue for a 1-coin stake.
+    result = mafia_repo.resolve_day_bounties(
+        game_id=gid, guild_id=TEST_GUILD_ID, day_number=1,
+        lynched_id=99, lynched_was_mafia=True, alive_count=8,
+    )
+    # Reward is capped to the single parked stake, not the fund balance.
+    assert result["reward"] == 1
+    assert result["paid"] == {10: 1}
+    assert _balance(mafia_repo, 10) - bal_before == 1
+    # Only the 1 staked coin leaves the fund; the 50 of unrelated revenue stays.
+    assert _fund(mafia_repo) == 50
 
 
 def test_add_bounty_is_guild_isolated(mafia_repo):
