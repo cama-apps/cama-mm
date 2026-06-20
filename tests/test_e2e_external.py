@@ -63,12 +63,16 @@ class TestE2EOpenDotaIntegration:
 
         from services.player_service import PlayerService
 
-        for invalid in (-1, 0, 2147483648):
+        # Steam32 account IDs span the full unsigned 32-bit range, so the only
+        # out-of-range value is >= 2**32; negative and zero are also invalid.
+        for invalid in (-1, 0, 2**32):
             with pytest.raises(ValueError, match="Invalid Steam ID"):
                 PlayerService._validate_steam_id(invalid)
 
-        # Control: a legitimate Steam32 ID passes the guard without raising.
+        # Control: legitimate Steam32 IDs pass — including one above 2**31, which
+        # the old int32-max bound wrongly rejected.
         PlayerService._validate_steam_id(123456789)
+        PlayerService._validate_steam_id(2147483648)
 
         # And no player was added as a side effect of the rejected attempts.
         player = test_db.get_player(99999)
