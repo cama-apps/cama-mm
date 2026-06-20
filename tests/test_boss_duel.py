@@ -1237,3 +1237,38 @@ class TestLossCannotGoNegative:
         assert balance_after == balance_before - 100, (
             "solvent loss should debit the full wager"
         )
+
+    def test_in_debt_loss_is_not_credited(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Regression: an in-debt player who LOSES a free boss fight must NOT be
+        credited. The old clamp did `jc_delta = -current_balance`, which is
+        POSITIVE when the balance is already negative — minting coins (wiping the
+        debt) on a loss. The fix clamps the debit to the positive balance only,
+        so a negative balance is left unchanged on a loss (never credited)."""
+        uid = _register(player_repository, discord_id=40004, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(uid, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            uid, TEST_GUILD_ID, depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+
+        # Free fight (no wager) so the loss charges the flat repair bill.
+        safe_idx = _seed_loss_bound_duel(dig_repo, uid, TEST_GUILD_ID, wager=0)
+        # Player is already in debt when the fight resolves.
+        player_repository.update_balance(uid, TEST_GUILD_ID, -100)
+
+        result = dig_service.resume_boss_duel(uid, TEST_GUILD_ID, option_idx=safe_idx)
+        assert result["success"]
+        assert result["won"] is False
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        assert balance_after <= 0, (
+            f"a loss must never CREDIT an in-debt player; balance rose to {balance_after}"
+        )
+        assert balance_after == -100, (
+            f"an already-negative balance must be unchanged by a clamped loss; got {balance_after}"
+        )

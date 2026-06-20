@@ -114,9 +114,16 @@ class PlayerService:
         # Route the primary Steam ID through the junction table so the
         # UNIQUE(steam_id) constraint is the single source of truth. With
         # is_primary=True this also syncs the legacy players.steam_id column.
-        # The owner pre-check above already guards against a cross-player
-        # conflict (and a re-raise here would leave a half-registered row).
-        self.player_repo.add_steam_id(discord_id, steam_id, is_primary=True)
+        # The owner pre-check above is only a fast path; the junction's
+        # UNIQUE(steam_id) is the real guarantee. If a concurrent registration
+        # claimed the same Steam ID between the pre-check and here, add_steam_id
+        # raises — roll back the just-created player row so the loser of the race
+        # isn't left half-registered (a player with no Steam mapping).
+        try:
+            self.player_repo.add_steam_id(discord_id, steam_id, is_primary=True)
+        except Exception:
+            self.player_repo.delete(discord_id, guild_id)
+            raise
 
         # Best-effort: cache the player's server region from OpenDota play so the
         # shuffle/draft embeds can recommend a server. Only on the non-override path
