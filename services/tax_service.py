@@ -107,6 +107,27 @@ class TaxService:
             now=now,
         )
 
+    def reset_fine_cooldown(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        actor_id: int,
+    ) -> dict:
+        """Reset a player's Tax Man fine cooldown."""
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if player is None:
+            return {"status": "target_not_registered"}
+
+        had_cooldown = self.tax_repo.reset_fine_cooldown(discord_id, guild_id)
+        return {
+            "status": "ok",
+            "discord_id": discord_id,
+            "guild_id": player.guild_id,
+            "actor_id": actor_id,
+            "had_cooldown": had_cooldown,
+        }
+
     def add_bankruptcy_modifier(
         self,
         discord_id: int,

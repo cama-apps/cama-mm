@@ -238,6 +238,73 @@ def test_levy_fine_enforces_per_player_cooldown_without_new_ledger(tax_stack):
     assert service.count_ledger_entries(TEST_GUILD_ID) == 2
 
 
+def test_reset_fine_cooldown_allows_refine_inside_original_window(tax_stack):
+    player_repo = tax_stack["player_repo"]
+    loan_repo = tax_stack["loan_repo"]
+    service = tax_stack["service"]
+    _add_player(player_repo, TARGET_ID, 20)
+    loan_repo.upsert_state(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        outstanding_principal=25,
+        outstanding_fee=0,
+    )
+
+    first = service.levy_fine(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        amount=5,
+        actor_id=TAX_MAN_ID,
+        now=1_000,
+        cooldown_seconds=100,
+    )
+    reset = service.reset_fine_cooldown(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        actor_id=TAX_MAN_ID,
+    )
+    second = service.levy_fine(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        amount=5,
+        actor_id=TAX_MAN_ID,
+        now=1_050,
+        cooldown_seconds=100,
+    )
+
+    assert first["status"] == "ok"
+    assert reset == {
+        "status": "ok",
+        "discord_id": TARGET_ID,
+        "guild_id": TEST_GUILD_ID,
+        "actor_id": TAX_MAN_ID,
+        "had_cooldown": True,
+    }
+    assert second["status"] == "ok"
+    assert player_repo.get_balance(TARGET_ID, TEST_GUILD_ID) == 10
+
+
+def test_reset_fine_cooldown_reports_missing_row_or_target(tax_stack):
+    player_repo = tax_stack["player_repo"]
+    service = tax_stack["service"]
+    _add_player(player_repo, TARGET_ID, 20)
+
+    already_clear = service.reset_fine_cooldown(
+        TARGET_ID,
+        TEST_GUILD_ID,
+        actor_id=TAX_MAN_ID,
+    )
+    missing_target = service.reset_fine_cooldown(
+        OTHER_TARGET_ID,
+        TEST_GUILD_ID,
+        actor_id=TAX_MAN_ID,
+    )
+
+    assert already_clear["status"] == "ok"
+    assert already_clear["had_cooldown"] is False
+    assert missing_target["status"] == "target_not_registered"
+
+
 def test_levy_fine_allows_different_players_during_cooldown(tax_stack):
     player_repo = tax_stack["player_repo"]
     loan_repo = tax_stack["loan_repo"]

@@ -384,6 +384,49 @@ class TaxCommands(commands.Cog):
         )
 
     @tax.command(
+        name="resetcooldown",
+        description="Reset a player's Tax Man fine cooldown",
+    )
+    @app_commands.describe(user="Player whose Tax Man fine cooldown should reset")
+    @require_guild
+    async def resetcooldown(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+    ):
+        if not await self._require_tax_man(interaction):
+            return
+        await safe_defer(interaction, ephemeral=True)
+
+        guild_id = interaction.guild.id
+        try:
+            result = await asyncio.to_thread(
+                self.tax_service.reset_fine_cooldown,
+                user.id,
+                guild_id,
+                actor_id=interaction.user.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to reset tax fine cooldown guild_id=%s user_id=%s actor_id=%s",
+                guild_id,
+                user.id,
+                interaction.user.id,
+            )
+            await safe_followup(
+                interaction,
+                content="Couldn't reset that Tax Man fine cooldown right now.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_followup(
+            interaction,
+            content=_format_reset_fine_cooldown_result(user, result),
+            ephemeral=True,
+        )
+
+    @tax.command(
         name="bankruptcy",
         description="Add or remove a player's bankruptcy modifier",
     )
@@ -597,6 +640,18 @@ def _format_fine_result(user: discord.User, result: dict) -> str:
     if status == "invalid_amount":
         return "Fine amount must be positive."
     return "That fine could not be levied."
+
+
+def _format_reset_fine_cooldown_result(user: discord.User, result: dict) -> str:
+    display_name = getattr(user, "display_name", user.name)
+    status = result.get("status")
+    if status == "ok":
+        if result.get("had_cooldown"):
+            return f"Reset Tax Man fine cooldown for {display_name}."
+        return f"{display_name} did not have an active Tax Man fine cooldown."
+    if status == "target_not_registered":
+        return "That user is not registered in this guild."
+    return "That Tax Man fine cooldown could not be reset."
 
 
 def _format_bankruptcy_modifier_result(user: discord.User, result: dict) -> str:

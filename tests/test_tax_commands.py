@@ -133,7 +133,14 @@ def _assert_ledger_page_metadata(
 def test_tax_group_contains_audit_and_enforcement_commands():
     names = {cmd.name for cmd in tax_commands.TaxCommands.tax.walk_commands()}
 
-    assert names == {"audit", "player", "ledger", "fine", "bankruptcy"}
+    assert names == {
+        "audit",
+        "player",
+        "ledger",
+        "fine",
+        "resetcooldown",
+        "bankruptcy",
+    }
 
 
 def test_tax_player_recent_ledger_splits_long_field():
@@ -483,6 +490,69 @@ async def test_tax_fine_reports_cooldown(monkeypatch):
 
     assert "still on Tax Man fine cooldown" in interaction.followup.messages[-1]["content"]
     assert "<t:1702592000:f>" in interaction.followup.messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_resetcooldown_calls_service(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    tax_service = SimpleNamespace(
+        reset_fine_cooldown=MagicMock(
+            return_value={"status": "ok", "had_cooldown": True}
+        )
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.resetcooldown.callback(cog, interaction, user=target)
+
+    tax_service.reset_fine_cooldown.assert_called_once_with(
+        99,
+        123,
+        actor_id=42,
+    )
+    message = interaction.followup.messages[-1]
+    assert message["ephemeral"] is True
+    assert "Reset Tax Man fine cooldown for Taxpayer" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_resetcooldown_reports_already_clear(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        interaction.response._done = True
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: True)
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+
+    target = SimpleNamespace(id=99, name="taxpayer", display_name="Taxpayer")
+    tax_service = SimpleNamespace(
+        reset_fine_cooldown=MagicMock(
+            return_value={"status": "ok", "had_cooldown": False}
+        )
+    )
+    cog = tax_commands.TaxCommands(bot=SimpleNamespace(), tax_service=tax_service)
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+
+    await cog.resetcooldown.callback(cog, interaction, user=target)
+
+    assert "did not have an active Tax Man fine cooldown" in (
+        interaction.followup.messages[-1]["content"]
+    )
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,19 @@ from repositories.base_repository import BaseRepository, safe_json_loads
 class TaxRepository(BaseRepository):
     """Read helpers for guild and player monetary exposure."""
 
+    def reset_fine_cooldown(self, discord_id: int, guild_id: int | None) -> bool:
+        """Clear the Tax Man fine cooldown for one guild-scoped player."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM tax_fine_cooldowns
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, gid),
+            )
+            return cursor.rowcount > 0
+
     def levy_fine_atomic(
         self,
         discord_id: int,
