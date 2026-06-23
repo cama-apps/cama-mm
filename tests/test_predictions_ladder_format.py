@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from commands.predictions import _build_ladder_fields, _format_market_field, _trade_link
+from commands.predictions import (
+    _build_ladder_fields,
+    _format_market_field,
+    _pick_biggest_mover,
+    _trade_link,
+)
 
 # --------------------------------------------------------------------------- #
 # _build_ladder_fields — buy-only two-column visual ladder
@@ -255,3 +260,45 @@ def test_format_market_field_omits_link_when_thread_missing():
     }
     _, value = _format_market_field(pred)
     assert "Trade" not in value
+
+
+# --------------------------------------------------------------------------- #
+# _pick_biggest_mover — chooses the biggest 1-day mover for the digest chart
+# --------------------------------------------------------------------------- #
+
+
+def _market(pid, current, prev):
+    return {"prediction_id": pid, "current_price": current, "prev_price": prev}
+
+
+def test_pick_biggest_mover_returns_largest_absolute_swing():
+    markets = [
+        _market(1, 52, 50),  # +2
+        _market(2, 30, 38),  # -8  <- biggest by magnitude
+        _market(3, 60, 55),  # +5
+    ]
+    assert _pick_biggest_mover(markets)["prediction_id"] == 2
+
+
+def test_pick_biggest_mover_counts_down_moves_by_magnitude():
+    """A big drop must beat a smaller rise (absolute, not signed)."""
+    markets = [_market(1, 55, 50), _market(2, 40, 49)]  # +5 vs -9
+    assert _pick_biggest_mover(markets)["prediction_id"] == 2
+
+
+def test_pick_biggest_mover_skips_markets_without_prev_price():
+    """A never-refreshed market (no prev_price) can't be the mover."""
+    markets = [
+        {"prediction_id": 1, "current_price": 90, "prev_price": None},
+        _market(2, 52, 50),
+    ]
+    assert _pick_biggest_mover(markets)["prediction_id"] == 2
+
+
+def test_pick_biggest_mover_returns_none_when_nothing_moved():
+    markets = [_market(1, 50, 50), _market(2, 17, 17)]
+    assert _pick_biggest_mover(markets) is None
+
+
+def test_pick_biggest_mover_returns_none_for_empty_list():
+    assert _pick_biggest_mover([]) is None

@@ -148,6 +148,16 @@ def _trade_link(prediction: dict) -> str | None:
     return base
 
 
+def _delta_phrase(cur: int, prev: int) -> str:
+    """Render a one-day price move as ``↑N today`` / ``↓N today`` (arrow + points).
+
+    Shared by the per-market field and the digest's biggest-mover banner so the
+    two renders never drift. Callers guard ``cur != prev`` before using it.
+    """
+    arrow = "↑" if cur > prev else "↓"
+    return f"{arrow}{abs(cur - prev)} today"
+
+
 def _format_market_field(prediction: dict, *, with_delta: bool = False) -> tuple[str, str]:
     """Build (field_name, field_value) for one market in /predict list or the digest.
 
@@ -163,8 +173,7 @@ def _format_market_field(prediction: dict, *, with_delta: bool = False) -> tuple
     if with_delta and price is not None:
         prev = prediction.get("prev_price")
         if prev is not None and prev != price:
-            arrow = "↑" if price > prev else "↓"
-            delta_str = f"  ({arrow}{abs(price - prev)} today)"
+            delta_str = f"  ({_delta_phrase(price, prev)})"
 
     name = f"📈 #{pid}  ·  YES {price_str}{delta_str}"
 
@@ -178,6 +187,28 @@ def _format_market_field(prediction: dict, *, with_delta: bool = False) -> tuple
 
     value = f"{quoted}{link_line}".strip() or "—"
     return (name, value)
+
+
+def _pick_biggest_mover(markets: list[dict]) -> dict | None:
+    """Return the market with the largest |current_price − prev_price| swing.
+
+    The digest charts this as the "biggest 1-day mover". ``prev_price`` is
+    stamped on each ~daily refresh, so the swing is the move over the last
+    refresh window. Markets never refreshed (no ``prev_price``) or that didn't
+    move are ignored; returns ``None`` when nothing moved.
+    """
+    movers = [
+        m
+        for m in markets
+        if m.get("current_price") is not None
+        and m.get("prev_price") is not None
+        and m["current_price"] != m["prev_price"]
+    ]
+    return max(
+        movers,
+        key=lambda m: abs(m["current_price"] - m["prev_price"]),
+        default=None,
+    )
 
 
 def _format_recent_trades(trades: list[dict], cog: PredictionCommands) -> str:
@@ -697,7 +728,7 @@ class PredictionCommands(commands.Cog):
 
         return self._MENTION_RE.sub(_repl, text)
 
-    async def _render_market_chart_file(self, view: dict) -> discord.File | None:
+    async def render_market_chart_file(self, view: dict) -> discord.File | None:
         """Render the per-market fair-history chart as a discord.File.
 
         Returns None on render failure so embed updates aren't blocked by a
@@ -811,7 +842,7 @@ class PredictionCommands(commands.Cog):
                 embed = self._build_cancelled_embed(view)
                 await msg.edit(embed=embed, view=None, attachments=[])
             else:
-                chart_file = await self._render_market_chart_file(view)
+                chart_file = await self.render_market_chart_file(view)
                 chart_filename = chart_file.filename if chart_file else None
                 embed = self._build_market_embed(view, chart_filename=chart_filename)
                 attachments = [chart_file] if chart_file else []
@@ -835,6 +866,7 @@ class PredictionCommands(commands.Cog):
         guild: discord.Guild,
         content: str | None = None,
         embed: discord.Embed | None = None,
+        file: discord.File | None = None,
     ) -> None:
         if content is None and embed is None:
             return
@@ -842,7 +874,10 @@ class PredictionCommands(commands.Cog):
         if ch is None:
             return
         try:
-            await ch.send(content=content, embed=embed)
+            # discord.py rejects ``file=None`` (expects MISSING), so only pass it
+            # through when a chart was actually rendered.
+            extra = {"file": file} if file is not None else {}
+            await ch.send(content=content, embed=embed, **extra)
         except discord.Forbidden:
             logger.debug("No permission to post in #%s", ch.name)
         except Exception as e:
@@ -914,7 +949,7 @@ class PredictionCommands(commands.Cog):
             view_data = await asyncio.to_thread(
                 self.prediction_service.get_market_view, prediction_id
             )
-            chart_file = await self._render_market_chart_file(view_data)
+            chart_file = await self.render_market_chart_file(view_data)
             chart_filename = chart_file.filename if chart_file else None
             embed = self._build_market_embed(view_data, chart_filename=chart_filename)
             view = PersistentMarketView(self)
@@ -1262,7 +1297,7 @@ class PredictionCommands(commands.Cog):
             embed = self._build_cancelled_embed(view_data)
             await safe_followup(interaction, embed=embed)
         else:
-            chart_file = await self._render_market_chart_file(view_data)
+            chart_file = await self.render_market_chart_file(view_data)
             chart_filename = chart_file.filename if chart_file else None
             embed = self._build_market_embed(view_data, chart_filename=chart_filename)
             if chart_file:
