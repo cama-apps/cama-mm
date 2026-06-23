@@ -3,6 +3,7 @@ Main Discord bot entry for Cama Balanced Shuffle.
 """
 
 import asyncio
+import datetime as _dt
 import logging
 import os
 import time
@@ -212,22 +213,39 @@ async def _process_one_refresh(market: dict) -> None:
         logger.warning("failed to post daily summary for market %s: %s", pid, ex)
 
 
-async def _prediction_digest_loop() -> None:
-    """Once-a-day digest of open markets, posted to each guild's gamba channel."""
-    import datetime as _dt
+def _next_digest_run(now, anchor_hours):
+    """Return the next UTC datetime at one of ``anchor_hours`` strictly after ``now``.
 
+    ``anchor_hours`` is a list of UTC hours (0-23); the digest fires at each one
+    every day. Picks the soonest upcoming anchor, rolling into tomorrow when all
+    of today's anchors have passed.
+    """
+    candidates = []
+    for day_offset in (0, 1):
+        base = (now + _dt.timedelta(days=day_offset)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        for hour in anchor_hours:
+            candidates.append(base.replace(hour=hour))
+    return min(c for c in candidates if c > now)
+
+
+async def _prediction_digest_loop() -> None:
+    """Twice-a-day digest of open markets, posted to each guild's gamba channel.
+
+    Fires at ``PREDICTION_DIGEST_HOUR_UTC`` and 12h opposite it (every 12 hours).
+    """
     from config import PREDICTION_DIGEST_HOUR_UTC
 
+    anchor_hours = sorted(
+        {PREDICTION_DIGEST_HOUR_UTC % 24, (PREDICTION_DIGEST_HOUR_UTC + 12) % 24}
+    )
     await bot.wait_until_ready()
-    logger.info("prediction digest loop started (hour_utc=%s)", PREDICTION_DIGEST_HOUR_UTC)
+    logger.info("prediction digest loop started (anchor_hours_utc=%s)", anchor_hours)
     while not bot.is_closed():
         try:
             now = _dt.datetime.now(_dt.UTC)
-            target = now.replace(
-                hour=PREDICTION_DIGEST_HOUR_UTC, minute=0, second=0, microsecond=0
-            )
-            if target <= now:
-                target = target + _dt.timedelta(days=1)
+            target = _next_digest_run(now, anchor_hours)
             wait_s = max(60.0, (target - now).total_seconds())
             await asyncio.sleep(wait_s)
             logger.info("digest firing for %d guilds", len(bot.guilds))
@@ -259,7 +277,11 @@ async def _manashop_debt_loop() -> None:
 
 
 async def _post_daily_digest_all_guilds() -> None:
-    from commands.predictions import _format_market_field
+    from commands.predictions import (
+        _delta_phrase,
+        _format_market_field,
+        _pick_biggest_mover,
+    )
 
     cog = bot.get_cog("PredictionCommands")
     if cog is None:
@@ -279,16 +301,36 @@ async def _post_daily_digest_all_guilds() -> None:
                 title="📈 Today in prediction markets",
                 color=0x3498DB,
             )
+            banner_lines = []
             split_banner = await asyncio.to_thread(
                 bot.prediction_service.prediction_repo.pop_one_shot_flag,
                 guild.id,
                 "split_announced",
             )
             if split_banner:
-                embed.description = (
+                banner_lines.append(
                     "**Markets stock-split 10:1** — quantities have been restated; "
                     "jopa balances unchanged."
                 )
+
+            # Spotlight the market with the biggest price-point swing since its
+            # last refresh (~1 day) with its fair-history chart.
+            chart_file = None
+            biggest = _pick_biggest_mover(opens)
+            if biggest is not None:
+                chart_file = await cog.render_market_chart_file(biggest)
+                if chart_file is not None:
+                    cur = biggest["current_price"]
+                    prev = biggest["prev_price"]
+                    banner_lines.append(
+                        f"📊 **Biggest mover:** #{biggest['prediction_id']} "
+                        f"{_delta_phrase(cur, prev)} ({prev}% → {cur}%)"
+                    )
+                    embed.set_image(url=f"attachment://{chart_file.filename}")
+
+            if banner_lines:
+                embed.description = "\n\n".join(banner_lines)
+
             FIELD_CAP = 25
             for added, p in enumerate(opens):
                 if added >= FIELD_CAP:
@@ -298,7 +340,7 @@ async def _post_daily_digest_all_guilds() -> None:
                     break
                 name, value = _format_market_field(p, with_delta=True)
                 embed.add_field(name=name, value=value, inline=False)
-            await cog.announce_to_gamba(guild, embed=embed)
+            await cog.announce_to_gamba(guild, embed=embed, file=chart_file)
             logger.info("digest guild=%s posted %d markets", guild.id, min(len(opens), FIELD_CAP))
         except Exception as ex:
             logger.warning("digest failed for guild %s: %s", guild.id, ex)

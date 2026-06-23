@@ -1411,3 +1411,41 @@ def test_get_player_orderbook_pnl_history(
     assert history[0]["prediction_id"] == win_pid
     assert history[0]["delta"] == 3 * PREDICTION_CONTRACT_VALUE - win_cost
     assert history[0]["settle_time"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# announce_to_gamba — digest chart attachment plumbing
+# --------------------------------------------------------------------------- #
+
+
+def _gamba_cog_and_channel():
+    """A bare PredictionCommands plus a fake #gamba channel that records send()."""
+    sent: dict = {}
+
+    class _Ch:
+        name = "gamba"
+
+        async def send(self, content=None, embed=None, **kwargs):
+            sent["content"] = content
+            sent["embed"] = embed
+            sent["file_passed"] = "file" in kwargs
+            sent["file"] = kwargs.get("file")
+
+    guild = SimpleNamespace(text_channels=[_Ch()])
+    cog = PredictionCommands(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    return cog, guild, sent
+
+
+async def test_announce_to_gamba_forwards_file_when_present():
+    cog, guild, sent = _gamba_cog_and_channel()
+    chart = object()
+    await cog.announce_to_gamba(guild, embed="E", file=chart)
+    assert sent["file_passed"] is True
+    assert sent["file"] is chart
+
+
+async def test_announce_to_gamba_omits_file_kwarg_when_none():
+    """discord.py rejects file=None, so it must not be passed through at all."""
+    cog, guild, sent = _gamba_cog_and_channel()
+    await cog.announce_to_gamba(guild, embed="E")
+    assert sent["file_passed"] is False

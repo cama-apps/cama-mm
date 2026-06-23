@@ -409,7 +409,7 @@ PREDICTION_FADE_TICKS = _parse_int("PREDICTION_FADE_TICKS", 5)                  
 PREDICTION_PRICE_LOW = _parse_int("PREDICTION_PRICE_LOW", 4)                     # clamp on fair so the seed ladder fits in {1..99}; wider refresh levels get filtered there
 PREDICTION_PRICE_HIGH = _parse_int("PREDICTION_PRICE_HIGH", 96)
 PREDICTION_RECENT_TRADES_SHOWN = _parse_int("PREDICTION_RECENT_TRADES_SHOWN", 5)
-PREDICTION_DIGEST_HOUR_UTC = _parse_int("PREDICTION_DIGEST_HOUR_UTC", 12)        # UTC hour for daily guild digest
+PREDICTION_DIGEST_HOUR_UTC = _parse_int("PREDICTION_DIGEST_HOUR_UTC", 12)        # anchor UTC hour; guild digest fires here and 12h opposite (twice daily)
 PREDICTION_INITIAL_FAIR_DEFAULT = _parse_int("PREDICTION_INITIAL_FAIR_DEFAULT", 50)
 PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TRADE", 1000)  # hard cap on a single buy
 
