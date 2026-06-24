@@ -4348,6 +4348,141 @@ RANDOM_EVENTS: list[RandomEvent] = [
         social=True,
         splash=SplashConfig(strategy="deepest_n", victim_count=2, penalty_jc=12, trigger="success", mode="burn"),
     ),
+    # --- Themed -EV events (subtle GW1 / MTG flavor) -----------------------
+    # Two "digger taxes": the low-variance branch is a guaranteed *toll*, not a
+    # free gain, so the event is negative-EV no matter which branch is chosen
+    # (pay a little for certain, or gamble into a worse expectation). Two
+    # "whale taxes": the digger gambles their own purse to soak the guild's
+    # three richest — one steals the spoils to the digger, one burns them out
+    # of the economy entirely.
+    RandomEvent(
+        id="sealed_reliquary",
+        name="Sealed Reliquary",
+        description=(
+            "A reliquary sealed in black wax, hairline-cracked from your pick. The wax won't re-set — whatever's inside is waking up, and it won't go back to sleep for free.",
+            "A flat obsidian case, older than any market that could price it, humming faintly. One in a thousand holds a true black-petaled prize; the rest are salted forgeries that bite the hand that opens them.",
+            "The seal is breaking on its own now. Smother it — at a cost — or gamble on whatever a long-dead collector thought worth locking away this deep.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Smother the seal and eat the cost",
+            success=EventOutcome(
+                "You pack the seal in wet clay and buy off the residue with a handful of coin. It goes quiet. You're out the coin.",
+                0, -7, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Crack it open for the prize",
+            success=EventOutcome(
+                "Black petals, intact and real. You pocket a fortune the collector never lived to spend.",
+                0, 60, False,
+            ),
+            failure=EventOutcome(
+                "A forgery. The case bursts into salted glass and takes a bite out of your purse on the way down.",
+                0, -34, False,
+            ),
+            success_chance=0.22,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="grenths_tithe",
+        name="Grenth's Tithe",
+        description=(
+            "A frost-shrine blocks the seam, rimed white. The cold here belongs to the god who keeps the dead, and he does not let the living pass for free.",
+            "Reapers wait at the shrine, patient as the grave. One holds out a skeletal hand. The toll is small. Refusing it is not.",
+            "Grenth's mark is cut into the ice. Pay the tithe and pass, or test how fast you are against things that have all of eternity to wait you out.",
+        ),
+        min_depth=10, max_depth=None,
+        safe_option=EventChoice(
+            "Pay the tithe",
+            success=EventOutcome(
+                "You leave coin at the frost-shrine. The reapers part. The cold takes its due and no more.",
+                0, -5, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Refuse and slip past the reapers",
+            success=EventOutcome(
+                "You dart through a gap in the cold and rifle a reaper's frozen cache on the way out.",
+                0, 32, False,
+            ),
+            failure=EventOutcome(
+                "The cold closes around you. Grenth takes far more than the tithe would ever have cost.",
+                0, -24, False,
+            ),
+            success_chance=0.28,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="rhystic_tollgate",
+        name="Rhystic Tollgate",
+        description=(
+            "A toll-rune flickers across the seam, keyed to the heaviest purses in the guild. It asks little of the rich — which is exactly why they never pay it willingly.",
+            "You find the bones of an old tithe-engine. Wind it up and it skims a quiet tax off whoever in the guild can most afford it.",
+            "The gate hums when wealth passes near. It does not care about yours — it's already counting three richer pockets up above.",
+        ),
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Strip the gate for scrap",
+            success=EventOutcome(
+                "You pull the toll-rune apart for parts. A modest, honest wage.",
+                0, 7, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Power the tollgate",
+            success=EventOutcome(
+                "The gate wakes and skims a tithe off the three fattest purses in the guild, routing the treasure straight into yours.",
+                0, 26, False,
+            ),
+            failure=EventOutcome(
+                "The rune misfires and bills you instead. Embarrassing, and expensive.",
+                0, -28, False,
+            ),
+            success_chance=0.50,
+        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=12, trigger="success", mode="steal"),
+    ),
+    RandomEvent(
+        id="underworld_reclaims",
+        name="The Underworld Reclaims",
+        description=(
+            "A spectral ledger unrolls in the dark, written in a reaper's hand. It lists the guild's richest hoards, and it is long overdue for an audit.",
+            "A reaper's bell hangs in the seam. Ring it, and the Underworld remembers what the living merely borrowed — and dissolves a cut of it back into the Mists.",
+            "Ectoplasm beads on the walls, leaking from somewhere that wants its wealth returned. The gilded up above will feel the draft first.",
+        ),
+        min_depth=75, max_depth=None,
+        safe_option=EventChoice(
+            "Leave the ledger unread",
+            success=EventOutcome(
+                "You let the reaper's accounting lie and dig on. A small, clean find.",
+                0, 6, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Ring the reaper's bell",
+            success=EventOutcome(
+                "The bell tolls. The Underworld audits the three richest hoards in the guild and dissolves a cut of each back into the Mists. You keep a finder's share.",
+                0, 56, False,
+            ),
+            failure=EventOutcome(
+                "The cold reads your ledger instead. The reapers take their audit out of your own purse.",
+                0, -32, False,
+            ),
+            success_chance=0.50,
+        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=22, trigger="success", mode="burn"),
+    ),
 ]
 
 
