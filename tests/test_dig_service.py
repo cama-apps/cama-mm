@@ -348,6 +348,70 @@ class TestCoreDig:
         assert result["streak_bonus"] == STREAKS[30]
         assert result["jc_earned"] == 1 + STREAKS[30]
 
+    def test_dynamite_cache_yield_buff_boosts_loot_and_lifts_cap(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """The Dynamite Cache (+75% yield) must actually apply: it scales base
+        loot AND lifts the base-payout cap proportionally, so a buffed dig can
+        exceed BASE_DIG_JC_PAYOUT_CAP. An unbuffed dig stays capped."""
+        # Neutralize every yield modifier so base loot == the rolled value,
+        # isolating the buff's effect.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)          # no cave-in/events
+        monkeypatch.setattr(random, "randint", lambda a, b: 12)      # roll == 12
+        monkeypatch.setattr(dig_service, "_relic_jc_yield_multiplier", lambda *a, **k: 1.0)
+        monkeypatch.setattr(dig_service, "_luminosity_jc_multiplier", lambda lum: 1.0)
+        monkeypatch.setattr(dig_service, "_post_pinnacle_decay_factor", lambda *a, **k: 1.0)
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: jc)
+
+        # Player A: no buff -> 12 rolled, under the 20 cap -> 12.
+        _register_player(player_repository, discord_id=20001)
+        dig_repo.create_tunnel(20001, guild_id, "A")
+        dig_repo.update_tunnel(20001, guild_id, depth=10, max_depth=10)
+        res_a = dig_service.dig(20001, guild_id)
+        assert res_a["success"]
+        assert res_a["milestone_bonus"] == 0 and res_a["streak_bonus"] == 0
+        assert res_a["jc_earned"] == 12, "unbuffed base should equal the rolled 12"
+
+        # Player B: Dynamite Cache (+75%) -> 12*1.75 = 21, cap lifted to 35 -> 21.
+        _register_player(player_repository, discord_id=20002)
+        dig_repo.create_tunnel(20002, guild_id, "B")
+        dig_repo.update_tunnel(20002, guild_id, depth=10, max_depth=10)
+        dig_service.set_temp_buff(
+            20002, guild_id,
+            {"id": "dynamite_cache", "name": "Dynamite Cache",
+             "duration_digs": 3, "effect": {"yield_multiplier": 1.75}},
+        )
+        res_b = dig_service.dig(20002, guild_id)
+        assert res_b["success"]
+        assert res_b["milestone_bonus"] == 0 and res_b["streak_bonus"] == 0
+        # Buff both scaled the loot (12->21) and let it exceed the normal 20 cap.
+        assert res_b["jc_earned"] == 21
+        assert res_b["jc_earned"] > BASE_DIG_JC_PAYOUT_CAP
+
+    def test_dynamite_cache_buff_respects_lifted_cap_on_huge_loot(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """With a +75% buff the base still tops out at the lifted cap (20*1.75=35),
+        not unbounded — proving the cap is scaled, not removed."""
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        # Force a pre-cap base far above any cap (overwrites the product).
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 100)
+
+        _register_player(player_repository, discord_id=20003)
+        dig_repo.create_tunnel(20003, guild_id, "C")
+        dig_repo.update_tunnel(20003, guild_id, depth=10, max_depth=10)
+        dig_service.set_temp_buff(
+            20003, guild_id,
+            {"id": "dynamite_cache", "name": "Dynamite Cache",
+             "duration_digs": 3, "effect": {"yield_multiplier": 1.75}},
+        )
+        res = dig_service.dig(20003, guild_id)
+        assert res["success"]
+        assert res["milestone_bonus"] == 0 and res["streak_bonus"] == 0
+        assert res["jc_earned"] == int(BASE_DIG_JC_PAYOUT_CAP * 1.75)  # 35
+
     def test_dig_increments_total_digs(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """total_digs counter increases."""
         _register_player(player_repository)

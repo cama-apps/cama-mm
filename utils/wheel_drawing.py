@@ -538,7 +538,7 @@ _BASE_GOLDEN_WHEEL_WEDGES = [
     ("DIVIDEND", "DIVIDEND", "#4a7000"),
     ("TRICKLE", "TRICKLE_DOWN", "#5c7a00"),
     ("TAKEOVER", "HOSTILE_TAKEOVER", "#6a2a80"),
-    ("COMPOUND", "COMPOUND_INTEREST", "#6b8c00"),
+    ("+100", "COMPOUND_INTEREST", "#6b8c00"),
     ("HEIST", "HEIST", "#7a5c00"),
     ("HEIST", "HEIST", "#7a5c00"),
     ("CRASH", "MARKET_CRASH", "#8a4000"),
@@ -684,8 +684,8 @@ def compute_live_golden_wedges(
     else:
         market_crash_ev = 25.0
 
-    # COMPOUND_INTEREST: 8% of spinner's balance, hard-capped at 150 in code
-    compound_ev = float(max(5, min(150, int(max(0, spinner_balance) * 0.08))))
+    # COMPOUND_INTEREST: flat +100 JC reward.
+    compound_ev = 100.0
 
     # TRICKLE_DOWN: tax all others 1-3% (avg 2%); approximate from total
     others_positive = max(0, total_positive_balance - max(0, spinner_balance))

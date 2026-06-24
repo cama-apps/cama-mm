@@ -1629,8 +1629,9 @@ class BettingCommands(commands.Cog):
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "COMPOUND_INTEREST":
-            # Earn 8% of spinner's own balance (min 5, max 150 JC)
-            compound_amount = max(5, min(150, int(new_balance * 0.08)))
+            # Flat +100 JC (replaced the old 8%-of-balance compound, which capped
+            # at +150 and so paid a fixed +150 to every golden-eligible spinner).
+            compound_amount = 100
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
                 guild_id,

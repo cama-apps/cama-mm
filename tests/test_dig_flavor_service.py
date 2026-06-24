@@ -606,6 +606,30 @@ class TestDigFlavorServiceFlavor:
         assert player_repository.get_balance(uid, TEST_GUILD_ID) == 100
 
     @pytest.mark.asyncio
+    async def test_flavor_headroom_follows_lifted_cap_under_yield_buff(
+        self, dig_repo, player_repository,
+    ):
+        """A yield buff (Dynamite Cache) lifts the base cap above 20, recorded as
+        nonstreak_cap. The nudge headroom must track that lifted cap, so a base
+        dig above 20 still has room for a positive nudge (vs. a hard 20 clamp)."""
+        uid = _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
+
+        svc = self._bonus_service(dig_repo, player_repository, 4.0)
+        # Buffed dig: nonstreak 30 with the cap lifted to 35 -> headroom 5.
+        # Without the lifted-cap fix, headroom would be max(0, 20-30)=0 and the
+        # nudge would be silently dropped.
+        result = {
+            "advance": 1, "jc_earned": 30, "nonstreak_jc": 30,
+            "nonstreak_cap": 35, "depth_after": 5, "success": True,
+        }
+        await svc.flavor(result, uid, TEST_GUILD_ID, rng=self._small_cap_rng())
+
+        # 4% of 30 ≈ 1 JC, within the 5 JC headroom of the lifted cap -> applied.
+        assert result.get("llm_jc_delta") == 1
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) == 101
+
+    @pytest.mark.asyncio
     async def test_flavor_headroom_ignores_milestone_and_streak(
         self, dig_repo, player_repository,
     ):

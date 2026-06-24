@@ -90,7 +90,7 @@ class TestGoldenWheelWedges:
             "BLUE_SHELL": config.WHEEL_BLUE_SHELL_EST_EV,
             "HEIST": float(sum(max(1, int(b * 0.085)) for b in bottom_player_balances)),
             "MARKET_CRASH": float(sum(max(1, int(b * 0.115)) for b in other_top_balances)),
-            "COMPOUND_INTEREST": float(max(5, min(150, int(spinner_balance * 0.08)))),
+            "COMPOUND_INTEREST": 100.0,  # flat +100 reward
             "TRICKLE_DOWN": float(int(max(0, total_positive_balance - spinner_balance) * avg_trickle)),
             "DIVIDEND": float(max(10, int(total_positive_balance * 0.005))),
             "HOSTILE_TAKEOVER": float(max(1, int(rank_next_balance * 0.115))),
