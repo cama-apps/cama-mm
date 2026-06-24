@@ -542,6 +542,10 @@ class DigService(
         buff_effects = self._apply_buff_effects(active_buff)
         buff_advance_bonus = buff_effects.get("advance_bonus", 0)
         buff_cavein_reduction = buff_effects.get("cave_in_reduction", 0.0)
+        # Yield buff (e.g. Dynamite Cache +75%): a paid consumable that boosts
+        # base loot AND lifts the base-payout cap proportionally, so the buff is
+        # not silently swallowed by the flat cap.
+        buff_yield_mult = float(buff_effects.get("yield_multiplier", 1.0))
         self._decrement_buff(discord_id, guild_id, tunnel)
 
         # 7d. Get and apply active temp curse (event "curse" threat). Mirrors
@@ -954,6 +958,7 @@ class DigService(
             * jc_mult
             * relic_yield_mult
             * weather_combo_yield
+            * buff_yield_mult
             * self._luminosity_jc_multiplier(luminosity)
             * self._post_pinnacle_decay_factor(new_depth, discord_id, guild_id)
         ) + magma_heart_bonus + int(perk_loot_flat + 0.5)
@@ -993,8 +998,11 @@ class DigService(
             jc_earned += min(cavein_free_streak, 20)
 
         # Cap the non-streak payout (base loot + relic). Milestones and the
-        # daily-streak bonus are separate buckets added on top.
-        jc_earned = min(jc_earned, BASE_DIG_JC_PAYOUT_CAP)
+        # daily-streak bonus are separate buckets added on top. A yield buff
+        # (Dynamite Cache) lifts the cap proportionally so its boost isn't
+        # swallowed — a normal dig still tops out at BASE_DIG_JC_PAYOUT_CAP.
+        base_cap = int(BASE_DIG_JC_PAYOUT_CAP * buff_yield_mult)
+        jc_earned = min(jc_earned, base_cap)
         # Pre-tax capped non-streak basis — used by the LLM flavor layer to clamp
         # its nudge against the cap without being fooled by later taxes.
         nonstreak_jc = jc_earned
@@ -1206,6 +1214,7 @@ class DigService(
             advance=advance,
             jc_earned=jc_earned,
             nonstreak_jc=nonstreak_jc,
+            nonstreak_cap=base_cap,
             bankruptcy_penalty=dig_bankruptcy_penalty,
             milestone_bonus=milestone_bonus,
             streak_bonus=streak_bonus,

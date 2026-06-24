@@ -342,7 +342,11 @@ class DigFlavorService:
                         - int(result.get("milestone_bonus", 0) or 0)
                         - int(result.get("streak_bonus", 0) or 0)
                     )
-                headroom = max(0, BASE_DIG_JC_PAYOUT_CAP - int(nonstreak))
+                # Use the cap that actually applied to this dig. A yield buff
+                # (Dynamite Cache) lifts the base cap above BASE_DIG_JC_PAYOUT_CAP,
+                # so the nudge headroom must track the lifted cap, not the constant.
+                cap = int(result.get("nonstreak_cap") or BASE_DIG_JC_PAYOUT_CAP)
+                headroom = max(0, cap - int(nonstreak))
                 delta = min(delta, headroom)
             if delta != 0:
                 try:

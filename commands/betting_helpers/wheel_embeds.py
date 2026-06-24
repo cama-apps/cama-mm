@@ -265,12 +265,12 @@ def build_wheel_result_embed(
             )
 
     elif value == "COMPOUND_INTEREST":
-        title = "📈 COMPOUND INTEREST! 📈"
+        title = "📈 +100 BONUS! 📈"
         color = discord.Color.from_str("#6b8c00")
         description = (
-            f"**COMPOUND**\n\n"
-            f"📈 Your wealth grows on itself!\n"
-            f"Earned **{compound_amount}** {JOPACOIN_EMOTE} (8% of your balance).\n\n"
+            f"**+100**\n\n"
+            f"📈 A flat bonus, straight to your balance.\n"
+            f"Earned **{compound_amount}** {JOPACOIN_EMOTE}.\n\n"
             f"*The most boring way to get rich — and the most reliable.*"
         )
 
