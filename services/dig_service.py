@@ -1200,6 +1200,20 @@ class DigService(
             },
             log_action_type="dig",
         )
+        if self.buff_service is not None and jc_earned > 0:
+            try:
+                bonus = self.buff_service.apply_positive_gain_bonuses(
+                    discord_id, guild_id, jc_earned, self.player_repo
+                )
+                if bonus:
+                    jc_earned += bonus
+                grave_skimmed = self.buff_service.apply_grave_contract_skim(
+                    discord_id, guild_id, jc_earned, self.player_repo
+                )
+                if grave_skimmed:
+                    jc_earned = max(0, jc_earned - grave_skimmed)
+            except Exception:
+                logger.exception("Failed to apply high-tier manashop dig effects")
         if overgrowth_active:
             try:
                 self.buff_service.consume_overgrowth_charge(discord_id, guild_id)

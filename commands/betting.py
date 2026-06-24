@@ -347,7 +347,7 @@ class BettingCommands(commands.Cog):
     @app_commands.describe(
         team="Radiant or Dire",
         amount="Amount of jopacoin to wager (view balance with /balance)",
-        leverage="Leverage multiplier (2x, 3x, 5x) - can cause debt!",
+        leverage="Leverage multiplier (2x, 3x, 5x, special 7x/10x) - can cause debt!",
         match="Match to bet on (optional - auto-selects if you're a participant or only one match exists)",
     )
     @app_commands.choices(
@@ -360,6 +360,7 @@ class BettingCommands(commands.Cog):
             app_commands.Choice(name="2x", value=2),
             app_commands.Choice(name="3x", value=3),
             app_commands.Choice(name="5x", value=5),
+            app_commands.Choice(name="7x", value=7),
             app_commands.Choice(name="10x", value=10),
         ],
     )

@@ -1602,22 +1602,27 @@ class ShopCommands(commands.Cog):
         # Red
         app_commands.Choice(name="Red • Cheap • Pyroclasm (25 JC) — burn JC from 3 players, claim a bounty", value="pyroclasm"),
         app_commands.Choice(name="Red • Mid • Dynamite Cache (35 JC) — next 3 digs +75% yield", value="dynamite_cache"),
+        app_commands.Choice(name="Red • High • Reckless Ritual (80 JC) — next match bet may use 7x", value="reckless_ritual"),
         app_commands.Choice(name="Red • Ult • Wildfire (150 JC, taps mana) — drain JC from every positive player", value="wildfire"),
         # Blue
         app_commands.Choice(name="Blue • Cheap • Insight (10 JC) — peek at any digger's stats", value="insight"),
         app_commands.Choice(name="Blue • Mid • Mana Shield (35 JC) — refund 60% of largest 24h loss", value="mana_shield"),
+        app_commands.Choice(name="Blue • High • Transmute (55 JC) — buy non-ult items as any color today", value="transmute"),
         app_commands.Choice(name="Blue • Ult • Counterspell (75 JC, taps mana) — 24h PvP immunity", value="counterspell"),
         # Green
         app_commands.Choice(name="Green • Cheap • Sapling (10 JC) — shave 45min off /dig cooldown", value="sapling"),
         app_commands.Choice(name="Green • Mid • Regrowth (25 JC) — recover 35% of last 24h losses", value="regrowth"),
+        app_commands.Choice(name="Green • High • Verdant Reserve (55 JC) — +10 on next 3 positive gains", value="verdant_reserve"),
         app_commands.Choice(name="Green • Ult • Overgrowth (90 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
         # White
         app_commands.Choice(name="White • Cheap • Communion (8 JC) — fund reserve, +10% next match win", value="communion"),
         app_commands.Choice(name="White • Mid • Aegis (35 JC) — absorb the next PvP attack", value="aegis"),
+        app_commands.Choice(name="White • High • Alms Round (40 JC) — aid bankrupt players, gain small blessings", value="alms_round"),
         app_commands.Choice(name="White • Ult • Sanctuary (60 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
         # Black
         app_commands.Choice(name="Black • Cheap • Soul Harvest (25 JC) — drain 2 JC from every positive player", value="soul_harvest"),
         app_commands.Choice(name="Black • Mid • Blood Pact (75 JC) — skim 25% of target's earnings 24h", value="blood_pact"),
+        app_commands.Choice(name="Black • High • Grave Contract (100 JC) — skim 15% of target's gains 24h", value="grave_contract"),
         app_commands.Choice(name="Black • Ult • Dark Bargain (150 JC, taps mana) — 800 JC now, 700 due later", value="dark_bargain"),
     ])
     @app_commands.checks.cooldown(1, 10)
@@ -1684,6 +1689,12 @@ class ShopCommands(commands.Cog):
             "regrowth": {"tier": "mid", "color": "Green", "cost": 25, "name": "Regrowth"},
             "aegis": {"tier": "mid", "color": "White", "cost": 35, "name": "Aegis"},
             "blood_pact": {"tier": "mid", "color": "Black", "cost": 75, "name": "Blood Pact"},
+            # High
+            "reckless_ritual": {"tier": "high", "color": "Red", "cost": 80, "name": "Reckless Ritual"},
+            "transmute": {"tier": "high", "color": "Blue", "cost": 55, "name": "Transmute"},
+            "verdant_reserve": {"tier": "high", "color": "Green", "cost": 55, "name": "Verdant Reserve"},
+            "alms_round": {"tier": "high", "color": "White", "cost": 40, "name": "Alms Round"},
+            "grave_contract": {"tier": "high", "color": "Black", "cost": 100, "name": "Grave Contract"},
             # Ultimate (taps mana)
             "wildfire": {"tier": "ult", "color": "Red", "cost": 150, "name": "Wildfire"},
             "counterspell": {"tier": "ult", "color": "Blue", "cost": 75, "name": "Counterspell"},
@@ -1703,7 +1714,25 @@ class ShopCommands(commands.Cog):
         display_name = spec["name"]
         tier = spec["tier"]
 
+        transmuted = False
         if effects.color != required_color:
+            if tier != "ult" and buff_service is not None:
+                try:
+                    transmuted = await asyncio.to_thread(
+                        buff_service.has_transmute, user_id, guild_id,
+                    )
+                except Exception:
+                    transmuted = False
+            if not transmuted:
+                color_to_land = {"Red": "Mountain", "Blue": "Island", "Green": "Forest", "White": "Plains", "Black": "Swamp"}
+                await interaction.followup.send(
+                    f"**{display_name}** requires **{required_color}** mana ({color_to_land.get(required_color, '?')}). "
+                    f"Your current mana is **{effects.color}**.",
+                    ephemeral=True,
+                )
+                return
+
+        if transmuted and tier == "ult":
             color_to_land = {"Red": "Mountain", "Blue": "Island", "Green": "Forest", "White": "Plains", "Black": "Swamp"}
             await interaction.followup.send(
                 f"**{display_name}** requires **{required_color}** mana ({color_to_land.get(required_color, '?')}). "
@@ -1716,8 +1745,8 @@ class ShopCommands(commands.Cog):
         # invalid use. ``insight`` permits self-target (peeking at your own
         # stats is a no-op); ``sanctuary`` and ``blood_pact`` require an
         # *other* player so the ally / victim role is meaningful.
-        target_required_for = {"sanctuary", "blood_pact", "insight"}
-        no_self_target_items = {"sanctuary", "blood_pact"}
+        target_required_for = {"sanctuary", "blood_pact", "insight", "grave_contract"}
+        no_self_target_items = {"sanctuary", "blood_pact", "grave_contract"}
         if item_key in target_required_for:
             if not target:
                 await interaction.followup.send(
@@ -2046,6 +2075,121 @@ class ShopCommands(commands.Cog):
             await interaction.followup.send(
                 f"🌿🩸 **BLOOD PACT** — {interaction.user.mention} marks {target.mention} for skim.\n"
                 f"For 24h, you receive 25% of {target.display_name}'s match/wheel/dig earnings (cap 150 JC).\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "reckless_ritual":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    buff_service.grant_reckless_ritual, user_id, guild_id,
+                )
+            except Exception:
+                logger.exception("Reckless Ritual grant failed")
+                await _refund("Could not complete the ritual; refunded.")
+                return
+            await interaction.followup.send(
+                f"⛰️🔥 **RECKLESS RITUAL** — {interaction.user.mention} primes one dangerous wager.\n"
+                f"Your next match bet today may use 7x leverage. If it loses, you burn 10 extra {JOPACOIN_EMOTE}.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "transmute":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(buff_service.grant_transmute, user_id, guild_id)
+            except Exception:
+                logger.exception("Transmute grant failed")
+                await _refund("Could not transmute your mana; refunded.")
+                return
+            await interaction.followup.send(
+                f"🏝️🔁 **TRANSMUTE** — {interaction.user.mention} bends today's color wheel.\n"
+                f"For 24h, your mana counts as any color for Cheap, Mid, and High manashop items. Ultimates still require their real color.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "verdant_reserve":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    buff_service.grant_verdant_reserve, user_id, guild_id,
+                )
+            except Exception:
+                logger.exception("Verdant Reserve grant failed")
+                await _refund("Could not seed the reserve; refunded.")
+                return
+            await interaction.followup.send(
+                f"🌲🌿 **VERDANT RESERVE** — {interaction.user.mention} stores growth for later.\n"
+                f"Your next 3 positive JC gains get +10, capped at 75 JC per boosted gain.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "alms_round":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                await asyncio.to_thread(buff_service.grant_alms_round, user_id, guild_id)
+            except Exception:
+                logger.exception("Alms Round grant failed")
+                await _refund("Could not complete the alms round; refunded.")
+                return
+            all_players = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            recipients = [
+                p for p in all_players
+                if p.discord_id != user_id and p.jopacoin_balance <= 0
+            ][:5]
+            for p in recipients:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance,
+                    p.discord_id,
+                    guild_id,
+                    10,
+                    source="manashop",
+                    actor_id=user_id,
+                    related_type="alms_round",
+                    reason="alms round bankrupt-player grant",
+                    metadata={"item": "alms_round", "amount": 10},
+                )
+            recipient_text = (
+                f"{len(recipients)} bankrupt player(s) received 10 {JOPACOIN_EMOTE}."
+                if recipients else
+                "No bankrupt players were available for alms."
+            )
+            await interaction.followup.send(
+                f"🌾🤲 **ALMS ROUND** — {interaction.user.mention} passes the plate.\n"
+                f"{recipient_text}\n"
+                f"You gain +1 {JOPACOIN_EMOTE} on each of your next 10 match/dig/trivia gains.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "grave_contract":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            recipient = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
+            if not recipient:
+                await _refund(f"{target.mention} is not registered; refunded.")
+                return
+            try:
+                await asyncio.to_thread(
+                    buff_service.grant_grave_contract, user_id, guild_id, target.id,
+                )
+            except Exception:
+                logger.exception("Grave Contract grant failed")
+                await _refund("Could not write the grave contract; refunded.")
+                return
+            await interaction.followup.send(
+                f"🌿📜 **GRAVE CONTRACT** — {interaction.user.mention} binds {target.mention}'s future gains.\n"
+                f"For 24h, you receive 15% of {target.display_name}'s positive JC gains (cap 100 JC).\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 

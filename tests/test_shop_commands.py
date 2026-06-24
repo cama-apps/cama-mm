@@ -801,6 +801,104 @@ async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_tar
 
 
 @pytest.mark.asyncio
+async def test_manashop_high_tier_reckless_ritual_does_not_tap_mana(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    guild_id = 9001
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.buff_service = MagicMock()
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="reckless_ritual"), target=None,
+    )
+
+    bot.buff_service.grant_reckless_ritual.assert_called_once_with(buyer_id, guild_id)
+    bot.mana_repo.mark_mana_consumed_atomic.assert_not_called()
+    assert player_service.adjust_balance.call_args_list[0].args == (
+        buyer_id, guild_id, -80,
+    )
+
+
+@pytest.mark.asyncio
+async def test_manashop_transmute_allows_off_color_non_ultimate(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    guild_id = 9001
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Blue")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.buff_service = MagicMock()
+    bot.buff_service.has_transmute.return_value = True
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="reckless_ritual"), target=None,
+    )
+
+    bot.buff_service.has_transmute.assert_called_once_with(buyer_id, guild_id)
+    bot.buff_service.grant_reckless_ritual.assert_called_once_with(buyer_id, guild_id)
+
+
+@pytest.mark.asyncio
+async def test_manashop_alms_round_grants_up_to_five_bankrupt_players(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    guild_id = 9001
+    bankrupt_players = [
+        SimpleNamespace(discord_id=5000 + idx, name=f"Bankrupt {idx}", jopacoin_balance=-idx)
+        for idx in range(6)
+    ]
+    positive_player = SimpleNamespace(discord_id=7000, name="Positive", jopacoin_balance=10)
+
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="White")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.buff_service = MagicMock()
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = [*bankrupt_players, positive_player]
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="alms_round"), target=None,
+    )
+
+    calls = [c.args for c in player_service.adjust_balance.call_args_list]
+    assert calls[0] == (buyer_id, guild_id, -40)
+    recipient_calls = [c for c in calls if c[0] != buyer_id]
+    assert len(recipient_calls) == 5
+    assert all(c[2] == 10 for c in recipient_calls)
+    assert positive_player.discord_id not in {c[0] for c in recipient_calls}
+    bot.buff_service.grant_alms_round.assert_called_once_with(buyer_id, guild_id)
+    bot.mana_repo.mark_mana_consumed_atomic.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dark_bargain_due_amount_matches_loan_principal():
     bot = MagicMock()
     bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")

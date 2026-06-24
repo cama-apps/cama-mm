@@ -26,6 +26,11 @@ BUFF_BLOOD_PACT = "blood_pact"
 BUFF_DARK_BARGAIN = "dark_bargain"
 BUFF_FIRST_AEGIS_TODAY = "first_aegis_today"  # Auto-granted by White mana
 BUFF_COMMUNION_BLESSING = "communion_blessing"  # Single-charge +10% next match win
+BUFF_RECKLESS_RITUAL = "reckless_ritual"  # One 7x match bet today
+BUFF_TRANSMUTE = "transmute"  # Current mana counts as any non-ultimate color
+BUFF_VERDANT_RESERVE = "verdant_reserve"  # +10 on next 3 positive gains, capped at 75
+BUFF_ALMS_ROUND = "alms_round"  # +1 on next 10 positive match/dig/trivia gains
+BUFF_GRAVE_CONTRACT = "grave_contract"  # 15% skim from target gains, cap 100
 
 # All PvP-defending buff types (any of these blocks Pyroclasm/Soul-Harvest/Sabotage/etc.)
 PVP_DEFENSE_BUFFS = (BUFF_COUNTERSPELL, BUFF_AEGIS, BUFF_SANCTUARY, BUFF_FIRST_AEGIS_TODAY)
@@ -149,6 +154,51 @@ class BuffService:
             data={"match_win_bonus_pct": match_win_bonus_pct},
         )
 
+    def grant_reckless_ritual(self, discord_id: int, guild_id: int | None) -> int:
+        """24h: unlock one 7x match bet. Consumed when a 7x bet is placed."""
+        return self.buff_repo.refresh_atomic(
+            discord_id, guild_id, BUFF_RECKLESS_RITUAL, self._expires(24)
+        )
+
+    def grant_transmute(self, discord_id: int, guild_id: int | None) -> int:
+        """24h: satisfy manashop color checks for Cheap/Mid/High items."""
+        return self.buff_repo.refresh_atomic(
+            discord_id, guild_id, BUFF_TRANSMUTE, self._expires(24)
+        )
+
+    def grant_verdant_reserve(self, discord_id: int, guild_id: int | None) -> int:
+        """24h: +10 on next three positive gains, each capped at 75 total."""
+        return self.buff_repo.refresh_atomic(
+            discord_id,
+            guild_id,
+            BUFF_VERDANT_RESERVE,
+            self._expires(24),
+            data={"charges_remaining": 3, "bonus": 10, "gain_cap": 75},
+        )
+
+    def grant_alms_round(self, discord_id: int, guild_id: int | None) -> int:
+        """24h: +1 on next ten positive match/dig/trivia gains."""
+        return self.buff_repo.refresh_atomic(
+            discord_id,
+            guild_id,
+            BUFF_ALMS_ROUND,
+            self._expires(24),
+            data={"charges_remaining": 10, "bonus": 1},
+        )
+
+    def grant_grave_contract(
+        self, caster_id: int, guild_id: int | None, target_id: int
+    ) -> int:
+        """24h: caster skims 15% of target's earnings (cap 100 JC total)."""
+        return self.buff_repo.grant(
+            caster_id,
+            guild_id,
+            BUFF_GRAVE_CONTRACT,
+            self._expires(24),
+            target_id=target_id,
+            data={"skimmed_total": 0, "cap": 100, "skim_rate": 0.15},
+        )
+
     # ------------------------------------------------------------------
     # Read / consume helpers
     # ------------------------------------------------------------------
@@ -178,10 +228,78 @@ class BuffService:
     def has_overgrowth(self, discord_id: int, guild_id: int | None) -> bool:
         return self.buff_repo.has_active(discord_id, guild_id, BUFF_OVERGROWTH)
 
+    def has_transmute(self, discord_id: int, guild_id: int | None) -> bool:
+        return self.buff_repo.has_active(discord_id, guild_id, BUFF_TRANSMUTE)
+
+    def has_reckless_ritual(self, discord_id: int, guild_id: int | None) -> bool:
+        return self.buff_repo.has_active(discord_id, guild_id, BUFF_RECKLESS_RITUAL)
+
+    def consume_reckless_ritual(self, discord_id: int, guild_id: int | None) -> bool:
+        active = self.buff_repo.active_for(discord_id, guild_id, BUFF_RECKLESS_RITUAL)
+        if not active:
+            return False
+        return self.buff_repo.consume_atomic(active[0]["id"])
+
     def consume_overgrowth_charge(self, discord_id: int, guild_id: int | None) -> bool:
         return self.buff_repo.consume_data_charge_atomic(
             discord_id, guild_id, BUFF_OVERGROWTH, "charges_remaining"
         )
+
+    def apply_positive_gain_bonuses(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        gain: int,
+        player_repo: "PlayerRepository",
+    ) -> int:
+        """Credit high-tier Green/White gain bonuses and return the extra JC.
+
+        Verdant Reserve applies first: +10 while keeping that individual gain
+        at or below its stored cap. Alms Round then adds +1. Each successful
+        bonus consumes one charge from its corresponding buff.
+        """
+        if gain <= 0:
+            return 0
+        credited = 0
+        verdant = self.buff_repo.active_for(discord_id, guild_id, BUFF_VERDANT_RESERVE)
+        if verdant:
+            data = verdant[0].get("data") or {}
+            bonus = int(data.get("bonus") or 0)
+            gain_cap = int(data.get("gain_cap") or 0)
+            bonus = max(0, min(bonus, gain_cap - gain if gain_cap > 0 else bonus))
+            consumed = self.buff_repo.consume_data_charge_atomic(
+                discord_id, guild_id, BUFF_VERDANT_RESERVE, "charges_remaining"
+            )
+            if bonus > 0 and consumed:
+                player_repo.add_balance(
+                    discord_id,
+                    guild_id,
+                    bonus,
+                    source="manashop_buff",
+                    related_type=BUFF_VERDANT_RESERVE,
+                    reason="verdant reserve gain bonus",
+                    metadata={"base_gain": gain, "bonus": bonus},
+                )
+                credited += bonus
+
+        alms = self.buff_repo.active_for(discord_id, guild_id, BUFF_ALMS_ROUND)
+        if alms:
+            data = alms[0].get("data") or {}
+            bonus = int(data.get("bonus") or 0)
+            if bonus > 0 and self.buff_repo.consume_data_charge_atomic(
+                discord_id, guild_id, BUFF_ALMS_ROUND, "charges_remaining"
+            ):
+                player_repo.add_balance(
+                    discord_id,
+                    guild_id,
+                    bonus,
+                    source="manashop_buff",
+                    related_type=BUFF_ALMS_ROUND,
+                    reason="alms round gain bonus",
+                    metadata={"base_gain": gain, "bonus": bonus},
+                )
+                credited += bonus
+        return credited
 
     def has_sanctuary_match_bonus(
         self, discord_id: int, guild_id: int | None
@@ -260,6 +378,48 @@ class BuffService:
             except Exception:
                 logger.exception(
                     "Failed to revert Blood Pact skim for buff %d", buff_id
+                )
+            return 0
+        return amount
+
+    def apply_grave_contract_skim(
+        self,
+        target_id: int,
+        guild_id: int | None,
+        earning: int,
+        player_repo: "PlayerRepository",
+    ) -> int:
+        """Reserve, transfer, and roll back the Grave Contract skim on failure."""
+        if earning <= 0:
+            return 0
+        try:
+            skim = self.buff_repo.claim_contract_skim_atomic(
+                target_id, guild_id, earning, BUFF_GRAVE_CONTRACT
+            )
+        except Exception:
+            logger.exception(
+                "Failed to claim Grave Contract skim for player %d", target_id
+            )
+            return 0
+        if not skim:
+            return 0
+        amount = int(skim["amount"])
+        skimmer_id = int(skim["skimmer_id"])
+        buff_id = int(skim["buff_id"])
+        try:
+            player_repo.add_balance_many(
+                {target_id: -amount, skimmer_id: amount},
+                guild_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to transfer Grave Contract skim for player %d", target_id
+            )
+            try:
+                self.buff_repo.revert_blood_pact_skim(buff_id, amount)
+            except Exception:
+                logger.exception(
+                    "Failed to revert Grave Contract skim for buff %d", buff_id
                 )
             return 0
         return amount

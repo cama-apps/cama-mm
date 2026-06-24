@@ -262,6 +262,64 @@ class BuffRepository(BaseRepository):
                 "new_total": new_total,
             }
 
+    def claim_contract_skim_atomic(
+        self,
+        target_id: int,
+        guild_id: int | None,
+        earning: int,
+        buff_type: str,
+    ) -> dict | None:
+        """Atomically reserve a generic targeted skim buff against earnings.
+
+        The buff data must contain ``cap``, ``skimmed_total``, and
+        ``skim_rate``. Returns ``{buff_id, skimmer_id, amount, new_total}``
+        when a skim was reserved, else ``None``.
+        """
+        if earning <= 0:
+            return None
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, discord_id, data
+                FROM manashop_buffs
+                WHERE target_id = ? AND guild_id = ? AND buff_type = ?
+                  AND triggered = 0 AND expires_at > ?
+                ORDER BY granted_at DESC
+                LIMIT 1
+                """,
+                (target_id, gid, buff_type, now),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            data = safe_json_loads(row["data"], {}, context="manashop_buffs.data")
+            cap = int(data.get("cap") or 0)
+            skimmed_total = int(data.get("skimmed_total") or 0)
+            remaining = cap - skimmed_total
+            if remaining <= 0:
+                return None
+            skim_rate = float(data.get("skim_rate") or 0)
+            amount = min(remaining, max(1, int(earning * skim_rate)))
+            if amount <= 0:
+                return None
+
+            new_total = skimmed_total + amount
+            data["skimmed_total"] = new_total
+            cursor.execute(
+                "UPDATE manashop_buffs SET data = ? WHERE id = ?",
+                (json.dumps(data), row["id"]),
+            )
+            return {
+                "buff_id": int(row["id"]),
+                "skimmer_id": int(row["discord_id"]),
+                "amount": amount,
+                "new_total": new_total,
+            }
+
     def revert_blood_pact_skim(self, buff_id: int, amount: int) -> None:
         """Undo a reserved skim when the balance transfer could not complete."""
         if amount <= 0:

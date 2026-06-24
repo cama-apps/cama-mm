@@ -65,6 +65,24 @@ class BettingService:
             earner_id, guild_id, earning, self.player_repo
         )
 
+    def _apply_grave_contract_skim(
+        self, earner_id: int, guild_id: int | None, earning: int
+    ) -> int:
+        if self.buff_service is None or earning <= 0:
+            return 0
+        return self.buff_service.apply_grave_contract_skim(
+            earner_id, guild_id, earning, self.player_repo
+        )
+
+    def _apply_high_tier_gain_bonuses(
+        self, earner_id: int, guild_id: int | None, earning: int
+    ) -> int:
+        if self.buff_service is None or earning <= 0:
+            return 0
+        return self.buff_service.apply_positive_gain_bonuses(
+            earner_id, guild_id, earning, self.player_repo
+        )
+
     def _skim_blood_pact_from_awards(
         self,
         results: dict[int, dict[str, int]],
@@ -79,6 +97,14 @@ class BettingService:
             if skimmed:
                 result["blood_pact_skimmed"] = skimmed
                 result["net"] = int(result.get("net", 0)) - skimmed
+            grave_skimmed = self._apply_grave_contract_skim(pid, guild_id, earning)
+            if grave_skimmed:
+                result["grave_contract_skimmed"] = grave_skimmed
+                result["net"] = int(result.get("net", 0)) - grave_skimmed
+            bonus = self._apply_high_tier_gain_bonuses(pid, guild_id, earning)
+            if bonus:
+                result["high_tier_bonus"] = int(result.get("high_tier_bonus", 0)) + bonus
+                result["net"] = int(result.get("net", 0)) + bonus
 
     def _since_ts(self, pending_state: PendingMatchState | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
@@ -114,9 +140,13 @@ class BettingService:
         if amount <= 0:
             raise ValueError("Bet amount must be positive.")
 
-        # Validate leverage tier
-        # 10x is a valid tier (gated by Red mana in the command layer)
+        # Validate leverage tier. 10x is gated by Red mana in the command
+        # layer; 7x is gated here by Reckless Ritual.
         valid_leverages = list(self.leverage_tiers) + [10]
+        if leverage == 7:
+            if self.buff_service is None or not self.buff_service.has_reckless_ritual(discord_id, guild_id):
+                raise ValueError("7x leverage requires an active Reckless Ritual.")
+            valid_leverages.append(7)
         if leverage != 1 and leverage not in valid_leverages:
             valid_tiers = ", ".join(str(t) for t in valid_leverages)
             raise ValueError(f"Invalid leverage. Valid tiers: 1 (none), {valid_tiers}")
@@ -132,18 +162,32 @@ class BettingService:
         team_total = current_totals[team]
         odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
 
+        reckless_consumed = False
+        if leverage == 7 and self.buff_service is not None:
+            reckless_consumed = self.buff_service.consume_reckless_ritual(discord_id, guild_id)
+            if not reckless_consumed:
+                raise ValueError("7x leverage requires an active Reckless Ritual.")
+
         # Atomic placement using DB pending match payload (enforces lock + team restriction).
-        self.bet_repo.place_bet_against_pending_match_atomic(
-            guild_id=guild_id,
-            discord_id=discord_id,
-            team=team,
-            amount=amount,
-            bet_time=now_ts,
-            leverage=leverage,
-            max_debt=self.max_debt,
-            odds_at_placement=odds_at_placement,
-            pending_match_id=pending_match_id,
-        )
+        try:
+            self.bet_repo.place_bet_against_pending_match_atomic(
+                guild_id=guild_id,
+                discord_id=discord_id,
+                team=team,
+                amount=amount,
+                bet_time=now_ts,
+                leverage=leverage,
+                max_debt=self.max_debt,
+                odds_at_placement=odds_at_placement,
+                pending_match_id=pending_match_id,
+            )
+        except Exception:
+            if reckless_consumed and self.buff_service is not None:
+                try:
+                    self.buff_service.grant_reckless_ritual(discord_id, guild_id)
+                except Exception:
+                    logger.exception("Failed to restore Reckless Ritual after bet failure")
+            raise
 
     def award_participation(
         self,
@@ -210,6 +254,14 @@ class BettingService:
             if skimmed:
                 result["blood_pact_skimmed"] = skimmed
                 result["net"] = int(result.get("net", 0)) - skimmed
+            grave_skimmed = self._apply_grave_contract_skim(pid, guild_id, total_reward)
+            if grave_skimmed:
+                result["grave_contract_skimmed"] = grave_skimmed
+                result["net"] = int(result.get("net", 0)) - grave_skimmed
+            bonus = self._apply_high_tier_gain_bonuses(pid, guild_id, total_reward)
+            if bonus:
+                result["high_tier_bonus"] = bonus
+                result["net"] = int(result.get("net", 0)) + bonus
             results[pid] = result
         return results
 
@@ -256,8 +308,29 @@ class BettingService:
                 skimmed = self._apply_blood_pact_skim(w["discord_id"], guild_id, profit)
                 if skimmed:
                     pact_skims[w["discord_id"]] = pact_skims.get(w["discord_id"], 0) + skimmed
+                grave_skimmed = self._apply_grave_contract_skim(w["discord_id"], guild_id, profit)
+                if grave_skimmed:
+                    distributions.setdefault("grave_contract_skims", {})
+                    distributions["grave_contract_skims"][w["discord_id"]] = (
+                        distributions["grave_contract_skims"].get(w["discord_id"], 0) + grave_skimmed
+                    )
+                bonus = self._apply_high_tier_gain_bonuses(w["discord_id"], guild_id, profit)
+                if bonus:
+                    w["high_tier_bonus"] = int(w.get("high_tier_bonus", 0)) + bonus
             if pact_skims:
                 distributions["blood_pact_skims"] = pact_skims
+            for loser in distributions.get("losers", []):
+                if int(loser.get("leverage", 1) or 1) == 7:
+                    self.player_repo.add_balance(
+                        loser["discord_id"],
+                        guild_id,
+                        -10,
+                        source="manashop_buff",
+                        related_type="reckless_ritual_burn",
+                        reason="reckless ritual losing burn",
+                        metadata={"burn": 10},
+                    )
+                    loser["reckless_ritual_burn"] = 10
 
         return distributions
 
@@ -349,6 +422,14 @@ class BettingService:
                 if skimmed:
                     result["net"] = int(result.get("net", 0)) - skimmed
                     result["blood_pact_skimmed"] = skimmed
+                grave_skimmed = self._apply_grave_contract_skim(pid, guild_id, gross)
+                if grave_skimmed:
+                    result["net"] = int(result.get("net", 0)) - grave_skimmed
+                    result["grave_contract_skimmed"] = grave_skimmed
+                bonus = self._apply_high_tier_gain_bonuses(pid, guild_id, gross)
+                if bonus:
+                    result["net"] = int(result.get("net", 0)) + bonus
+                    result["high_tier_bonus"] = bonus
 
         return results
 
