@@ -1,6 +1,7 @@
 """Tests for trivia cooldown and economy integration."""
 
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,6 +29,106 @@ def registered_player(player_service):
         mmr_override=3000,
     )
     return discord_id
+
+
+def _trivia_question():
+    from services.trivia_questions import TriviaQuestion
+
+    return TriviaQuestion(
+        text="Which hero says this?",
+        options=["Axe", "Crystal Maiden", "Pudge", "Invoker"],
+        correct_index=1,
+        difficulty="easy",
+        image_url=None,
+        category="test",
+        explanation=None,
+    )
+
+
+def _trivia_user(discord_id):
+    user = MagicMock()
+    user.id = discord_id
+    user.display_name = "trivia_tester"
+    user.display_avatar.url = "https://example.com/avatar.png"
+    return user
+
+
+class TestTriviaPayout:
+    def test_correct_answer_pays_base_plus_streak_bonuses(self):
+        import commands.trivia as trivia_mod
+
+        assert trivia_mod._jc_for_streak(1) == 1
+        assert trivia_mod._jc_for_streak(2) == 1
+        assert trivia_mod._jc_for_streak(3) == 2
+        assert trivia_mod._jc_for_streak(6) == 2
+        assert trivia_mod._jc_for_streak(7) == 1
+        assert trivia_mod._jc_for_streak(10) == 3
+        assert trivia_mod._jc_for_streak(14) == 2
+
+    @pytest.mark.asyncio
+    async def test_correct_answer_awards_one_jc_before_streak_bonus(
+        self, player_service, registered_player, monkeypatch
+    ):
+        import commands.trivia as trivia_mod
+
+        bot = SimpleNamespace(
+            player_service=player_service,
+            mana_effects_service=None,
+            bankruptcy_service=None,
+        )
+        cog = trivia_mod.TriviaCog(bot)
+        session = trivia_mod.TriviaSession(
+            user_id=registered_player,
+            guild_id=TEST_GUILD_ID,
+            user=_trivia_user(registered_player),
+        )
+        cog._sessions[(registered_player, TEST_GUILD_ID)] = session
+        view = trivia_mod.TriviaView(session, _trivia_question(), 1, cog)
+        interaction = MagicMock()
+        interaction.user.id = registered_player
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        monkeypatch.setattr(trivia_mod, "generate_question", lambda _streak, _recent: None)
+
+        initial = player_service.get_balance(registered_player, TEST_GUILD_ID)
+        await view._handle_answer(interaction, 1)
+
+        assert session.streak == 1
+        assert session.total_jc == 1
+        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 1
+
+    @pytest.mark.asyncio
+    async def test_correct_answer_awards_streak_bonus_on_milestone(
+        self, player_service, registered_player, monkeypatch
+    ):
+        import commands.trivia as trivia_mod
+
+        bot = SimpleNamespace(
+            player_service=player_service,
+            mana_effects_service=None,
+            bankruptcy_service=None,
+        )
+        cog = trivia_mod.TriviaCog(bot)
+        session = trivia_mod.TriviaSession(
+            user_id=registered_player,
+            guild_id=TEST_GUILD_ID,
+            user=_trivia_user(registered_player),
+            streak=2,
+        )
+        cog._sessions[(registered_player, TEST_GUILD_ID)] = session
+        view = trivia_mod.TriviaView(session, _trivia_question(), 3, cog)
+        interaction = MagicMock()
+        interaction.user.id = registered_player
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        monkeypatch.setattr(trivia_mod, "generate_question", lambda _streak, _recent: None)
+
+        initial = player_service.get_balance(registered_player, TEST_GUILD_ID)
+        await view._handle_answer(interaction, 1)
+
+        assert session.streak == 3
+        assert session.total_jc == 2
+        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 2
 
 
 class TestTriviaCooldown:
