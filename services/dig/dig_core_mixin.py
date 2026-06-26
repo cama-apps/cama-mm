@@ -914,8 +914,18 @@ class DigCoreMixin:
                 )
                 if skimmed:
                     jc_earned = max(0, jc_earned - skimmed)
+                bonus = self.buff_service.apply_positive_gain_bonuses(
+                    discord_id, guild_id, jc_earned, self.player_repo
+                )
+                if bonus:
+                    jc_earned += bonus
+                grave_skimmed = self.buff_service.apply_grave_contract_skim(
+                    discord_id, guild_id, jc_earned, self.player_repo
+                )
+                if grave_skimmed:
+                    jc_earned = max(0, jc_earned - grave_skimmed)
             except Exception:
-                logger.exception("Failed to apply Blood Pact skim to dig payout")
+                logger.exception("Failed to apply manashop buff effects to dig payout")
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({

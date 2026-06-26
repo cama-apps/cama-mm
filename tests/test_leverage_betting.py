@@ -2,13 +2,17 @@
 Tests for leverage betting, negative balances, and garnishment.
 """
 
+import json
+import sqlite3
 import time
 
 import pytest
 
 from repositories.bet_repository import BetRepository
+from repositories.buff_repository import BuffRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
+from services.buff_service import BuffService
 from services.garnishment_service import GarnishmentService
 from tests.conftest import TEST_GUILD_ID
 
@@ -31,6 +35,11 @@ def betting_service(bet_repo, player_repo):
         leverage_tiers=[2, 3, 5],
         max_debt=500,
     )
+
+
+@pytest.fixture
+def buff_service(repo_db_path):
+    return BuffService(BuffRepository(repo_db_path))
 
 
 class TestLeverageBetting:
@@ -194,6 +203,90 @@ class TestLeverageBetting:
                 amount=10,
                 pending_state=pending_state,
                 leverage=4,  # Not in [2, 3, 5]
+            )
+
+    def test_reckless_ritual_allows_one_7x_bet_and_loser_burns(
+        self, bet_repo, player_repo, buff_service
+    ):
+        player_repo.add(
+            discord_id=1006,
+            discord_username="Reckless",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=1500,
+            preferred_roles=["1"],
+        )
+        player_repo.update_balance(1006, TEST_GUILD_ID, 100)
+        buff_service.grant_reckless_ritual(1006, TEST_GUILD_ID)
+
+        betting_service = BettingService(
+            bet_repo,
+            player_repo,
+            leverage_tiers=[2, 3, 5],
+            max_debt=500,
+            buff_service=buff_service,
+        )
+
+        from domain.models.pending_match_state import PendingMatchState
+        now_ts = int(time.time())
+        pending_state = PendingMatchState(
+            shuffle_timestamp=now_ts - 1,
+            bet_lock_until=now_ts + 600,
+            radiant_team_ids=[],
+            dire_team_ids=[],
+            betting_mode="house",
+        )
+        with sqlite3.connect(bet_repo.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO pending_matches (guild_id, payload) VALUES (?, ?)",
+                (
+                    TEST_GUILD_ID,
+                    json.dumps({
+                        "shuffle_timestamp": pending_state.shuffle_timestamp,
+                        "bet_lock_until": pending_state.bet_lock_until,
+                        "radiant_team_ids": [],
+                        "dire_team_ids": [],
+                        "betting_mode": "house",
+                    }),
+                ),
+            )
+            pending_state.pending_match_id = cursor.lastrowid
+
+        betting_service.place_bet(
+            TEST_GUILD_ID, 1006, "radiant", 10, pending_state, leverage=7
+        )
+        assert player_repo.get_balance(1006, TEST_GUILD_ID) == 30
+        assert buff_service.has_reckless_ritual(1006, TEST_GUILD_ID) is False
+
+        distributions = betting_service.settle_bets(
+            900, TEST_GUILD_ID, "dire", pending_state
+        )
+
+        assert player_repo.get_balance(1006, TEST_GUILD_ID) == 20
+        assert distributions["losers"][0]["reckless_ritual_burn"] == 10
+
+    def test_7x_without_reckless_ritual_rejected(self, betting_service, player_repo):
+        player_repo.add(
+            discord_id=1007,
+            discord_username="NoRitual",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=1500,
+            preferred_roles=["1"],
+        )
+        player_repo.update_balance(1007, TEST_GUILD_ID, 100)
+
+        from domain.models.pending_match_state import PendingMatchState
+        now_ts = int(time.time())
+        pending_state = PendingMatchState(
+            shuffle_timestamp=now_ts - 1,
+            bet_lock_until=now_ts + 600,
+            radiant_team_ids=[],
+            dire_team_ids=[],
+        )
+
+        with pytest.raises(ValueError, match="7x leverage requires"):
+            betting_service.place_bet(
+                TEST_GUILD_ID, 1007, "radiant", 10, pending_state, leverage=7
             )
 
 

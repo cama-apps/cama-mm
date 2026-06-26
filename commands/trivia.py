@@ -307,6 +307,28 @@ class TriviaView(discord.ui.View):
                         self.session.guild_id,
                         jc,
                     )
+                    buff_service = getattr(self.cog.bot, "buff_service", None)
+                    player_repo = getattr(self.cog.bot, "player_repo", None)
+                    if buff_service is not None and player_repo is not None:
+                        bonus = await asyncio.to_thread(
+                            buff_service.apply_positive_gain_bonuses,
+                            self.session.user_id,
+                            self.session.guild_id,
+                            jc,
+                            player_repo,
+                        )
+                        if bonus:
+                            jc += bonus
+                            self.session.total_jc += bonus
+                        skimmed = await asyncio.to_thread(
+                            buff_service.apply_grave_contract_skim,
+                            self.session.user_id,
+                            self.session.guild_id,
+                            jc,
+                            player_repo,
+                        )
+                        if skimmed:
+                            jc = max(0, jc - skimmed)
                 except Exception:
                     logger.exception("Failed to award trivia JC")
 

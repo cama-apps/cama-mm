@@ -10,9 +10,14 @@ from repositories.buff_repository import BuffRepository
 from repositories.mana_repository import ManaRepository
 from repositories.slow_drip_repository import SlowDripRepository
 from services.buff_service import (
+    BUFF_ALMS_ROUND,
     BUFF_COUNTERSPELL,
     BUFF_DARK_BARGAIN,
+    BUFF_GRAVE_CONTRACT,
     BUFF_OVERGROWTH,
+    BUFF_RECKLESS_RITUAL,
+    BUFF_TRANSMUTE,
+    BUFF_VERDANT_RESERVE,
     BuffService,
 )
 from tests.conftest import TEST_GUILD_ID
@@ -399,6 +404,75 @@ def test_overgrowth_regrant_collapses_pre_existing_duplicates(buff_service, buff
     assert len(surviving) == 1
     assert surviving[0]["id"] == new_id
     assert new_id not in (leaked_a, leaked_b)
+
+
+def test_high_tier_buff_grants_and_transmute_refresh(buff_service, buff_repo):
+    first = buff_service.grant_transmute(USER, TEST_GUILD_ID)
+    second = buff_service.grant_transmute(USER, TEST_GUILD_ID)
+
+    active = buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_TRANSMUTE)
+    assert len(active) == 1
+    assert active[0]["id"] == second
+    assert active[0]["id"] != first
+    assert buff_service.has_transmute(USER, TEST_GUILD_ID) is True
+
+
+def test_reckless_ritual_consumes_once(buff_service, buff_repo):
+    buff_service.grant_reckless_ritual(USER, TEST_GUILD_ID)
+
+    assert buff_service.has_reckless_ritual(USER, TEST_GUILD_ID) is True
+    assert buff_service.consume_reckless_ritual(USER, TEST_GUILD_ID) is True
+    assert buff_service.consume_reckless_ritual(USER, TEST_GUILD_ID) is False
+    assert buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_RECKLESS_RITUAL) == []
+
+
+def test_verdant_and_alms_positive_gain_bonuses(repo_db_path, buff_service, buff_repo):
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Buffed", guild_id=TEST_GUILD_ID)
+    player_repo.update_balance(USER, TEST_GUILD_ID, 0)
+    buff_service.grant_verdant_reserve(USER, TEST_GUILD_ID)
+    buff_service.grant_alms_round(USER, TEST_GUILD_ID)
+
+    first_bonus = buff_service.apply_positive_gain_bonuses(
+        USER, TEST_GUILD_ID, 70, player_repo
+    )
+    second_bonus = buff_service.apply_positive_gain_bonuses(
+        USER, TEST_GUILD_ID, 100, player_repo
+    )
+    buff_service.apply_positive_gain_bonuses(USER, TEST_GUILD_ID, 10, player_repo)
+
+    assert first_bonus == 6  # Verdant is capped to 75 total, then Alms adds +1.
+    assert second_bonus == 1  # Verdant cannot boost gains already over its cap.
+    assert player_repo.get_balance(USER, TEST_GUILD_ID) == 6 + 1 + 11
+    assert buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_VERDANT_RESERVE) == []
+    assert buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_ALMS_ROUND)[0]["data"]["charges_remaining"] == 7
+
+
+def test_grave_contract_skims_positive_gains_with_cap(repo_db_path, buff_service, buff_repo):
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Skimmer", guild_id=TEST_GUILD_ID)
+    player_repo.add(discord_id=TARGET, discord_username="Target", guild_id=TEST_GUILD_ID)
+    player_repo.update_balance(USER, TEST_GUILD_ID, 0)
+    player_repo.update_balance(TARGET, TEST_GUILD_ID, 500)
+    buff_service.grant_grave_contract(USER, TEST_GUILD_ID, TARGET)
+
+    first = buff_service.apply_grave_contract_skim(
+        TARGET, TEST_GUILD_ID, 400, player_repo
+    )
+    second = buff_service.apply_grave_contract_skim(
+        TARGET, TEST_GUILD_ID, 400, player_repo
+    )
+
+    assert first == 60
+    assert second == 40
+    assert player_repo.get_balance(USER, TEST_GUILD_ID) == 100
+    assert player_repo.get_balance(TARGET, TEST_GUILD_ID) == 400
+    active = buff_repo.active_targeted_at(TARGET, TEST_GUILD_ID, BUFF_GRAVE_CONTRACT)
+    assert active[0]["data"]["skimmed_total"] == 100
 
 
 def test_cleanup_expired_prunes_old_rows(buff_service, buff_repo):
