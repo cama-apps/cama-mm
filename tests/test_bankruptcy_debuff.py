@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from commands.trivia import _jc_for_streak
+from commands.trivia import _jc_for_streak, _streak_bonus_for_streak
 from config import (
     BANKRUPTCY_PENALTY_GAMES,
     BANKRUPTCY_PENALTY_RATE,
@@ -349,47 +349,48 @@ class TestDigDebuff:
 
 
 # --------------------------------------------------------------------------- #
-# /trivia — milestone payouts (debuff applied in commands/trivia.py)
+# /trivia — base payouts plus streak bonuses (debuff applied in commands/trivia.py)
 # --------------------------------------------------------------------------- #
 
 
 class TestTriviaDebuff:
-    """Trivia milestone payouts are debuffed for a bankrupt player.
+    """Trivia streak-bonus payouts are debuffed for a bankrupt player.
 
-    The trivia view (``commands/trivia.py:_handle_answer``) runs its milestone JC
-    through ``apply_penalty_to_winnings`` as the last step before crediting. That
+    The trivia view (``commands/trivia.py:_handle_answer``) runs streak-bonus JC
+    through ``apply_penalty_to_winnings`` before adding the base reward. That
     payout lives inside a Discord View and isn't unit-invokable, so — mirroring
-    the trivia coverage in ``test_bankruptcy_buffs.py`` — we pin the building
-    blocks the view composes: the buffed milestone schedule and the per-source
-    debuff applied to it. Trivia must NOT clear the penalty; only inhouse match
-    wins do.
+    the trivia coverage in ``test_bankruptcy_buffs.py`` — we pin the helper
+    schedule and the per-source debuff applied to it. Trivia must NOT clear the
+    penalty; only inhouse match wins do.
     """
 
-    def test_hard_tier_milestone_buffed_to_two(self):
-        # Buff: the hard tier (streak 10) now pays +2; everything else unchanged.
-        assert _jc_for_streak(3) == 1
-        assert _jc_for_streak(6) == 1
-        assert _jc_for_streak(10) == 2
-        assert _jc_for_streak(14) == 1  # challenging cadence (+1 every 4) intact
-        assert _jc_for_streak(7) == 0  # non-milestone streaks award nothing
+    def test_base_reward_plus_hard_tier_streak_bonus(self):
+        # Base reward: 1 JC per correct answer. Streak 10 adds the +2 hard-tier bonus.
+        assert _streak_bonus_for_streak(3) == 1
+        assert _streak_bonus_for_streak(6) == 1
+        assert _streak_bonus_for_streak(10) == 2
+        assert _streak_bonus_for_streak(14) == 1  # challenging cadence (+1 every 4) intact
+        assert _streak_bonus_for_streak(7) == 0  # non-milestone streaks add no bonus
+        assert _jc_for_streak(7) == 1
+        assert _jc_for_streak(10) == 3
 
-    def test_penalized_trivia_milestone_is_not_zeroed_by_rounding(self, repos, bankruptcy_service):
+    def test_penalized_trivia_streak_bonus_is_not_zeroed_by_rounding(self, repos, bankruptcy_service):
         pid = 8001
         _add_player(repos["player"], pid)
         _penalize(repos, bankruptcy_service, pid)
 
-        # Milestone payouts are tiny (1-2 JC). The debuff floors the *withheld*
+        # Streak bonuses are tiny (1-2 JC). The debuff floors the *withheld*
         # share (int(amount * 0.25)), not the kept amount, so on these small
-        # payouts the penalty rounds to 0 and the bankrupt player keeps the whole
-        # milestone — instead of having a 1-JC payout zeroed out entirely.
-        assert _jc_for_streak(10) == 2
+        # bonuses the penalty rounds to 0 and the bankrupt player keeps the whole
+        # bonus — instead of having a 1-JC bonus zeroed out entirely.
+        assert _streak_bonus_for_streak(10) == 2
         assert bankruptcy_service.apply_penalty_to_winnings(pid, 2, TEST_GUILD_ID)["penalized"] == 2
         assert bankruptcy_service.apply_penalty_to_winnings(pid, 1, TEST_GUILD_ID)["penalized"] == 1
 
-    def test_non_penalized_trivia_keeps_full_milestone(self, repos, bankruptcy_service):
+    def test_non_penalized_trivia_keeps_full_streak_bonus(self, repos, bankruptcy_service):
         pid = 8002
         _add_player(repos["player"], pid, balance=100)
-        jc = _jc_for_streak(10)
+        jc = _streak_bonus_for_streak(10)
         info = bankruptcy_service.apply_penalty_to_winnings(pid, jc, TEST_GUILD_ID)
         assert info["penalized"] == jc  # no bankruptcy declared -> full payout
         assert info["penalty_applied"] == 0
@@ -403,8 +404,10 @@ class TestTriviaDebuff:
         _penalize(repos, bankruptcy_service, pid)
 
         before = bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining
-        # Apply the trivia debuff several times (as multiple milestones would).
+        # Apply the trivia debuff several times (as multiple streak bonuses would).
         for _ in range(3):
-            bankruptcy_service.apply_penalty_to_winnings(pid, _jc_for_streak(10), TEST_GUILD_ID)
+            bankruptcy_service.apply_penalty_to_winnings(
+                pid, _streak_bonus_for_streak(10), TEST_GUILD_ID
+            )
         after = bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining
         assert after == before == BANKRUPTCY_PENALTY_GAMES
