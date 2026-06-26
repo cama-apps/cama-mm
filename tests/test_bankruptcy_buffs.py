@@ -290,14 +290,14 @@ class TestTriviaBankruptMultiplier:
         from config import TRIVIA_BANKRUPT_MULTIPLIER
         from domain.models.mana_effects import ManaEffects
         red = ManaEffects.for_color("Red", "Mountain")
-        # Simulate the trivia milestone math: jc=1 (milestone hit)
+        # Simulate the trivia streak-bonus math: jc=1 (bonus hit)
         jc = 1
         jc = max(1, int(jc * red.trivia_payout_multiplier))  # 1 * 1.5 → 1
         jc = max(1, int(jc * TRIVIA_BANKRUPT_MULTIPLIER))    # 1 * 2 → 2
         assert jc == 2
 
-    def test_stack_with_red_mana_higher_milestone(self):
-        """At higher base milestone, stacking gives clean 3x effect."""
+    def test_stack_with_red_mana_higher_streak_bonus(self):
+        """At higher base streak bonus, stacking gives clean 3x effect."""
         from config import TRIVIA_BANKRUPT_MULTIPLIER
         from domain.models.mana_effects import ManaEffects
         red = ManaEffects.for_color("Red", "Mountain")

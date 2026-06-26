@@ -417,7 +417,7 @@ PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TR
 TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours
 TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
 TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
-TRIVIA_BANKRUPT_MULTIPLIER = _parse_float("TRIVIA_BANKRUPT_MULTIPLIER", 2.0)  # Milestone multiplier when balance ≤ 0
+TRIVIA_BANKRUPT_MULTIPLIER = _parse_float("TRIVIA_BANKRUPT_MULTIPLIER", 2.0)  # Streak-bonus multiplier when balance ≤ 0
 
 # White mana stipend (paid from nonprofit fund on /mana claim while bankrupt)
 WHITE_BANKRUPT_STIPEND = _parse_int("WHITE_BANKRUPT_STIPEND", 5)

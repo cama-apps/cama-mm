@@ -14,7 +14,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_gamba_channel
-from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS
+from config import (
+    TRIVIA_ANSWER_TIMEOUT_SECONDS,
+    TRIVIA_COOLDOWN_SECONDS,
+    TRIVIA_REWARD_PER_QUESTION,
+)
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question
@@ -33,8 +37,8 @@ DIFFICULTY_COLORS = {
 _TIER_BREAKPOINTS = frozenset({3, 6, 10})  # end of easy, medium, hard
 
 
-def _jc_for_streak(streak: int) -> int:
-    """JC earned for reaching this streak.
+def _streak_bonus_for_streak(streak: int) -> int:
+    """Bonus JC earned for reaching this streak.
 
     +1 JC for the easy/medium tiers (streak 3, 6), +2 for the hard tier
     (streak 10), then +1 JC every 4 questions in uncapped challenging mode.
@@ -46,6 +50,11 @@ def _jc_for_streak(streak: int) -> int:
     if streak > 10 and (streak - 10) % 4 == 0:
         return 1
     return 0
+
+
+def _jc_for_streak(streak: int) -> int:
+    """Total JC earned for a correct answer at this streak."""
+    return TRIVIA_REWARD_PER_QUESTION + _streak_bonus_for_streak(streak)
 
 
 OPTION_LABELS = ["A", "B", "C", "D"]
@@ -200,29 +209,31 @@ class TriviaView(discord.ui.View):
 
         if is_correct:
             self.session.streak += 1
-            jc = _jc_for_streak(self.session.streak)
+            jc = TRIVIA_REWARD_PER_QUESTION
+            streak_bonus_jc = _streak_bonus_for_streak(self.session.streak)
             self.session.recent_categories.append(self.question.category)
 
-            # Apply mana effects on milestone payouts (jc > 0 = milestone hit).
+            # Apply mana/bankruptcy effects to streak bonuses only. The base
+            # correct-answer reward stays a steady 1 JC.
             mana_tithe = 0
-            if jc > 0:
+            effects = None
+            if streak_bonus_jc > 0:
                 mana_fx = getattr(self.cog.bot, "mana_effects_service", None)
-                effects = None
                 if mana_fx is not None:
                     try:
                         effects = await asyncio.to_thread(
                             mana_fx.get_effects, self.session.user_id, self.session.guild_id
                         )
-                        # Red: +50% milestone payout
+                        # Red: +50% streak-bonus payout
                         if effects.trivia_payout_multiplier and effects.trivia_payout_multiplier != 1.0:
-                            jc = max(1, int(jc * effects.trivia_payout_multiplier))
-                        # Green: +1 steady per milestone
+                            streak_bonus_jc = max(1, int(streak_bonus_jc * effects.trivia_payout_multiplier))
+                        # Green: +1 steady per streak bonus
                         if effects.trivia_streak_bonus > 0:
-                            jc += effects.trivia_streak_bonus
+                            streak_bonus_jc += effects.trivia_streak_bonus
                     except Exception:
                         logger.exception("Failed to apply trivia mana effects")
                         effects = None
-                # Bankrupt buff: multiply milestone payout when balance ≤ 0.
+                # Bankrupt buff: multiply streak-bonus payout when balance ≤ 0.
                 # Stacks multiplicatively with mana effects above.
                 try:
                     from config import TRIVIA_BANKRUPT_MULTIPLIER
@@ -231,11 +242,11 @@ class TriviaView(discord.ui.View):
                         player_service.get_balance, self.session.user_id, self.session.guild_id
                     )
                     if pre_balance <= 0 and TRIVIA_BANKRUPT_MULTIPLIER != 1.0:
-                        jc = max(1, int(jc * TRIVIA_BANKRUPT_MULTIPLIER))
+                        streak_bonus_jc = max(1, int(streak_bonus_jc * TRIVIA_BANKRUPT_MULTIPLIER))
                 except Exception:
                     logger.exception("Failed to apply trivia bankrupt multiplier")
 
-                # Bankruptcy debuff: withhold a share of milestone winnings while
+                # Bankruptcy debuff: withhold a share of streak-bonus winnings while
                 # penalty games remain. Cleared only by inhouse match wins (not
                 # trivia), matching the other payout sources. The withheld JC is a
                 # coin sink — simply not minted.
@@ -245,43 +256,45 @@ class TriviaView(discord.ui.View):
                         info = await asyncio.to_thread(
                             bankruptcy_service.apply_penalty_to_winnings,
                             self.session.user_id,
-                            jc,
+                            streak_bonus_jc,
                             self.session.guild_id,
                         )
-                        jc = info["penalized"]
+                        streak_bonus_jc = info["penalized"]
                     except Exception:
                         logger.exception("Failed to apply trivia bankruptcy debuff")
 
+            jc += streak_bonus_jc
+
+            if effects is not None:
                 # White: tithe to the nonprofit fund from the player's NET payout
                 # (after the bankrupt buff and bankruptcy debuff), so the tithe is
                 # taken from what the player actually keeps and never drives their
                 # payout to zero. Skip if it would zero them out, or if
                 # loan_service is missing / fails — never destroy JC silently.
-                if effects is not None:
-                    loan_service = getattr(mana_fx, "loan_service", None)
-                    if (
-                        effects.plains_tithe_rate > 0
-                        and loan_service is not None
-                        and jc > 1
-                    ):
-                        mana_tithe = max(1, int(jc * effects.plains_tithe_rate))
-                        if mana_tithe < jc:
-                            try:
-                                await asyncio.to_thread(
-                                    loan_service.add_to_nonprofit_fund,
-                                    self.session.guild_id,
-                                    mana_tithe,
-                                    source="trivia",
-                                    related_type="plains_tithe",
-                                    reason="trivia plains tithe reserve credit",
-                                    metadata={"tithe": mana_tithe, "net_jc_before_tithe": jc},
-                                )
-                                jc -= mana_tithe
-                            except Exception:
-                                logger.warning(
-                                    "Trivia tithe transfer failed; tithe skipped.",
-                                    exc_info=True,
-                                )
+                loan_service = getattr(mana_fx, "loan_service", None)
+                if (
+                    effects.plains_tithe_rate > 0
+                    and loan_service is not None
+                    and jc > 1
+                ):
+                    mana_tithe = max(1, int(jc * effects.plains_tithe_rate))
+                    if mana_tithe < jc:
+                        try:
+                            await asyncio.to_thread(
+                                loan_service.add_to_nonprofit_fund,
+                                self.session.guild_id,
+                                mana_tithe,
+                                source="trivia",
+                                related_type="plains_tithe",
+                                reason="trivia plains tithe reserve credit",
+                                metadata={"tithe": mana_tithe, "net_jc_before_tithe": jc},
+                            )
+                            jc -= mana_tithe
+                        except Exception:
+                            logger.warning(
+                                "Trivia tithe transfer failed; tithe skipped.",
+                                exc_info=True,
+                            )
             self.session.total_jc += jc
 
             # Award jopacoin (only when jc > 0)
@@ -440,7 +453,7 @@ class TriviaCog(commands.Cog):
             except Exception:
                 logger.exception("Failed to record trivia session")
 
-    @app_commands.command(name="trivia", description="Test your Dota 2 knowledge! Earn 1 JC per correct answer.")
+    @app_commands.command(name="trivia", description="Test Dota 2 knowledge for 1 JC per correct answer plus streak bonuses.")
     @app_commands.checks.cooldown(1, 5.0)  # Rate limit: 1 per 5 seconds
     async def trivia(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):

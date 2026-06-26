@@ -322,7 +322,7 @@ Play a Dota 2 trivia question. Questions span heroes, abilities, and items acros
 | 6–9 | Hard | Scepter/shard upgrades, item cost exact, ability lore, item lore, hero bio, move speed, ability cooldown, ability mana cost, item active cooldown, armor at level 1, attack damage |
 | 10+ | Challenging | Voiceline, base attack time, attribute gain per level, night vision, turn rate |
 
-Each question has 4 options with a 30-second timer. A correct answer extends your streak; a wrong answer resets it.
+Each question has 4 options with a 30-second timer. A correct answer awards 1 JC and extends your streak; a wrong answer resets it. Streak bonuses add +1 JC at streaks 3 and 6, +2 JC at streak 10, then +1 JC every 4 correct answers after 10.
 
 #### `/trivia-reset-cooldown` (Admin)
 Reset the cooldown on the trivia streak for testing or moderation.

@@ -80,8 +80,8 @@ class ManaEffects:
     shop_consumable_discount_rate: float = 0.0  # Green: -5% on consumables
 
     # --- Trivia ---
-    trivia_streak_bonus: int = 0  # Green: +1 JC per streak milestone
-    trivia_payout_multiplier: float = 1.0  # Red: +50% milestone payout
+    trivia_streak_bonus: int = 0  # Green: +1 JC per streak bonus
+    trivia_payout_multiplier: float = 1.0  # Red: +50% streak-bonus payout
     trivia_hint_bonus: int = 0  # Blue: +1 hint slot per session
 
     # --- Loan / debt economy ---
@@ -148,7 +148,7 @@ class ManaEffects:
                 # Boss combat: damage variance bump + dynamite-vs-boss boost
                 boss_damage_variance_modifier=0.15,
                 boss_dynamite_damage_mult=1.5,
-                # Trivia: amplified milestone payouts
+                # Trivia: amplified streak-bonus payouts
                 trivia_payout_multiplier=1.5,
                 # Sabotage cheaper to fire
                 sabotage_cost_mult=0.5,
@@ -207,7 +207,7 @@ class ManaEffects:
                 pred_profit_cap_mult=2.0,
                 # Shop: consumable discount
                 shop_consumable_discount_rate=0.05,
-                # Trivia: per-milestone steady bonus
+                # Trivia: per-streak-bonus steady bonus
                 trivia_streak_bonus=1,
                 # Sabotage passive recovery
                 sabotage_passive_recovery=True,
