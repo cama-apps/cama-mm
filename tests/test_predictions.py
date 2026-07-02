@@ -939,9 +939,12 @@ def test_position_mark_falls_back_when_side_empty():
 
 
 from types import SimpleNamespace  # noqa: E402
-from unittest.mock import AsyncMock  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+import discord  # noqa: E402
 
 from commands.predictions import PredictionCommands  # noqa: E402
+from utils.thread_safety import THREAD_AUTO_ARCHIVE_MINUTES  # noqa: E402
 
 
 class _FakeFollowup:
@@ -1141,12 +1144,16 @@ async def test_refresh_status_lists_only_this_guild(
 class _FakeEmbedMessage:
     def __init__(self):
         self.calls: list[str] = []
+        self.edit_kwargs: dict | None = None
         self.thread: _FakeArchivableThread | None = None
 
     async def edit(self, **kwargs):
+        # Discord rejects message edits in archived threads (error 50083);
+        # note sends are different — they auto-unarchive unlocked threads.
         if self.thread is not None and self.thread.archived:
             raise RuntimeError("50083: Thread is archived")
         self.calls.append("msg.edit")
+        self.edit_kwargs = kwargs
 
 
 class _FakeArchivableThread:
@@ -1154,45 +1161,82 @@ class _FakeArchivableThread:
 
     def __init__(self, archived: bool, embed_msg: _FakeEmbedMessage):
         self.archived = archived
+        self.locked = False
+        self.auto_archive_duration = 1440
         self._embed_msg = embed_msg
         self.calls = embed_msg.calls  # shared ordered call log
         embed_msg.thread = self
 
-    async def edit(self, archived: bool):
+    async def edit(
+        self,
+        *,
+        archived: bool,
+        auto_archive_duration: int | None = None,
+        locked: bool | None = None,
+    ):
+        # Keyword-only, like the real Thread.edit.
         self.calls.append(f"thread.edit(archived={archived})")
         self.archived = archived
+        if auto_archive_duration is not None:
+            self.auto_archive_duration = auto_archive_duration
+        if locked is not None:
+            self.locked = locked
 
-    async def fetch_message(self, _msg_id):
+    async def fetch_message(self, msg_id):
+        self.calls.append("fetch_message")
+        assert msg_id == _EMBED_MSG_ID, f"unexpected message id {msg_id}"
         return self._embed_msg
 
 
-def _market_with_thread_ids(prediction_service, thread_id=555, embed_message_id=777):
+_THREAD_ID = 555
+_EMBED_MSG_ID = 777
+
+
+def _market_with_thread_ids(prediction_service):
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=999, question="Frozen embed?", initial_fair=50,
     )["prediction_id"]
-    with prediction_service.prediction_repo.connection() as conn:
-        conn.execute(
-            "UPDATE predictions SET thread_id = ?, embed_message_id = ? WHERE prediction_id = ?",
-            (thread_id, embed_message_id, pid),
-        )
+    prediction_service.prediction_repo.update_prediction_discord_ids(
+        pid, thread_id=_THREAD_ID, embed_message_id=_EMBED_MSG_ID
+    )
     return pid
+
+
+def _cog_with_uncached_thread(prediction_service, thread):
+    """Cog whose bot resolves the thread only via fetch_channel.
+
+    Mirrors production: discord.py evicts archived threads from the cache,
+    so get_channel returns None and the code must take the fetch fallback.
+    """
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.bot.get_channel = lambda cid: None
+    return cog
 
 
 async def test_refresh_market_embed_unarchives_thread_before_editing(prediction_service):
     """An auto-archived market thread must be revived before the message edit,
     otherwise Discord rejects the edit and the embed silently freezes forever
-    (the daily refresh keeps stamping last_refresh_at regardless)."""
+    (the daily refresh keeps stamping last_refresh_at regardless). The message
+    is fetched first — reading works in archived threads, and a vanished
+    message must not trigger a pointless revival. The revival also re-widens
+    the auto-archive window so pre-fix threads stop re-archiving daily."""
     msg = _FakeEmbedMessage()
     thread = _FakeArchivableThread(archived=True, embed_msg=msg)
 
     pid = _market_with_thread_ids(prediction_service)
-    cog = _make_cog(prediction_service, thread=thread)
+    cog = _cog_with_uncached_thread(prediction_service, thread)
     cog.render_market_chart_file = AsyncMock(return_value=None)
 
     await cog.refresh_market_embed(pid)
 
-    assert thread.calls == ["thread.edit(archived=False)", "msg.edit"]
+    assert thread.calls == ["fetch_message", "thread.edit(archived=False)", "msg.edit"]
     assert thread.archived is False
+    assert thread.auto_archive_duration == THREAD_AUTO_ARCHIVE_MINUTES
+    # The edit carried a real payload (a regression to attachments=None would
+    # TypeError in prod while a record-only fake stayed green).
+    assert msg.edit_kwargs is not None
+    assert "embed" in msg.edit_kwargs
+    assert msg.edit_kwargs["attachments"] == []
 
 
 async def test_refresh_market_embed_leaves_live_thread_alone(prediction_service):
@@ -1206,7 +1250,99 @@ async def test_refresh_market_embed_leaves_live_thread_alone(prediction_service)
 
     await cog.refresh_market_embed(pid)
 
-    assert thread.calls == ["msg.edit"]
+    assert thread.calls == ["fetch_message", "msg.edit"]
+
+
+async def test_refresh_market_embed_vanished_message_does_not_revive_thread(
+    prediction_service,
+):
+    """A deleted embed message must not turn the thread into a daily-revived
+    zombie: fetch_message raises NotFound before any unarchive happens."""
+
+    class _GoneMessageThread(_FakeArchivableThread):
+        async def fetch_message(self, msg_id):
+            self.calls.append("fetch_message")
+            raise discord.NotFound(MagicMock(status=404), "message deleted")
+
+    msg = _FakeEmbedMessage()
+    thread = _GoneMessageThread(archived=True, embed_msg=msg)
+
+    pid = _market_with_thread_ids(prediction_service)
+    cog = _cog_with_uncached_thread(prediction_service, thread)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    await cog.refresh_market_embed(pid)
+
+    assert thread.calls == ["fetch_message"]
+    assert thread.archived is True
+
+
+async def test_resolve_rewrites_embed_and_archives_even_if_announcement_fails(
+    prediction_service, patched_cog_helpers
+):
+    """The resolve announcement must not gate the embed rewrite or the thread
+    lock: payouts have already happened, so a failed send would otherwise
+    leave a live-looking book on a settled market forever. The thread is also
+    revived first, so resolving a market whose thread auto-archived works."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    class _FailingSendThread(_FakeArchivableThread):
+        async def send(self, content):
+            raise RuntimeError("send blocked (e.g. locked thread)")
+
+    msg = _FakeEmbedMessage()
+    thread = _FailingSendThread(archived=True, embed_msg=msg)
+
+    pid = _market_with_thread_ids(prediction_service)
+    cog = _cog_with_uncached_thread(prediction_service, thread)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.guild.text_channels = []
+    await cog.resolve.callback(cog, interaction, pid, SimpleNamespace(value="yes"))
+
+    assert prediction_service.get_prediction(pid)["status"] == "resolved"
+    # The resolved embed was rendered despite the failed announcement...
+    assert "msg.edit" in thread.calls
+    # ...and the thread still got locked + archived afterwards.
+    assert thread.locked is True
+    assert thread.archived is True
+
+
+async def test_create_uses_max_auto_archive_and_persists_thread_ids(
+    prediction_service, patched_cog_helpers
+):
+    """/predict create must open its thread with the widest auto-archive window
+    (quiet threads otherwise archive on the channel default and embed edits
+    start failing) and persist the ids the refresh loop needs."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    embed_msg = SimpleNamespace(id=777, pin=AsyncMock())
+    thread = SimpleNamespace(id=555, send=AsyncMock(return_value=embed_msg))
+    channel_msg = SimpleNamespace(id=333, create_thread=AsyncMock(return_value=thread))
+
+    cog = _make_cog(prediction_service)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.channel.send = AsyncMock(return_value=channel_msg)
+    interaction.channel_id = 11
+    interaction.user.mention = "<@999>"
+
+    await cog.create.callback(cog, interaction, "Will it archive?", 50)
+
+    create_kwargs = channel_msg.create_thread.await_args.kwargs
+    assert create_kwargs["auto_archive_duration"] == THREAD_AUTO_ARCHIVE_MINUTES
+
+    opens = prediction_service.list_open_orderbook_markets(TEST_GUILD_ID)
+    assert len(opens) == 1
+    pred = prediction_service.get_prediction(opens[0]["prediction_id"])
+    assert pred["thread_id"] == 555
+    assert pred["embed_message_id"] == 777
 
 
 # --------------------------------------------------------------------------- #
