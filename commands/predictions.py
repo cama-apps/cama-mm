@@ -69,6 +69,13 @@ def _mark_value_jopa(mark_pct: float | int | None, qty: int) -> int:
 # Embed rendering
 # --------------------------------------------------------------------------- #
 
+# The daily refresh layers new price levels and leaves orphans in place, so a
+# long-lived market's book grows without bound — but an embed field caps at
+# 1024 chars, and one oversized field makes every msg.edit fail (silently
+# freezing the embed). Show only the rows nearest the mid on each side.
+_LADDER_MAX_ROWS_PER_SIDE = 8
+
+
 def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     """Return one embed field with a depth-of-market style buy-only book.
 
@@ -80,6 +87,11 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     asks = book.get("yes_asks", [])  # cheapest YES first
     bids = book.get("yes_bids", [])  # highest YES bid → cheapest NO first
     current = book.get("current_price")
+
+    hidden_asks = max(0, len(asks) - _LADDER_MAX_ROWS_PER_SIDE)
+    hidden_bids = max(0, len(bids) - _LADDER_MAX_ROWS_PER_SIDE)
+    asks = asks[:_LADDER_MAX_ROWS_PER_SIDE]
+    bids = bids[:_LADDER_MAX_ROWS_PER_SIDE]
 
     BAR_CAP = 10  # cap bar width so layered depth doesn't blow up the row
 
@@ -98,6 +110,8 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     # first, so reversed puts cheapest YES last (touching the mid line).
     lines = [f"{GREEN}🟢 Buy YES{RESET}"]
     if asks:
+        if hidden_asks:
+            lines.append(f"  (+{hidden_asks} deeper)")
         for p, s in reversed(asks):
             lines.append(f"{GREEN}{_row(p, s)}{RESET}")
     else:
@@ -124,6 +138,8 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     if bids:
         for p, s in bids:
             lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
+        if hidden_bids:
+            lines.append(f"  (+{hidden_bids} deeper)")
     else:
         lines.append("  (none — refreshes daily)")
 
@@ -833,6 +849,10 @@ class PredictionCommands(commands.Cog):
             if not thread_id or not embed_msg_id:
                 return
             channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+            # An auto-archived thread rejects message edits (50083), which
+            # would silently freeze the embed — revive it first.
+            if getattr(channel, "archived", False):
+                await channel.edit(archived=False)
             msg = await channel.fetch_message(embed_msg_id)
 
             if view["status"] == "resolved":
@@ -944,7 +964,12 @@ class PredictionCommands(commands.Cog):
                 f'"{question}" — starting at YES {initial_fair}%',
             )
             thread_name = f"Market #{prediction_id}: {question[:60]}"
-            thread = await channel_msg.create_thread(name=thread_name)
+            # Max auto-archive window: trade confirmations are ephemeral, so
+            # Discord sees no thread activity and archives on the channel
+            # default (as little as 24h), breaking daily embed refreshes.
+            thread = await channel_msg.create_thread(
+                name=thread_name, auto_archive_duration=10080
+            )
 
             view_data = await asyncio.to_thread(
                 self.prediction_service.get_market_view, prediction_id

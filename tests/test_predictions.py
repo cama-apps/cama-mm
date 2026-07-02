@@ -985,7 +985,7 @@ class _FakeInteraction:
         self.followup = _FakeFollowup()
 
 
-def _make_cog(prediction_service, thread: _FakeThread | None = None) -> PredictionCommands:
+def _make_cog(prediction_service, thread=None) -> PredictionCommands:
     bot = SimpleNamespace()
     bot.prediction_service = prediction_service
     bot.player_service = SimpleNamespace()
@@ -1131,6 +1131,82 @@ async def test_refresh_status_lists_only_this_guild(
     assert f"{p1:>4}" in body
     assert f"{p2:>4}" in body
     assert f"{p_other:>4}" not in body
+
+
+# --------------------------------------------------------------------------- #
+# refresh_market_embed — archived-thread recovery
+# --------------------------------------------------------------------------- #
+
+
+class _FakeEmbedMessage:
+    def __init__(self):
+        self.calls: list[str] = []
+        self.thread: _FakeArchivableThread | None = None
+
+    async def edit(self, **kwargs):
+        if self.thread is not None and self.thread.archived:
+            raise RuntimeError("50083: Thread is archived")
+        self.calls.append("msg.edit")
+
+
+class _FakeArchivableThread:
+    """Thread stand-in that rejects message edits while archived (50083)."""
+
+    def __init__(self, archived: bool, embed_msg: _FakeEmbedMessage):
+        self.archived = archived
+        self._embed_msg = embed_msg
+        self.calls = embed_msg.calls  # shared ordered call log
+        embed_msg.thread = self
+
+    async def edit(self, archived: bool):
+        self.calls.append(f"thread.edit(archived={archived})")
+        self.archived = archived
+
+    async def fetch_message(self, _msg_id):
+        return self._embed_msg
+
+
+def _market_with_thread_ids(prediction_service, thread_id=555, embed_message_id=777):
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Frozen embed?", initial_fair=50,
+    )["prediction_id"]
+    with prediction_service.prediction_repo.connection() as conn:
+        conn.execute(
+            "UPDATE predictions SET thread_id = ?, embed_message_id = ? WHERE prediction_id = ?",
+            (thread_id, embed_message_id, pid),
+        )
+    return pid
+
+
+async def test_refresh_market_embed_unarchives_thread_before_editing(prediction_service):
+    """An auto-archived market thread must be revived before the message edit,
+    otherwise Discord rejects the edit and the embed silently freezes forever
+    (the daily refresh keeps stamping last_refresh_at regardless)."""
+    msg = _FakeEmbedMessage()
+    thread = _FakeArchivableThread(archived=True, embed_msg=msg)
+
+    pid = _market_with_thread_ids(prediction_service)
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    await cog.refresh_market_embed(pid)
+
+    assert thread.calls == ["thread.edit(archived=False)", "msg.edit"]
+    assert thread.archived is False
+
+
+async def test_refresh_market_embed_leaves_live_thread_alone(prediction_service):
+    """No spurious thread.edit round-trips when the thread is not archived."""
+    msg = _FakeEmbedMessage()
+    thread = _FakeArchivableThread(archived=False, embed_msg=msg)
+
+    pid = _market_with_thread_ids(prediction_service)
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    await cog.refresh_market_embed(pid)
+
+    assert thread.calls == ["msg.edit"]
 
 
 # --------------------------------------------------------------------------- #
