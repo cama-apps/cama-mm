@@ -194,6 +194,9 @@ async def _process_one_refresh(market: dict) -> None:
         return
     try:
         thread = bot.get_channel(thread_id) or await bot.fetch_channel(thread_id)
+        # Sends to an auto-archived thread fail (50083); revive it first.
+        if getattr(thread, "archived", False):
+            await thread.edit(archived=False)
         biggest = trade_summary.get("biggest_trade")
         biggest_str = ""
         if biggest:

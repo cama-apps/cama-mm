@@ -253,3 +253,60 @@ async def test_post_digest_no_chart_when_nothing_moved(bot_module):
     cog.render_market_chart_file.assert_not_awaited()
     cog.announce_to_gamba.assert_awaited_once()
     assert cog.announce_to_gamba.await_args.kwargs["file"] is None
+
+
+# --------------------------------------------------------------------------- #
+# _process_one_refresh — daily-summary post into an auto-archived thread
+# --------------------------------------------------------------------------- #
+
+
+class _ArchivedThread:
+    """Thread stand-in: sends fail while archived (Discord error 50083)."""
+
+    def __init__(self):
+        self.archived = True
+        self.sent: list[str] = []
+
+    async def edit(self, archived: bool):
+        self.archived = archived
+
+    async def send(self, content):
+        if self.archived:
+            raise RuntimeError("50083: Thread is archived")
+        self.sent.append(content)
+
+
+async def test_process_one_refresh_unarchives_thread_for_daily_summary(bot_module):
+    """The daily summary is the only message keeping market threads alive; if
+    the thread auto-archived first, the send must revive it, not fail silently."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    thread = _ArchivedThread()
+    summary = {
+        "skipped": False,
+        "old_price": 50,
+        "new_price": 55,
+        "trade_summary": {
+            "trade_count": 2,
+            "total_volume": 7,
+            "yes_volume": 4,
+            "no_volume": 3,
+            "biggest_trade": None,
+        },
+    }
+    svc = MagicMock()
+    svc.refresh_market = MagicMock(return_value=summary)
+    cog = MagicMock()
+    cog.refresh_market_embed = AsyncMock()
+
+    with (
+        patch.object(bot_module.bot, "prediction_service", svc, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_channel", return_value=thread),
+    ):
+        await bot_module._process_one_refresh({"prediction_id": 1, "thread_id": 999})
+
+    cog.refresh_market_embed.assert_awaited_once_with(1)
+    assert thread.archived is False
+    assert len(thread.sent) == 1
+    assert "Daily refresh" in thread.sent[0]

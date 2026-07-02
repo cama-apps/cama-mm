@@ -163,6 +163,41 @@ def test_ladder_handles_missing_current_price():
     assert "price" not in value
 
 
+def test_ladder_caps_rows_and_stays_under_embed_field_limit():
+    """A long-lived market accumulates orphan levels from the daily refresh.
+    Unbounded rows overflow Discord's 1024-char field cap, which makes every
+    embed edit fail and silently freezes the market embed — the ladder must
+    keep only the rows nearest the mid and stay under the limit."""
+    book = {
+        "current_price": 50,
+        "yes_asks": [(51 + i, 10) for i in range(30)],  # 51..80, cheapest first
+        "yes_bids": [(49 - i, 10) for i in range(30)],  # 49..20, best bid first
+    }
+    value = _build_ladder_fields(book)[0][1]
+    assert len(value) <= 1024
+    # The rows nearest the mid survive on both sides (ask 51; bid 49 → NO 51).
+    assert "  51  " in value
+    # Deep orphan levels are dropped (ask 80 and bid 20 → NO 80 both hidden).
+    assert "  80  " not in value
+    # Hidden depth is surfaced honestly, once per side.
+    assert value.count("(+22 deeper)") == 2
+    # Mid line still reflects the true top of book.
+    assert "YES 51%" in value and "NO 51%" in value
+
+
+def test_ladder_no_truncation_marker_when_book_fits():
+    """Books at or under the per-side cap render every row, no marker."""
+    book = {
+        "current_price": 50,
+        "yes_asks": [(51 + i, 10) for i in range(8)],
+        "yes_bids": [(49 - i, 10) for i in range(8)],
+    }
+    value = _build_ladder_fields(book)[0][1]
+    assert "deeper" not in value
+    # All 8 ask rows render, including the deepest.
+    assert "  58  " in value
+
+
 # --------------------------------------------------------------------------- #
 # _trade_link — discord deep link to the trade-buttons message
 # --------------------------------------------------------------------------- #
