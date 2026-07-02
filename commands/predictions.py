@@ -35,6 +35,7 @@ from utils.drawing.predictions import draw_market_fair_history
 from utils.formatting import JOPACOIN_EMOTE, format_duration_short
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service, send_neon_result
+from utils.thread_safety import THREAD_AUTO_ARCHIVE_MINUTES, ensure_thread_writable
 
 logger = logging.getLogger("cama_bot.commands.predictions")
 
@@ -88,8 +89,12 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     bids = book.get("yes_bids", [])  # highest YES bid → cheapest NO first
     current = book.get("current_price")
 
+    # Disclose the worst hidden price on each side: buys sweep the whole book,
+    # so a large order can fill at levels the capped view doesn't show.
     hidden_asks = max(0, len(asks) - _LADDER_MAX_ROWS_PER_SIDE)
     hidden_bids = max(0, len(bids) - _LADDER_MAX_ROWS_PER_SIDE)
+    worst_hidden_yes = asks[-1][0] if hidden_asks else None
+    worst_hidden_no = (100 - bids[-1][0]) if hidden_bids else None
     asks = asks[:_LADDER_MAX_ROWS_PER_SIDE]
     bids = bids[:_LADDER_MAX_ROWS_PER_SIDE]
 
@@ -110,8 +115,9 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     # first, so reversed puts cheapest YES last (touching the mid line).
     lines = [f"{GREEN}🟢 Buy YES{RESET}"]
     if asks:
+        # Marker sits at the deep edge, away from the mid, on both sides.
         if hidden_asks:
-            lines.append(f"  (+{hidden_asks} deeper)")
+            lines.append(f"  (+{hidden_asks} deeper to {worst_hidden_yes})")
         for p, s in reversed(asks):
             lines.append(f"{GREEN}{_row(p, s)}{RESET}")
     else:
@@ -139,7 +145,7 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
         for p, s in bids:
             lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
         if hidden_bids:
-            lines.append(f"  (+{hidden_bids} deeper)")
+            lines.append(f"  (+{hidden_bids} deeper to {worst_hidden_no})")
     else:
         lines.append("  (none — refreshes daily)")
 
@@ -849,10 +855,8 @@ class PredictionCommands(commands.Cog):
             if not thread_id or not embed_msg_id:
                 return
             channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
-            # An auto-archived thread rejects message edits (50083), which
-            # would silently freeze the embed — revive it first.
-            if getattr(channel, "archived", False):
-                await channel.edit(archived=False)
+            # Fetch before any unarchive: reading works in archived threads,
+            # and a vanished message must not revive the thread for nothing.
             msg = await channel.fetch_message(embed_msg_id)
 
             if view["status"] == "resolved":
@@ -862,6 +866,12 @@ class PredictionCommands(commands.Cog):
                 embed = self._build_cancelled_embed(view)
                 await msg.edit(embed=embed, view=None, attachments=[])
             else:
+                # An archived thread rejects message edits (50083), which
+                # would silently freeze the embed — revive it first. Open
+                # markets only: resolve/cancel manage their thread's archive
+                # state themselves, and a market resolved mid-refresh must
+                # not have its just-archived thread reopened here.
+                await ensure_thread_writable(channel)
                 chart_file = await self.render_market_chart_file(view)
                 chart_filename = chart_file.filename if chart_file else None
                 embed = self._build_market_embed(view, chart_filename=chart_filename)
@@ -870,7 +880,12 @@ class PredictionCommands(commands.Cog):
         except discord.NotFound:
             logger.debug("Market embed message vanished for %s", prediction_id)
         except Exception as e:
-            logger.warning(f"Failed to refresh market embed: {e}")
+            logger.warning(
+                "Failed to refresh market embed for %s: %s",
+                prediction_id,
+                e,
+                exc_info=True,
+            )
 
     # -- guild gamba channel discovery (for digest / announcements) ---
 
@@ -964,11 +979,13 @@ class PredictionCommands(commands.Cog):
                 f'"{question}" — starting at YES {initial_fair}%',
             )
             thread_name = f"Market #{prediction_id}: {question[:60]}"
-            # Max auto-archive window: trade confirmations are ephemeral, so
-            # Discord sees no thread activity and archives on the channel
-            # default (as little as 24h), breaking daily embed refreshes.
+            # Widest auto-archive window: trade confirmations are ephemeral,
+            # so Discord sees no thread activity and archives on the channel
+            # default (as low as 60 minutes). Quiet markets can still archive
+            # after 7 days — ensure_thread_writable is what keeps refreshes
+            # working; this just makes revival rare.
             thread = await channel_msg.create_thread(
-                name=thread_name, auto_archive_duration=10080
+                name=thread_name, auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES
             )
 
             view_data = await asyncio.to_thread(
@@ -1073,8 +1090,15 @@ class PredictionCommands(commands.Cog):
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
-                await thread.send(announce)
+                # Revive an archived thread and rewrite the embed before the
+                # announcement — a failed send must not leave a paid-out
+                # market showing a live book.
+                await ensure_thread_writable(thread)
                 await self.refresh_market_embed(prediction_id)
+                try:
+                    await thread.send(announce)
+                except Exception as e:
+                    logger.warning(f"Failed to post resolve announcement: {e}")
                 try:
                     await thread.edit(locked=True, archived=True)
                 except discord.Forbidden:
@@ -1123,16 +1147,20 @@ class PredictionCommands(commands.Cog):
         )
         await safe_followup(interaction, content=announce)
 
+        # Refresh first (it revives an archived thread), then announce — same
+        # order as force_refresh, so the announcement isn't dropped.
+        await self.refresh_market_embed(prediction_id)
+
         pred = await asyncio.to_thread(
             self.prediction_service.get_prediction, prediction_id
         )
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
+                await ensure_thread_writable(thread)
                 await thread.send(announce)
             except Exception as e:
                 logger.warning(f"Failed to post set_fair announcement: {e}")
-        await self.refresh_market_embed(prediction_id)
 
     # -- /predict cancel ---
 
@@ -1170,8 +1198,15 @@ class PredictionCommands(commands.Cog):
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
-                await thread.send(announce)
+                # Same ordering as resolve: revive + rewrite the embed before
+                # the announcement so a failed send can't strand a refunded
+                # market behind a live-looking book.
+                await ensure_thread_writable(thread)
                 await self.refresh_market_embed(prediction_id)
+                try:
+                    await thread.send(announce)
+                except Exception as e:
+                    logger.warning(f"Failed to post cancel announcement: {e}")
                 try:
                     await thread.edit(locked=True, archived=True)
                 except discord.Forbidden:
@@ -1482,6 +1517,7 @@ class PredictionCommands(commands.Cog):
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
+                await ensure_thread_writable(thread)
                 await thread.send(announce)
             except Exception as e:
                 logger.warning(f"Failed to post force_refresh announcement: {e}")

@@ -61,6 +61,7 @@ from infrastructure.service_container import ServiceContainer
 from services.monitoring_service import MonitoringService, UsageMonitor, set_global_usage_monitor
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
+from utils.thread_safety import ensure_thread_writable
 
 # Bot setup
 
@@ -192,11 +193,19 @@ async def _process_one_refresh(market: dict) -> None:
     thread_id = market.get("thread_id")
     if not thread_id:
         return
+    # A concurrent /predict resolve or cancel may have settled the market
+    # between refresh_market and here — don't post into (or revive) the
+    # thread of a market that is no longer open.
+    pred = await asyncio.to_thread(
+        bot.prediction_service.prediction_repo.get_prediction, pid
+    )
+    if not pred or pred.get("status") != "open":
+        return
     try:
         thread = bot.get_channel(thread_id) or await bot.fetch_channel(thread_id)
-        # Sends to an auto-archived thread fail (50083); revive it first.
-        if getattr(thread, "archived", False):
-            await thread.edit(archived=False)
+        # Sends auto-unarchive an unlocked thread, but reviving explicitly
+        # also covers locked threads and re-widens the archive window.
+        await ensure_thread_writable(thread)
         biggest = trade_summary.get("biggest_trade")
         biggest_str = ""
         if biggest:

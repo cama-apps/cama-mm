@@ -179,8 +179,10 @@ def test_ladder_caps_rows_and_stays_under_embed_field_limit():
     assert "  51  " in value
     # Deep orphan levels are dropped (ask 80 and bid 20 → NO 80 both hidden).
     assert "  80  " not in value
-    # Hidden depth is surfaced honestly, once per side.
-    assert value.count("(+22 deeper)") == 2
+    # Hidden depth is surfaced honestly, once per side, with the worst hidden
+    # price disclosed — buys sweep the whole book, including unseen levels
+    # (deepest ask 80; deepest bid 20 mirrors to NO 80).
+    assert value.count("(+22 deeper to 80)") == 2
     # Mid line still reflects the true top of book.
     assert "YES 51%" in value and "NO 51%" in value
 

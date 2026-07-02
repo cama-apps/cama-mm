@@ -261,28 +261,32 @@ async def test_post_digest_no_chart_when_nothing_moved(bot_module):
 
 
 class _ArchivedThread:
-    """Thread stand-in: sends fail while archived (Discord error 50083)."""
+    """Archived-thread stand-in.
+
+    Discord semantics: sends auto-unarchive an *unlocked* thread, but message
+    edits fail (50083). The guard under test revives the thread explicitly —
+    its observable value is the revival plus the re-widened archive window.
+    """
 
     def __init__(self):
         self.archived = True
+        self.auto_archive_duration = 1440
         self.sent: list[str] = []
+        self.archived_at_send: list[bool] = []
 
-    async def edit(self, archived: bool):
+    async def edit(self, *, archived: bool, auto_archive_duration: int | None = None):
+        # Keyword-only, like the real Thread.edit.
         self.archived = archived
+        if auto_archive_duration is not None:
+            self.auto_archive_duration = auto_archive_duration
 
     async def send(self, content):
-        if self.archived:
-            raise RuntimeError("50083: Thread is archived")
+        self.archived_at_send.append(self.archived)
         self.sent.append(content)
 
 
-async def test_process_one_refresh_unarchives_thread_for_daily_summary(bot_module):
-    """The daily summary is the only message keeping market threads alive; if
-    the thread auto-archived first, the send must revive it, not fail silently."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    thread = _ArchivedThread()
-    summary = {
+def _refresh_summary():
+    return {
         "skipped": False,
         "old_price": 50,
         "new_price": 55,
@@ -294,19 +298,64 @@ async def test_process_one_refresh_unarchives_thread_for_daily_summary(bot_modul
             "biggest_trade": None,
         },
     }
+
+
+def _refresh_env(bot_module, thread, *, status="open"):
+    """Wire bot globals to fakes for a _process_one_refresh run.
+
+    get_channel returns None to mirror production, where discord.py evicts
+    archived threads from the cache and only fetch_channel can resolve them.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
     svc = MagicMock()
-    svc.refresh_market = MagicMock(return_value=summary)
+    svc.refresh_market = MagicMock(return_value=_refresh_summary())
+    svc.prediction_repo.get_prediction = MagicMock(return_value={"status": status})
     cog = MagicMock()
     cog.refresh_market_embed = AsyncMock()
 
-    with (
+    return cog, [
         patch.object(bot_module.bot, "prediction_service", svc, create=True),
         patch.object(bot_module.bot, "get_cog", return_value=cog),
-        patch.object(bot_module.bot, "get_channel", return_value=thread),
-    ):
+        patch.object(bot_module.bot, "get_channel", return_value=None),
+        patch.object(bot_module.bot, "fetch_channel", AsyncMock(return_value=thread)),
+    ]
+
+
+async def test_process_one_refresh_revives_thread_for_daily_summary(bot_module):
+    """The daily summary is the only message keeping market threads alive; the
+    guard must revive an archived thread (covers locked threads) and re-widen
+    its auto-archive window so pre-fix threads stop re-archiving daily."""
+    import contextlib
+
+    thread = _ArchivedThread()
+    cog, patches = _refresh_env(bot_module, thread)
+
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         await bot_module._process_one_refresh({"prediction_id": 1, "thread_id": 999})
 
     cog.refresh_market_embed.assert_awaited_once_with(1)
     assert thread.archived is False
-    assert len(thread.sent) == 1
-    assert "Daily refresh" in thread.sent[0]
+    assert thread.auto_archive_duration == 10080
+    assert thread.sent and "Daily refresh" in thread.sent[0]
+    assert thread.archived_at_send == [False]
+
+
+async def test_process_one_refresh_skips_summary_when_market_no_longer_open(bot_module):
+    """A market resolved between refresh_market and the summary post must not
+    get its just-archived thread revived or a 'Daily refresh' message."""
+    import contextlib
+
+    thread = _ArchivedThread()
+    cog, patches = _refresh_env(bot_module, thread, status="resolved")
+
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        await bot_module._process_one_refresh({"prediction_id": 1, "thread_id": 999})
+
+    cog.refresh_market_embed.assert_awaited_once_with(1)
+    assert thread.archived is True
+    assert thread.sent == []
