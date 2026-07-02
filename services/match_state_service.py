@@ -14,6 +14,7 @@ Thread Safety:
     state_lock() context manager to hold the lock for the entire operation.
 """
 
+import logging
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -22,6 +23,8 @@ from typing import Any
 from domain.models.pending_match_state import PendingMatchState
 from repositories.interfaces import IMatchRepository
 from utils.guild import normalize_guild_id
+
+logger = logging.getLogger("cama_bot.services.match_state")
 
 
 def _row_to_state(row: dict[str, Any] | None) -> PendingMatchState | None:
@@ -246,6 +249,11 @@ class MatchStateService:
         with self._shuffle_state_lock:
             state = self.get_last_shuffle(guild_id, pending_match_id)
             if not state:
+                logger.debug(
+                    "set_shuffle_message_info: no pending state for guild %s "
+                    "pending_match_id %s; dropping message info",
+                    guild_id, pending_match_id,
+                )
                 return
             if message_id is not None:
                 state.shuffle_message_id = message_id

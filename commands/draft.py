@@ -1918,8 +1918,20 @@ class DraftCommands(commands.Cog):
         betting reminders, and posts to the match thread. Behavior-preserving.
         """
         try:
+            # Capture the lobby thread id up front so the pending match is
+            # created already carrying it — /record and /abort use it to
+            # rename + archive the thread (reset_lobby below clears it).
+            lobby_service = getattr(self.bot, "lobby_service", None)
+            thread_id = (
+                await asyncio.to_thread(lobby_service.get_lobby_thread_id, guild_id=guild_id)
+                if lobby_service
+                else None
+            )
+
             # Create pending match for betting and recording
-            pending_match_id = await self._create_pending_match(guild_id, state)
+            pending_match_id = await self._create_pending_match(
+                guild_id, state, thread_id=thread_id
+            )
 
             if pending_match_id is None:
                 # Failed to create pending match - don't reset lobby, show error
@@ -2008,31 +2020,6 @@ class DraftCommands(commands.Cog):
             for pid in included_player_ids:
                 await asyncio.to_thread(self.player_repo.decay_exclusion_count, pid, guild_id)
 
-            # Save thread ID before resetting lobby
-            lobby_service = getattr(self.bot, "lobby_service", None)
-            thread_id = (
-                await asyncio.to_thread(lobby_service.get_lobby_thread_id, guild_id=guild_id)
-                if lobby_service
-                else None
-            )
-
-            # Store the thread id in the pending state (same as shuffle mode) so
-            # /record and /abort can rename + archive the thread afterwards.
-            if thread_id:
-                try:
-                    await asyncio.to_thread(
-                        functools.partial(
-                            self.match_service.set_shuffle_message_info,
-                            guild_id,
-                            message_id=None,
-                            channel_id=None,
-                            thread_id=thread_id,
-                            pending_match_id=pending_match_id,
-                        )
-                    )
-                except Exception as exc:
-                    logger.warning(f"Failed to store draft thread id: {exc}")
-
             # Reset lobby only after successful match creation
             await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
 
@@ -2074,7 +2061,7 @@ class DraftCommands(commands.Cog):
                     logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
 
             # Post to match thread and ping players
-            await self._post_to_match_thread(state, embed, thread_id)
+            await self._post_to_match_thread(state, embed, thread_id, pending_match_id)
 
         except Exception as e:
             logger.error(f"Error during draft completion for guild {guild_id}: {e}", exc_info=True)
@@ -2157,6 +2144,7 @@ class DraftCommands(commands.Cog):
         self,
         guild_id: int,
         state: DraftState,
+        thread_id: int | None = None,
     ) -> int | None:
         """
         Create a pending match from draft result for betting and recording.
@@ -2205,6 +2193,7 @@ class DraftCommands(commands.Cog):
             shuffle_message_id=state.draft_message_id,
             shuffle_channel_id=state.draft_channel_id,
             origin_channel_id=state.draft_channel_id,  # For betting reminders
+            thread_shuffle_thread_id=thread_id,  # For /record and /abort thread finalization
             betting_mode="pool",  # Default to pool mode for drafts
             is_draft=True,  # Mark as draft for any special handling
             is_bomb_pot=is_bomb_pot,  # Bomb pot mode for higher stakes
@@ -2457,7 +2446,11 @@ class DraftCommands(commands.Cog):
         return "\n".join(lines)
 
     async def _post_to_match_thread(
-        self, state: DraftState, embed: discord.Embed, thread_id: int | None = None
+        self,
+        state: DraftState,
+        embed: discord.Embed,
+        thread_id: int | None = None,
+        pending_match_id: int | None = None,
     ) -> None:
         """Post draft complete embed to match thread and ping players."""
         if not thread_id:
@@ -2475,7 +2468,24 @@ class DraftCommands(commands.Cog):
                 pass  # Rate limit on thread name changes
 
             # Post the draft complete embed
-            await thread.send(embed=embed)
+            thread_msg = await thread.send(embed=embed)
+
+            # Store the embed's message id (same as shuffle mode) so betting
+            # updates can refresh the wager field inside the thread.
+            if thread_msg and pending_match_id:
+                try:
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.match_service.set_shuffle_message_info,
+                            state.guild_id,
+                            message_id=None,
+                            channel_id=None,
+                            thread_message_id=thread_msg.id,
+                            pending_match_id=pending_match_id,
+                        )
+                    )
+                except Exception:
+                    logger.warning("Failed to store draft thread message id", exc_info=True)
 
             # Ping all drafted players (both teams)
             all_player_ids = state.radiant_player_ids + state.dire_player_ids

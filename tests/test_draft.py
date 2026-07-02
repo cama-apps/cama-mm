@@ -1545,23 +1545,59 @@ class _FakeDraftMatchService:
         self.state = state
 
     def get_last_shuffle(self, guild_id, pending_match_id=None):
+        # Mirror the real service: a specific id only matches its own state
+        if (
+            pending_match_id is not None
+            and self.state is not None
+            and self.state.pending_match_id != pending_match_id
+        ):
+            return None
         return self.state
 
     def set_last_shuffle(self, guild_id, state):
         self.state = state
 
-    def set_shuffle_message_info(self, guild_id, **kwargs):
-        self.message_info = kwargs
-        if self.state:
-            # Mirror the real service: only overwrite fields passed as non-None
-            if kwargs.get("message_id") is not None:
-                self.state.shuffle_message_id = kwargs["message_id"]
-            if kwargs.get("channel_id") is not None:
-                self.state.shuffle_channel_id = kwargs["channel_id"]
-            if kwargs.get("jump_url") is not None:
-                self.state.shuffle_message_jump_url = kwargs["jump_url"]
-            if kwargs.get("thread_id") is not None:
-                self.state.thread_shuffle_thread_id = kwargs["thread_id"]
+    def set_shuffle_message_info(
+        self,
+        guild_id,
+        message_id,
+        channel_id,
+        jump_url=None,
+        thread_message_id=None,
+        thread_id=None,
+        origin_channel_id=None,
+        pending_match_id=None,
+        cmd_message_id=None,
+        cmd_channel_id=None,
+    ):
+        """Mirror MatchStateService: same signature, resolve the state by
+        pending_match_id (silent no-op on a miss), only overwrite non-None."""
+        self.message_info = {
+            "message_id": message_id,
+            "channel_id": channel_id,
+            "jump_url": jump_url,
+            "thread_message_id": thread_message_id,
+            "thread_id": thread_id,
+            "origin_channel_id": origin_channel_id,
+            "pending_match_id": pending_match_id,
+            "cmd_message_id": cmd_message_id,
+            "cmd_channel_id": cmd_channel_id,
+        }
+        state = self.get_last_shuffle(guild_id, pending_match_id)
+        if not state:
+            return
+        if message_id is not None:
+            state.shuffle_message_id = message_id
+        if channel_id is not None:
+            state.shuffle_channel_id = channel_id
+        if jump_url is not None:
+            state.shuffle_message_jump_url = jump_url
+        if thread_message_id is not None:
+            state.thread_shuffle_message_id = thread_message_id
+        if thread_id is not None:
+            state.thread_shuffle_thread_id = thread_id
+        if origin_channel_id is not None:
+            state.origin_channel_id = origin_channel_id
 
 
 _ROLE_CYCLE = [["1"], ["2"], ["3"], ["4"], ["5"], ["1", "2"], ["3", "4"], ["2", "5"]]
@@ -1754,6 +1790,49 @@ class TestExecuteDraft:
         )
 
 
+def _make_final_pick_scenario(
+    player_repository, guild_id, player_ids, *, bot, match_service, lobby_manager=None
+):
+    """Build a cog + drafting state one pick away from completion.
+
+    Shared by the final-pick tests so the ~15 hand-set DraftState fields stay
+    in lockstep; only the bot wiring differs between them.
+    """
+    captain1, captain2 = player_ids[0], player_ids[1]
+    cog = DraftCommands(
+        bot=bot,
+        player_repo=player_repository,
+        lobby_manager=lobby_manager if lobby_manager is not None else MagicMock(),
+        draft_state_manager=DraftStateManager(),
+        draft_service=DraftService(),
+        match_service=match_service,
+    )
+    state = cog.draft_state_manager.create_draft(guild_id)
+    state.phase = DraftPhase.DRAFTING
+    state.player_pool_ids = player_ids
+    state.captain1_id = captain1
+    state.captain2_id = captain2
+    state.captain1_rating = 1700
+    state.captain2_rating = 1600
+    state.radiant_captain_id = captain1
+    state.dire_captain_id = captain2
+    state.player_draft_first_captain_id = captain1
+    state.radiant_hero_pick_order = 1
+    state.dire_hero_pick_order = 2
+    state.draft_channel_id = 555_000
+    state.draft_message_id = 9_000_001
+    state.current_pick_index = 7
+    state.radiant_player_ids = [captain1, player_ids[2], player_ids[5], player_ids[6]]
+    state.dire_player_ids = [
+        captain2,
+        player_ids[3],
+        player_ids[4],
+        player_ids[7],
+        player_ids[8],
+    ]
+    return cog, state
+
+
 class TestHandlePlayerPick:
     """Regression tests for Discord component handling during active drafting."""
 
@@ -1761,7 +1840,7 @@ class TestHandlePlayerPick:
         """The last pick does slow match setup, so it must acknowledge the button first."""
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 10)
-        captain1, captain2 = player_ids[0], player_ids[1]
+        captain1 = player_ids[0]
         final_pick = player_ids[9]
 
         match_service = _FakeDraftMatchService()
@@ -1771,38 +1850,10 @@ class TestHandlePlayerPick:
             lobby_service=None,
             get_cog=lambda _name: None,
         )
-        cog = DraftCommands(
-            bot=bot,
-            player_repo=player_repository,
-            lobby_manager=lobby_manager,
-            draft_state_manager=DraftStateManager(),
-            draft_service=DraftService(),
-            match_service=match_service,
+        cog, state = _make_final_pick_scenario(
+            player_repository, guild_id, player_ids,
+            bot=bot, match_service=match_service, lobby_manager=lobby_manager,
         )
-
-        state = cog.draft_state_manager.create_draft(guild_id)
-        state.phase = DraftPhase.DRAFTING
-        state.player_pool_ids = player_ids
-        state.captain1_id = captain1
-        state.captain2_id = captain2
-        state.captain1_rating = 1700
-        state.captain2_rating = 1600
-        state.radiant_captain_id = captain1
-        state.dire_captain_id = captain2
-        state.player_draft_first_captain_id = captain1
-        state.radiant_hero_pick_order = 1
-        state.dire_hero_pick_order = 2
-        state.draft_channel_id = 555_000
-        state.draft_message_id = 9_000_001
-        state.current_pick_index = 7
-        state.radiant_player_ids = [captain1, player_ids[2], player_ids[5], player_ids[6]]
-        state.dire_player_ids = [
-            captain2,
-            player_ids[3],
-            player_ids[4],
-            player_ids[7],
-            player_ids[8],
-        ]
 
         interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
 
@@ -1820,19 +1871,21 @@ class TestHandlePlayerPick:
         assert match_service.message_info["channel_id"] == interaction.channel.id
         lobby_manager.reset_lobby.assert_called_once_with(guild_id)
 
-    async def test_final_pick_stores_thread_id_for_record_finalize(self, player_repository):
-        """Draft completion must persist the lobby thread id into the pending
+    async def test_final_pick_stores_thread_info_for_record_finalize(self, player_repository):
+        """Draft completion must carry the lobby thread id in the pending
         match state, exactly as the shuffle path does.
 
         Regression: /record finalizes the lobby thread via
         pending_state.thread_shuffle_thread_id (record_match clears the state,
         so there is no fallback). The draft path posted to the thread but never
         stored its id, so drafted matches left their thread stuck on
-        "🔒 Draft Complete - Awaiting Results" forever after recording.
+        "🔒 Draft Complete - Awaiting Results" forever after recording. The
+        embed's message id must be stored too so betting updates can refresh
+        the wager field inside the thread.
         """
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 10)
-        captain1, captain2 = player_ids[0], player_ids[1]
+        captain1 = player_ids[0]
         final_pick = player_ids[9]
         thread_id = 777_001
 
@@ -1846,7 +1899,13 @@ class TestHandlePlayerPick:
                 self.edits.append(kwargs)
 
             async def send(self, content=None, **kwargs):
-                self.sent.append({"content": content, **kwargs})
+                msg = SimpleNamespace(
+                    id=8_000_000 + len(self.sent),
+                    content=content,
+                    embed=kwargs.get("embed"),
+                )
+                self.sent.append(msg)
+                return msg
 
         thread = _FakeThread(thread_id)
         match_service = _FakeDraftMatchService()
@@ -1858,48 +1917,24 @@ class TestHandlePlayerPick:
             get_cog=lambda _name: None,
             get_channel=lambda cid: thread if cid == thread_id else None,
         )
-        cog = DraftCommands(
-            bot=bot,
-            player_repo=player_repository,
-            lobby_manager=MagicMock(),
-            draft_state_manager=DraftStateManager(),
-            draft_service=DraftService(),
-            match_service=match_service,
+        cog, state = _make_final_pick_scenario(
+            player_repository, guild_id, player_ids,
+            bot=bot, match_service=match_service,
         )
-
-        state = cog.draft_state_manager.create_draft(guild_id)
-        state.phase = DraftPhase.DRAFTING
-        state.player_pool_ids = player_ids
-        state.captain1_id = captain1
-        state.captain2_id = captain2
-        state.captain1_rating = 1700
-        state.captain2_rating = 1600
-        state.radiant_captain_id = captain1
-        state.dire_captain_id = captain2
-        state.player_draft_first_captain_id = captain1
-        state.radiant_hero_pick_order = 1
-        state.dire_hero_pick_order = 2
-        state.draft_channel_id = 555_000
-        state.draft_message_id = 9_000_001
-        state.current_pick_index = 7
-        state.radiant_player_ids = [captain1, player_ids[2], player_ids[5], player_ids[6]]
-        state.dire_player_ids = [
-            captain2,
-            player_ids[3],
-            player_ids[4],
-            player_ids[7],
-            player_ids[8],
-        ]
 
         interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
 
         await cog.handle_player_pick(interaction, guild_id, final_pick)
 
-        # The draft-complete embed was posted to the lobby thread
-        assert thread.sent, "draft completion should post to the lobby thread"
+        # The draft-complete embed was posted to the thread, which was renamed and locked
+        assert thread.sent and thread.sent[0].embed is not None
+        assert any("Draft Complete" in edit.get("name", "") for edit in thread.edits)
+        assert any(edit.get("locked") for edit in thread.edits)
         # The thread id must survive in the pending state so /record can
         # rename + archive the thread once the match result is in.
         assert match_service.state.thread_shuffle_thread_id == thread_id
+        # The embed's message id is stored so betting updates refresh the thread copy
+        assert match_service.state.thread_shuffle_message_id == thread.sent[0].id
 
     async def test_pick_rejected_when_turn_passes_during_defer(self, player_repository):
         """A pick that passed the pre-defer turn check is dropped if the turn
