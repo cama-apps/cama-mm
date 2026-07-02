@@ -105,6 +105,76 @@ class TestAbortLobbySleepRemoved:
         mock_thread.edit.assert_called()
 
 
+class TestLobbyThreadIdStoredOnPostFailure:
+    """
+    Regression: _lock_lobby_thread must store the thread id even when posting
+    into the thread fails, so /record can still rename + archive the thread.
+    Previously the store was gated on the embed send succeeding, leaving the
+    thread stuck on "Shuffled - Awaiting Results" whenever the post failed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_thread_id_stored_when_thread_post_fails(self):
+        from commands.match import MatchCommands
+
+        mock_bot = MagicMock()
+        mock_lobby_service = MagicMock()
+        mock_match_service = MagicMock()
+
+        mock_lobby_service.get_lobby_thread_id.return_value = 424_242
+        # Thread fetch blows up (deleted thread / missing permissions)
+        mock_bot.get_channel = MagicMock(return_value=None)
+        mock_bot.fetch_channel = AsyncMock(side_effect=RuntimeError("boom"))
+
+        cog = MatchCommands(mock_bot, mock_lobby_service, mock_match_service, MagicMock())
+
+        await cog._lock_lobby_thread(guild_id=123, pending_match_id=77)
+
+        mock_match_service.set_shuffle_message_info.assert_called_once_with(
+            123,
+            message_id=None,
+            channel_id=None,
+            thread_message_id=None,
+            thread_id=424_242,
+            pending_match_id=77,
+        )
+
+
+class TestFinalizeThreadScopedToRecordedMatch:
+    """
+    Regression: finalizing a recorded match whose thread id is unknown must not
+    fall back to another concurrent match's pending state — that would post
+    "Match Complete" into the other match's active thread and archive it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_to_other_matchs_thread(self):
+        from commands.match import MatchCommands
+        from domain.models.pending_match_state import PendingMatchState
+
+        mock_bot = MagicMock()
+        mock_match_service = MagicMock()
+        other_match_state = PendingMatchState(thread_shuffle_thread_id=999)
+
+        def get_last_shuffle(guild_id, pending_match_id=None):
+            # The recorded match (id 77) is already cleared; an unrelated
+            # concurrent match would be returned by an unscoped lookup.
+            if pending_match_id == 77:
+                return None
+            return other_match_state
+
+        mock_match_service.get_last_shuffle.side_effect = get_last_shuffle
+
+        cog = MatchCommands(mock_bot, MagicMock(), mock_match_service, MagicMock())
+
+        await cog._finalize_lobby_thread(
+            123, "radiant", thread_id=None, pending_match_id=77
+        )
+
+        mock_bot.get_channel.assert_not_called()
+        mock_bot.fetch_channel.assert_not_called()
+
+
 class TestGamblingLeaderboardNoFetchUser:
     """
     Regression test for Issue 2C: Gambling leaderboard timeout.

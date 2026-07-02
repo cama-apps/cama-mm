@@ -173,17 +173,17 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to lock lobby thread: {exc}")
 
-        # Store thread shuffle message ID for betting updates
-        if thread_shuffle_msg:
-            await asyncio.to_thread(
-                self.match_service.set_shuffle_message_info,
-                guild_id,
-                message_id=None,
-                channel_id=None,
-                thread_message_id=thread_shuffle_msg.id,
-                thread_id=thread_id,
-                pending_match_id=pending_match_id,
-            )
+        # Store thread info even when posting failed so /record can still
+        # rename + archive the thread (thread_message_id stays unset then).
+        await asyncio.to_thread(
+            self.match_service.set_shuffle_message_info,
+            guild_id,
+            message_id=None,
+            channel_id=None,
+            thread_message_id=thread_shuffle_msg.id if thread_shuffle_msg else None,
+            thread_id=thread_id,
+            pending_match_id=pending_match_id,
+        )
 
     async def _finalize_lobby_thread(
         self, guild_id: int | None, winning_result: str, *,
@@ -1267,9 +1267,16 @@ class MatchCommands(commands.Cog):
 
         self._spawn_curse_flames(interaction, guild, guild_id, winners, losers, record_result)
 
-        # Finalize lobby thread with results (use saved thread_id since pending state is cleared)
-        await self._finalize_lobby_thread(
-            guild_id, winning_result, thread_id=thread_id_for_finalize
+        # Finalize lobby thread with results (use saved thread_id since pending
+        # state is cleared; pass pending_match_id so the fallback lookup can't
+        # resolve to a different concurrent match's thread). Run as a task so
+        # the pre-archive sleep doesn't delay the rest of the record flow.
+        asyncio.create_task(
+            self._finalize_lobby_thread(
+                guild_id, winning_result,
+                thread_id=thread_id_for_finalize,
+                pending_match_id=pending_match_id,
+            )
         )
 
         await self._run_neon_match_hooks(interaction, guild_id, winners, losers, record_result)

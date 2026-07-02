@@ -6,8 +6,13 @@ with proper isolation of state, betting, and recording.
 """
 
 
-import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
+from discord import app_commands
+
+from commands.match import MatchCommands
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -517,6 +522,95 @@ class TestConcurrentMatchCleanupIsolation:
         # Both should be gone
         pending = match_repo.get_pending_matches(TEST_GUILD_ID)
         assert len(pending) == 0
+
+
+class TestRecordFinalizeThreadIsolation:
+    """Recording one match must only ever touch that match's own thread.
+
+    Regression: /record's finalize step used to re-resolve the pending state
+    without a pending_match_id after record_match had already cleared it, so
+    with concurrent matches the lookup could land on the OTHER match and post
+    "Match Complete" into its active thread and archive it mid-game.
+    """
+
+    def _make_record_cog(self, services):
+        mock_bot = Mock()
+        lobby_service = Mock()
+        lobby_service.get_lobby_thread_id.return_value = None
+        cog = MatchCommands(mock_bot, lobby_service, services["match_service"], Mock())
+        return cog, mock_bot
+
+    def _make_interaction(self, user_id):
+        name = f"Voter{user_id}"
+        return SimpleNamespace(
+            user=SimpleNamespace(
+                id=user_id, name=name, display_name=name, mention=f"<@{user_id}>"
+            ),
+            response=AsyncMock(),
+            followup=AsyncMock(),
+            channel=Mock(),
+            guild=SimpleNamespace(id=TEST_GUILD_ID),
+        )
+
+    async def test_record_scopes_finalize_to_recorded_match(self, services):
+        """/record hands the recorded match's pending_match_id to the thread
+        finalizer, so its fallback lookup can never land on the concurrent
+        match; the other match's state survives the record untouched."""
+        match_service = services["match_service"]
+
+        players_a = list(range(41000, 41010))
+        players_b = list(range(42000, 42010))
+        state_a, state_b = _create_two_concurrent_matches(services, players_a, players_b)
+
+        # Only match B has a live lobby thread
+        match_service.set_shuffle_message_info(
+            TEST_GUILD_ID, message_id=None, channel_id=None,
+            thread_id=999_777, pending_match_id=state_b.pending_match_id,
+        )
+
+        cog, _mock_bot = self._make_record_cog(services)
+        finalize = AsyncMock()
+        interaction = self._make_interaction(players_a[0])
+        result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
+
+        with (
+            patch.object(cog, "_finalize_lobby_thread", finalize),
+            patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
+            patch("commands.match.has_admin_permission", return_value=True),
+        ):
+            await cog.record.callback(cog, interaction, result_choice)
+
+        # A is recorded and cleared; B survives
+        assert match_service.get_last_shuffle(
+            TEST_GUILD_ID, pending_match_id=state_a.pending_match_id
+        ) is None
+        assert match_service.get_last_shuffle(
+            TEST_GUILD_ID, pending_match_id=state_b.pending_match_id
+        ) is not None
+        # The finalizer was scoped to the recorded match: no stored thread id
+        # for A, and A's own pending_match_id so the fallback can't hit B.
+        finalize.assert_called_once_with(
+            TEST_GUILD_ID, "radiant",
+            thread_id=None,
+            pending_match_id=state_a.pending_match_id,
+        )
+
+    async def test_finalize_archives_recorded_matchs_thread(self, services):
+        """With its own thread id, the finalizer posts the result and archives."""
+        cog, mock_bot = self._make_record_cog(services)
+        thread = AsyncMock()
+        mock_bot.get_channel = Mock(return_value=thread)
+
+        with patch("commands.match.asyncio.sleep", AsyncMock()):
+            await cog._finalize_lobby_thread(
+                TEST_GUILD_ID, "radiant", thread_id=555_111, pending_match_id=1
+            )
+
+        assert thread.send.called
+        archive_edits = [
+            c for c in thread.edit.call_args_list if c.kwargs.get("archived") is True
+        ]
+        assert archive_edits, "recorded match's thread should be renamed and archived"
 
 
 if __name__ == "__main__":
