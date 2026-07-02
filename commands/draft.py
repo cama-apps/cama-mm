@@ -2016,6 +2016,23 @@ class DraftCommands(commands.Cog):
                 else None
             )
 
+            # Store the thread id in the pending state (same as shuffle mode) so
+            # /record and /abort can rename + archive the thread afterwards.
+            if thread_id:
+                try:
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.match_service.set_shuffle_message_info,
+                            guild_id,
+                            message_id=None,
+                            channel_id=None,
+                            thread_id=thread_id,
+                            pending_match_id=pending_match_id,
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to store draft thread id: {exc}")
+
             # Reset lobby only after successful match creation
             await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
 
