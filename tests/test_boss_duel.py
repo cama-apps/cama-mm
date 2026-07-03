@@ -733,7 +733,7 @@ class TestPhaseTransitionEvents:
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=24, prestige=2)
         rolls = iter([0.0, 0.99] * 100)
         monkeypatch.setattr(random, "random", lambda: next(rolls))
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=0)
         assert result["success"]
         assert result.get("phase2_incoming") is True
 
@@ -773,7 +773,7 @@ class TestPhaseTransitionEvents:
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=24, prestige=2)
         rolls = iter([0.0, 0.99] * 100)
         monkeypatch.setattr(random, "random", lambda: next(rolls))
-        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
+        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=0)
         assert result["success"]
         assert result.get("phase2_incoming") is True
 

@@ -127,6 +127,12 @@ class BossCombatMixin:
         carried = self._get_carried_wager(boss_progress, at_boss)
         if carried is None:
             return None
+        if not self._is_pinnacle_depth(at_boss):
+            self._clear_carried_wager(boss_progress, at_boss)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, boss_progress=json.dumps(boss_progress),
+            )
+            return None
         wager, risk_tier = carried
         return {"wager": wager, "risk_tier": risk_tier, "boundary": at_boss}
 
@@ -241,6 +247,27 @@ class BossCombatMixin:
             entry.pop("carried_wager", None)
             entry.pop("carried_risk_tier", None)
             boss_progress[str(at_boss)] = entry
+
+    def _regular_boss_wager_allowed(
+        self, boss_progress: dict, at_boss: int, prestige_level: int,
+    ) -> bool:
+        """Return True only when this regular boss fight is on its final phase."""
+        entry = boss_progress.get(str(at_boss), "active")
+        current_status = entry.get("status", "active") if isinstance(entry, dict) else entry
+        phase2_min_p = int(BOSS_PHASES.get("phase_2_min_prestige", 2))
+        phase3_min_p = int(BOSS_PHASES.get("phase_3_min_prestige", 5))
+        phase3_min_tier = int(BOSS_PHASES.get("phase_3_min_tier", 100))
+        has_later_phase = (
+            prestige_level >= phase2_min_p
+            and at_boss in BOSS_PHASE2
+            and current_status == "active"
+        ) or (
+            prestige_level >= phase3_min_p
+            and at_boss >= phase3_min_tier
+            and at_boss in BOSS_PHASE3
+            and current_status == "phase1_defeated"
+        )
+        return not has_later_phase
 
     def _persist_boss_hp_after_fight(
         self,
@@ -559,8 +586,14 @@ class BossCombatMixin:
         # Multi-phase carry: prior phase win locks original wager + risk on
         # the boss_progress entry — the next phase rides the same stake.
         carried = self._get_carried_wager(boss_progress, at_boss)
-        if carried is not None:
+        if carried is not None and self._is_pinnacle_depth(at_boss):
             wager, risk_tier = carried
+        elif carried is not None:
+            self._clear_carried_wager(boss_progress, at_boss)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, boss_progress=json.dumps(boss_progress),
+            )
+            carried = None
 
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
@@ -569,6 +602,14 @@ class BossCombatMixin:
             return self._error("Wager must be non-negative.")
 
         if wager > 0 and carried is None:
+            prestige_level = tunnel.get("prestige_level", 0) or 0
+            if (
+                not self._is_pinnacle_depth(at_boss)
+                and not self._regular_boss_wager_allowed(
+                    boss_progress, at_boss, prestige_level,
+                )
+            ):
+                return self._error("Boss wagers are only available on the final phase.")
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
@@ -875,10 +916,6 @@ class BossCombatMixin:
                         "status": next_status,
                         "pending_phase_event_id": phase_event.id,
                     }
-                # Lock the original wager + risk_tier so the next phase rides
-                # the same stake (no new wager modal on the next /dig go).
-                if wager > 0:
-                    self._set_carried_wager(boss_progress, at_boss, wager, risk_tier)
                 self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
                     tunnel_updates={
@@ -1173,13 +1210,27 @@ class BossCombatMixin:
         # onto the boss_progress entry. The next phase fight rides the same
         # stake — caller args are ignored when a carry is present.
         carried = self._get_carried_wager(boss_progress, at_boss)
-        if carried is not None:
+        if carried is not None and self._is_pinnacle_depth(at_boss):
             wager, risk_tier = carried
+        elif carried is not None:
+            self._clear_carried_wager(boss_progress, at_boss)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, boss_progress=json.dumps(boss_progress),
+            )
+            carried = None
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
         if wager < 0:
             return self._error("Wager must be non-negative.")
         if wager > 0 and carried is None:
+            prestige_level = tunnel.get("prestige_level", 0) or 0
+            if (
+                not self._is_pinnacle_depth(at_boss)
+                and not self._regular_boss_wager_allowed(
+                    boss_progress, at_boss, prestige_level,
+                )
+            ):
+                return self._error("Boss wagers are only available on the final phase.")
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
@@ -1971,10 +2022,6 @@ class BossCombatMixin:
                         "status": next_status,
                         "pending_phase_event_id": phase_event.id,
                     }
-                # Lock the original wager + risk_tier onto the entry so the
-                # next phase rides the same stake (no new wager modal).
-                if wager > 0:
-                    self._set_carried_wager(boss_progress, at_boss, wager, risk_tier)
                 self.dig_repo.update_tunnel(
                     discord_id, guild_id,
                     boss_progress=json.dumps(boss_progress),
@@ -2301,7 +2348,7 @@ class BossCombatMixin:
         # the existing behavior of "no JC at risk".
         carried = self._get_carried_wager(boss_progress, at_boss)
         carried_forfeit = 0
-        if carried is not None:
+        if carried is not None and self._is_pinnacle_depth(at_boss):
             carried_wager_amount, _ = carried
             carried_forfeit = carried_wager_amount // 2
 

@@ -15,6 +15,7 @@ from repositories.prediction_repository import PredictionRepository
 from services.dig_constants import (
     BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
+    BOSS_LOSS_REPAIR_BILL,
     BOSS_VICTORY_BASE_JC,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
@@ -1792,6 +1793,96 @@ class TestBoss:
         assert result["payout"] >= BOSS_VICTORY_BASE_JC[25]
         gained = player_repository.get_balance(10001, guild_id) - balance_before
         assert gained == result["payout"]
+
+    def test_boss_fight_rejects_wager_before_final_phase(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Non-final boss phases should not accept a wager."""
+        _register_player(player_repository, balance=1000)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=24,
+            prestige_level=2,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        result = dig_service.fight_boss(10001, guild_id, "reckless", wager=872)
+
+        assert not result["success"]
+        assert "final phase" in result["error"]
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+        entry = json.loads(dig_repo.get_tunnel(10001, guild_id)["boss_progress"])["25"]
+        assert entry["status"] == "active"
+
+    def test_start_boss_duel_rejects_wager_before_final_phase(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """The live boss-duel path should reject wagers before the final phase."""
+        _register_player(player_repository, balance=1000)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=24,
+            prestige_level=2,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        result = dig_service.start_boss_duel(10001, guild_id, "reckless", wager=872)
+
+        assert not result["success"]
+        assert "final phase" in result["error"]
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+        entry = json.loads(dig_repo.get_tunnel(10001, guild_id)["boss_progress"])["25"]
+        assert entry["status"] == "active"
+
+    def test_boss_fight_ignores_stale_carried_wager(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A stale carried wager marker should not auto-charge the next phase."""
+        _register_player(player_repository, balance=1000)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=25,
+            prestige_level=2,
+            boss_progress=json.dumps({
+                "25": {
+                    "boss_id": "grothak",
+                    "status": "phase1_defeated",
+                    "carried_wager": 872,
+                    "carried_risk_tier": "reckless",
+                }
+            }),
+        )
+        balance_before = player_repository.get_balance(10001, guild_id)
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
+
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+
+        assert result["success"]
+        assert result["won"] is False
+        assert (
+            player_repository.get_balance(10001, guild_id)
+            == balance_before - BOSS_LOSS_REPAIR_BILL
+        )
+        entry = json.loads(dig_repo.get_tunnel(10001, guild_id)["boss_progress"])["25"]
+        assert "carried_wager" not in entry
+        assert "carried_risk_tier" not in entry
 
     def test_boss_fight_lose(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Lose forfeits the wager and applies a depth knockback."""

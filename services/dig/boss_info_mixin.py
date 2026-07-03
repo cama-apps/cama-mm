@@ -188,4 +188,9 @@ class BossInfoMixin:
             "ascii_art": boss.ascii_art or BOSS_ASCII.get(boundary, ""),
             "luminosity_display": self._luminosity_combat_display(tunnel),
             "mana_reveal_hp": mana_reveal_hp,
+            "wager_allowed": self._regular_boss_wager_allowed(
+                boss_progress,
+                boundary,
+                tunnel.get("prestige_level", 0) or 0,
+            ),
         }

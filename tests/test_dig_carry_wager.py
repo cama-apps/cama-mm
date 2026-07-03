@@ -68,18 +68,19 @@ def _seed_phase1_cleared(dig_repo, discord_id, guild_id, *, boundary=25):
     )
 
 
-class TestCarriedWagerReadback:
-    """get_carried_wager surfaces the carried state for the UI."""
+class TestRegularBossCarriedWagerReadback:
+    """Regular boss carry markers are stale and should be cleared."""
 
-    def test_returns_carry_when_set(self, dig_service, dig_repo, player_repository, guild_id):
+    def test_returns_none_and_clears_regular_boss_carry(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
         _register(player_repository)
         _seed_phase1_cleared(dig_repo, 10001, guild_id)
 
-        carried = dig_service.get_carried_wager(10001, guild_id)
-        assert carried is not None
-        assert carried["wager"] == 200
-        assert carried["risk_tier"] == "bold"
-        assert carried["boundary"] == 25
+        assert dig_service.get_carried_wager(10001, guild_id) is None
+        entry = json.loads(dig_repo.get_tunnel(10001, guild_id)["boss_progress"])["25"]
+        assert "carried_wager" not in entry
+        assert "carried_risk_tier" not in entry
 
     def test_returns_none_without_carry(self, dig_service, dig_repo, player_repository, guild_id):
         _register(player_repository)
@@ -127,8 +128,8 @@ class TestPhaseTransitionPersistsCarry:
         assert entry["hp_max"] == 40
 
 
-class TestRetreatForfeitsHalfOfCarry:
-    """Retreating between phases forfeits half the carried wager."""
+class TestRegularBossRetreatIgnoresCarry:
+    """Retreating a regular boss phase ignores stale carry markers."""
 
     def test_retreat_with_carried_wager_debits_half(
         self, dig_service, dig_repo, player_repository, guild_id,
@@ -140,8 +141,8 @@ class TestRetreatForfeitsHalfOfCarry:
         result = dig_service.retreat_boss(10001, guild_id)
 
         assert result["success"]
-        assert result["carried_wager_forfeit"] == 100  # 200 // 2
-        assert player_repository.get_balance(10001, guild_id) == balance_before - 100
+        assert result["carried_wager_forfeit"] == 0
+        assert player_repository.get_balance(10001, guild_id) == balance_before
 
     def test_retreat_clears_carry_markers(
         self, dig_service, dig_repo, player_repository, guild_id,

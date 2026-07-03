@@ -261,6 +261,45 @@ class BossWagerModal(discord.ui.Modal):
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
 
 
+class BossRiskModal(discord.ui.Modal):
+    """Modal for choosing a non-final boss phase risk tier without a wager."""
+
+    risk_tier = discord.ui.TextInput(
+        label="Risk Tier (cautious / bold / reckless)",
+        placeholder="bold",
+        min_length=1,
+        max_length=10,
+        required=True,
+    )
+
+    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, dig_flavor_service=None):
+        super().__init__(title="Boss Phase Risk")
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.dig_flavor_service = dig_flavor_service
+
+    async def on_submit(self, interaction: discord.Interaction):
+        tier = self.risk_tier.value.strip().lower()
+        if tier not in ("cautious", "bold", "reckless"):
+            await interaction.response.send_message(
+                "Invalid risk tier. Choose: cautious, bold, or reckless.", ephemeral=True
+            )
+            return
+
+        await safe_defer(interaction)
+        await _resolve_phase_fight_without_modal(
+            interaction,
+            dig_service=self.dig_service,
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            risk_tier=tier,
+            wager=0,
+            dig_flavor_service=self.dig_flavor_service,
+        )
+        self.stop()
+
+
 async def _post_phase_transition_followup(
     channel,
     *,
@@ -361,7 +400,7 @@ async def _post_phase_transition_followup(
         view.message = msg
 
 
-async def _resolve_carried_phase_fight(
+async def _resolve_phase_fight_without_modal(
     interaction: discord.Interaction,
     *,
     dig_service: DigService,
@@ -381,7 +420,7 @@ async def _resolve_carried_phase_fight(
             dig_service.start_boss_duel, user_id, guild_id, risk_tier, wager,
         ))
     except Exception as e:
-        logger.error("Carried-phase fight error: %s", e, exc_info=True)
+        logger.error("Phase fight error: %s", e, exc_info=True)
         await safe_followup(interaction, content="Boss fight failed.", ephemeral=True)
         return
 
@@ -945,6 +984,16 @@ class BossEncounterView(discord.ui.View):
             await safe_defer(interaction)
             return
         self._engaged = True
+        if getattr(self.boss_info, "wager_allowed", True) is False:
+            modal = BossRiskModal(
+                self.dig_service,
+                self.user_id,
+                self.guild_id,
+                dig_flavor_service=self.dig_flavor_service,
+            )
+            await interaction.response.send_modal(modal)
+            self.stop()
+            return
         # Multi-phase carry: a prior phase win locked the original wager onto
         # this boss. Skip the wager modal — the carried stake rides forward.
         carried = await asyncio.to_thread(
@@ -952,7 +1001,7 @@ class BossEncounterView(discord.ui.View):
         )
         if carried:
             await safe_defer(interaction)
-            await _resolve_carried_phase_fight(
+            await _resolve_phase_fight_without_modal(
                 interaction,
                 dig_service=self.dig_service,
                 user_id=self.user_id,
