@@ -570,15 +570,25 @@ class TestRecordFinalizeThreadIsolation:
 
         cog, _mock_bot = self._make_record_cog(services)
         finalize = AsyncMock()
-        interaction = self._make_interaction(players_a[0])
         result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
 
+        # Three matching non-admin votes from match A players reach the record
+        # threshold (MIN_NON_ADMIN_SUBMISSIONS) without any permission mocking.
         with (
             patch.object(cog, "_finalize_lobby_thread", finalize),
             patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
-            patch("commands.match.has_admin_permission", return_value=True),
         ):
-            await cog.record.callback(cog, interaction, result_choice)
+            for voter in players_a[:3]:
+                interaction = self._make_interaction(voter)
+                await cog.record.callback(cog, interaction, result_choice)
+
+        # The final vote completed the record (on failure this surfaces the
+        # actual ❌/vote-progress message the command answered with)
+        followup_messages = [
+            str(c.args[0]) if c.args else str(c.kwargs.get("content", ""))
+            for c in interaction.followup.send.call_args_list
+        ]
+        assert any("Match recorded" in m for m in followup_messages), followup_messages
 
         # A is recorded and cleared; B survives
         assert match_service.get_last_shuffle(
