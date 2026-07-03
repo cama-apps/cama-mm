@@ -269,6 +269,18 @@ class BossCombatMixin:
         )
         return not has_later_phase
 
+    def _forced_no_wager_regular_phase(
+        self, boss_progress: dict, at_boss: int, prestige_level: int, wager: int,
+    ) -> bool:
+        """True when a regular boss phase forbids wagering, making wager=0 mandatory."""
+        return (
+            wager == 0
+            and not self._is_pinnacle_depth(at_boss)
+            and not self._regular_boss_wager_allowed(
+                boss_progress, at_boss, prestige_level,
+            )
+        )
+
     def _persist_boss_hp_after_fight(
         self,
         boss_progress: dict,
@@ -634,6 +646,9 @@ class BossCombatMixin:
         multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
 
         prestige_level = tunnel.get("prestige_level", 0) or 0
+        forced_no_wager_phase = self._forced_no_wager_regular_phase(
+            boss_progress, at_boss, prestige_level, wager,
+        )
 
         # Cheer bonus (existing mechanic: +5% accuracy per cheer, cap 3 cheers).
         cheers = self._get_cheers(tunnel)
@@ -733,7 +748,7 @@ class BossCombatMixin:
             + lum_hit_offset
             + self._wager_skin_bonus(wager)
         )
-        if wager == 0:
+        if wager == 0 and not forced_no_wager_phase:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
         player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
 
@@ -1065,9 +1080,14 @@ class BossCombatMixin:
         else:
             knockback = random.randint(BOSS_LOSS_KNOCKBACK_MIN, BOSS_LOSS_KNOCKBACK_MAX)
             new_depth = max(0, depth - knockback)
-            # A loss always costs something: forfeit the wager, or charge a flat
-            # repair bill on a free (no-wager) fight.
-            jc_delta = -wager if wager > 0 else -BOSS_LOSS_REPAIR_BILL
+            # A loss always costs something when the player elected a wager/free
+            # fight. Forced no-wager phase fights should not pay the free-fight
+            # repair bill just because wagering is disallowed.
+            jc_delta = (
+                -wager if wager > 0
+                else 0 if forced_no_wager_phase
+                else -BOSS_LOSS_REPAIR_BILL
+            )
 
             # Loss is harsher on gear — an extra durability tick beyond the
             # per-fight tick above.
@@ -1257,6 +1277,9 @@ class BossCombatMixin:
         multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
 
         prestige_level = tunnel.get("prestige_level", 0) or 0
+        forced_no_wager_phase = self._forced_no_wager_regular_phase(
+            boss_progress, at_boss, prestige_level, wager,
+        )
         cheers = self._get_cheers(tunnel)
         now = int(time.time())
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
@@ -1325,7 +1348,7 @@ class BossCombatMixin:
             + lum_hit_offset
             + self._wager_skin_bonus(wager)
         )
-        if wager == 0:
+        if wager == 0 and not forced_no_wager_phase:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
         player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
 
@@ -1412,6 +1435,7 @@ class BossCombatMixin:
                             for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                             if p is not None
                         ],
+                        "forced_no_wager_phase": forced_no_wager_phase,
                     }),
                     "echo_applied": 1 if echo_applied else 0,
                     "echo_killer_id": (
@@ -1481,6 +1505,7 @@ class BossCombatMixin:
             depth=depth,
             ending_boss_hp=int(boss_hp), boss_hp_max=int(boss_hp_max),
             starting_boss_hp=starting_boss_hp,
+            forced_no_wager_phase=forced_no_wager_phase,
         )
 
     def resume_boss_duel(
@@ -1659,6 +1684,7 @@ class BossCombatMixin:
             gear_snapshot_ids=snapshot_ids,
             ending_boss_hp=int(boss_hp), boss_hp_max=int(approx_hp_max),
             starting_boss_hp=starting_boss_hp_for_resume,
+            forced_no_wager_phase=bool(status_effects.get("forced_no_wager_phase")),
         )
 
     # --- helpers --------------------------------------------------------
@@ -1922,6 +1948,7 @@ class BossCombatMixin:
         ending_boss_hp: int | None = None,
         boss_hp_max: int | None = None,
         starting_boss_hp: int | None = None,
+        forced_no_wager_phase: bool = False,
     ) -> dict:
         """Apply the win-branch or loss-branch post-processing and return the result dict.
 
@@ -2199,9 +2226,14 @@ class BossCombatMixin:
         )
         knockback += extra_kb
         new_depth = max(0, depth - knockback)
-        # A loss always costs something: forfeit the wager, or charge a flat
-        # repair bill on a free (no-wager) fight.
-        jc_delta = -wager if wager > 0 else -BOSS_LOSS_REPAIR_BILL
+        # A loss always costs something when the player elected a wager/free
+        # fight. Forced no-wager phase fights should not pay the free-fight
+        # repair bill just because wagering is disallowed.
+        jc_delta = (
+            -wager if wager > 0
+            else 0 if forced_no_wager_phase
+            else -BOSS_LOSS_REPAIR_BILL
+        )
         # Floor the debit at the player's current balance. The wager was only
         # *validated* at start_boss_duel, never escrowed, so a player who
         # spent JC during a mid-fight pause (or whose balance otherwise

@@ -42,6 +42,12 @@ from services.dig_constants import (
     SABOTAGE_SUCCESS_CHANCE,
     STREAKS,
 )
+from services.dig_data.bosses import (
+    BOSS_DUEL_STATS,
+    BOSS_FREE_FIGHT_ACCURACY_MOD,
+    BOSS_PRESTIGE_BONUS,
+    BOSS_TIER_BONUS,
+)
 from services.dig_service import DigService, _prestige_cave_in_multiplier
 
 
@@ -1819,6 +1825,45 @@ class TestBoss:
         assert player_repository.get_balance(10001, guild_id) == balance_before
         entry = json.loads(dig_repo.get_tunnel(10001, guild_id)["boss_progress"])["25"]
         assert entry["status"] == "active"
+
+    def test_boss_fight_forced_no_wager_phase_avoids_free_fight_penalty(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Mandatory no-wager phases should not inherit voluntary free-fight costs."""
+        _register_player(player_repository, balance=1000)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=24,
+            prestige_level=2,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
+
+        captured = {}
+
+        def capture_win_prob(**kwargs):
+            captured["player_hit"] = kwargs["player_hit"]
+            return 0.5
+
+        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", capture_win_prob)
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        result = dig_service.fight_boss(10001, guild_id, "reckless", wager=0)
+
+        assert result["success"]
+        assert result["won"] is False
+        expected_hit = (
+            BOSS_DUEL_STATS["reckless"]["player_hit"]
+            - BOSS_TIER_BONUS[25]["pen"]
+            - BOSS_PRESTIGE_BONUS[2]["pen"]
+        )
+        assert captured["player_hit"] == pytest.approx(expected_hit)
+        assert captured["player_hit"] > expected_hit * BOSS_FREE_FIGHT_ACCURACY_MOD
+        assert result["jc_delta"] == 0
+        assert player_repository.get_balance(10001, guild_id) == balance_before
 
     def test_start_boss_duel_rejects_wager_before_final_phase(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,

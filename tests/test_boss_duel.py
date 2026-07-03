@@ -1127,6 +1127,27 @@ class TestLiveDuelPathWagerAtomicity:
         )
         assert result["jc_delta"] == -BOSS_LOSS_REPAIR_BILL
 
+    def test_forced_no_wager_phase_loss_does_not_charge_repair_bill(
+        self, dig_service, dig_repo, player_repository, monkeypatch
+    ):
+        """Mid-phase no-wager fights are mandatory, not voluntary free fights."""
+        uid = _at_boss_for_duel(
+            dig_service, dig_repo, player_repository, monkeypatch,
+            uid=30010, balance=200,
+        )
+        dig_repo.update_tunnel(uid, TEST_GUILD_ID, prestige_level=2)
+        balance_before = player_repository.get_balance(uid, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+        monkeypatch.setattr("services.dig_service._approx_duel_win_prob", lambda **kw: 0.50)
+
+        result = dig_service.start_boss_duel(uid, TEST_GUILD_ID, "cautious", wager=0)
+        assert result["success"]
+        assert result["won"] is False
+
+        balance_after = player_repository.get_balance(uid, TEST_GUILD_ID)
+        assert balance_after == balance_before
+        assert result["jc_delta"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Finding-5: a boss-duel loss can never drive the balance negative.
