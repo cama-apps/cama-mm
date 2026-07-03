@@ -175,7 +175,7 @@ class TestDuelScaling:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "random", lambda: 0.0)
 
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=0)
         first_round_boss_hp_after_hit = result["round_log"][0]["boss_hp"]
         assert first_round_boss_hp_after_hit == expected - int(BOSS_DUEL_STATS["cautious"]["player_dmg"])
 
@@ -205,7 +205,7 @@ class TestDuelScaling:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "random", lambda: 0.0)
 
-        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=0)
         first_round_boss_hp_after_hit = result["round_log"][0]["boss_hp"]
         assert first_round_boss_hp_after_hit == expected - int(BOSS_DUEL_STATS["cautious"]["player_dmg"])
 
