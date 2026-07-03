@@ -100,7 +100,7 @@ class BossWagerModal(discord.ui.Modal):
             )
             return
 
-        await safe_defer(interaction)
+        await safe_defer(interaction, thinking=True)
         try:
             self.result = _wrap(await asyncio.to_thread(
                 self.dig_service.start_boss_duel,
@@ -287,17 +287,29 @@ class BossRiskModal(discord.ui.Modal):
             )
             return
 
-        await safe_defer(interaction)
-        await _resolve_phase_fight_without_modal(
-            interaction,
-            dig_service=self.dig_service,
-            user_id=self.user_id,
-            guild_id=self.guild_id,
-            risk_tier=tier,
-            wager=0,
-            dig_flavor_service=self.dig_flavor_service,
-        )
-        self.stop()
+        await safe_defer(interaction, thinking=True)
+        try:
+            await _resolve_phase_fight_without_modal(
+                interaction,
+                dig_service=self.dig_service,
+                user_id=self.user_id,
+                guild_id=self.guild_id,
+                risk_tier=tier,
+                wager=0,
+                dig_flavor_service=self.dig_flavor_service,
+            )
+        except Exception as e:
+            logger.error("Boss phase risk fight error: %s", e, exc_info=True)
+            try:
+                await safe_followup(
+                    interaction,
+                    content="Boss fight failed. Try again.",
+                    ephemeral=True,
+                )
+            except Exception:
+                logger.warning("Boss phase risk failure followup failed", exc_info=True)
+        finally:
+            self.stop()
 
 
 async def _post_phase_transition_followup(
