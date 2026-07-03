@@ -48,3 +48,34 @@ def test_fight_ignores_double_click(monkeypatch):
         assert deferred == [1]
 
     asyncio.run(scenario())
+
+
+def test_fight_uses_risk_modal_when_wagers_are_disabled(monkeypatch):
+    risk_modal = MagicMock()
+    risk_modal_factory = MagicMock(return_value=risk_modal)
+    wager_modal_factory = MagicMock()
+
+    monkeypatch.setattr(bv, "BossRiskModal", risk_modal_factory)
+    monkeypatch.setattr(bv, "BossWagerModal", wager_modal_factory)
+
+    async def scenario():
+        dig_service = MagicMock()
+        dig_service.get_carried_wager.return_value = None
+        boss_info = MagicMock()
+        boss_info.wager_allowed = False
+        view = bv.BossEncounterView(
+            dig_service, user_id=42, guild_id=7, boss_info=boss_info,
+        )
+
+        interaction = MagicMock()
+        interaction.user.id = 42
+        interaction.response = AsyncMock()
+
+        await view.fight.callback(interaction)
+
+        interaction.response.send_modal.assert_awaited_once_with(risk_modal)
+        assert view._engaged is True
+        assert not dig_service.get_carried_wager.called
+        wager_modal_factory.assert_not_called()
+
+    asyncio.run(scenario())

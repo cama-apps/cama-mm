@@ -389,7 +389,7 @@ class TestAscensionSystem:
         # blanket 0.99 set above. Sized for the post-revamp boss HP at P2.
         rolls = iter([0.0, 0.99] * 100)
         monkeypatch.setattr(random, "random", lambda: next(rolls))
-        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
         assert result["success"]
         assert result.get("won") is True
         # At P2+, boss should enter phase 2 on first victory
