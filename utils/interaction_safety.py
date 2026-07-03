@@ -20,7 +20,12 @@ def friendly_error(action: str) -> str:
     return f"❌ Couldn't {action} right now — try again in a moment."
 
 
-async def safe_defer(interaction: discord.Interaction, *, ephemeral: bool = False) -> bool:
+async def safe_defer(
+    interaction: discord.Interaction,
+    *,
+    ephemeral: bool = False,
+    thinking: bool = False,
+) -> bool:
     """
     Defer the interaction if it is still valid.
 
@@ -28,7 +33,7 @@ async def safe_defer(interaction: discord.Interaction, *, ephemeral: bool = Fals
     False when the interaction is no longer valid.
     """
     try:
-        await interaction.response.defer(ephemeral=ephemeral)
+        await interaction.response.defer(ephemeral=ephemeral, thinking=thinking)
         return True
     except (discord.NotFound, discord.InteractionResponded, discord.HTTPException) as exc:
         logger.warning("Unable to defer interaction: %s", exc)

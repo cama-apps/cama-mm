@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from utils.interaction_safety import safe_followup, send_public_or_ephemeral
+from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
 
 
 def _http_error(status: int = 403, reason: str = "Forbidden", message: str = "Missing Permissions"):
@@ -39,6 +39,22 @@ class _StubInteraction:
         self.followup = followup or _Recorder()
         self.channel = channel
         self.response = SimpleNamespace(is_done=lambda: is_done)
+
+
+@pytest.mark.asyncio
+async def test_safe_defer_forwards_thinking_flag():
+    calls = []
+
+    class _Response:
+        async def defer(self, **kwargs):
+            calls.append(kwargs)
+
+    interaction = SimpleNamespace(response=_Response())
+
+    result = await safe_defer(interaction, thinking=True)
+
+    assert result is True
+    assert calls == [{"ephemeral": False, "thinking": True}]
 
 
 @pytest.mark.asyncio

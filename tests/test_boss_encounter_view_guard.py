@@ -8,6 +8,7 @@ path that resolves the same phase (and settles the wager) twice.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import commands.dig_helpers.boss_views as bv
@@ -77,5 +78,46 @@ def test_fight_uses_risk_modal_when_wagers_are_disabled(monkeypatch):
         assert view._engaged is True
         assert not dig_service.get_carried_wager.called
         wager_modal_factory.assert_not_called()
+
+    asyncio.run(scenario())
+
+
+def test_risk_modal_submit_reports_unexpected_resolution_failure(monkeypatch):
+    deferred = []
+    followups = []
+
+    async def fake_defer(interaction, **kwargs):
+        deferred.append(kwargs)
+        return True
+
+    async def fake_followup(interaction, **kwargs):
+        followups.append(kwargs)
+
+    async def fail_resolution(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bv, "safe_defer", fake_defer)
+    monkeypatch.setattr(bv, "safe_followup", fake_followup)
+    monkeypatch.setattr(bv, "_resolve_phase_fight_without_modal", fail_resolution)
+
+    async def scenario():
+        modal = SimpleNamespace(
+            risk_tier=SimpleNamespace(value="cautious"),
+            dig_service=MagicMock(),
+            user_id=42,
+            guild_id=7,
+            dig_flavor_service=None,
+            stop=MagicMock(),
+        )
+        interaction = MagicMock()
+
+        await bv.BossRiskModal.on_submit(modal, interaction)
+
+        assert deferred == [{"thinking": True}]
+        assert followups == [{
+            "content": "Boss fight failed. Try again.",
+            "ephemeral": True,
+        }]
+        modal.stop.assert_called_once()
 
     asyncio.run(scenario())
