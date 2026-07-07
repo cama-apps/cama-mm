@@ -219,6 +219,28 @@ def test_buy_yes_rejects_insufficient_depth(prediction_service, player_repositor
         )
 
 
+def test_refresh_uses_widened_drift_bounds(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    """Daily refresh random walk uses the configured inclusive drift range."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market drift?", initial_fair=50,
+    )["prediction_id"]
+    bounds = {}
+
+    def capture_randint(lo, hi):
+        bounds["lo"] = lo
+        bounds["hi"] = hi
+        return hi
+
+    monkeypatch.setattr(random, "randint", capture_randint)
+
+    summary = prediction_service.refresh_market(pid)
+
+    assert bounds == {"lo": -3, "hi": 3}
+    assert summary["drift"] == 3
+
+
 def test_buy_yes_rejects_insufficient_balance(prediction_service, player_repository):
     _add_player(player_repository, 1, balance=10)
     pid = prediction_service.create_orderbook_prediction(
@@ -1088,6 +1110,96 @@ async def test_force_refresh_skipped_when_resolved(
 
     fwup = " ".join((m.get("content") or "") for m in interaction.followup.messages)
     assert "skipped" in fwup.lower()
+
+
+async def test_resolve_announces_all_winners_and_losers(
+    prediction_service, prediction_repo, player_repository, patched_cog_helpers
+):
+    """Admin resolution lists every settled winner and loser, not only the top winner."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    for discord_id in (101, 102, 201, 202):
+        _add_player(player_repository, discord_id, balance=1000)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Will everyone print?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=101, side="yes", contracts=2)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=102, side="yes", contracts=1)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=201, side="no", contracts=3)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=202, side="no", contracts=1)
+    loser_201_loss = prediction_repo.get_position(pid, 201)["no_cost_basis_total"]
+    loser_202_loss = prediction_repo.get_position(pid, 202)["no_cost_basis_total"]
+
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.guild = None
+
+    await cog.resolve.callback(
+        cog, interaction, pid, SimpleNamespace(value="yes")
+    )
+
+    announce = "\n".join((m.get("content") or "") for m in interaction.followup.messages)
+    assert f"<@101> +{2 * PREDICTION_CONTRACT_VALUE} JC (2 contracts)" in announce
+    assert f"<@102> +{1 * PREDICTION_CONTRACT_VALUE} JC (1 contracts)" in announce
+    assert f"<@201> -{loser_201_loss} JC (3 contracts)" in announce
+    assert f"<@202> -{loser_202_loss} JC (1 contracts)" in announce
+
+
+async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):
+    """Large settlements stay under Discord's per-message content limit."""
+    from commands import predictions as pmod
+
+    class _FakeGambaChannel:
+        name = "gamba"
+
+        def __init__(self):
+            self.messages: list[str] = []
+
+        async def send(self, content=None, embed=None, **kwargs):
+            self.messages.append(content or "")
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
+
+    winners = [
+        {"discord_id": 10_000 + i, "payout": 1_000 - i, "contracts": 1}
+        for i in range(80)
+    ]
+    losers = [
+        {"discord_id": 20_000 + i, "loss": 900 - i, "contracts": 1}
+        for i in range(80)
+    ]
+    prediction_service = MagicMock()
+    prediction_service.resolve_orderbook.return_value = {
+        "winners": winners,
+        "losers": losers,
+    }
+    prediction_service.get_prediction.return_value = None
+
+    cog = _make_cog(prediction_service)
+    gamba = _FakeGambaChannel()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID, text_channels=[gamba])
+
+    await cog.resolve.callback(
+        cog, interaction, 42, SimpleNamespace(value="yes")
+    )
+
+    followup_contents = [m["content"] for m in interaction.followup.messages]
+    assert len(followup_contents) > 1
+    assert len(gamba.messages) == len(followup_contents)
+    assert all(len(content) <= pmod.DISCORD_MESSAGE_MAX_CHARS for content in followup_contents)
+    assert all(len(content) <= pmod.DISCORD_MESSAGE_MAX_CHARS for content in gamba.messages)
+
+    full_followup = "\n".join(followup_contents)
+    assert "<@10000> +1000 JC (1 contracts)" in full_followup
+    assert "<@10079> +921 JC (1 contracts)" in full_followup
+    assert "<@20000> -900 JC (1 contracts)" in full_followup
+    assert "<@20079> -821 JC (1 contracts)" in full_followup
 
 
 async def test_refresh_status_admin_only(

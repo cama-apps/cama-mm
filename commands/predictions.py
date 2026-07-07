@@ -41,6 +41,7 @@ logger = logging.getLogger("cama_bot.commands.predictions")
 
 MARKET_TITLE_PREFIX = "📈 Market #"
 MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
+DISCORD_MESSAGE_MAX_CHARS = 2000
 
 
 def _avg_price_pct(cost_basis: int, qty: int) -> float:
@@ -64,6 +65,68 @@ def _mark_value_jopa(mark_pct: float | int | None, qty: int) -> int:
     if mark_pct is None:
         return 0
     return int(mark_pct * qty * PREDICTION_CONTRACT_VALUE / 100)
+
+
+def _chunk_message_lines(
+    lines: list[str], max_chars: int = DISCORD_MESSAGE_MAX_CHARS
+) -> list[str]:
+    """Split newline-joined lines into Discord-safe message chunks."""
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line)
+        separator_len = 1 if current else 0
+        if current and current_len + separator_len + line_len > max_chars:
+            chunks.append("\n".join(current))
+            current = []
+            current_len = 0
+
+        if line_len > max_chars:
+            for start in range(0, line_len, max_chars):
+                piece = line[start : start + max_chars]
+                if current:
+                    chunks.append("\n".join(current))
+                    current = []
+                    current_len = 0
+                chunks.append(piece)
+            continue
+
+        current.append(line)
+        current_len += (1 if current_len else 0) + line_len
+
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
+def _build_resolution_announcement_chunks(
+    prediction_id: int,
+    outcome: str,
+    winners: list[dict],
+    losers: list[dict],
+    bankruptcy_total: int,
+) -> list[str]:
+    winner_lines = [
+        f"<@{w['discord_id']}> +{w['payout']} JC ({w['contracts']} contracts)"
+        for w in winners
+    ]
+    loser_lines = [
+        f"<@{loser['discord_id']}> -{loser['loss']} JC ({loser['contracts']} contracts)"
+        for loser in losers
+    ]
+    lines = [
+        f"📈 Market #{prediction_id} resolved **{outcome.upper()}** — "
+        f"{len(winners)} winners, {len(losers)} losers.",
+        "**Winners:**",
+        *(winner_lines or ["none"]),
+        "**Losers:**",
+        *(loser_lines or ["none"]),
+    ]
+    if bankruptcy_total > 0:
+        lines.append(f"({bankruptcy_total} JC withheld from bankrupt winners.)")
+    return _chunk_message_lines(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -1050,21 +1113,19 @@ class PredictionCommands(commands.Cog):
             await safe_followup(interaction, content=f"❌ {e}")
             return
 
-        winners = result.get("winners", [])
-        biggest = max(winners, key=lambda w: w["payout"], default=None)
-        biggest_str = (
-            f"biggest +{biggest['payout']} to <@{biggest['discord_id']}>"
-            if biggest
-            else "no winners"
+        winners = sorted(
+            result.get("winners", []), key=lambda w: w["payout"], reverse=True
         )
-        announce = (
-            f"📈 Market #{prediction_id} resolved **{outcome.value.upper()}** — "
-            f"{len(winners)} winners, {biggest_str}."
+        losers = sorted(
+            result.get("losers", []), key=lambda loser: loser["loss"], reverse=True
         )
+        biggest = winners[0] if winners else None
         bankruptcy_total = sum(w.get("bankruptcy_penalty", 0) for w in winners)
-        if bankruptcy_total > 0:
-            announce += f" ({bankruptcy_total} JC withheld from bankrupt winners.)"
-        await safe_followup(interaction, content=announce)
+        announce_chunks = _build_resolution_announcement_chunks(
+            prediction_id, outcome.value, winners, losers, bankruptcy_total
+        )
+        for chunk in announce_chunks:
+            await safe_followup(interaction, content=chunk)
 
         # Rare neon celebration for the biggest market winner (best-effort).
         if biggest and biggest.get("payout"):
@@ -1096,7 +1157,8 @@ class PredictionCommands(commands.Cog):
                 await ensure_thread_writable(thread)
                 await self.refresh_market_embed(prediction_id)
                 try:
-                    await thread.send(announce)
+                    for chunk in announce_chunks:
+                        await thread.send(chunk)
                 except Exception as e:
                     logger.warning(f"Failed to post resolve announcement: {e}")
                 try:
@@ -1108,7 +1170,8 @@ class PredictionCommands(commands.Cog):
 
         # Gamba channel announcement
         if interaction.guild:
-            await self.announce_to_gamba(interaction.guild, announce)
+            for chunk in announce_chunks:
+                await self.announce_to_gamba(interaction.guild, chunk)
 
     # -- /predict set_fair ---
 
