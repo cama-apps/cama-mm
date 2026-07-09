@@ -28,10 +28,11 @@ GID = TEST_GUILD_ID
 
 
 class TestBankruptWheelEV:
-    """Verify the bankrupt wheel actually averages +25 JC after the math fix."""
+    """Verify the bankrupt wheel actually averages its configured scaled target."""
 
     def test_bankrupt_wheel_mean_equals_target(self):
         from config import WHEEL_BANKRUPT_TARGET_EV
+        from utils.economy_scaling import scale_minigame_jc_delta
         from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, bankrupt_special_ev
 
         total = 0.0
@@ -39,12 +40,13 @@ class TestBankruptWheelEV:
             if isinstance(value, int):
                 total += value
             else:
-                total += bankrupt_special_ev(value)
+                total += scale_minigame_jc_delta(bankrupt_special_ev(value))
         mean = total / len(BANKRUPT_WHEEL_WEDGES)
+        target = scale_minigame_jc_delta(WHEEL_BANKRUPT_TARGET_EV)
 
-        assert abs(mean - WHEEL_BANKRUPT_TARGET_EV) <= 1.0, (
+        assert abs(mean - target) <= 1.0, (
             f"Bankrupt wheel mean {mean:.2f} drifted from target "
-            f"{WHEEL_BANKRUPT_TARGET_EV} by more than 1 JC"
+            f"{target} by more than 1 JC"
         )
 
     def test_bankrupt_wedge_value_clamped_negative(self):
@@ -68,17 +70,18 @@ class TestBankruptWheelEV:
             WHEEL_RED_SHELL_EST_EV,
             WHEEL_TARGET_EV,
         )
+        from utils.economy_scaling import scale_minigame_jc_delta
         from utils.wheel_drawing import WHEEL_WEDGES
 
         special_ev = {
-            "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
-            "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
-            "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
-            "COMMUNE": WHEEL_COMMUNE_EST_EV,
-            "COMEBACK": WHEEL_COMEBACK_EST_EV,
-            "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
-            "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
-            "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
+            "RED_SHELL": scale_minigame_jc_delta(WHEEL_RED_SHELL_EST_EV),
+            "BLUE_SHELL": scale_minigame_jc_delta(WHEEL_BLUE_SHELL_EST_EV),
+            "LIGHTNING_BOLT": scale_minigame_jc_delta(WHEEL_LIGHTNING_BOLT_EST_EV),
+            "COMMUNE": scale_minigame_jc_delta(WHEEL_COMMUNE_EST_EV),
+            "COMEBACK": scale_minigame_jc_delta(WHEEL_COMEBACK_EST_EV),
+            "BANANA_PEEL": scale_minigame_jc_delta(WHEEL_BANANA_PEEL_EST_EV),
+            "GREEN_SHELL": scale_minigame_jc_delta(WHEEL_GREEN_SHELL_EST_EV),
+            "BOMB_OMB": scale_minigame_jc_delta(WHEEL_BOMB_OMB_EST_EV),
         }
 
         total = 0.0
@@ -89,7 +92,8 @@ class TestBankruptWheelEV:
                 total += special_ev.get(value, 0.0)
         mean = total / len(WHEEL_WEDGES)
 
-        assert abs(mean - WHEEL_TARGET_EV) <= 1.0
+        target = scale_minigame_jc_delta(WHEEL_TARGET_EV)
+        assert abs(mean - target) <= 1.0
 
     def test_bankrupt_wheel_distinct_from_normal_wheel(self):
         """The bankrupt and normal wheels must be different lists. Guards
