@@ -36,6 +36,7 @@ from services.dig_constants import (
     pick_cave_in_consequence,
     roll_catastrophic_cave_in,
 )
+from utils.economy_scaling import scale_minigame_jc_delta
 
 
 class DigCoreMixin:
@@ -147,6 +148,7 @@ class DigCoreMixin:
         result dict."""
         advance = random.randint(3, 7)
         jc_earned = random.randint(1, 5)
+        jc_earned = scale_minigame_jc_delta(jc_earned)
         new_depth = depth_before + advance
 
         # Tunnel advance + JC payout commit together so a crash can't
@@ -806,10 +808,12 @@ class DigCoreMixin:
         streak_bonus = min(streak_bonus, DIG_STREAK_JC_PAYOUT_CAP)
         jc_earned += streak_bonus
 
-        # Plains tithe / Blue tax apply to the full payout.
+        jc_earned = scale_minigame_jc_delta(jc_earned)
+
+        # Plains tithe / Blue tax apply to the scaled full payout.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
         # Helltide bell: flat per-dig tax while the guild modifier is active.
-        helltide_tax = self._helltide_tax(guild_id)
+        helltide_tax = scale_minigame_jc_delta(self._helltide_tax(guild_id))
         if helltide_tax > 0:
             jc_earned = max(0, jc_earned - helltide_tax)
 
@@ -1268,10 +1272,12 @@ class DigCoreMixin:
 
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
-            # Plains tithe / Blue tax apply to the full payout.
+            jc_earned = scale_minigame_jc_delta(jc_earned)
+
+            # Plains tithe / Blue tax apply to the scaled full payout.
             jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
             # Helltide bell: flat per-dig tax while the guild modifier is active.
-            helltide_tax = self._helltide_tax(guild_id)
+            helltide_tax = scale_minigame_jc_delta(self._helltide_tax(guild_id))
             if helltide_tax > 0:
                 jc_earned = max(0, jc_earned - helltide_tax)
 

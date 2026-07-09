@@ -201,6 +201,30 @@ class LoanService(ILoanService):
             metadata=metadata,
         )
 
+    def deduct_up_to_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
+        """Deduct up to amount from the nonprofit fund. Returns actual deduction."""
+        return self.loan_repo.deduct_up_to_nonprofit_fund(
+            guild_id,
+            amount,
+            source=source,
+            actor_id=actor_id,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
+
     def reset_loan_cooldown(self, discord_id: int, guild_id: int | None) -> None:
         """
         Reset a player's loan cooldown (admin operation).

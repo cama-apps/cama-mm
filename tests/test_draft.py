@@ -1539,10 +1539,15 @@ class _FakeDraftMatchService:
     def __init__(self):
         self.state = None
         self.message_info = None
+        self.reserve_calls = []
 
     def _persist_match_state(self, guild_id, state):
         state.pending_match_id = 1234
         self.state = state
+
+    def reserve_betting_seed(self, guild_id, state):
+        self.reserve_calls.append((guild_id, state.pending_match_id))
+        return state
 
     def get_last_shuffle(self, guild_id, pending_match_id=None):
         # Mirror the real service: a specific id only matches its own state

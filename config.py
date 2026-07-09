@@ -149,6 +149,7 @@ BET_LAST_CALL_OFFSET = _parse_int("BET_LAST_CALL_OFFSET", 60)  # 1m left
 # the final warning @-pings the under-bet team to drum up action.
 BET_UNDERDOG_PING_RATIO = _parse_float("BET_UNDERDOG_PING_RATIO", 4.0)
 HOUSE_PAYOUT_MULTIPLIER = _parse_float("HOUSE_PAYOUT_MULTIPLIER", 1.0)
+DOTA_BET_SEED_AMOUNT = _parse_int("DOTA_BET_SEED_AMOUNT", 50)
 
 # Auto-liquidity (blind bets) configuration
 AUTO_BLIND_ENABLED = _parse_bool("AUTO_BLIND_ENABLED", True)  # Enable auto-blind bets in pool mode

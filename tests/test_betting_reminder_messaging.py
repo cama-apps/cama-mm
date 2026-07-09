@@ -25,6 +25,9 @@ def _make_cog():
         betting_mode="pool",
         bet_lock_until=LOCK_TS,
         pending_match_id=1,
+        bet_seed_radiant=0,
+        bet_seed_dire=0,
+        bet_seed_bonus=0,
         thread_shuffle_message_id=None,
         thread_shuffle_thread_id=None,
         radiant_team_ids=[1001, 1002, 1003, 1004, 1005],
@@ -69,6 +72,22 @@ async def test_warning_reminder_is_terse_and_skips_flavor():
 
 
 @pytest.mark.asyncio
+async def test_warning_reminder_includes_pool_seed_text():
+    cog, channel = _make_cog()
+    pending = cog.match_service.get_last_shuffle.return_value
+    pending.bet_seed_radiant = 25
+    pending.bet_seed_dire = 25
+
+    await send_betting_reminder(
+        cog, 1, reminder_type="warning", lock_until=LOCK_TS, pending_match_id=1
+    )
+
+    content = channel.send.call_args.args[0]
+    assert "Seed: Radiant 25" in content
+    assert "Dire 25" in content
+
+
+@pytest.mark.asyncio
 async def test_last_call_reminder_includes_flavor_line():
     cog, channel = _make_cog()
     await send_betting_reminder(
@@ -79,6 +98,25 @@ async def test_last_call_reminder_includes_flavor_line():
     content = channel.send.call_args.args[0]
     assert "Last call" in content
     assert "ANNOUNCER LINE" in content
+
+
+@pytest.mark.asyncio
+async def test_closed_reminder_includes_house_bonus_text(monkeypatch):
+    cog, channel = _make_cog()
+    pending = cog.match_service.get_last_shuffle.return_value
+    pending.betting_mode = "house"
+    pending.bet_seed_bonus = 50
+    cog.betting_service.get_pot_odds = MagicMock(return_value={"radiant": 10, "dire": 20})
+    flip = AsyncMock()
+    monkeypatch.setattr(bm, "update_shuffle_message_wagers", flip)
+
+    await send_betting_reminder(
+        cog, 1, reminder_type="closed", lock_until=LOCK_TS, pending_match_id=1
+    )
+
+    content = channel.send.call_args.args[0]
+    assert "Final House (1:1) pool" in content
+    assert "Winner bonus: 50" in content
 
 
 @pytest.mark.asyncio

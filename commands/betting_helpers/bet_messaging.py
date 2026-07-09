@@ -49,7 +49,14 @@ async def update_shuffle_message_wagers(
     lock_until = pending_state.bet_lock_until
     betting_mode = pending_state.betting_mode
     field_name, field_value = format_betting_display(
-        totals["radiant"], totals["dire"], betting_mode, lock_until, locked=locked
+        totals["radiant"],
+        totals["dire"],
+        betting_mode,
+        lock_until,
+        locked=locked,
+        seed_radiant=pending_state.bet_seed_radiant,
+        seed_dire=pending_state.bet_seed_dire,
+        seed_bonus=pending_state.bet_seed_bonus,
     )
 
     # Update main channel message (lobby channel)
@@ -166,7 +173,13 @@ async def send_betting_reminder(
 
     # Format bets with odds for pool mode
     _, totals_text = format_betting_display(
-        totals["radiant"], totals["dire"], betting_mode, lock_until=None
+        totals["radiant"],
+        totals["dire"],
+        betting_mode,
+        lock_until=None,
+        seed_radiant=pending_state.bet_seed_radiant,
+        seed_dire=pending_state.bet_seed_dire,
+        seed_bonus=pending_state.bet_seed_bonus,
     )
     mode_label = "Pool" if betting_mode == "pool" else "House (1:1)"
 

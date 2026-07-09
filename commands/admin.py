@@ -1274,7 +1274,13 @@ class AdminCommands(commands.Cog):
                             )
 
                         new_field_name, new_field_value = format_betting_display(
-                            totals["radiant"], totals["dire"], betting_mode, new_lock_until
+                            totals["radiant"],
+                            totals["dire"],
+                            betting_mode,
+                            new_lock_until,
+                            seed_radiant=pending_state.bet_seed_radiant,
+                            seed_dire=pending_state.bet_seed_dire,
+                            seed_bonus=pending_state.bet_seed_bonus,
                         )
 
                         # Find and replace the betting field (usually the last field or has "Wagers" in name)

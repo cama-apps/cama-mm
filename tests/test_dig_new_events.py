@@ -11,6 +11,7 @@ from repositories.dig_repository import DigRepository
 from services.dig_constants import EVENT_POOL, RANDOM_EVENTS
 from services.dig_splash import resolve_splash
 from tests.conftest import TEST_GUILD_ID
+from utils.economy_scaling import scale_minigame_jc_delta
 
 NEW_EVENT_IDS = (
     "aegis_whisper",
@@ -93,10 +94,10 @@ class TestStealMode:
             mode="steal",
         )
         assert result.mode == "steal"
-        assert result.victims == [(20002, 15)]
+        assert result.victims == [(20002, scale_minigame_jc_delta(15))]
         # Victim is debited, digger is credited atomically.
-        assert player_repository.get_balance(20001, TEST_GUILD_ID) == 115
-        assert player_repository.get_balance(20002, TEST_GUILD_ID) == 185
+        assert player_repository.get_balance(20001, TEST_GUILD_ID) == 112
+        assert player_repository.get_balance(20002, TEST_GUILD_ID) == 188
 
     def test_steal_logs_both_victim_and_thief(
         self, dig_repo, player_repository, monkeypatch,
@@ -124,14 +125,14 @@ class TestStealMode:
                 "ORDER BY id",
             ).fetchall()
         actions = [(r["actor_id"], r["action_type"], r["jc_delta"]) for r in rows]
-        assert (20002, "splash_victim", -15) in actions
-        assert (20001, "splash_thief", 15) in actions
+        assert (20002, "splash_victim", -12) in actions
+        assert (20001, "splash_thief", 12) in actions
 
-    def test_steal_can_push_victim_below_zero(
+    def test_steal_skips_victim_below_auto_blind_threshold(
         self, dig_repo, player_repository, monkeypatch,
     ):
         _register(player_repository, 20001, balance=0)  # digger
-        _register(player_repository, 20002, balance=5)  # victim with low balance
+        _register(player_repository, 20002, balance=5)  # victim below AOE threshold
         monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
 
         result = resolve_splash(
@@ -145,10 +146,9 @@ class TestStealMode:
             penalty_jc=15,
             mode="steal",
         )
-        # Steal is unclamped on the victim (matches Red/Blue Shell semantics).
-        assert result.victims == [(20002, 15)]
-        assert player_repository.get_balance(20001, TEST_GUILD_ID) == 15
-        assert player_repository.get_balance(20002, TEST_GUILD_ID) == -10
+        assert result.victims == []
+        assert player_repository.get_balance(20001, TEST_GUILD_ID) == 0
+        assert player_repository.get_balance(20002, TEST_GUILD_ID) == 5
 
     def test_steal_with_empty_pool_returns_empty(self, dig_repo, player_repository):
         _register(player_repository, 20001, balance=100)  # only the digger

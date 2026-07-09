@@ -54,6 +54,13 @@ class PendingMatchState:
     is_draft: bool = False
     balancing_rating_system: str = "glicko"
 
+    # Reserve-backed betting seed. Pool mode uses radiant/dire seed shares;
+    # house mode uses a neutral bonus pool.
+    bet_seed_reserved: int = 0
+    bet_seed_radiant: int = 0
+    bet_seed_dire: int = 0
+    bet_seed_bonus: int = 0
+
     # Auto-blind betting result snapshot (draft display only)
     blind_bets_result: dict | None = None
 

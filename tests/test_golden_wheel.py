@@ -10,12 +10,13 @@ Covers:
 - Golden wheel eligibility (top-N vs not top-N)
 - Bankrupt wheel priority over golden wheel
 - New outcome mechanics: HEIST, MARKET_CRASH, COMPOUND_INTEREST,
-  TRICKLE_DOWN, DIVIDEND, HOSTILE_TAKEOVER, CROWN JEWEL (250 JC)
+  TRICKLE_DOWN, DIVIDEND, HOSTILE_TAKEOVER, CROWN JEWEL (scaled 200 JC)
 """
 
 import pytest
 
 from tests.conftest import TEST_GUILD_ID
+from utils.economy_scaling import scale_minigame_jc_delta
 
 # ---------------------------------------------------------------------------
 # Wheel drawing unit tests
@@ -39,9 +40,10 @@ class TestGoldenWheelWedges:
 
     def test_golden_wheel_contains_crown_jewel(self):
         from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES
-        crown = [w for w in GOLDEN_WHEEL_WEDGES if w[0] == "CROWN"]
+        crown = [w for w in GOLDEN_WHEEL_WEDGES if w[2] == "#fffacd"]
         assert len(crown) == 1
-        assert crown[0][1] == 250
+        assert crown[0][0] == "200"
+        assert crown[0][1] == 200
 
     def test_golden_wheel_contains_new_mechanics(self):
         from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES
@@ -86,25 +88,35 @@ class TestGoldenWheelWedges:
         # Recompute estimated EVs for special wedges (same logic as inside the function)
         avg_trickle = (config.LIGHTNING_BOLT_PCT_MIN + config.LIGHTNING_BOLT_PCT_MAX) / 2.0
         live_evs = {
-            "RED_SHELL": config.WHEEL_RED_SHELL_EST_EV,
-            "BLUE_SHELL": config.WHEEL_BLUE_SHELL_EST_EV,
-            "HEIST": float(sum(max(1, int(b * 0.085)) for b in bottom_player_balances)),
-            "MARKET_CRASH": float(sum(max(1, int(b * 0.115)) for b in other_top_balances)),
-            "COMPOUND_INTEREST": 100.0,  # flat +100 reward
-            "TRICKLE_DOWN": float(int(max(0, total_positive_balance - spinner_balance) * avg_trickle)),
-            "DIVIDEND": float(max(10, int(total_positive_balance * 0.005))),
-            "HOSTILE_TAKEOVER": float(max(1, int(rank_next_balance * 0.115))),
-            "RECESSION": -float(max(0, int(spinner_balance * config.WHEEL_GOLDEN_RECESSION_TOP_PCT))),
-            "BANANA_PEEL": config.WHEEL_BANANA_PEEL_EST_EV,
-            "GREEN_SHELL": config.WHEEL_GREEN_SHELL_EST_EV,
-            "BOMB_OMB": config.WHEEL_BOMB_OMB_EST_EV,
+            "RED_SHELL": scale_minigame_jc_delta(config.WHEEL_RED_SHELL_EST_EV),
+            "BLUE_SHELL": scale_minigame_jc_delta(config.WHEEL_BLUE_SHELL_EST_EV),
+            "HEIST": scale_minigame_jc_delta(
+                float(sum(max(1, int(b * 0.085)) for b in bottom_player_balances))
+            ),
+            "MARKET_CRASH": scale_minigame_jc_delta(
+                float(sum(max(1, int(b * 0.115)) for b in other_top_balances))
+            ),
+            "COMPOUND_INTEREST": scale_minigame_jc_delta(100.0),
+            "TRICKLE_DOWN": scale_minigame_jc_delta(
+                float(int(max(0, total_positive_balance - spinner_balance) * avg_trickle))
+            ),
+            "DIVIDEND": scale_minigame_jc_delta(
+                float(max(10, int(total_positive_balance * 0.005)))
+            ),
+            "HOSTILE_TAKEOVER": scale_minigame_jc_delta(float(max(1, int(rank_next_balance * 0.115)))),
+            "RECESSION": scale_minigame_jc_delta(
+                -float(max(0, int(spinner_balance * config.WHEEL_GOLDEN_RECESSION_TOP_PCT)))
+            ),
+            "BANANA_PEEL": scale_minigame_jc_delta(config.WHEEL_BANANA_PEEL_EST_EV),
+            "GREEN_SHELL": scale_minigame_jc_delta(config.WHEEL_GREEN_SHELL_EST_EV),
+            "BOMB_OMB": scale_minigame_jc_delta(config.WHEEL_BOMB_OMB_EST_EV),
         }
 
         int_sum = sum(v for _, v, _ in wedges if isinstance(v, int))
         special_sum = sum(live_evs.get(v, 0.0) for _, v, _ in wedges if isinstance(v, str))
         ev = (int_sum + special_sum) / len(wedges)
 
-        target = config.WHEEL_GOLDEN_TARGET_EV
+        target = scale_minigame_jc_delta(config.WHEEL_GOLDEN_TARGET_EV)
         # EV should match target within 1 JC (int() truncation causes tiny rounding)
         assert abs(ev - target) < 1.0, (
             f"Live golden wheel EV {ev:.2f} should be within 1 JC of target {target:.1f}"

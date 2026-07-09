@@ -22,6 +22,7 @@ from config import (
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 
@@ -264,6 +265,7 @@ class TriviaView(discord.ui.View):
                         logger.exception("Failed to apply trivia bankruptcy debuff")
 
             jc += streak_bonus_jc
+            jc = scale_minigame_jc_delta(jc)
 
             if effects is not None:
                 # White: tithe to the nonprofit fund from the player's NET payout

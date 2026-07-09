@@ -18,6 +18,7 @@ import pytest
 import services.dig_service as dig_service_module
 from repositories.dig_repository import DigRepository
 from services.dig_service import DigService
+from utils.economy_scaling import scale_minigame_jc_delta
 
 
 @pytest.fixture
@@ -115,7 +116,7 @@ class TestEventVariance:
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
         """200 resolutions of underground_stream safe (jc=3) should land
-        within [2, 4] and the empirical mean should be near 3."""
+        within the economy-scaled jitter range."""
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_tunnel(dig_service, dig_repo, player_repository)
 
@@ -126,11 +127,11 @@ class TestEventVariance:
             assert r["success"]
             rolls.append(r.get("jc_delta", 0))
 
-        assert min(rolls) >= 2  # int(round(3 * 0.5)) = 2
-        assert max(rolls) <= 4  # int(round(3 * 1.5)) = 4
+        assert min(rolls) >= scale_minigame_jc_delta(2)
+        assert max(rolls) <= scale_minigame_jc_delta(4)
         mean = sum(rolls) / len(rolls)
-        assert 2.5 <= mean <= 3.5, f"mean {mean} not within ±15% of base 3"
-        assert len({*rolls}) >= 3, "no jitter visible across 200 rolls"
+        assert 2.0 <= mean <= 2.8, f"mean {mean} not within scaled base-3 range"
+        assert len({*rolls}) >= 2, "no jitter visible across 200 rolls"
 
     def test_zero_jc_outcome_stays_zero(self):
         """A base outcome of 0 JC should never roll non-zero (rounding
@@ -227,7 +228,7 @@ class TestEventVariance:
             random.seed(i + 500)
             r = dig_service.resolve_event(10001, 12345, "underground_stream", "safe")
             rolls.add(r.get("jc_delta", 0))
-        assert len(rolls) >= 3, f"variance not firing — only {len(rolls)} unique rolls"
+        assert len(rolls) >= 2, f"variance not firing — only {len(rolls)} unique rolls"
 
 
 class TestThreatPayloadUnjittered:

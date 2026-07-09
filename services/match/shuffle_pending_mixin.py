@@ -12,7 +12,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from config import BET_LOCK_SECONDS
+from config import BET_LOCK_SECONDS, DOTA_BET_SEED_AMOUNT
 from domain.models.pending_match_state import PendingMatchState
 from domain.models.player import Player
 from domain.models.team import Team
@@ -129,6 +129,40 @@ class ShufflePendingMixin:
     def _persist_match_state(self, guild_id: int | None, state: PendingMatchState) -> None:
         """Persist the pending match state (delegates to state_service)."""
         self.state_service.persist_state(guild_id, state)
+
+    def reserve_betting_seed(
+        self, guild_id: int | None, state: PendingMatchState
+    ) -> PendingMatchState:
+        """Reserve nonprofit funds as match betting seed and persist them on state."""
+        if state.bet_seed_reserved > 0 or DOTA_BET_SEED_AMOUNT <= 0:
+            return state
+        loan_service = getattr(self, "loan_service", None)
+        if loan_service is None:
+            return state
+
+        reserved = loan_service.deduct_up_to_nonprofit_fund(
+            guild_id,
+            DOTA_BET_SEED_AMOUNT,
+            source="dota_bet_seed",
+            related_type="pending_match",
+            related_id=state.pending_match_id,
+            reason="reserve-backed Dota betting seed",
+            metadata={"betting_mode": state.betting_mode},
+        )
+        if reserved <= 0:
+            return state
+
+        state.bet_seed_reserved = reserved
+        if state.betting_mode == "pool":
+            state.bet_seed_radiant = (reserved + 1) // 2
+            state.bet_seed_dire = reserved // 2
+            state.bet_seed_bonus = 0
+        else:
+            state.bet_seed_radiant = 0
+            state.bet_seed_dire = 0
+            state.bet_seed_bonus = reserved
+        self.state_service.persist_state(guild_id, state)
+        return state
 
     def shuffle_players(
         self,
@@ -456,6 +490,7 @@ class ShufflePendingMixin:
         )
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
+        self.reserve_betting_seed(guild_id, shuffle_state)
 
         return {
             "radiant_team": radiant_team,
