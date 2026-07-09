@@ -333,9 +333,7 @@ class DigService(
         paid-day counter commit atomically here so a crash between the two
         writes can't charge JC without counting the dig.
         """
-        cooldown_remaining = self._apply_mana_cooldown_reduction(
-            discord_id, guild_id, self._get_cooldown_remaining(tunnel)
-        )
+        cooldown_remaining = self._get_cooldown_remaining(tunnel)
         if cooldown_remaining <= 0:
             return None, 0
 

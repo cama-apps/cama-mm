@@ -483,6 +483,76 @@ class TestCooldown:
         result = dig_service.dig(10001, guild_id)
         assert not result["success"] or result.get("paid_dig_required")
 
+    @pytest.mark.parametrize(
+        ("mutations", "expected_remaining"),
+        [
+            (None, 3600),
+            (json.dumps([{"id": "restless"}]), 5400),
+        ],
+        ids=["plain", "restless"],
+    )
+    def test_stamina_13_caps_cooldown_after_mutations(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+        monkeypatch,
+        mutations,
+        expected_remaining,
+    ):
+        """The stamina cap applies after the Restless duration is added."""
+        now = 1_000_000
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            total_digs=1,
+            last_dig_at=now,
+            stat_stamina=13,
+            mutations=mutations,
+        )
+        monkeypatch.setattr(time, "time", lambda: now)
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"] is False
+        assert result["cooldown_remaining"] == expected_remaining
+
+    def test_forest_cooldown_is_ready_at_7170_seconds(
+        self, dig_service, dig_repo, guild_id, monkeypatch,
+    ):
+        """Forest's 30-second reduction reaches zero at the exact boundary."""
+        last_dig_at = 1_000_000
+        forest_effects = SimpleNamespace(
+            color="Green",
+            dig_cooldown_reduction_seconds=30,
+        )
+        monkeypatch.setattr(
+            dig_service,
+            "mana_effects_service",
+            SimpleNamespace(get_effects=lambda discord_id, guild_id: forest_effects),
+        )
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            total_digs=1,
+            last_dig_at=last_dig_at,
+        )
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+
+        assert dig_service._get_cooldown_remaining(
+            tunnel, now=last_dig_at + 7169,
+        ) == 1
+        assert dig_service._get_cooldown_remaining(
+            tunnel, now=last_dig_at + 7170,
+        ) == 0
+        assert dig_service.get_free_dig_ready_at(
+            10001, guild_id, now=last_dig_at + 7170,
+        ) is None
+
     def test_dig_cooldown_allows_paid_dig(self, dig_service, player_repository, guild_id, monkeypatch):
         """Can paid dig during cooldown."""
         _register_player(player_repository, balance=200)

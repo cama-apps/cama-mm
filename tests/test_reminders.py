@@ -246,26 +246,22 @@ class TestReminderServiceBetting:
 
 
 @pytest.fixture
-def dig_repo_mock():
+def dig_service_mock():
     mock = MagicMock()
-    mock.get_tunnel.return_value = None
+    mock.get_free_dig_ready_at.return_value = None
     return mock
 
 
 @pytest.fixture
-def reminder_service_with_dig(notification_repo, player_repo_mock, dig_repo_mock):
+def reminder_service_with_dig(notification_repo, player_repo_mock, dig_service_mock):
     return ReminderService(
         notification_repo=notification_repo,
         player_repo=player_repo_mock,
-        dig_repo=dig_repo_mock,
+        dig_service=dig_service_mock,
     )
 
 
 class TestDigReminder:
-    def test_dig_preference_default_false(self, notification_repo):
-        prefs = notification_repo.get_preferences(1, TEST_GUILD_ID)
-        assert prefs.get("dig_enabled") is False
-
     def test_dig_preference_toggle(self, notification_repo):
         notification_repo.set_preference(1, TEST_GUILD_ID, "dig", True)
         assert notification_repo.get_preferences(1, TEST_GUILD_ID)["dig_enabled"] is True
@@ -276,9 +272,27 @@ class TestDigReminder:
     ):
         reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
         future_time = int(time.time()) + 3600
-        reminder_service_with_dig.schedule_dig_reminder(mock_bot, 1, TEST_GUILD_ID, future_time)
-        assert (1, TEST_GUILD_ID, "dig") in reminder_service_with_dig._tasks
-        reminder_service_with_dig._cancel_task(1, TEST_GUILD_ID, "dig")
+        key = (1, TEST_GUILD_ID, "dig")
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new_callable=AsyncMock,
+        ) as send_dm_after_delay:
+            reminder_service_with_dig.schedule_dig_reminder(
+                mock_bot, 1, TEST_GUILD_ID, future_time,
+            )
+            assert key in reminder_service_with_dig._tasks
+            task = reminder_service_with_dig._tasks[key]
+            try:
+                assert send_dm_after_delay.call_args.kwargs["message"] == (
+                    "Your free dig cooldown has expired! "
+                    "You can `/dig go` again now."
+                )
+            finally:
+                reminder_service_with_dig._cancel_task(1, TEST_GUILD_ID, "dig")
+                with pytest.raises(asyncio.CancelledError):
+                    await task
 
     def test_dig_no_task_when_disabled(self, reminder_service_with_dig, mock_bot):
         future_time = int(time.time()) + 3600
@@ -286,29 +300,51 @@ class TestDigReminder:
         assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
 
     @pytest.mark.asyncio
-    async def test_reschedule_dig_active_cooldown(
-        self, reminder_service_with_dig, dig_repo_mock, mock_bot
+    async def test_reschedule_dig_uses_authoritative_ready_at(
+        self,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
     ):
+        now = 1_000_000
+        ready_at = now + 5400
+        monkeypatch.setattr(time, "time", lambda: now)
         reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
-        dig_repo_mock.get_tunnel.return_value = {"last_dig_at": int(time.time()) - 100}
-        await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
-        assert (1, TEST_GUILD_ID, "dig") in reminder_service_with_dig._tasks
-        reminder_service_with_dig._cancel_task(1, TEST_GUILD_ID, "dig")
+        dig_service_mock.get_free_dig_ready_at.return_value = ready_at
+
+        with patch.object(
+            reminder_service_with_dig, "schedule_dig_reminder",
+        ) as schedule_dig_reminder:
+            await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+
+        dig_service_mock.get_free_dig_ready_at.assert_called_once_with(
+            1, TEST_GUILD_ID, now=now,
+        )
+        schedule_dig_reminder.assert_called_once_with(
+            mock_bot, 1, TEST_GUILD_ID, ready_at,
+        )
 
     @pytest.mark.asyncio
-    async def test_reschedule_dig_skips_none_tunnel(
-        self, reminder_service_with_dig, dig_repo_mock, mock_bot
+    async def test_reschedule_dig_skips_already_ready(
+        self,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
     ):
+        now = 1_000_000
+        monkeypatch.setattr(time, "time", lambda: now)
         reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
-        dig_repo_mock.get_tunnel.return_value = None
-        await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
-        assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
+        dig_service_mock.get_free_dig_ready_at.return_value = None
 
-    @pytest.mark.asyncio
-    async def test_reschedule_dig_skips_expired_cooldown(
-        self, reminder_service_with_dig, dig_repo_mock, mock_bot
-    ):
-        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
-        dig_repo_mock.get_tunnel.return_value = {"last_dig_at": int(time.time()) - 200000}
-        await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+        with patch.object(
+            reminder_service_with_dig, "schedule_dig_reminder",
+        ) as schedule_dig_reminder:
+            await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+
+        dig_service_mock.get_free_dig_ready_at.assert_called_once_with(
+            1, TEST_GUILD_ID, now=now,
+        )
+        schedule_dig_reminder.assert_not_called()
         assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks

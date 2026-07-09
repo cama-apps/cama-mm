@@ -10,10 +10,10 @@ logger = logging.getLogger("cama_bot.reminder_service")
 
 
 class ReminderService:
-    def __init__(self, notification_repo, player_repo, dig_repo=None):
+    def __init__(self, notification_repo, player_repo, dig_service=None):
         self._notification_repo = notification_repo
         self._player_repo = player_repo
-        self._dig_repo = dig_repo
+        self._dig_service = dig_service
         self._tasks: dict[tuple, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
@@ -84,10 +84,13 @@ class ReminderService:
                 delay=delay,
                 bot=bot,
                 discord_id=discord_id,
-                message="Your free dig cooldown has expired! You can `/dig` again now.",
+                message="Your free dig cooldown has expired! You can `/dig go` again now.",
             )
         )
         self._register_task((discord_id, guild_id, "dig"), task)
+
+    def cancel_dig_reminder(self, discord_id: int, guild_id: int) -> None:
+        self._cancel_task(discord_id, guild_id, "dig")
 
     async def notify_betting_subscribers(
         self, bot: "commands.Bot", guild_id: int, bet_lock_until: int
@@ -112,7 +115,6 @@ class ReminderService:
 
     async def reschedule_all(self, bot: "commands.Bot", guild_ids: list[int]) -> None:
         from config import TRIVIA_COOLDOWN_SECONDS, WHEEL_COOLDOWN_SECONDS
-        from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
 
         now = int(time.time())
         for guild_id in guild_ids:
@@ -142,21 +144,18 @@ class ReminderService:
                 if next_trivia > now:
                     self.schedule_trivia_reminder(bot, discord_id, guild_id, next_trivia)
 
-            if self._dig_repo is not None:
+            if self._dig_service is not None:
                 dig_subscribers = await asyncio.to_thread(
                     self._notification_repo.get_enabled_users_for_type, guild_id, "dig"
                 )
                 for discord_id in dig_subscribers:
-                    tunnel = await asyncio.to_thread(
-                        self._dig_repo.get_tunnel, discord_id, guild_id
+                    next_dig = await asyncio.to_thread(
+                        self._dig_service.get_free_dig_ready_at,
+                        discord_id,
+                        guild_id,
+                        now=now,
                     )
-                    if tunnel is None:
-                        continue
-                    last_dig_at = tunnel.get("last_dig_at") if isinstance(tunnel, dict) else getattr(tunnel, "last_dig_at", None)
-                    if not last_dig_at:
-                        continue
-                    next_dig = last_dig_at + FREE_DIG_COOLDOWN_SECONDS
-                    if next_dig > now:
+                    if next_dig is not None:
                         self.schedule_dig_reminder(bot, discord_id, guild_id, next_dig)
 
         logger.info("Reminder service rescheduled %d tasks after restart", len(self._tasks))
