@@ -12,14 +12,17 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from commands.mana import _build_single_embed
 from repositories.mana_repository import ManaRepository
 from services.mana_service import (
     LAND_COLORS,
     ManaService,
+    get_mana_day_start_timestamp,
     get_today_pst,
 )
 from tests.conftest import TEST_GUILD_ID
@@ -162,6 +165,40 @@ class TestGetTodayPst:
         assert result == "2025-06-15"
 
 
+def test_mana_day_start_timestamp_observes_four_am_boundary():
+    from zoneinfo import ZoneInfo
+
+    la_tz = ZoneInfo("America/Los_Angeles")
+    before_reset = datetime(2025, 6, 15, 2, 30, tzinfo=la_tz)
+    after_reset = datetime(2025, 6, 15, 10, 30, tzinfo=la_tz)
+
+    assert get_mana_day_start_timestamp(before_reset) == int(
+        datetime(2025, 6, 14, 4, 0, tzinfo=la_tz).timestamp()
+    )
+    assert get_mana_day_start_timestamp(after_reset) == int(
+        datetime(2025, 6, 15, 4, 0, tzinfo=la_tz).timestamp()
+    )
+
+
+def test_plains_embed_shows_guardian_capacity_and_retro_refund():
+    embed = _build_single_embed(
+        SimpleNamespace(display_name="Guardian"),
+        {
+            "land": "Plains",
+            "color": "White",
+            "emoji": "🌾",
+            "assigned_date": get_today_pst(),
+            "guardian_remaining": 16,
+            "retro_refund": 9,
+            "consumed": False,
+        },
+    )
+
+    guardian = next(field for field in embed.fields if field.name == "🌾 Guardian Aura")
+    assert "16/25 JC" in guardian.value
+    assert "Recovered **9 JC**" in guardian.value
+
+
 # =============================================================================
 # ManaRepository
 # =============================================================================
@@ -293,6 +330,27 @@ class TestAssignDailyMana:
                 # new discord_id per iteration to avoid double-claim
                 result = svc.assign_daily_mana(1000 + i, TEST_GUILD_ID)
             assert result["land"] in LAND_COLORS
+
+    def test_plains_assignment_reconciles_guardian_since_daily_reset(self, mana_repo):
+        svc = _make_service(mana_repo)
+        protection_service = MagicMock()
+        protection_service.reconcile_guardian.return_value = 9
+        svc.protection_service = protection_service
+
+        with (
+            patch("services.mana_service.get_today_pst", return_value="2025-06-15"),
+            patch("services.mana_service.random.choices", return_value=["Plains"]),
+            patch(
+                "services.mana_service.get_mana_day_start_timestamp",
+                return_value=1_750_000_000,
+            ),
+        ):
+            result = svc.assign_daily_mana(42, TEST_GUILD_ID)
+
+        protection_service.reconcile_guardian.assert_called_once_with(
+            42, TEST_GUILD_ID, 1_750_000_000
+        )
+        assert result["retro_refund"] == 9
 
 
 # =============================================================================

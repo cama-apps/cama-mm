@@ -954,26 +954,66 @@ class ProgressionMixin:
         # consumed when present. In both cases the would-be victim gets a
         # small JC tip — defending feels like a win, not a non-event.
         victim_block_tip = max(25, cost // 2)
+        protection_service = getattr(self, "protection_service", None)
+        if protection_service is not None:
+            try:
+                protection = protection_service.block_non_jc_attack(
+                    target_id,
+                    guild_id,
+                    actor_id=actor_id,
+                    event_key=(
+                        f"sabotage:{guild_id}:{actor_id}:{target_id}:"
+                        f"{int(time.time()) // (12 * 3600)}"
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to resolve sabotage protection")
+            else:
+                if protection.blocked:
+                    awarded_tip = 0 if protection.duplicate else victim_block_tip
+                    if awarded_tip:
+                        self.player_repo.add_balance(
+                            target_id,
+                            guild_id,
+                            awarded_tip,
+                            source="dig",
+                            actor_id=actor_id,
+                            related_type="sabotage_block",
+                            related_id=actor_id,
+                            reason="dig sabotage White shield block tip",
+                            metadata={
+                                "tip": awarded_tip,
+                                "protection_source": protection.source,
+                            },
+                        )
+                        self.dig_repo.log_action(
+                            discord_id=actor_id,
+                            guild_id=guild_id,
+                            action_type="sabotage",
+                            details=json.dumps({
+                                "target_id": target_id,
+                                "absorbed": True,
+                                "cost": 0,
+                                "victim_tip": awarded_tip,
+                                "protection_source": protection.source,
+                            }),
+                        )
+                    return self._ok(
+                        cost=0,
+                        damage=0,
+                        target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
+                        trap_triggered=False,
+                        trap_detail=None,
+                        clue=None,
+                        is_reveal=False,
+                        insurance_applied=False,
+                        damage_reduced=True,
+                        absorbed_by_aegis=protection.source == "aegis",
+                        protection_source=protection.source,
+                        victim_tip=awarded_tip,
+                    )
         if self.buff_service is not None:
             try:
-                # White mana passive: lazily grant the first-sabotage-today aegis
-                # if the target has the effect active and the buff hasn't been
-                # issued yet today (idempotent — grant is a no-op when a live row
-                # already exists).
-                if self.mana_effects_service is not None:
-                    try:
-                        _target_effects = self.mana_effects_service.get_effects(
-                            target_id, guild_id
-                        )
-                        if _target_effects.sabotage_first_aegis_today:
-                            from services.buff_service import BUFF_FIRST_AEGIS_TODAY
-                            if not self.buff_service.buff_repo.has_active(
-                                target_id, guild_id, BUFF_FIRST_AEGIS_TODAY
-                            ):
-                                self.buff_service.grant_first_aegis_today(target_id, guild_id)
-                    except Exception:
-                        logger.debug("White mana aegis grant failed", exc_info=True)
-
                 if self.buff_service.has_pvp_immunity(target_id, guild_id):
                     self.player_repo.add_balance(
                         target_id,

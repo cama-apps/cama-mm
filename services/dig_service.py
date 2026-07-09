@@ -133,6 +133,7 @@ class DigService(
         inventory_service=None,
         quest_service=None,
         prediction_repo=None,
+        protection_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -144,6 +145,7 @@ class DigService(
         self.slow_drip_repo = slow_drip_repo
         self.balance_history_service = balance_history_service
         self.prediction_repo = prediction_repo
+        self.protection_service = protection_service
         # Sub-services for focused concerns. Defaults wire local instances so
         # existing callers (and tests that construct DigService directly) keep
         # working without having to pass anything new.

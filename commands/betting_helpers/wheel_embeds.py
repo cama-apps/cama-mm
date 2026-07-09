@@ -5,6 +5,7 @@ from __future__ import annotations
 import discord
 
 from commands.betting_helpers.messages import WHEEL_EXPLOSION_REWARD
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 
 
@@ -68,6 +69,8 @@ def build_wheel_result_embed(
     bomb_omb_victims: list | None = None,
     bomb_omb_burn_total: int = 0,
     bomb_omb_missed: bool = False,
+    shield_absorbed_total: int = 0,
+    shielded_count: int = 0,
     bankruptcy_penalty: int = 0,
 ) -> discord.Embed:
     """Build the final result embed after the wheel stops."""
@@ -115,10 +118,12 @@ def build_wheel_result_embed(
     elif value == "EMERGENCY":
         title = "🚨 EMERGENCY! 🚨"
         color = discord.Color.from_str("#2a1a00")
+        emergency_loss_cap = scale_minigame_jc_delta(20)
         description = (
             f"**SOS**\n\n"
             f"🚨 Economic crisis triggered!\n\n"
-            f"**{emergency_count}** players each lost up to **20** {JOPACOIN_EMOTE}.\n"
+            f"**{emergency_count}** players each lost up to "
+            f"**{emergency_loss_cap}** {JOPACOIN_EMOTE}.\n"
             f"Total drained: **{emergency_total}** {JOPACOIN_EMOTE} (vanished).\n\n"
             f"*No one is safe. Not even you.*"
         )
@@ -237,7 +242,7 @@ def build_wheel_result_embed(
             description = (
                 f"**HEIST**\n\n"
                 f"You cased the joint... but the bottom 30 are already broke.\n\n"
-                f"*Consolation prize: **+20** {JOPACOIN_EMOTE}.*"
+                f"*Consolation prize: **+{heist_total}** {JOPACOIN_EMOTE}.*"
             )
         else:
             description = (
@@ -254,7 +259,7 @@ def build_wheel_result_embed(
             description = (
                 f"**CRASH**\n\n"
                 f"You triggered a crash... but you're the only whale. No one to tax.\n\n"
-                f"*Consolation prize: **+25** {JOPACOIN_EMOTE}.*"
+                f"*Consolation prize: **+{market_crash_total}** {JOPACOIN_EMOTE}.*"
             )
         else:
             description = (
@@ -265,10 +270,10 @@ def build_wheel_result_embed(
             )
 
     elif value == "COMPOUND_INTEREST":
-        title = "📈 +100 BONUS! 📈"
+        title = f"📈 +{compound_amount} BONUS! 📈"
         color = discord.Color.from_str("#6b8c00")
         description = (
-            f"**+100**\n\n"
+            f"**+{compound_amount}**\n\n"
             f"📈 A flat bonus, straight to your balance.\n"
             f"Earned **{compound_amount}** {JOPACOIN_EMOTE}.\n\n"
             f"*The most boring way to get rich — and the most reliable.*"
@@ -308,7 +313,7 @@ def build_wheel_result_embed(
             description = (
                 f"**TAKEOVER**\n\n"
                 f"🏴 You targeted rank #4... but they're broke or don't exist.\n\n"
-                f"*Consolation prize: **+40** {JOPACOIN_EMOTE}.*"
+                f"*Consolation prize: **+{takeover_amount}** {JOPACOIN_EMOTE}.*"
             )
         else:
             description = (
@@ -409,12 +414,14 @@ def build_wheel_result_embed(
         )
 
     elif value == "DECAY":
+        top_loss = scale_minigame_jc_delta(60)
+        fourth_loss = scale_minigame_jc_delta(80)
         title = "🌿💀 DECAY!"
         color = discord.Color.from_str("#4b0082")
         description = (
             "**DECAY**\n\n"
-            "Rot spreads to the wealthy. The top 3 wealthiest lose 60 JC each, "
-            "rank #4 loses 80 JC. You consume the remains.\n\n"
+            f"Rot spreads to the wealthy. The top 3 are targeted for {top_loss} JC each, "
+            f"rank #4 for {fourth_loss} JC. You consume what lands.\n\n"
             "*The Swamp claims what it is owed.*"
         )
 
@@ -428,12 +435,12 @@ def build_wheel_result_embed(
             title = "🪙 Two Coins."
             color = discord.Color.from_str("#3a3500")
             description = "**2**\n\nEven charity has standards. Here's 2.\n\n*Don't spend it all in one place.*"
-        elif is_golden and value == 250:
+        elif is_golden and label == "CROWN":
             title = "👑 CROWN JEWEL! 👑"
             color = discord.Color.from_str("#ffd700")
             description = (
                 f"**CROWN**\n\n"
-                f"✨ **+250 {JOPACOIN_EMOTE} JACKPOT!** ✨\n\n"
+                f"✨ **+{value} {JOPACOIN_EMOTE} JACKPOT!** ✨\n\n"
                 f"The golden wheel's ultimate prize.\n"
                 f"The crown jewel of Jopacoin fortune.\n\n"
                 f"*The server weeps. You reign.*"
@@ -502,6 +509,16 @@ def build_wheel_result_embed(
         embed.add_field(
             name="Bankruptcy Penalty",
             value=f"−{bankruptcy_penalty} {JOPACOIN_EMOTE} withheld while bankrupt",
+            inline=False,
+        )
+
+    if shield_absorbed_total > 0:
+        embed.add_field(
+            name="🌾 White Mana Shields",
+            value=(
+                f"{shielded_count} shield activation(s) absorbed "
+                f"**{shield_absorbed_total}** {JOPACOIN_EMOTE}."
+            ),
             inline=False,
         )
 

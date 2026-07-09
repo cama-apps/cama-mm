@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import random
 import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -223,6 +225,42 @@ class TestResolveSplashBurns:
         victim_ids = {vid for vid, _ in result.victims}
         assert 10002 not in victim_ids
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == -50
+
+    def test_burn_routes_through_white_protection_gateway(
+        self, dig_repo, player_repository, monkeypatch
+    ):
+        _register(player_repository, 10001, balance=500)
+        _register(player_repository, 10002, balance=500)
+        monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+        protection = MagicMock()
+        protection.apply_hostile_loss.return_value = SimpleNamespace(
+            attempted=16,
+            absorbed=10,
+            applied=6,
+        )
+
+        result = resolve_splash(
+            player_repo=player_repository,
+            dig_repo=dig_repo,
+            guild_id=TEST_GUILD_ID,
+            digger_id=10001,
+            event_name="Shield Test",
+            strategy="random_active",
+            victim_count=1,
+            penalty_jc=20,
+            protection_service=protection,
+            event_key_prefix="dig:test",
+        )
+
+        assert result.victims == [(10002, 6)]
+        assert result.absorbed_total == 10
+        assert result.shielded_count == 1
+        call = protection.apply_hostile_loss.call_args
+        assert call.args[:4] == (10002, TEST_GUILD_ID, 16, "dig_splash_burn")
+        assert call.kwargs["destination"] == "burn"
+        assert call.kwargs["event_key"] == "dig:test:10002"
+        # The fake gateway owns settlement, so the legacy debit is not repeated.
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 500
 
 
 class TestActiveDiggersLookback:

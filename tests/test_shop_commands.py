@@ -710,6 +710,162 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_manashop_reprieve_grants_pool_and_reconciles_rolling_losses(
+    monkeypatch,
+):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    user_id = 4242
+    guild_id = 9001
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="White")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.buff_service = MagicMock()
+    bot.buff_service.grant_reprieve.return_value = 77
+    bot.protection_service = MagicMock()
+    bot.protection_service.reconcile_purchased_pool.return_value = 10
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=user_id)
+    player_service.get_balance.return_value = 100
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=user_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="reprieve"), target=None,
+    )
+
+    assert player_service.adjust_balance.call_args_list[0].args == (
+        user_id,
+        guild_id,
+        -15,
+    )
+    bot.buff_service.grant_reprieve.assert_called_once_with(user_id, guild_id)
+    bot.protection_service.reconcile_purchased_pool.assert_called_once_with(
+        user_id, guild_id, 77, 24 * 3600,
+    )
+    bot.mana_repo.mark_item_used_atomic.assert_called_once_with(
+        user_id, guild_id, "reprieve", ANY,
+    )
+    message = interaction.followup.send.call_args.args[0]
+    assert "REPRIEVE" in message
+    assert "Recovered **10" in message
+    assert "balance: 95" in message
+
+
+@pytest.mark.asyncio
+async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        "commands.shop.random.sample", lambda population, count: population[:count]
+    )
+    monkeypatch.setattr("commands.shop.random.randint", lambda *_args: 20)
+
+    buyer_id = 4242
+    guild_id = 9001
+    targets = [
+        SimpleNamespace(
+            discord_id=5000 + index,
+            name=f"Target {index}",
+            jopacoin_balance=100,
+        )
+        for index in range(3)
+    ]
+    outcomes = [
+        SimpleNamespace(applied_loss=0, absorbed_amount=16),
+        SimpleNamespace(applied_loss=8, absorbed_amount=8),
+        SimpleNamespace(applied_loss=16, absorbed_amount=0),
+    ]
+
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.protection_service = MagicMock()
+    bot.protection_service.apply_hostile_loss.side_effect = outcomes
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = targets
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="pyroclasm"), target=None,
+    )
+
+    protection_calls = bot.protection_service.apply_hostile_loss.call_args_list
+    assert len(protection_calls) == 3
+    prefixes = {
+        call.kwargs["event_key"].rsplit(":", 1)[0]
+        for call in protection_calls
+    }
+    assert len(prefixes) == 1
+    for target, call in zip(targets, protection_calls, strict=True):
+        assert call.args[:3] == (target.discord_id, guild_id, 16)
+        assert call.kwargs["kind"] == "pyroclasm"
+        assert call.kwargs["destination"] == "burn"
+        assert call.kwargs["clamp_to_balance"] is True
+
+    balance_calls = [call.args for call in player_service.adjust_balance.call_args_list]
+    assert balance_calls == [
+        (buyer_id, guild_id, -25),
+        (buyer_id, guild_id, 12),
+    ]
+    message = interaction.followup.send.call_args.args[0]
+    assert "**24" in message
+    assert "You claim **12" in message
+    assert "Shields absorbed **24" in message
+
+
+@pytest.mark.asyncio
+async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    guild_id = 9001
+    targets = [
+        SimpleNamespace(discord_id=5001, name="A", jopacoin_balance=100),
+        SimpleNamespace(discord_id=5002, name="B", jopacoin_balance=100),
+    ]
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Black")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.protection_service = MagicMock()
+    bot.protection_service.apply_hostile_loss.side_effect = [
+        SimpleNamespace(applied_loss=1, absorbed_amount=1),
+        SimpleNamespace(applied_loss=1, absorbed_amount=1),
+    ]
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = targets
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="soul_harvest"), target=None,
+    )
+
+    assert [call.args for call in player_service.adjust_balance.call_args_list] == [
+        (buyer_id, guild_id, -25),
+    ]
+    for call in bot.protection_service.apply_hostile_loss.call_args_list:
+        assert call.kwargs["kind"] == "soul_harvest"
+        assert call.kwargs["destination"] == "player"
+        assert call.kwargs["recipient_id"] == buyer_id
+    message = interaction.followup.send.call_args.args[0]
+    assert "Gained **2" in message
+    assert "Shields absorbed **2" in message
+
+
+@pytest.mark.asyncio
 async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypatch):
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
 
@@ -801,6 +957,98 @@ async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_tar
     bot.mana_repo.unmark_item_used.assert_called_once_with(
         buyer_id, guild_id, "soul_harvest", ANY,
     )
+
+
+@pytest.mark.asyncio
+async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.shop.random.randint", lambda *_args: 10)
+
+    buyer_id = 4242
+    guild_id = 9001
+    victim = SimpleNamespace(discord_id=5001, name="Target", jopacoin_balance=100)
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.mana_repo.mark_mana_consumed_atomic.return_value = True
+    bot.dig_service = None
+    bot.protection_service = MagicMock()
+    bot.protection_service.apply_hostile_loss.return_value = SimpleNamespace(
+        applied_loss=4,
+        absorbed_amount=4,
+    )
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = [victim]
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="wildfire"), target=None,
+    )
+
+    call = bot.protection_service.apply_hostile_loss.call_args
+    assert call.args[:3] == (victim.discord_id, guild_id, 8)
+    assert call.kwargs["kind"] == "wildfire"
+    assert call.kwargs["destination"] == "burn"
+    # 45% of the 4 JC that landed floors to 1; the absorbed 4 pays nothing.
+    assert [entry.args for entry in player_service.adjust_balance.call_args_list] == [
+        (buyer_id, guild_id, -150),
+        (buyer_id, guild_id, 1),
+    ]
+    message = interaction.followup.send.call_args.args[0]
+    assert "Drained **4" in message
+    assert "claim **1" in message
+    assert "Shields absorbed **4" in message
+
+
+@pytest.mark.asyncio
+async def test_manashop_sanctuary_costs_90_without_match_bonus(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+
+    buyer_id = 4242
+    ally_id = 5001
+    guild_id = 9001
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="White")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.mana_repo.mark_mana_consumed_atomic.return_value = True
+    bot.dig_service = None
+    bot.buff_service = MagicMock()
+
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [
+        SimpleNamespace(discord_id=buyer_id),
+        SimpleNamespace(discord_id=ally_id),
+    ]
+    player_service.get_balance.return_value = 500
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+    target = SimpleNamespace(
+        id=ally_id,
+        mention=f"<@{ally_id}>",
+        display_name="Ally",
+    )
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value="sanctuary"), target=target,
+    )
+
+    assert player_service.adjust_balance.call_args_list[0].args == (
+        buyer_id,
+        guild_id,
+        -90,
+    )
+    bot.buff_service.grant_sanctuary.assert_called_once_with(
+        buyer_id, guild_id, ally_id,
+    )
+    message = interaction.followup.send.call_args.args[0]
+    assert "150" in message
+    assert "match" not in message.lower()
 
 
 @pytest.mark.asyncio

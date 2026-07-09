@@ -9,6 +9,7 @@ import functools
 import logging
 import random
 import time
+import uuid
 from typing import TYPE_CHECKING
 
 import discord
@@ -17,8 +18,8 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from config import (
-    AUTO_BLIND_THRESHOLD,
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
+    HOSTILE_LOSS_MIN_BALANCE,
     PACKAGE_DEAL_GAMES_DURATION,
     SHOP_ANNOUNCE_COST,
     SHOP_ANNOUNCE_TARGET_COST,
@@ -37,6 +38,7 @@ from config import (
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.hero_lookup import get_all_heroes, get_hero_color, get_hero_image_url, get_hero_name
 from utils.interaction_safety import safe_defer, safe_followup
@@ -55,6 +57,27 @@ logger = logging.getLogger("cama_bot.commands.shop")
 
 SOUL_HARVEST_COST = 25
 SOUL_HARVEST_DRAIN_PER_TARGET = 2
+
+
+def _protection_result_int(result, field: str, default: int = 0) -> int:
+    """Read a numeric field from a protection result object or mapping."""
+    if result is None:
+        return default
+    aliases = {
+        "attempted_loss": "attempted",
+        "absorbed_amount": "absorbed",
+        "applied_loss": "applied",
+        "victim_new_balance": "victim_balance_after",
+        "recipient_new_balance": "destination_balance_after",
+    }
+    if isinstance(result, dict):
+        value = result.get(field, result.get(aliases.get(field, ""), default))
+    else:
+        value = getattr(result, field, getattr(result, aliases.get(field, ""), default))
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # Bounty Hunter theme
@@ -1613,9 +1636,9 @@ class ShopCommands(commands.Cog):
         app_commands.Choice(name="Green • Mid • Regrowth (25 JC) — recover 35% of last 24h losses", value="regrowth"),
         app_commands.Choice(name="Green • Ult • Overgrowth (90 JC, taps mana) — 12h dig overdrive", value="overgrowth"),
         # White
-        app_commands.Choice(name="White • Cheap • Communion (8 JC) — fund reserve, +10% next match win", value="communion"),
-        app_commands.Choice(name="White • Mid • Aegis (35 JC) — absorb the next PvP attack", value="aegis"),
-        app_commands.Choice(name="White • Ult • Sanctuary (60 JC, taps mana) — ally + you: 24h PvP immunity & match buff", value="sanctuary"),
+        app_commands.Choice(name="White • Cheap • Reprieve (15 JC) — 50% shield, 25 JC pool, rolling 24h recovery", value="reprieve"),
+        app_commands.Choice(name="White • Mid • Aegis (35 JC) — fully absorb 75 JC of hostile losses for 24h", value="aegis"),
+        app_commands.Choice(name="White • Ult • Sanctuary (90 JC, taps mana) — shared 150 JC shield for you + an ally", value="sanctuary"),
         # Black
         app_commands.Choice(name="Black • Cheap • Soul Harvest (25 JC) — drain 2 JC from every positive player", value="soul_harvest"),
         app_commands.Choice(name="Black • Mid • Blood Pact (75 JC) — skim 25% of target's earnings 24h", value="blood_pact"),
@@ -1645,6 +1668,15 @@ class ShopCommands(commands.Cog):
         mana_service = getattr(self.bot, "mana_service", None)
         mana_repo = getattr(self.bot, "mana_repo", None)
         buff_service = getattr(self.bot, "buff_service", None)
+        # ``MagicMock`` fabricates arbitrary attributes, so prefer the bot's
+        # concrete attribute dictionary. Explicitly configured test doubles and
+        # the real bot both store services there.
+        bot_attrs = getattr(self.bot, "__dict__", {})
+        protection_service = (
+            bot_attrs.get("protection_service")
+            if isinstance(bot_attrs, dict)
+            else getattr(self.bot, "protection_service", None)
+        )
         if not (mana_effects_service and mana_service and mana_repo):
             await interaction.followup.send("Mana system not available.", ephemeral=True)
             return
@@ -1677,7 +1709,7 @@ class ShopCommands(commands.Cog):
             "pyroclasm": {"tier": "cheap", "color": "Red", "cost": 25, "name": "Pyroclasm"},
             "insight": {"tier": "cheap", "color": "Blue", "cost": 10, "name": "Insight"},
             "sapling": {"tier": "cheap", "color": "Green", "cost": 10, "name": "Sapling"},
-            "communion": {"tier": "cheap", "color": "White", "cost": 8, "name": "Communion"},
+            "reprieve": {"tier": "cheap", "color": "White", "cost": 15, "name": "Reprieve"},
             "soul_harvest": {"tier": "cheap", "color": "Black", "cost": SOUL_HARVEST_COST, "name": "Soul Harvest"},
             # Mid
             "dynamite_cache": {"tier": "mid", "color": "Red", "cost": 35, "name": "Dynamite Cache"},
@@ -1689,7 +1721,7 @@ class ShopCommands(commands.Cog):
             "wildfire": {"tier": "ult", "color": "Red", "cost": 150, "name": "Wildfire"},
             "counterspell": {"tier": "ult", "color": "Blue", "cost": 75, "name": "Counterspell"},
             "overgrowth": {"tier": "ult", "color": "Green", "cost": 90, "name": "Overgrowth"},
-            "sanctuary": {"tier": "ult", "color": "White", "cost": 60, "name": "Sanctuary"},
+            "sanctuary": {"tier": "ult", "color": "White", "cost": 90, "name": "Sanctuary"},
             "dark_bargain": {"tier": "ult", "color": "Black", "cost": 150, "name": "Dark Bargain"},
         }
 
@@ -1789,6 +1821,55 @@ class ShopCommands(commands.Cog):
                 logger.exception("Failed to release daily-use slot for %s", item_key)
             await interaction.followup.send(reason, ephemeral=True)
 
+        async def _apply_hostile_loss(
+            victim_id: int,
+            amount: int,
+            *,
+            kind: str,
+            event_key: str,
+            destination: str,
+            recipient_id: int | None = None,
+            clamp_to_balance: bool = True,
+        ):
+            """Use the protection gateway, with a tagged legacy fallback."""
+            if protection_service is not None:
+                return await asyncio.to_thread(
+                    protection_service.apply_hostile_loss,
+                    victim_id,
+                    guild_id,
+                    amount,
+                    kind=kind,
+                    actor_id=user_id,
+                    event_key=event_key,
+                    destination=destination,
+                    recipient_id=recipient_id,
+                    clamp_to_balance=clamp_to_balance,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                )
+
+            await asyncio.to_thread(
+                self.player_service.adjust_balance,
+                victim_id,
+                guild_id,
+                -amount,
+                source="manashop",
+                actor_id=user_id,
+                related_type="hostile_loss",
+                related_id=event_key,
+                reason=f"manashop {kind} victim debit",
+                metadata={
+                    "kind": kind,
+                    "attempted_loss": amount,
+                    "destination": destination,
+                    "recipient_id": recipient_id,
+                },
+            )
+            return {
+                "attempted_loss": amount,
+                "absorbed_amount": 0,
+                "applied_loss": amount,
+            }
+
         # Mana Conduit relic: refund 25% of tap-mana ultimate cost.
         ult_refund = 0
         if tier == "ult":
@@ -1815,29 +1896,70 @@ class ShopCommands(commands.Cog):
             )
             eligible = [
                 p for p in all_players
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+                if p.discord_id != user_id
+                and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
             if not eligible:
                 await _refund("No eligible targets to scorch; refunded.")
                 return
             targets = random.sample(eligible, min(3, len(eligible)))
+            event_prefix = f"pyroclasm:{uuid.uuid4().hex}"
             total_destroyed = 0
+            total_absorbed = 0
             victim_lines = []
             for t in targets:
-                destroy_amt = random.randint(12, 24)
+                destroy_amt = scale_minigame_jc_delta(random.randint(12, 24))
                 destroy_amt = min(destroy_amt, t.jopacoin_balance)
                 if destroy_amt > 0:
-                    await asyncio.to_thread(self.player_service.adjust_balance, t.discord_id, guild_id, -destroy_amt)
-                    total_destroyed += destroy_amt
-                    victim_lines.append(f"  - {t.name}: -{destroy_amt} {JOPACOIN_EMOTE}")
+                    outcome = await _apply_hostile_loss(
+                        t.discord_id,
+                        destroy_amt,
+                        kind="pyroclasm",
+                        event_key=f"{event_prefix}:{t.discord_id}",
+                        destination="burn",
+                    )
+                    applied = _protection_result_int(
+                        outcome, "applied_loss", destroy_amt
+                    )
+                    absorbed = _protection_result_int(
+                        outcome, "absorbed_amount"
+                    )
+                    total_destroyed += applied
+                    total_absorbed += absorbed
+                    shield_note = (
+                        f" (shield absorbed {absorbed})" if absorbed else ""
+                    )
+                    victim_lines.append(
+                        f"  - {t.name}: -{applied} {JOPACOIN_EMOTE}{shield_note}"
+                    )
             bounty = min(35, total_destroyed // 2)
             if bounty > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, bounty)
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance,
+                    user_id,
+                    guild_id,
+                    bounty,
+                    source="manashop",
+                    actor_id=user_id,
+                    related_type="hostile_loss_reward",
+                    related_id=event_prefix,
+                    reason="manashop pyroclasm bounty",
+                    metadata={
+                        "kind": "pyroclasm",
+                        "applied_loss": total_destroyed,
+                        "absorbed_amount": total_absorbed,
+                    },
+                )
             victims_text = "\n".join(victim_lines) if victim_lines else "  No eligible targets."
+            shield_text = (
+                f" Shields absorbed **{total_absorbed} {JOPACOIN_EMOTE}**."
+                if total_absorbed
+                else ""
+            )
             await interaction.followup.send(
                 f"⛰️🔥 **PYROCLASM** — {interaction.user.mention} unleashes chaos!\n"
                 f"{victims_text}\n"
-                f"**{total_destroyed} {JOPACOIN_EMOTE} burned**. "
+                f"**{total_destroyed} {JOPACOIN_EMOTE} burned**.{shield_text} "
                 f"You claim **{bounty} {JOPACOIN_EMOTE}** from the ash.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + bounty})"
             )
@@ -1907,36 +2029,40 @@ class ShopCommands(commands.Cog):
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
-        elif item_key == "communion":
-            loan_service = getattr(self.bot, "loan_service", None)
-            if loan_service is not None:
+        elif item_key == "reprieve":
+            if buff_service is None:
+                await _refund("Buff system unavailable; refunded.")
+                return
+            try:
+                buff_id = await asyncio.to_thread(
+                    buff_service.grant_reprieve, user_id, guild_id
+                )
+            except Exception:
+                logger.exception("Reprieve grant failed")
+                await _refund("Could not raise the reprieve; refunded.")
+                return
+
+            recovered = 0
+            if protection_service is not None:
                 try:
-                    await asyncio.to_thread(
-                        loan_service.add_to_nonprofit_fund,
-                        guild_id,
-                        cost,
-                        source="shop",
-                        actor_id=user_id,
-                        related_type="manashop_purchase",
-                        related_id="communion",
-                        reason="communion reserve donation",
-                        metadata={"item": "communion", "cost": cost},
+                    recovered = int(
+                        await asyncio.to_thread(
+                            protection_service.reconcile_purchased_pool,
+                            user_id,
+                            guild_id,
+                            buff_id,
+                            24 * 3600,
+                        )
                     )
                 except Exception:
-                    pass
-            # Grant a small "blessing" buff: +10% next match win bonus.
-            # Routed through BuffService so the buff_type key stays in one place.
-            if buff_service is not None:
-                try:
-                    await asyncio.to_thread(
-                        buff_service.grant_communion_blessing, user_id, guild_id,
-                    )
-                except Exception:
-                    logger.exception("Communion blessing grant failed")
+                    logger.exception("Reprieve retroactive reconciliation failed")
+
             await interaction.followup.send(
-                f"🌾🕊️ **COMMUNION** — {interaction.user.mention} gives {cost} {JOPACOIN_EMOTE} to the Jopacoin Reserve.\n"
-                f"A blessing settles on you: +10% on your next match-win bonus.\n"
-                f"(balance: {new_balance})"
+                f"🌾🕊️ **REPRIEVE** — {interaction.user.mention} raises a rolling ward.\n"
+                f"Recovered **{recovered} {JOPACOIN_EMOTE}** from eligible losses "
+                f"in the past 24h. Remaining capacity protects 50% of hostile "
+                f"losses for 24h, up to **25 {JOPACOIN_EMOTE}** total.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance + recovered})"
             )
 
         elif item_key == "soul_harvest":
@@ -1945,22 +2071,63 @@ class ShopCommands(commands.Cog):
             )
             eligible = [
                 p for p in all_players
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+                if p.discord_id != user_id
+                and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
             if not eligible:
                 await _refund("No living souls to drain; refunded.")
                 return
+            event_prefix = f"soul_harvest:{uuid.uuid4().hex}"
             total_drained = 0
+            total_absorbed = 0
             for p in eligible:
-                drain = min(SOUL_HARVEST_DRAIN_PER_TARGET, p.jopacoin_balance)
-                await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -drain)
-                total_drained += drain
-            if total_drained > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, total_drained)
+                drain = min(
+                    scale_minigame_jc_delta(SOUL_HARVEST_DRAIN_PER_TARGET),
+                    p.jopacoin_balance,
+                )
+                outcome = await _apply_hostile_loss(
+                    p.discord_id,
+                    drain,
+                    kind="soul_harvest",
+                    event_key=f"{event_prefix}:{p.discord_id}",
+                    destination="player",
+                    recipient_id=user_id,
+                )
+                total_drained += _protection_result_int(
+                    outcome, "applied_loss", drain
+                )
+                total_absorbed += _protection_result_int(
+                    outcome, "absorbed_amount"
+                )
+            # ProtectionService moves each applied loss to the caster inside the
+            # hostile-loss transaction. The legacy fallback debits victims only,
+            # so preserve the old aggregate credit when no gateway is wired.
+            if protection_service is None and total_drained > 0:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance,
+                    user_id,
+                    guild_id,
+                    total_drained,
+                    source="manashop",
+                    actor_id=user_id,
+                    related_type="hostile_loss_reward",
+                    related_id=event_prefix,
+                    reason="manashop soul harvest collected drain",
+                    metadata={
+                        "kind": "soul_harvest",
+                        "applied_loss": total_drained,
+                        "absorbed_amount": total_absorbed,
+                    },
+                )
+            shield_text = (
+                f" Shields absorbed **{total_absorbed} {JOPACOIN_EMOTE}**."
+                if total_absorbed
+                else ""
+            )
             await interaction.followup.send(
                 f"🌿💀 **SOUL HARVEST** — {interaction.user.mention} drains the living!\n"
                 f"Drained up to **2 {JOPACOIN_EMOTE}** from **{len(eligible)}** players. "
-                f"Gained **{total_drained} {JOPACOIN_EMOTE}**.\n"
+                f"Gained **{total_drained} {JOPACOIN_EMOTE}**.{shield_text}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + total_drained})"
             )
 
@@ -2033,8 +2200,9 @@ class ShopCommands(commands.Cog):
                 await _refund("Could not raise the ward; refunded.")
                 return
             await interaction.followup.send(
-                f"🌾🛡️ **AEGIS** — {interaction.user.mention} prepares a single-charge ward.\n"
-                f"The next sabotage / Pyroclasm / Soul Harvest aimed at you is absorbed.\n"
+                f"🌾🛡️ **AEGIS** — {interaction.user.mention} raises a fortified ward.\n"
+                f"For 24h, it fully absorbs up to **75 {JOPACOIN_EMOTE}** of "
+                f"hostile losses (or one non-JC sabotage).\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
@@ -2062,22 +2230,57 @@ class ShopCommands(commands.Cog):
             )
             eligible = [
                 p for p in all_players
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+                if p.discord_id != user_id
+                and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
+            event_prefix = f"wildfire:{uuid.uuid4().hex}"
             total_drained = 0
+            total_absorbed = 0
             for p in eligible:
-                drain = random.randint(4, 12)
+                drain = scale_minigame_jc_delta(random.randint(4, 12))
                 drain = min(drain, p.jopacoin_balance)
                 if drain > 0:
-                    await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -drain)
-                    total_drained += drain
+                    outcome = await _apply_hostile_loss(
+                        p.discord_id,
+                        drain,
+                        kind="wildfire",
+                        event_key=f"{event_prefix}:{p.discord_id}",
+                        destination="burn",
+                    )
+                    total_drained += _protection_result_int(
+                        outcome, "applied_loss", drain
+                    )
+                    total_absorbed += _protection_result_int(
+                        outcome, "absorbed_amount"
+                    )
             user_gain = int(total_drained * 0.45)
             if user_gain > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, user_gain)
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance,
+                    user_id,
+                    guild_id,
+                    user_gain,
+                    source="manashop",
+                    actor_id=user_id,
+                    related_type="hostile_loss_reward",
+                    related_id=event_prefix,
+                    reason="manashop wildfire harvest",
+                    metadata={
+                        "kind": "wildfire",
+                        "applied_loss": total_drained,
+                        "absorbed_amount": total_absorbed,
+                    },
+                )
+            shield_text = (
+                f" Shields absorbed **{total_absorbed} {JOPACOIN_EMOTE}**."
+                if total_absorbed
+                else ""
+            )
             await interaction.followup.send(
                 f"⛰️🔥🔥 **WILDFIRE** — {interaction.user.mention} consumes the day's color in flame.\n"
                 f"Drained **{total_drained} {JOPACOIN_EMOTE}** from {len(eligible)} players. "
-                f"You claim **{user_gain} {JOPACOIN_EMOTE}** of the harvest.\n"
+                f"You claim **{user_gain} {JOPACOIN_EMOTE}** of the harvest."
+                f"{shield_text}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {balance - cost + user_gain + ult_refund})"
             )
 
@@ -2132,7 +2335,8 @@ class ShopCommands(commands.Cog):
                 return
             await interaction.followup.send(
                 f"🌾🕊️ **SANCTUARY** — {interaction.user.mention} shelters {target.mention}.\n"
-                f"For 24h, both of you have PvP immunity AND +15% on match-win JC bonuses.\n"
+                f"For 24h, both of you share **150 {JOPACOIN_EMOTE}** of full "
+                f"hostile-loss protection and non-JC PvP immunity.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, mana spent, balance: {new_balance})"
             )
 

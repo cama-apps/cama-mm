@@ -92,7 +92,9 @@ class ManaEffects:
     # --- Sabotage / social PvP ---
     sabotage_cost_mult: float = 1.0  # Red=0.5
     sabotage_steal_depth_pct: float = 0.0  # Black=0.25 (steal 25% of victim's depth as bonus)
-    sabotage_first_aegis_today: bool = False  # White: free aegis vs first sabotage of the day
+    # Legacy compatibility flag. Guardian is now a JC-loss pool; purchased
+    # Aegis handles non-JC sabotage instead of a free daily charge.
+    sabotage_first_aegis_today: bool = False
     sabotage_reveal_attacker: bool = False  # Blue: de-anonymize sabotage attacker
     sabotage_passive_recovery: bool = False  # Green: lost depth auto-recovers at 1/min
 
@@ -229,8 +231,6 @@ class ManaEffects:
                 # Loan: lower fee for the generous; bankruptcy shortened by one match
                 loan_fee_mult=0.5,
                 bankruptcy_games_reduction=1,
-                # Sabotage: free aegis vs first sabotage of the day
-                sabotage_first_aegis_today=True,
                 # Weather combo: Sunny + White yield boost
                 weather_combo_sunny_yield_mult=1.10,
             )

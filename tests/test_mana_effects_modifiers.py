@@ -36,7 +36,8 @@ def test_sabotage_modifiers_per_color():
 
     assert red.sabotage_cost_mult == 0.5
     assert black.sabotage_steal_depth_pct == 0.25
-    assert white.sabotage_first_aegis_today is True
+    assert white.sabotage_first_aegis_today is False
+    assert white.plains_guardian_aura is True
     assert blue.sabotage_reveal_attacker is True
     assert green.sabotage_passive_recovery is True
 

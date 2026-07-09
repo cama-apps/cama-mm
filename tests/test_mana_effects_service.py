@@ -335,14 +335,14 @@ class TestManaEffectsService:
     # -------------------------------------------------------------------------
 
     def test_execute_siphon(self, service):
-        """Swamp siphon steals 1-3 JC from a random positive-balance player."""
+        """Swamp siphon steals a scaled 1-2 JC from an eligible player."""
         _register_player(service["player_repo"], 20001, balance=50)
         _register_player(service["player_repo"], 20002, balance=100)
 
         result = service["effects_service"].execute_siphon(20001, GID)
         assert result is not None
         assert result["victim_id"] == 20002
-        assert 1 <= result["amount"] <= 3
+        assert 1 <= result["amount"] <= 2
         assert isinstance(result["anonymous"], bool)
 
     def test_execute_siphon_transfers_balance(self, service):
