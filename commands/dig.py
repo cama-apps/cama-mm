@@ -340,6 +340,29 @@ class DigCommands(commands.Cog):
                 logger.debug("dig flavor failed", exc_info=True)
         return _wrap(raw)
 
+    async def _schedule_dig_reminder(self, user_id: int, guild_id: int | None) -> None:
+        """Best-effort scheduling for the persisted, fully modified cooldown."""
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc is None:
+            return
+        try:
+            ready_at = await asyncio.to_thread(
+                self.dig_service.get_free_dig_ready_at, user_id, guild_id,
+            )
+            if ready_at is not None:
+                reminder_svc.schedule_dig_reminder(
+                    self.bot, user_id, guild_id, ready_at,
+                )
+            else:
+                reminder_svc.cancel_dig_reminder(user_id, guild_id)
+        except Exception:
+            logger.warning(
+                "dig reminder scheduling failed for user %s in guild %s",
+                user_id,
+                guild_id,
+                exc_info=True,
+            )
+
     # ------------------------------------------------------------------
     # Autocomplete helpers
     # ------------------------------------------------------------------
@@ -424,12 +447,8 @@ class DigCommands(commands.Cog):
             )
             return
 
-        reminder_svc = getattr(self.bot, "reminder_service", None)
-        if reminder_svc:
-            from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
-            reminder_svc.schedule_dig_reminder(
-                self.bot, interaction.user.id, guild_id, int(time.time()) + FREE_DIG_COOLDOWN_SECONDS
-            )
+        if getattr(result, "success", False):
+            await self._schedule_dig_reminder(interaction.user.id, guild_id)
 
         # Witch's Curse: roll on successful dig outcomes only — skip the first-dig welcome
         # and the paid_dig_available cooldown prompt (no actual dig happened on those paths).
@@ -614,6 +633,7 @@ class DigCommands(commands.Cog):
             err = getattr(paid_result, "error", "Paid dig failed.")
             await msg.edit(content=err, embed=None, view=None)
             return
+        await self._schedule_dig_reminder(interaction.user.id, guild_id)
         paid_embed, paid_layer_name, paid_pick_tier, paid_items_ids = _build_dig_embed(paid_result, interaction.user)
         paid_layer_file = await _attach_layer_thumbnail(paid_embed, paid_layer_name)
         paid_pick_file = await _attach_pickaxe_footer(paid_embed, paid_pick_tier)

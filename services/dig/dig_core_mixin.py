@@ -45,18 +45,14 @@ class DigCoreMixin:
     Composed into :class:`~services.dig_service.DigService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
-    def _get_cooldown_remaining(self, tunnel: dict) -> int:
-        """Returns seconds remaining on free dig cooldown, 0 if ready."""
-        if tunnel.get("last_dig_at") is None:
-            return 0
-        now = int(time.time())
-        elapsed = now - tunnel["last_dig_at"]
+    def _get_free_dig_cooldown_duration(self, tunnel: dict) -> int:
+        """Return the effective free-dig cooldown after every modifier."""
         cooldown = FREE_DIG_COOLDOWN
-        # Mutation: restless — extra cooldown
+        # Mutation: restless — extra cooldown.
         mutations = self._get_mutations(tunnel)
         mutation_fx = self._apply_mutation_effects(mutations)
         cooldown += int(mutation_fx.get("cooldown_bonus_seconds", 0))
-        # Check for stun from injury (overrides base + mutation bonus).
+        # A slower-cooldown injury overrides the base and mutation bonus.
         injury = None
         if tunnel.get("injury_state"):
             try:
@@ -66,12 +62,33 @@ class DigCoreMixin:
         if injury and injury.get("type") == "slower_cooldown":
             cooldown = INJURY_SLOW_COOLDOWN
         cooldown = self._apply_stamina_to_cooldown(cooldown, tunnel)
-        # Bankruptcy halves whatever cooldown survived. Applied LAST so an
-        # injury override (which wipes prior adjustments) still gets halved.
         if self._is_bankrupt(tunnel.get("discord_id"), tunnel.get("guild_id")):
             cooldown //= 2
-        remaining = cooldown - elapsed
-        return max(0, remaining)
+        return self._apply_mana_cooldown_reduction(
+            tunnel.get("discord_id"), tunnel.get("guild_id"), cooldown,
+        )
+
+    def _get_cooldown_remaining(self, tunnel: dict, *, now: int | None = None) -> int:
+        """Return seconds remaining on the effective free-dig cooldown."""
+        if tunnel.get("last_dig_at") is None:
+            return 0
+        current_time = int(time.time()) if now is None else int(now)
+        elapsed = current_time - int(tunnel["last_dig_at"])
+        return max(0, self._get_free_dig_cooldown_duration(tunnel) - elapsed)
+
+    def get_free_dig_ready_at(
+        self, discord_id: int, guild_id, *, now: int | None = None,
+    ) -> int | None:
+        """Return the effective ready timestamp, or ``None`` when already ready."""
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None or tunnel.get("last_dig_at") is None:
+            return None
+        tunnel = dict(tunnel)
+        tunnel["discord_id"] = discord_id
+        tunnel["guild_id"] = guild_id
+        ready_at = int(tunnel["last_dig_at"]) + self._get_free_dig_cooldown_duration(tunnel)
+        current_time = int(time.time()) if now is None else int(now)
+        return ready_at if ready_at > current_time else None
 
     def _is_bankrupt(self, discord_id, guild_id) -> bool:
         """True if the player currently has bankruptcy penalty games remaining.

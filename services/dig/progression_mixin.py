@@ -27,7 +27,6 @@ from services.dig._common import (
 from services.dig_constants import (
     CONSUMABLE_ITEMS,
     DIG_TIPS,
-    FREE_DIG_COOLDOWN,
     GEAR_TIER_TABLES,
     HELLTIDE_MODIFIER_ID,
     HELLTIDE_TAX_PER_DIG,
@@ -171,7 +170,7 @@ class ProgressionMixin:
             return cooldown_seconds
         if effects.color is None or effects.dig_cooldown_reduction_seconds <= 0:
             return cooldown_seconds
-        return max(1, cooldown_seconds - effects.dig_cooldown_reduction_seconds)
+        return max(0, cooldown_seconds - effects.dig_cooldown_reduction_seconds)
 
     def _apply_mana_hazard_modifier(
         self, discord_id: int, guild_id, base_chance: float
@@ -825,6 +824,7 @@ class ProgressionMixin:
         if helper_tunnel:
             helper_tunnel = dict(helper_tunnel)
             helper_tunnel["discord_id"] = helper_id
+            helper_tunnel["guild_id"] = guild_id
             cooldown = self._get_cooldown_remaining(helper_tunnel)
             if cooldown > 0:
                 return self._error(f"You're on cooldown ({cooldown}s remaining).")
@@ -903,11 +903,17 @@ class ProgressionMixin:
                 logger.debug("Mentor's Lantern target bonus failed", exc_info=True)
                 target_jc_bonus = 0
 
+        cooldown_tunnel = helper_tunnel or {
+            "discord_id": helper_id,
+            "guild_id": guild_id,
+        }
+        helper_ready_at = now + self._get_free_dig_cooldown_duration(cooldown_tunnel)
+
         return self._ok(
             advance=advance,
             target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
             target_depth_after=new_depth,
-            helper_cooldown_until=now + FREE_DIG_COOLDOWN,
+            helper_cooldown_until=helper_ready_at,
             mentor_helper_bonus=helper_jc_bonus if mentor_active else 0,
             mentor_target_bonus=target_jc_bonus,
         )
