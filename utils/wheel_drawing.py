@@ -1661,7 +1661,7 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
     Create an animated GIF of the wheel exploding.
 
     The wheel spins briefly, then EXPLODES with particles, fire, and smoke.
-    The scaled explosion reward appears in the aftermath with an apology.
+    The explosion reward appears in the aftermath with an apology.
 
     Args:
         size: Image size in pixels
@@ -1873,8 +1873,8 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         # Draw the compensation message
         text_alpha = min(255, frame_idx * 25)
 
-        # Scaled wheel explosion reward in gold
-        jc_text = f"+{scale_minigame_jc_delta(67)} JC"
+        # Wheel explosion reward in gold
+        jc_text = "+67 JC"
         bbox = draw.textbbox((0, 0), jc_text, font=big_font)
         text_w = bbox[2] - bbox[0]
         jc_x = center - text_w // 2

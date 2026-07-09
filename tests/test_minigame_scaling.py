@@ -1,3 +1,4 @@
+from commands.betting_helpers.messages import WHEEL_EXPLOSION_REWARD
 from services.dig_splash import resolve_splash
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES, WHEEL_WEDGES
@@ -37,6 +38,10 @@ def test_golden_wheel_numeric_wedges_are_scaled_for_display_and_payout():
     for label, value, _color in GOLDEN_WHEEL_WEDGES:
         if isinstance(value, int) and value > 0:
             assert label == str(value)
+
+
+def test_wheel_explosion_keeps_legacy_sixty_seven_reward():
+    assert WHEEL_EXPLOSION_REWARD == 67
 
 
 class _FakePlayerRepo:
