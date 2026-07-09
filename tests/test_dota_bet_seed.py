@@ -6,8 +6,8 @@ import pytest
 
 from commands.betting_helpers.bet_actions import bets_action, mybets_action
 from commands.draft import DraftCommands
-from domain.models.pending_match_state import PendingMatchState
 from domain.models.draft import DraftState
+from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from repositories.bet_repository import BetRepository
 from repositories.loan_repository import LoanRepository
