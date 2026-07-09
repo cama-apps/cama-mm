@@ -2201,6 +2201,7 @@ class DraftCommands(commands.Cog):
 
         # persist_state handles both DB persistence and in-memory cache update
         await asyncio.to_thread(self.match_service._persist_match_state, guild_id, shuffle_state)
+        await asyncio.to_thread(self.match_service.reserve_betting_seed, guild_id, shuffle_state)
 
         # After persist_state, shuffle_state.pending_match_id is set via mutation
         pending_match_id = shuffle_state.pending_match_id
@@ -2389,7 +2390,13 @@ class DraftCommands(commands.Cog):
             totals = await asyncio.to_thread(functools.partial(betting_service.get_pot_odds, guild_id, pending_state=pending_state))
             lock_until = pending_state.bet_lock_until
             wager_field_name, wager_field_value = format_betting_display(
-                totals["radiant"], totals["dire"], betting_mode, lock_until
+                totals["radiant"],
+                totals["dire"],
+                betting_mode,
+                lock_until,
+                seed_radiant=pending_state.bet_seed_radiant,
+                seed_dire=pending_state.bet_seed_dire,
+                seed_bonus=pending_state.bet_seed_bonus,
             )
             embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 

@@ -99,6 +99,7 @@ from commands.betting_helpers.wheel_views import (
 )
 from commands.checks import require_gamba_channel, require_guild
 from config import (
+    AUTO_BLIND_THRESHOLD,
     LIGHTNING_BOLT_MIN_TAX,
     LIGHTNING_BOLT_PCT_MAX,
     LIGHTNING_BOLT_PCT_MIN,
@@ -123,6 +124,7 @@ from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
 from services.tip_service import TipService
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.wheel_drawing import (
@@ -1095,13 +1097,13 @@ class BettingCommands(commands.Cog):
             # chain_value=None means no prior spin → no effect
 
         elif result_value == "EMERGENCY":
-            # All players with positive balance lose min(balance, 20) JC; amount vanishes
+            # All players with enough balance lose min(balance, scaled 20) JC; amount vanishes
             all_players_em = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             for p in all_players_em:
-                if p.jopacoin_balance > 0:
-                    loss = min(p.jopacoin_balance, 20)
+                if p.jopacoin_balance >= AUTO_BLIND_THRESHOLD:
+                    loss = min(p.jopacoin_balance, scale_minigame_jc_delta(20))
                     await asyncio.to_thread(
                         self._adjust_gamba_balance,
                         user_id,
@@ -1117,12 +1119,12 @@ class BettingCommands(commands.Cog):
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "COMMUNE":
-            # All positive-balance players donate 1 JC to the spinner
+            # Threshold-eligible players donate 1 JC to the spinner.
             all_players_cm = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             for p in all_players_cm:
-                if p.discord_id != user_id and p.jopacoin_balance > 0:
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD:
                     await asyncio.to_thread(
                         self._adjust_gamba_balance,
                         user_id,
@@ -1162,6 +1164,7 @@ class BettingCommands(commands.Cog):
                 eruption_amount = abs(last_spin["result"]) * 2
                 if eruption_amount == 0:
                     eruption_amount = 50
+            eruption_amount = scale_minigame_jc_delta(eruption_amount)
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
                 guild_id,
@@ -1192,6 +1195,7 @@ class BettingCommands(commands.Cog):
                 overgrowth_amount = await asyncio.to_thread(
                     mana_effects_service.apply_green_cap, effects, overgrowth_amount
                 )
+            overgrowth_amount = scale_minigame_jc_delta(overgrowth_amount)
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
                 guild_id,
@@ -1211,7 +1215,9 @@ class BettingCommands(commands.Cog):
             for i, p in enumerate(top_4):
                 if p.discord_id == user_id:
                     continue
-                loss = 80 if i == 3 else 60
+                if p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
+                    continue
+                loss = scale_minigame_jc_delta(80 if i == 3 else 60)
                 loss = min(loss, max(0, p.jopacoin_balance))
                 if loss > 0:
                     await asyncio.to_thread(
@@ -1243,7 +1249,7 @@ class BettingCommands(commands.Cog):
             if player_above:
                 pct_amount = max(1, int(player_above.jopacoin_balance * random.uniform(0.02, 0.07)))
                 flat_amount = random.randint(2, 10)
-                shell_amount = max(pct_amount, flat_amount)
+                shell_amount = scale_minigame_jc_delta(max(pct_amount, flat_amount))
                 # Atomic steal from player above (can push victim below MAX_DEBT - intentional)
                 steal_result = await asyncio.to_thread(
                     functools.partial(
@@ -1280,7 +1286,7 @@ class BettingCommands(commands.Cog):
                 shell_self_hit = True
                 pct_amount = max(1, int(new_balance * random.uniform(0.02, 0.07)))
                 flat_amount = random.randint(4, 20)
-                shell_amount = max(pct_amount, flat_amount)
+                shell_amount = scale_minigame_jc_delta(max(pct_amount, flat_amount))
                 await asyncio.to_thread(
                     self._adjust_gamba_balance,
                     user_id,
@@ -1312,7 +1318,7 @@ class BettingCommands(commands.Cog):
                 richest = leaderboard[0]
                 pct_amount = max(1, int(richest.jopacoin_balance * random.uniform(0.02, 0.07)))
                 flat_amount = random.randint(4, 20)
-                shell_amount = max(pct_amount, flat_amount)
+                shell_amount = scale_minigame_jc_delta(max(pct_amount, flat_amount))
                 steal_result = await asyncio.to_thread(
                     functools.partial(
                         self.player_service.steal_atomic,
@@ -1347,9 +1353,11 @@ class BettingCommands(commands.Cog):
             lightning_count = 0
             lightning_victims = []  # (name, amount, discord_id) for embed
             for p in all_players:
-                if p.jopacoin_balance <= 0:
+                if p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
                     continue
-                tax = max(LIGHTNING_BOLT_MIN_TAX, int(p.jopacoin_balance * lightning_pct))
+                tax = scale_minigame_jc_delta(
+                    max(LIGHTNING_BOLT_MIN_TAX, int(p.jopacoin_balance * lightning_pct))
+                )
                 await asyncio.to_thread(
                     self._adjust_gamba_balance,
                     user_id,
@@ -1403,7 +1411,10 @@ class BettingCommands(commands.Cog):
                 raw_loss = random.randint(
                     WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX
                 )
-                banana_victim_loss = min(raw_loss, below.jopacoin_balance)
+                banana_victim_loss = min(
+                    scale_minigame_jc_delta(raw_loss),
+                    below.jopacoin_balance,
+                )
                 try:
                     await asyncio.to_thread(
                         self._adjust_gamba_balance,
@@ -1453,7 +1464,10 @@ class BettingCommands(commands.Cog):
                 raw_steal = random.randint(
                     WHEEL_GREEN_SHELL_STEAL_MIN, WHEEL_GREEN_SHELL_STEAL_MAX
                 )
-                green_shell_amount = min(raw_steal, victim_p.jopacoin_balance)
+                green_shell_amount = min(
+                    scale_minigame_jc_delta(raw_steal),
+                    victim_p.jopacoin_balance,
+                )
                 if green_shell_amount <= 0:
                     green_shell_missed = True
                 else:
@@ -1501,7 +1515,7 @@ class BettingCommands(commands.Cog):
             )
             eligible_bo = [
                 p for p in leaderboard_bo
-                if p.discord_id != user_id and p.jopacoin_balance > 0
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
             ]
             sample_size = min(WHEEL_BOMB_OMB_VICTIM_COUNT, len(eligible_bo))
             if sample_size <= 0:
@@ -1512,7 +1526,7 @@ class BettingCommands(commands.Cog):
                     raw_loss = random.randint(
                         WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX
                     )
-                    loss = min(raw_loss, vp.jopacoin_balance)
+                    loss = min(scale_minigame_jc_delta(raw_loss), vp.jopacoin_balance)
                     if loss <= 0:
                         continue
                     try:
@@ -1547,11 +1561,16 @@ class BettingCommands(commands.Cog):
                 functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=30, min_balance=1)
             )
             # Exclude the spinner themselves
-            victims = [p for p in bottom_players if p.discord_id != user_id]
+            victims = [
+                p for p in bottom_players
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+            ]
             heist_total = 0
             heist_count = 0
             for victim in victims:
-                steal_amt = max(1, int(victim.jopacoin_balance * random.uniform(0.05, 0.12)))
+                steal_amt = scale_minigame_jc_delta(
+                    max(1, int(victim.jopacoin_balance * random.uniform(0.05, 0.12)))
+                )
                 try:
                     await asyncio.to_thread(
                         functools.partial(
@@ -1573,13 +1592,14 @@ class BettingCommands(commands.Cog):
                     logger.warning("Failed to execute heist steal from victim %s: %s", victim.discord_id, e)
             if heist_count == 0:
                 # Fallback: no eligible victims
-                heist_total = 20
+                fallback = scale_minigame_jc_delta(20)
+                heist_total = fallback
                 await asyncio.to_thread(
                     self._adjust_gamba_balance,
                     user_id,
                     user_id,
                     guild_id,
-                    20,
+                    fallback,
                     "gamba heist fallback credit",
                     "HEIST",
                 )
@@ -1590,11 +1610,16 @@ class BettingCommands(commands.Cog):
             top_3 = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N)
             )
-            crash_victims = [p for p in top_3 if p.discord_id != user_id and p.jopacoin_balance > 0]
+            crash_victims = [
+                p for p in top_3
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+            ]
             market_crash_total = 0
             market_crash_count = 0
             for victim in crash_victims:
-                tax_amt = max(1, int(victim.jopacoin_balance * random.uniform(0.08, 0.15)))
+                tax_amt = scale_minigame_jc_delta(
+                    max(1, int(victim.jopacoin_balance * random.uniform(0.08, 0.15)))
+                )
                 try:
                     await asyncio.to_thread(
                         functools.partial(
@@ -1616,13 +1641,13 @@ class BettingCommands(commands.Cog):
                     logger.warning("Failed to execute market crash tax on victim %s: %s", victim.discord_id, e)
             if market_crash_count == 0:
                 # Fallback: spinner is only top-3 player
-                market_crash_total = 25
+                market_crash_total = scale_minigame_jc_delta(25)
                 await asyncio.to_thread(
                     self._adjust_gamba_balance,
                     user_id,
                     user_id,
                     guild_id,
-                    25,
+                    market_crash_total,
                     "gamba market crash fallback credit",
                     "MARKET_CRASH",
                 )
@@ -1631,7 +1656,7 @@ class BettingCommands(commands.Cog):
         elif result_value == "COMPOUND_INTEREST":
             # Flat +100 JC (replaced the old 8%-of-balance compound, which capped
             # at +150 and so paid a fixed +150 to every golden-eligible spinner).
-            compound_amount = 100
+            compound_amount = scale_minigame_jc_delta(100)
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
                 guild_id,
@@ -1650,9 +1675,9 @@ class BettingCommands(commands.Cog):
             trickle_total = 0
             trickle_count = 0
             for p in all_players_td:
-                if p.discord_id == user_id or p.jopacoin_balance <= 0:
+                if p.discord_id == user_id or p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
                     continue
-                tax = max(1, int(p.jopacoin_balance * trickle_pct))
+                tax = scale_minigame_jc_delta(max(1, int(p.jopacoin_balance * trickle_pct)))
                 await asyncio.to_thread(
                     self._adjust_gamba_balance,
                     user_id,
@@ -1680,7 +1705,7 @@ class BettingCommands(commands.Cog):
             total_guild_wealth = await asyncio.to_thread(
                 self.player_service.get_total_positive_balance, guild_id
             )
-            dividend_amount = max(10, int(total_guild_wealth * 0.005))
+            dividend_amount = scale_minigame_jc_delta(max(10, int(total_guild_wealth * 0.005)))
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
                 guild_id,
@@ -1701,7 +1726,9 @@ class BettingCommands(commands.Cog):
             takeover_amount = 0
             takeover_victim_name = "rank #4"
             if rank4 and rank4.jopacoin_balance > 0:
-                takeover_amount = max(1, int(rank4.jopacoin_balance * random.uniform(0.08, 0.15)))
+                takeover_amount = scale_minigame_jc_delta(
+                    max(1, int(rank4.jopacoin_balance * random.uniform(0.08, 0.15)))
+                )
                 try:
                     steal_result = await asyncio.to_thread(
                         functools.partial(
@@ -1727,13 +1754,13 @@ class BettingCommands(commands.Cog):
             else:
                 # No rank 4 or rank 4 is in debt
                 takeover_missed = True
-                takeover_amount = 40
+                takeover_amount = scale_minigame_jc_delta(40)
                 await asyncio.to_thread(
                     self._adjust_gamba_balance,
                     user_id,
                     user_id,
                     guild_id,
-                    40,
+                    takeover_amount,
                     "gamba hostile takeover fallback credit",
                     "HOSTILE_TAKEOVER",
                 )
@@ -1758,7 +1785,7 @@ class BettingCommands(commands.Cog):
             top_n = WHEEL_GOLDEN_TOP_N
             mid_end = WHEEL_GOLDEN_RECESSION_MID_RANK_END
             for rank_idx, p in enumerate(all_players_rec):
-                if p.jopacoin_balance <= 0:
+                if p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
                     continue
                 if rank_idx < top_n:
                     pct = WHEEL_GOLDEN_RECESSION_TOP_PCT
@@ -1769,7 +1796,8 @@ class BettingCommands(commands.Cog):
                 else:
                     pct = WHEEL_GOLDEN_RECESSION_REST_PCT
                     min_loss = 1
-                loss = min(p.jopacoin_balance, max(min_loss, int(p.jopacoin_balance * pct)))
+                loss = scale_minigame_jc_delta(max(min_loss, int(p.jopacoin_balance * pct)))
+                loss = min(p.jopacoin_balance, loss)
                 if loss <= 0:
                     continue
                 await asyncio.to_thread(

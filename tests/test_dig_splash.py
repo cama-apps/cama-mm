@@ -15,6 +15,7 @@ from services.dig_splash import (
     resolve_splash,
 )
 from tests.conftest import TEST_GUILD_ID
+from utils.economy_scaling import scale_minigame_jc_delta
 
 
 @pytest.fixture
@@ -172,20 +173,21 @@ class TestResolveSplashBurns:
             victim_count=2,
             penalty_jc=20,
         )
-        assert result.total_burned == 40
+        expected_burn = 2 * scale_minigame_jc_delta(20)
+        assert result.total_burned == expected_burn
         total_after = (
             player_repository.get_balance(10001, TEST_GUILD_ID)
             + player_repository.get_balance(10002, TEST_GUILD_ID)
             + player_repository.get_balance(10003, TEST_GUILD_ID)
         )
         # The 40 JC is burned — not transferred to the digger or anyone else.
-        assert total_after == total_before - 40
+        assert total_after == total_before - expected_burn
         # Digger balance should be untouched by the splash itself.
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == 500
 
-    def test_clamps_penalty_to_victim_balance(self, dig_repo, player_repository, monkeypatch):
+    def test_skips_players_below_auto_blind_threshold(self, dig_repo, player_repository, monkeypatch):
         _register(player_repository, 10001, balance=500)
-        _register(player_repository, 10002, balance=3)   # can only lose 3 JC
+        _register(player_repository, 10002, balance=3)   # below AOE threshold
         monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
 
         result = resolve_splash(
@@ -198,8 +200,8 @@ class TestResolveSplashBurns:
             victim_count=1,
             penalty_jc=100,
         )
-        assert result.victims == [(10002, 3)]
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 0
+        assert result.victims == []
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 3
 
     def test_skips_debtors(self, dig_repo, player_repository, monkeypatch):
         _register(player_repository, 10001, balance=500)
@@ -277,9 +279,9 @@ class TestSplashGrantMode:
         assert len(result.victims) == 1
         vid, amount = result.victims[0]
         assert vid == 10002
-        assert amount == 10
+        assert amount == scale_minigame_jc_delta(10)
         # Recipient balance goes UP.
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 110
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 108
 
     def test_grant_ignores_zero_balance_guard(self, dig_repo, player_repository, monkeypatch):
         """Grant mode does not skip debtors — you can gift into a negative balance."""
@@ -299,8 +301,8 @@ class TestSplashGrantMode:
             penalty_jc=10,
             mode="grant",
         )
-        assert result.victims == [(10002, 10)]
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == -15
+        assert result.victims == [(10002, scale_minigame_jc_delta(10))]
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == -17
 
 
 class TestResolveSplashDeepest:
@@ -336,9 +338,9 @@ class TestResolveSplashDeepest:
         assert victim_ids == [10002, 10003]
         assert 10001 not in victim_ids
         # Each victim burned exactly the penalty; shallower 10004 untouched.
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 90
-        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 90
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 92
+        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 92
         assert player_repository.get_balance(10004, TEST_GUILD_ID) == 100
         # Digger's own balance is not touched by the splash.
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100
-        assert result.total_burned == 20
+        assert result.total_burned == 16

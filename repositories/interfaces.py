@@ -365,6 +365,9 @@ class IBetRepository(ABC):
         house_payout_multiplier: float,
         betting_mode: str = "pool",
         pending_match_id: int | None = None,
+        bet_seed_radiant: int = 0,
+        bet_seed_dire: int = 0,
+        bet_seed_bonus: int = 0,
     ) -> dict:
         """Atomically settle bets for the current match window."""
         ...
@@ -376,6 +379,7 @@ class IBetRepository(ABC):
         guild_id: int | None,
         since_ts: int,
         pending_match_id: int | None = None,
+        bet_seed_reserved: int = 0,
     ) -> int:
         """Atomically refund + delete pending bets. Returns number of bets refunded."""
         ...
@@ -1330,6 +1334,20 @@ class ILoanRepository(ABC):
 
     @abstractmethod
     def deduct_from_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int: ...
+
+    @abstractmethod
+    def deduct_up_to_nonprofit_fund(
         self,
         guild_id: int | None,
         amount: int,

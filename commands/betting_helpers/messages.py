@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from utils.economy_scaling import scale_minigame_jc_delta
+
 # 1% chance for the wheel to explode
 WHEEL_EXPLOSION_CHANCE = 0.01
-WHEEL_EXPLOSION_REWARD = 67
+WHEEL_EXPLOSION_REWARD = scale_minigame_jc_delta(67)
 
 
 # Snarky messages for those who don't deserve bankruptcy

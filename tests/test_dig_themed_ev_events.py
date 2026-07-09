@@ -25,6 +25,7 @@ from repositories.dig_repository import DigRepository
 from services.dig_data.aliases import EVENT_POOL
 from services.dig_data.balance import NEGATIVE_EVENT_JC_MULTIPLIER
 from services.dig_service import DigService
+from utils.economy_scaling import scale_minigame_jc_delta
 
 TRAP_EVENT_IDS = ("sealed_reliquary", "grenths_tithe")
 WHALE_EVENT_IDS = ("rhystic_tollgate", "underworld_reclaims")
@@ -155,11 +156,12 @@ def test_rhystic_tollgate_steals_from_the_richest(
 
     splash = r["splash"]
     assert splash is not None and splash["mode"] == "steal"
-    assert splash["total_burned"] == 3 * 12  # magnitude transferred
+    expected_steal = scale_minigame_jc_delta(12)
+    assert splash["total_burned"] == 3 * expected_steal  # magnitude transferred
 
     after = {v: player_repository.get_balance(v, 12345) for v in victims}
     for v in victims:
-        assert before[v] - after[v] == 12, f"victim {v} should lose 12 JC"
+        assert before[v] - after[v] == expected_steal, f"victim {v} should lose {expected_steal} JC"
 
     # Zero-sum to the digger: they pocket the event payout *plus* the stolen pot.
     digger_after = player_repository.get_balance(10001, 12345)
@@ -192,10 +194,11 @@ def test_underworld_reclaims_burns_the_richest(
 
     after = {v: player_repository.get_balance(v, 12345) for v in victims}
     burned = sum(before[v] - after[v] for v in victims)
+    expected_burn = scale_minigame_jc_delta(22)
     for v in victims:
-        assert before[v] - after[v] == 22, f"victim {v} should lose 22 JC"
+        assert before[v] - after[v] == expected_burn, f"victim {v} should lose {expected_burn} JC"
 
-    assert splash["total_burned"] == burned == 66
+    assert splash["total_burned"] == burned == 3 * expected_burn
     # The digger gains only their finder's share, and it is strictly less than
     # what was burned: net coin leaves the economy.
     digger_after = player_repository.get_balance(10001, 12345)

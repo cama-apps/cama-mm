@@ -231,8 +231,8 @@ class TestPoolBettingSettlement:
             assert winner["payout"] == 100  # Each gets 50 * 2.0
             assert winner["multiplier"] == 2.0
 
-    def test_pool_betting_no_winners_refunds_all(self, services):
-        """Pool mode: if no bets on winning side, refund all bets."""
+    def test_pool_betting_no_winners_burns_losing_bets(self, services):
+        """Pool mode: if no real bets on winning side, losing bets burn."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -275,19 +275,18 @@ class TestPoolBettingSettlement:
         assert player_repo.get_balance(spectator1, TEST_GUILD_ID) == 23
         assert player_repo.get_balance(spectator2, TEST_GUILD_ID) == 33
 
-        # Radiant wins - no winners, should refund all
+        # Radiant wins - no real winners, losing bets burn.
         distributions = betting_service.settle_bets(202, TEST_GUILD_ID, "radiant", pending_state=pending)
 
         assert len(distributions["winners"]) == 0
         assert len(distributions["losers"]) == 2
 
-        # Check that all losers were refunded
+        # Losing bets stay burned.
         for loser in distributions["losers"]:
-            assert loser.get("refunded") is True
+            assert "refunded" not in loser
 
-        # Balances should be restored
-        assert player_repo.get_balance(spectator1, TEST_GUILD_ID) == 53
-        assert player_repo.get_balance(spectator2, TEST_GUILD_ID) == 53
+        assert player_repo.get_balance(spectator1, TEST_GUILD_ID) == 23
+        assert player_repo.get_balance(spectator2, TEST_GUILD_ID) == 33
 
     def test_house_mode_still_works(self, services):
         """House mode should still work when explicitly set."""

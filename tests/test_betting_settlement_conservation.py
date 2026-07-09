@@ -323,8 +323,8 @@ class TestPayoutConservation:
         assert distributions["winners"][0]["effective_bet"] == 30
         assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 203 - 30 + expected
 
-    def test_pool_no_winning_side_refunds_full_effective_stakes(self, services):
-        """When nobody bet the winning side, every stake (with leverage) is refunded."""
+    def test_pool_no_winning_side_burns_effective_losing_stakes(self, services):
+        """When nobody bet the winning side, losing effective stakes burn."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -335,19 +335,18 @@ class TestPayoutConservation:
         _seed_players(player_repo, [d1, d2], balance=200)
 
         pending = _open_shuffle(match_service, player_ids, mode="pool")
-        # Both bet dire; d2 uses leverage so the refund must cover effective stake.
+        # Both bet dire; d2 uses leverage so the burned amount is the effective stake.
         betting_service.place_bet(TEST_GUILD_ID, d1, "dire", 25, pending)
         betting_service.place_bet(TEST_GUILD_ID, d2, "dire", 10, pending, leverage=2)
         assert player_repo.get_balance(d1, TEST_GUILD_ID) == 203 - 25
         assert player_repo.get_balance(d2, TEST_GUILD_ID) == 203 - 20  # 10 * 2x
 
-        # Radiant wins -> no winners on radiant -> full refund.
+        # Radiant wins -> no real winners on radiant -> losing bets burn.
         distributions = betting_service.settle_bets(
             714, TEST_GUILD_ID, "radiant", pending_state=pending
         )
         assert distributions["winners"] == []
         assert len(distributions["losers"]) == 2
-        assert all(loser["refunded"] for loser in distributions["losers"])
-        # Effective stakes returned in full -> back to 203 each.
-        assert player_repo.get_balance(d1, TEST_GUILD_ID) == 203
-        assert player_repo.get_balance(d2, TEST_GUILD_ID) == 203
+        assert all("refunded" not in loser for loser in distributions["losers"])
+        assert player_repo.get_balance(d1, TEST_GUILD_ID) == 203 - 25
+        assert player_repo.get_balance(d2, TEST_GUILD_ID) == 203 - 20

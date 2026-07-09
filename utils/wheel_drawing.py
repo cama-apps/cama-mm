@@ -8,6 +8,7 @@ import random
 from PIL import Image, ImageDraw, ImageFont
 
 from config import WHEEL_BANKRUPT_TARGET_EV, WHEEL_GOLDEN_TARGET_EV, WHEEL_TARGET_EV
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.fonts import get_font
 
 
@@ -299,6 +300,10 @@ _BASE_WHEEL_WEDGES = [
 _SPECIAL_WEDGE_EST_EVS: dict[str, float] = {}
 
 
+def _scaled_ev(value: int | float) -> int:
+    return scale_minigame_jc_delta(value)
+
+
 def _load_special_wedge_evs() -> None:
     """Load estimated EVs for special wedges from config (deferred to avoid circular import)."""
     if _SPECIAL_WEDGE_EST_EVS:
@@ -355,13 +360,13 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
 
     # Calculate sum of non-bankrupt, non-special values (integers only)
     non_bankrupt_sum = sum(
-        v for _, v, _ in _BASE_WHEEL_WEDGES
+        _scaled_ev(v) for _, v, _ in _BASE_WHEEL_WEDGES
         if isinstance(v, int) and v >= 0
     )
 
     # Sum estimated EVs for special wedges
     special_ev_sum = sum(
-        _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+        _scaled_ev(_SPECIAL_WEDGE_EST_EVS.get(v, 0.0))
         for _, v, _ in _BASE_WHEEL_WEDGES
         if isinstance(v, str)
     )
@@ -374,7 +379,7 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
 
     # target_sum = non_bankrupt_sum + special_ev_sum + (num_bankrupt * bankrupt_value)
     # bankrupt_value = (target_sum - non_bankrupt_sum - special_ev_sum) / num_bankrupt
-    target_sum = target_ev * num_wedges
+    target_sum = _scaled_ev(target_ev) * num_wedges
     if num_bankrupt > 0:
         bankrupt_value = int((target_sum - non_bankrupt_sum - special_ev_sum) / num_bankrupt)
         # BANKRUPT must always be negative (minimum -1)
@@ -391,7 +396,8 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
             # Update label to show actual value
             adjusted.append((str(bankrupt_value), bankrupt_value, color))
         else:
-            adjusted.append((label, value, color))
+            scaled_value = _scaled_ev(value)
+            adjusted.append((str(scaled_value), scaled_value, color))
 
     return adjusted
 
@@ -478,12 +484,12 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
     num_wedges = len(_BASE_BANKRUPT_WHEEL_WEDGES)
 
     non_bankrupt_sum = sum(
-        v for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
+        _scaled_ev(v) for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
         if isinstance(v, int) and v >= 0
     )
 
     special_ev_sum = sum(
-        bankrupt_special_ev(v)
+        _scaled_ev(bankrupt_special_ev(v))
         for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
         if isinstance(v, str)
     )
@@ -493,7 +499,7 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
         if isinstance(v, int) and v < 0
     )
 
-    target_sum = target_ev * num_wedges
+    target_sum = _scaled_ev(target_ev) * num_wedges
     if num_bankrupt > 0:
         bankrupt_value = int((target_sum - non_bankrupt_sum - special_ev_sum) / num_bankrupt)
         bankrupt_value = min(bankrupt_value, -1)
@@ -507,7 +513,8 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
         elif value < 0:  # BANKRUPT placeholder
             adjusted.append((str(bankrupt_value), bankrupt_value, color))
         else:
-            adjusted.append((label, value, color))
+            scaled_value = _scaled_ev(value)
+            adjusted.append((str(scaled_value), scaled_value, color))
 
     return adjusted
 
@@ -604,12 +611,12 @@ def _calculate_golden_adjusted_wedges(target_ev: float) -> list[tuple[str, int |
     num_wedges = len(_BASE_GOLDEN_WHEEL_WEDGES)
 
     non_overextended_sum = sum(
-        v for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
+        _scaled_ev(v) for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
         if isinstance(v, int) and v >= 0
     )
 
     special_ev_sum = sum(
-        _GOLDEN_SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+        _scaled_ev(_GOLDEN_SPECIAL_WEDGE_EST_EVS.get(v, 0.0))
         for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
         if isinstance(v, str)
     )
@@ -619,7 +626,7 @@ def _calculate_golden_adjusted_wedges(target_ev: float) -> list[tuple[str, int |
         if isinstance(v, int) and v < 0
     )
 
-    target_sum = target_ev * num_wedges
+    target_sum = _scaled_ev(target_ev) * num_wedges
     if num_overextended > 0:
         overextended_value = int((target_sum - non_overextended_sum - special_ev_sum) / num_overextended)
         overextended_value = min(overextended_value, -1)
@@ -633,7 +640,8 @@ def _calculate_golden_adjusted_wedges(target_ev: float) -> list[tuple[str, int |
         elif value < 0:  # OVEREXTENDED placeholder
             adjusted.append((str(overextended_value), overextended_value, color))
         else:
-            adjusted.append((label, value, color))
+            scaled_value = _scaled_ev(value)
+            adjusted.append((str(scaled_value), scaled_value, color))
 
     return adjusted
 
@@ -722,10 +730,12 @@ def compute_live_golden_wedges(
 
     num_wedges = len(_BASE_GOLDEN_WHEEL_WEDGES)
     non_overextended_sum = sum(
-        v for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES if isinstance(v, int) and v >= 0
+        _scaled_ev(v)
+        for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
+        if isinstance(v, int) and v >= 0
     )
     special_ev_sum = sum(
-        live_evs.get(v, 0.0)
+        _scaled_ev(live_evs.get(v, 0.0))
         for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
         if isinstance(v, str)
     )
@@ -733,7 +743,7 @@ def compute_live_golden_wedges(
         1 for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES if isinstance(v, int) and v < 0
     )
 
-    target_sum = target_ev * num_wedges
+    target_sum = _scaled_ev(target_ev) * num_wedges
     if num_overextended > 0:
         overextended_value = int(
             (target_sum - non_overextended_sum - special_ev_sum) / num_overextended
@@ -747,8 +757,13 @@ def compute_live_golden_wedges(
     # returned wedges is purely cosmetic.
     return sorted(
         [
-            (str(overextended_value) if (isinstance(v, int) and v < 0) else label,
-             overextended_value if (isinstance(v, int) and v < 0) else v,
+            (
+                str(overextended_value)
+                if isinstance(v, int) and v < 0
+                else str(_scaled_ev(v)) if isinstance(v, int) and v > 0 else label,
+                overextended_value
+                if isinstance(v, int) and v < 0
+                else _scaled_ev(v) if isinstance(v, int) and v > 0 else v,
              color)
             for label, v, color in _BASE_GOLDEN_WHEEL_WEDGES
         ],
@@ -1646,7 +1661,7 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
     Create an animated GIF of the wheel exploding.
 
     The wheel spins briefly, then EXPLODES with particles, fire, and smoke.
-    A "67 JC" appears in the aftermath with an apology.
+    The scaled explosion reward appears in the aftermath with an apology.
 
     Args:
         size: Image size in pixels
@@ -1824,7 +1839,7 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         frames.append(frame_p)
         durations.append(60 if frame_idx < 4 else 80)
 
-    # Phase 4: Aftermath with "67 JC" and smoke clearing
+    # Phase 4: Aftermath with reward text and smoke clearing
     aftermath_frames = 14
     big_font = _get_cached_font(int(48 * scale), "explosion_big", bold=True)
     small_font = _get_cached_font(int(20 * scale), "explosion_small", bold=True)
@@ -1858,8 +1873,8 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         # Draw the compensation message
         text_alpha = min(255, frame_idx * 25)
 
-        # "67 JC" in gold
-        jc_text = "+67 JC"
+        # Scaled wheel explosion reward in gold
+        jc_text = f"+{scale_minigame_jc_delta(67)} JC"
         bbox = draw.textbbox((0, 0), jc_text, font=big_font)
         text_w = bbox[2] - bbox[0]
         jc_x = center - text_w // 2

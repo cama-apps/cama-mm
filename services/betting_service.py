@@ -247,7 +247,14 @@ class BettingService:
             bankruptcy_penalty_rate=(
                 self.bankruptcy_service.penalty_rate if self.bankruptcy_service else None
             ),
+            bet_seed_radiant=pending_state.bet_seed_radiant,
+            bet_seed_dire=pending_state.bet_seed_dire,
+            bet_seed_bonus=pending_state.bet_seed_bonus,
         )
+        pending_state.bet_seed_reserved = 0
+        pending_state.bet_seed_radiant = 0
+        pending_state.bet_seed_dire = 0
+        pending_state.bet_seed_bonus = 0
 
         if self.buff_service:
             pact_skims: dict[int, int] = {}
@@ -555,9 +562,17 @@ class BettingService:
         if pending_match_id is None:
             pending_match_id = pending_state.pending_match_id
 
-        return self.bet_repo.refund_pending_bets_atomic(
-            guild_id=guild_id, since_ts=int(since_ts), pending_match_id=pending_match_id
+        refunded = self.bet_repo.refund_pending_bets_atomic(
+            guild_id=guild_id,
+            since_ts=int(since_ts),
+            pending_match_id=pending_match_id,
+            bet_seed_reserved=pending_state.bet_seed_reserved,
         )
+        pending_state.bet_seed_reserved = 0
+        pending_state.bet_seed_radiant = 0
+        pending_state.bet_seed_dire = 0
+        pending_state.bet_seed_bonus = 0
+        return refunded
 
     def create_auto_blind_bets(
         self,

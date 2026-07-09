@@ -719,6 +719,7 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
         SimpleNamespace(discord_id=5000 + idx, name=f"Target {idx}", jopacoin_balance=100)
         for idx in range(3)
     ]
+    low_player = SimpleNamespace(discord_id=6666, name="Low", jopacoin_balance=49)
     zero_player = SimpleNamespace(discord_id=7777, name="Flat", jopacoin_balance=0)
     bankrupt_player = SimpleNamespace(discord_id=8888, name="Bankrupt", jopacoin_balance=-10)
 
@@ -732,6 +733,7 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
     player_service.get_balance.return_value = 500
     player_service.get_leaderboard.return_value = [
         *positive_players,
+        low_player,
         zero_player,
         bankrupt_player,
     ]
@@ -746,6 +748,7 @@ async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypa
     calls = [c.args for c in player_service.adjust_balance.call_args_list]
     assert calls[0] == (buyer_id, guild_id, -25)
     assert calls[-1] == (buyer_id, guild_id, 6)
+    assert not any(c[0] == low_player.discord_id for c in calls)
     assert not any(c[0] == zero_player.discord_id for c in calls)
     assert not any(c[0] == bankrupt_player.discord_id for c in calls)
 

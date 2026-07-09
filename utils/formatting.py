@@ -45,7 +45,13 @@ def format_roles_list(roles: Iterable[str]) -> str:
     return ", ".join(format_role_display(r) for r in roles)
 
 
-def calculate_pool_odds(radiant_total: int, dire_total: int) -> tuple[float | None, float | None]:
+def calculate_pool_odds(
+    radiant_total: int,
+    dire_total: int,
+    *,
+    seed_radiant: int = 0,
+    seed_dire: int = 0,
+) -> tuple[float | None, float | None]:
     """
     Calculate pool betting multipliers for each team.
 
@@ -57,8 +63,8 @@ def calculate_pool_odds(radiant_total: int, dire_total: int) -> tuple[float | No
     if total_pool == 0:
         return None, None
 
-    radiant_mult = total_pool / radiant_total if radiant_total > 0 else None
-    dire_mult = total_pool / dire_total if dire_total > 0 else None
+    radiant_mult = (total_pool + seed_dire) / radiant_total if radiant_total > 0 else None
+    dire_mult = (total_pool + seed_radiant) / dire_total if dire_total > 0 else None
     return radiant_mult, dire_mult
 
 
@@ -68,6 +74,9 @@ def format_betting_display(
     betting_mode: str,
     lock_until: int | None = None,
     locked: bool = False,
+    seed_radiant: int = 0,
+    seed_dire: int = 0,
+    seed_bonus: int = 0,
 ) -> tuple[str, str]:
     """
     Format the betting display for embeds.
@@ -90,7 +99,12 @@ def format_betting_display(
         lock_text = ""
 
     if betting_mode == "pool":
-        radiant_mult, dire_mult = calculate_pool_odds(radiant_total, dire_total)
+        radiant_mult, dire_mult = calculate_pool_odds(
+            radiant_total,
+            dire_total,
+            seed_radiant=seed_radiant,
+            seed_dire=seed_dire,
+        )
         radiant_odds = f"({radiant_mult:.2f}x)" if radiant_mult else "(—)"
         dire_odds = f"({dire_mult:.2f}x)" if dire_mult else "(—)"
 
@@ -98,6 +112,11 @@ def format_betting_display(
             f"Radiant: {radiant_total} {JOPACOIN_EMOTE} {radiant_odds} | "
             f"Dire: {dire_total} {JOPACOIN_EMOTE} {dire_odds}"
         )
+        if seed_radiant or seed_dire:
+            totals_text += (
+                f"\nSeed: Radiant {seed_radiant} {JOPACOIN_EMOTE} | "
+                f"Dire {seed_dire} {JOPACOIN_EMOTE}"
+            )
         if lock_text:
             totals_text += f"\n{lock_text}"
 
@@ -107,6 +126,8 @@ def format_betting_display(
         totals_text = (
             f"Radiant: {radiant_total} {JOPACOIN_EMOTE} | Dire: {dire_total} {JOPACOIN_EMOTE}"
         )
+        if seed_bonus:
+            totals_text += f"\nWinner bonus: {seed_bonus} {JOPACOIN_EMOTE}"
         if lock_text:
             totals_text += f"\n{lock_text}"
 

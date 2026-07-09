@@ -408,10 +408,8 @@ EXTENSIONS = [
     "commands.wrapped",
     "commands.trivia",
     "commands.mana",
-    "commands.roll",
     "commands.dig",
     "commands.mafia",
-    "commands.russianroulette",
     "commands.reminders",
 ]
 

@@ -1,4 +1,5 @@
 """Tests for the Wheel of Fortune /gamba command."""
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from config import (
     WHEEL_TARGET_EV,
 )
 from domain.models.mana_effects import ManaEffects
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
 
@@ -133,7 +135,7 @@ async def test_wheel_cooldown_expired_allows_spin():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    five_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
+    five_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
         with patch("commands.betting.random.randint", return_value=five_idx):
@@ -242,7 +244,7 @@ async def test_wheel_positive_no_debt_adds_directly():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick the index of a +5 wedge so the test survives wheel reordering.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
@@ -251,7 +253,7 @@ async def test_wheel_positive_no_debt_adds_directly():
                     await commands.gamba.callback(commands, interaction)
 
     # Should add balance directly (user_id, guild_id, amount)
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1003, 123, 5)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1003, 123, 4)
 
 
 @pytest.mark.asyncio
@@ -292,7 +294,7 @@ async def test_wheel_white_mana_animation_uses_capped_wedges():
     interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
-    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 80)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 64)
 
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()) as mock_gif:
         with patch("commands.betting.random.randint", return_value=target_idx):
@@ -344,7 +346,7 @@ async def test_wheel_blue_mana_embed_uses_reduced_numeric_payout():
     interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
-    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 100)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 80)
 
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint", return_value=target_idx):
@@ -352,10 +354,10 @@ async def test_wheel_blue_mana_embed_uses_reduced_numeric_payout():
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     await commands.gamba.callback(commands, interaction)
 
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1011, 123, 75)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1011, 123, 60)
     embed = message.edit.call_args.kwargs["embed"]
     assert embed.title == "🎉 Winner!"
-    assert "won **75**" in embed.description
+    assert "won **60**" in embed.description
     assert any(field.name == "🏝️ Blue Mana Tax" for field in embed.fields)
 
 
@@ -596,7 +598,7 @@ async def test_wheel_jackpot_result():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Find jackpot (100) wedge dynamically
-    jackpot_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 100)
+    jackpot_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 80)
 
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -605,8 +607,8 @@ async def test_wheel_jackpot_result():
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     await commands.gamba.callback(commands, interaction)
 
-    # Should add 100
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1007, 123, 100)
+    # Should add scaled jackpot.
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1007, 123, 80)
 
 
 def test_wheel_wedges_has_correct_count():
@@ -619,20 +621,14 @@ def test_wheel_wedges_distribution():
     # Bankrupt wedges have negative integer values
     bankrupt_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0)
     lose_turn_count = sum(1 for w in WHEEL_WEDGES if w[1] == 0)
-    small_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 5 <= w[1] <= 10)
-    medium_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 15 <= w[1] <= 25)
-    good_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 30 <= w[1] <= 50)
-    great_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 60 <= w[1] <= 80)
-    jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 100)
+    positive_values = sorted(w[1] for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0)
+    jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 80)
     special_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], str))
 
     assert bankrupt_count == 2, f"Expected 2 Bankrupt wedges, got {bankrupt_count}"
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
-    assert small_count == 3, f"Expected 3 small win wedges, got {small_count}"
-    assert medium_count == 3, f"Expected 3 medium win wedges, got {medium_count}"
-    assert good_count == 4, f"Expected 4 good win wedges, got {good_count}"
-    assert great_count == 3, f"Expected 3 great win wedges, got {great_count}"
-    assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
+    assert positive_values == [4, 8, 8, 12, 16, 20, 24, 32, 40, 40, 48, 56, 64, 80, 80]
+    assert jackpot_count == 2, f"Expected 2 scaled Jackpot wedges, got {jackpot_count}"
     assert special_count == 6, f"Expected 6 special wedges, got {special_count}"
 
 
@@ -645,12 +641,12 @@ def test_wheel_expected_value_matches_config():
     BANKRUPT is adjusted so the overall wheel EV hits the target.
     """
     est_evs = {
-        "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
-        "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
-        "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
-        "BANANA_PEEL": WHEEL_BANANA_PEEL_EST_EV,
-        "GREEN_SHELL": WHEEL_GREEN_SHELL_EST_EV,
-        "BOMB_OMB": WHEEL_BOMB_OMB_EST_EV,
+        "RED_SHELL": scale_minigame_jc_delta(WHEEL_RED_SHELL_EST_EV),
+        "BLUE_SHELL": scale_minigame_jc_delta(WHEEL_BLUE_SHELL_EST_EV),
+        "LIGHTNING_BOLT": scale_minigame_jc_delta(WHEEL_LIGHTNING_BOLT_EST_EV),
+        "BANANA_PEEL": scale_minigame_jc_delta(WHEEL_BANANA_PEEL_EST_EV),
+        "GREEN_SHELL": scale_minigame_jc_delta(WHEEL_GREEN_SHELL_EST_EV),
+        "BOMB_OMB": scale_minigame_jc_delta(WHEEL_BOMB_OMB_EST_EV),
     }
     # Sum integer wedges + estimated EVs for special wedges
     total_value = 0.0
@@ -662,7 +658,10 @@ def test_wheel_expected_value_matches_config():
     expected_value = total_value / len(WHEEL_WEDGES)
 
     # EV should be close to the configured target (within 1 due to integer rounding)
-    assert abs(expected_value - WHEEL_TARGET_EV) <= 1, f"Expected EV ~{WHEEL_TARGET_EV}, got {expected_value}"
+    scaled_target_ev = scale_minigame_jc_delta(WHEEL_TARGET_EV)
+    assert abs(expected_value - scaled_target_ev) <= 1, (
+        f"Expected EV ~{scaled_target_ev}, got {expected_value}"
+    )
     # Independent hardcoded sanity bound: the wheel is intentionally a coin sink
     # (WHEEL_TARGET_EV ≈ -25). Guard against runaway misconfiguration: must
     # never be a net positive (infinite money) or absurdly worse than designed.
@@ -728,7 +727,7 @@ async def test_wheel_animation_uses_gif():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
@@ -779,7 +778,7 @@ async def test_wheel_updates_cooldown_in_database():
     _FROZEN_NOW = 1_700_000_000  # fixed epoch; avoids sub-second boundary flakiness
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
         with patch("commands.betting.random.randint", return_value=target_idx):
@@ -831,7 +830,7 @@ async def test_wheel_admin_bypasses_cooldown():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
     # Mock admin check to return True
     with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
         with patch("commands.betting.has_admin_permission", return_value=True):
@@ -917,13 +916,13 @@ async def test_wheel_red_shell_steals_from_player_above():
     # Should call get_player_above
     player_service.get_player_above.assert_called_once_with(1010, 123)
 
-    # Should call steal_atomic: max(pct=3, flat=2) = 3 JC
+    # Should call steal_atomic: max(pct=3, flat=2) scales to 2 JC
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1010,
         victim_discord_id=2001,
         guild_id=123,
-        amount=3,
+        amount=2,
     )
 
 
@@ -1046,13 +1045,13 @@ async def test_wheel_blue_shell_steals_from_richest():
     # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
     player_service.get_leaderboard.assert_any_call(123, limit=1)
 
-    # Should call steal_atomic: max(pct=5, flat=4) = 5 JC
+    # Should call steal_atomic: max(pct=5, flat=4) scales to 4 JC
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
-        amount=5,
+        amount=4,
     )
 
 
@@ -1129,12 +1128,12 @@ async def test_wheel_blue_shell_self_hit_when_richest():
                         await cmds.gamba.callback(cmds, interaction)
 
     # Self-hit uses adjust_balance (not steal_atomic since no victim)
-    # max(pct=10, flat=4) = 10 JC loss
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -10)
+    # max(pct=10, flat=4) scales to 8 JC loss
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -8)
 
     # Should credit nonprofit fund with the loss
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 8)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
@@ -1210,16 +1209,16 @@ async def test_wheel_lightning_bolt_taxes_all_players():
                         await cmds.gamba.callback(cmds, interaction)
 
     # Should call adjust_balance for each positive-balance player
-    # Alice: 2% of 1000 = 20, Bob: 2% of 500 = 10, Carol: 2% of 100 = 2
+    # Alice: 20 -> 16, Bob: 10 -> 8, Carol: 2 -> 2 after scaling.
     adjust_calls = player_service.adjust_balance.call_args_list
     assert len(adjust_calls) == 3
     # Check each call is negative (tax)
     for call in adjust_calls:
         assert call[0][2] < 0, "Tax should be negative"
 
-    # Should credit nonprofit fund with total tax (20 + 10 + 2 = 32)
+    # Should credit nonprofit fund with total scaled tax (16 + 8 + 2 = 26)
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 32)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 26)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
@@ -1246,12 +1245,16 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.adjust_balance = MagicMock()
 
-    # Mix of positive, zero, and negative balance players
+    # Mix of eligible, below-threshold, zero, and negative balance players.
     players = [
         Player(name="Rich", discord_id=3001, mmr=None, initial_mmr=None,
                wins=0, losses=0, preferred_roles=None, main_role=None,
                glicko_rating=None, glicko_rd=None, glicko_volatility=None,
                jopacoin_balance=500),
+        Player(name="Low", discord_id=3004, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=49),
         Player(name="Broke", discord_id=3002, mmr=None, initial_mmr=None,
                wins=0, losses=0, preferred_roles=None, main_role=None,
                glicko_rating=None, glicko_rd=None, glicko_volatility=None,
@@ -1293,14 +1296,14 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await cmds.gamba.callback(cmds, interaction)
 
-    # Only Rich (500 JC) should be taxed; Broke (0) and InDebt (-100) skipped
+    # Only Rich (500 JC) should be taxed; Low (49), Broke (0), and InDebt skipped.
     adjust_calls = player_service.adjust_balance.call_args_list
     assert len(adjust_calls) == 1
-    assert adjust_calls[0][0] == (3001, 123, -10)  # 2% of 500 = 10
+    assert adjust_calls[0][0] == (3001, 123, -8)  # 2% of 500 = 10, scaled to 8
 
     # Nonprofit receives only the one tax
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 8)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
@@ -1379,6 +1382,61 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
     # Verify the spinner was taxed
     taxed_ids = {call[0][0] for call in adjust_calls}
     assert spinner_id in taxed_ids, "Spinner should be taxed too"
+
+
+@pytest.mark.asyncio
+async def test_wheel_commune_skips_players_below_auto_blind_threshold():
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    spinner_id = 4101
+    player_service.get_player.return_value = MagicMock(name="Spinner")
+    player_service.get_balance.return_value = -20
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    donors = [
+        SimpleNamespace(discord_id=4102, name="Eligible", jopacoin_balance=50),
+        SimpleNamespace(discord_id=4103, name="Protected", jopacoin_balance=49),
+    ]
+
+    def leaderboard_side_effect(*args, **kwargs):
+        if kwargs.get("limit") == 3:
+            return []
+        return donors
+
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard_side_effect)
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = spinner_id
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    commune_idx = next(i for i, w in enumerate(BANKRUPT_WHEEL_WEDGES) if w[1] == "COMMUNE")
+
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=commune_idx):
+            with patch("commands.betting.random.random", return_value=1.0):
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    adjust_calls = [call.args[:3] for call in player_service.adjust_balance.call_args_list]
+    assert (4102, 123, -1) in adjust_calls
+    assert (4103, 123, -1) not in adjust_calls
+    assert (spinner_id, 123, 1) in adjust_calls
 
 
 # ============================================================================
@@ -1513,11 +1571,12 @@ def test_bankrupt_wheel_ev_maintained():
         if isinstance(v, int):
             total_value += v
         elif isinstance(v, str):
-            total_value += bankrupt_special_ev(v)
+            total_value += scale_minigame_jc_delta(bankrupt_special_ev(v))
 
     expected_value = total_value / len(BANKRUPT_WHEEL_WEDGES)
-    assert abs(expected_value - WHEEL_BANKRUPT_TARGET_EV) <= 1, (
-        f"Bankrupt wheel EV ~{WHEEL_BANKRUPT_TARGET_EV}, got {expected_value:.2f}"
+    scaled_target_ev = scale_minigame_jc_delta(WHEEL_BANKRUPT_TARGET_EV)
+    assert abs(expected_value - scaled_target_ev) <= 1, (
+        f"Bankrupt wheel EV ~{scaled_target_ev}, got {expected_value:.2f}"
     )
 
 
@@ -1566,11 +1625,11 @@ def test_wheels_in_rainbow_order():
 
 
 def test_bankrupt_wheel_jackpot_is_gold():
-    """Bankrupt wheel's 100-JC jackpot wedges should share the regular wheel's gold (#f1c40f)."""
+    """Bankrupt wheel's scaled jackpot wedges should share the regular wheel's gold (#f1c40f)."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
-    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 100}
-    bankrupt_jackpot_colors = {w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 100}
+    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 80}
+    bankrupt_jackpot_colors = {w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 80}
 
     assert bankrupt_jackpot_colors == regular_jackpot_colors, (
         f"Bankrupt jackpot colors {bankrupt_jackpot_colors} should match regular {regular_jackpot_colors}"
@@ -1606,6 +1665,64 @@ def _make_wheel_player_service(spinner_balance: int = 100):
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.adjust_balance = MagicMock()
     return player_service
+
+
+@pytest.mark.asyncio
+async def test_golden_trickle_down_skips_players_below_auto_blind_threshold():
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7200
+    spinner = SimpleNamespace(name="Spinner", discord_id=spinner_id, jopacoin_balance=500)
+    eligible_big = SimpleNamespace(name="Big", discord_id=7201, jopacoin_balance=1000)
+    eligible_edge = SimpleNamespace(name="Edge", discord_id=7202, jopacoin_balance=50)
+    below_threshold = SimpleNamespace(name="Low", discord_id=7203, jopacoin_balance=49)
+    top_players = [spinner, eligible_big, eligible_edge]
+    all_players = [spinner, eligible_big, below_threshold, eligible_edge]
+
+    player_service = _make_wheel_player_service(spinner_balance=500)
+    player_service.get_total_positive_balance = MagicMock(return_value=1599)
+    player_service.get_leaderboard_bottom = MagicMock(return_value=[])
+
+    def leaderboard_side_effect(*args, **kwargs):
+        limit = kwargs.get("limit")
+        if limit == 3:
+            return top_players
+        if limit == 4:
+            return [*top_players, below_threshold]
+        return all_players
+
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard_side_effect)
+
+    interaction = _make_wheel_interaction(spinner_id)
+    interaction.channel.send = AsyncMock()
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    with patch(
+        "commands.betting.compute_live_golden_wedges",
+        return_value=[("TRICKLE_DOWN", "TRICKLE_DOWN", "#ffd700")],
+    ):
+        with patch("commands.betting.random.randint", return_value=0):
+            with patch("commands.betting.random.uniform", return_value=0.02):
+                with patch("commands.betting.random.random", return_value=1.0):
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                            await cmds.gamba.callback(cmds, interaction)
+
+    calls = [c.args for c in player_service.adjust_balance.call_args_list]
+    victim_debits = [c for c in calls if c[2] < 0]
+    assert victim_debits == [
+        (eligible_big.discord_id, 123, -16),
+        (eligible_edge.discord_id, 123, -1),
+    ]
+    assert not any(c[0] == below_threshold.discord_id for c in calls)
+    assert any(c == (spinner_id, 123, 17) for c in calls)
 
 
 @pytest.mark.asyncio
@@ -1757,7 +1874,7 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
         thief_discord_id=spinner_id,
         victim_discord_id=8003,
         guild_id=123,
-        amount=20,
+        amount=16,
     )
     # steal_atomic handles both sides; adjust_balance must NOT be used here
     player_service.adjust_balance.assert_not_called()
@@ -1807,7 +1924,10 @@ async def test_bomb_omb_burns_three_random_others():
     spinner_id = 7006
     others = [
         MagicMock(name=f"V{i}", discord_id=9000 + i, jopacoin_balance=100)
-        for i in range(5)
+        for i in range(3)
+    ] + [
+        MagicMock(name="Low1", discord_id=9010, jopacoin_balance=49),
+        MagicMock(name="Low2", discord_id=9011, jopacoin_balance=49),
     ]
     player_service = _make_wheel_player_service()
     # Exclude spinner — keeps them out of top-N so the regular wheel fires.
@@ -1835,6 +1955,8 @@ async def test_bomb_omb_burns_three_random_others():
     # All targets are distinct, none is the spinner, all deltas negative
     assert len(set(victim_ids)) == 3, f"Victims must be distinct, got {victim_ids}"
     assert spinner_id not in victim_ids, "BOMB_OMB must NOT debit the spinner"
+    assert 9010 not in victim_ids
+    assert 9011 not in victim_ids
     assert all(d < 0 for d in deltas), f"All BOMB_OMB deltas must be negative, got {deltas}"
 
 
@@ -2129,8 +2251,9 @@ async def test_wheel_negative_balance_uses_bankrupt_wheel():
     interaction.followup.send.assert_awaited()
 
 
-def test_commune_credits_spinner_debits_positive_balance_players(repo_db_path):
-    """COMMUNE: each positive-balance player loses 1 JC; spinner gains total."""
+def test_commune_credits_spinner_debits_threshold_eligible_players(repo_db_path):
+    """COMMUNE: each threshold-eligible player loses 1 JC; spinner gains total."""
+    from config import AUTO_BLIND_THRESHOLD
     from repositories.player_repository import PlayerRepository
 
     player_repo = PlayerRepository(repo_db_path)
@@ -2140,7 +2263,7 @@ def test_commune_credits_spinner_debits_positive_balance_players(repo_db_path):
                     glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
     player_repo.update_balance(8001, 0, -20)
 
-    # Two positive-balance donors
+    # One threshold-eligible donor
     player_repo.add(discord_id=8002, discord_username="Donor1", guild_id=0,
                     glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
     player_repo.update_balance(8002, 0, 50)
@@ -2154,19 +2277,19 @@ def test_commune_credits_spinner_debits_positive_balance_players(repo_db_path):
                     glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
     player_repo.update_balance(8004, 0, 0)  # explicitly set to 0
 
-    # Simulate COMMUNE: debit each positive-balance donor 1 JC, credit spinner
+    # Simulate COMMUNE: debit each threshold-eligible donor 1 JC, credit spinner
     commune_total = 0
     all_players = player_repo.get_leaderboard(0, limit=9999)
     for p in all_players:
-        if p.discord_id != 8001 and p.jopacoin_balance > 0:
+        if p.discord_id != 8001 and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD:
             player_repo.add_balance(p.discord_id, 0, -1)
             commune_total += 1
     player_repo.add_balance(8001, 0, commune_total)
 
-    assert commune_total == 2, f"Expected 2 donors, got {commune_total}"
-    assert player_repo.get_balance(8001, 0) == -20 + 2, "Spinner should have gained commune_total JC"
+    assert commune_total == 1, f"Expected 1 donor, got {commune_total}"
+    assert player_repo.get_balance(8001, 0) == -20 + 1, "Spinner should have gained commune_total JC"
     assert player_repo.get_balance(8002, 0) == 49, "Donor1 should have lost 1 JC"
-    assert player_repo.get_balance(8003, 0) == 9, "Donor2 should have lost 1 JC"
+    assert player_repo.get_balance(8003, 0) == 10, "Donor2 should be protected below threshold"
     assert player_repo.get_balance(8004, 0) == 0, "Zero-balance player should be unchanged"
 
 
