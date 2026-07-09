@@ -29,9 +29,10 @@ from __future__ import annotations
 import json
 import logging
 import random
+import uuid
 from dataclasses import dataclass
 
-from config import AUTO_BLIND_THRESHOLD
+from config import HOSTILE_LOSS_MIN_BALANCE
 from utils.economy_scaling import scale_minigame_jc_delta
 
 logger = logging.getLogger("cama_bot.services.dig_splash")
@@ -58,6 +59,8 @@ class SplashResult:
     victims: list[tuple[int, int]]
     total_burned: int
     mode: str = "burn"
+    absorbed_total: int = 0
+    shielded_count: int = 0
 
 
 def _select_random_active(repos, guild_id: int, digger_id: int, count: int) -> list[int]:
@@ -223,6 +226,8 @@ def resolve_splash(
     victim_count: int,
     penalty_jc: int,
     mode: str = "burn",
+    protection_service=None,
+    event_key_prefix: str | None = None,
 ) -> SplashResult:
     """Select targets and move JC — burn from each (default) or grant to each.
 
@@ -255,6 +260,7 @@ def resolve_splash(
 
     repos = _ReposBundle(player_repo, dig_repo)
     victim_ids = selector(repos, guild_id, digger_id, victim_count)
+    event_key_prefix = event_key_prefix or f"dig-splash:{uuid.uuid4().hex}"
 
     audit_detail = json.dumps({
         "event_name": event_name,
@@ -266,6 +272,8 @@ def resolve_splash(
     })
 
     victims: list[tuple[int, int]] = []
+    absorbed_total = 0
+    shielded_count = 0
     for vid in victim_ids:
         if mode == "grant":
             actual = int(scaled_penalty_jc)
@@ -301,29 +309,63 @@ def resolve_splash(
             except Exception:
                 logger.exception("Splash steal: get_balance failed for victim %s in guild %s", vid, guild_id)
                 continue
-            if current_balance < AUTO_BLIND_THRESHOLD:
+            if current_balance < HOSTILE_LOSS_MIN_BALANCE:
                 continue
-            try:
-                player_repo.steal_atomic(
-                    thief_discord_id=digger_id,
-                    victim_discord_id=vid,
-                    guild_id=guild_id,
-                    amount=actual,
-                    source="dig",
-                    actor_id=digger_id,
-                    related_type="splash_victim",
-                    related_id=event_name,
-                    reason="dig splash steal",
-                    metadata={
-                        "event_name": event_name,
-                        "strategy": strategy,
-                        "mode": mode,
-                    },
-                )
-            except ValueError:
-                logger.exception(
-                    "Splash steal: steal_atomic failed for victim %s in guild %s", vid, guild_id,
-                )
+            if protection_service is not None:
+                try:
+                    settlement = protection_service.apply_hostile_loss(
+                        vid,
+                        guild_id,
+                        actual,
+                        "dig_splash_steal",
+                        actor_id=digger_id,
+                        event_key=f"{event_key_prefix}:{vid}",
+                        destination="player",
+                        recipient_id=digger_id,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        metadata={
+                            "event_name": event_name,
+                            "strategy": strategy,
+                            "mode": mode,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Splash steal settlement failed for victim %s in guild %s",
+                        vid,
+                        guild_id,
+                    )
+                    continue
+                actual = settlement.applied
+                if settlement.absorbed > 0:
+                    absorbed_total += settlement.absorbed
+                    shielded_count += 1
+            else:
+                try:
+                    player_repo.steal_atomic(
+                        thief_discord_id=digger_id,
+                        victim_discord_id=vid,
+                        guild_id=guild_id,
+                        amount=actual,
+                        source="dig",
+                        actor_id=digger_id,
+                        related_type="splash_victim",
+                        related_id=event_name,
+                        reason="dig splash steal",
+                        metadata={
+                            "event_name": event_name,
+                            "strategy": strategy,
+                            "mode": mode,
+                        },
+                    )
+                except ValueError:
+                    logger.exception(
+                        "Splash steal: steal_atomic failed for victim %s in guild %s",
+                        vid,
+                        guild_id,
+                    )
+                    continue
+            if actual <= 0:
                 continue
             dig_repo.log_action(
                 discord_id=vid,
@@ -349,27 +391,59 @@ def resolve_splash(
         except Exception:
             logger.exception("Splash: get_balance failed for victim %s in guild %s", vid, guild_id)
             continue
-        if current_balance < AUTO_BLIND_THRESHOLD:
+        if current_balance < HOSTILE_LOSS_MIN_BALANCE:
             continue
         actual = int(min(scaled_penalty_jc, current_balance))
         if actual <= 0:
             continue
-        player_repo.add_balance(
-            vid,
-            guild_id,
-            -actual,
-            source="dig",
-            actor_id=digger_id,
-            related_type="splash_victim",
-            related_id=event_name,
-            reason="dig splash victim penalty",
-            metadata={
-                "event_name": event_name,
-                "strategy": strategy,
-                "mode": mode,
-                "digger_id": digger_id,
-            },
-        )
+        if protection_service is not None:
+            try:
+                settlement = protection_service.apply_hostile_loss(
+                    vid,
+                    guild_id,
+                    actual,
+                    "dig_splash_burn",
+                    actor_id=digger_id,
+                    event_key=f"{event_key_prefix}:{vid}",
+                    destination="burn",
+                    clamp_to_balance=True,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                    metadata={
+                        "event_name": event_name,
+                        "strategy": strategy,
+                        "mode": mode,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Splash burn settlement failed for victim %s in guild %s",
+                    vid,
+                    guild_id,
+                )
+                continue
+            actual = settlement.applied
+            if settlement.absorbed > 0:
+                absorbed_total += settlement.absorbed
+                shielded_count += 1
+        else:
+            player_repo.add_balance(
+                vid,
+                guild_id,
+                -actual,
+                source="dig",
+                actor_id=digger_id,
+                related_type="splash_victim",
+                related_id=event_name,
+                reason="dig splash victim penalty",
+                metadata={
+                    "event_name": event_name,
+                    "strategy": strategy,
+                    "mode": mode,
+                    "digger_id": digger_id,
+                },
+            )
+        if actual <= 0:
+            continue
         dig_repo.log_action(
             discord_id=vid,
             guild_id=guild_id,
@@ -383,4 +457,5 @@ def resolve_splash(
     return SplashResult(
         strategy=strategy, event_name=event_name, victims=victims,
         total_burned=total, mode=mode,
+        absorbed_total=absorbed_total, shielded_count=shielded_count,
     )

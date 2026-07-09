@@ -128,6 +128,7 @@ class ServiceContainer:
         from repositories.pairings_repository import PairingsRepository
         from repositories.player_repository import PlayerRepository
         from repositories.prediction_repository import PredictionRepository
+        from repositories.protection_repository import ProtectionRepository
         from repositories.rebellion_repository import RebellionRepository
         from repositories.recalibration_repository import RecalibrationRepository
         from repositories.slow_drip_repository import SlowDripRepository
@@ -145,6 +146,7 @@ class ServiceContainer:
             "pairings_repo": PairingsRepository(p),
             "guild_config_repo": GuildConfigRepository(p),
             "prediction_repo": PredictionRepository(p),
+            "protection_repo": ProtectionRepository(p),
             "disburse_repo": DisburseRepository(p),
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
@@ -379,22 +381,29 @@ class ServiceContainer:
         from services.buff_service import BuffService
         from services.mana_effects_service import ManaEffectsService
         from services.mana_service import ManaService
+        from services.protection_service import ProtectionService
 
         c = self._components
+        c["protection_service"] = ProtectionService(c["protection_repo"])
         c["mana_service"] = ManaService(
             mana_repo=c["mana_repo"],
             player_repo=c["player_repo"],
             gambling_stats_service=c["gambling_stats_service"],
             bankruptcy_service=c["bankruptcy_service"],
             tip_repo=c["tip_repo"],
+            protection_service=c["protection_service"],
         )
         c["mana_effects_service"] = ManaEffectsService(
             mana_service=c["mana_service"],
             player_repo=c["player_repo"],
             mana_repo=c["mana_repo"],
             loan_service=c["loan_service"],
+            protection_service=c["protection_service"],
         )
-        c["buff_service"] = BuffService(buff_repo=c["buff_repo"])
+        c["buff_service"] = BuffService(
+            buff_repo=c["buff_repo"],
+            protection_service=c["protection_service"],
+        )
         # Late-attach so the betting service can read manashop buffs at award
         # time. BettingService is constructed in _init_economy_services (which
         # runs before _init_mana_service) so we set the dependency back here.
@@ -442,6 +451,8 @@ class ServiceContainer:
             quest_service=c["dig_quest_service"],
             prediction_repo=c.get("prediction_repo"),
         )
+        # Hostile dig splashes and sabotage are wired after both services exist.
+        c["dig_service"].protection_service = c["protection_service"]
 
         # Cross-wire: quest finale JC needs the same Plains-tithe/Blue-tax
         # treatment as normal dig JC. The tax function lives on DigService
@@ -558,6 +569,7 @@ class ServiceContainer:
         bot.package_deal_repo = c["package_deal_repo"]
         bot.tip_repository = c["tip_repo"]
         bot.economy_ledger_repo = c["economy_ledger_repo"]
+        bot.protection_repo = c["protection_repo"]
         bot.tax_repo = c["tax_repo"]
 
         # Services
@@ -590,6 +602,7 @@ class ServiceContainer:
         bot.mana_service = c["mana_service"]
         bot.mana_repo = c["mana_repo"]
         bot.mana_effects_service = c["mana_effects_service"]
+        bot.protection_service = c["protection_service"]
         bot.buff_service = c["buff_service"]
         bot.buff_repo = c["buff_repo"]
         bot.slow_drip_repo = c["slow_drip_repo"]

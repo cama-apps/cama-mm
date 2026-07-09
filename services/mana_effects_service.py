@@ -7,10 +7,13 @@ Mana changes daily at 4 AM PST, and effects change with it.
 
 import logging
 import random
+import uuid
 from typing import TYPE_CHECKING
 
+from config import HOSTILE_LOSS_MIN_BALANCE
 from domain.models.mana_effects import ManaEffects
 from services.mana_service import get_today_pst
+from utils.economy_scaling import scale_minigame_jc_delta
 
 logger = logging.getLogger("cama_bot.services.mana_effects")
 
@@ -30,11 +33,13 @@ class ManaEffectsService:
         player_repo: "PlayerRepository",
         mana_repo: "ManaRepository",
         loan_service: "LoanService",
+        protection_service=None,
     ):
         self.mana_service = mana_service
         self.player_repo = player_repo
         self.mana_repo = mana_repo
         self.loan_service = loan_service
+        self.protection_service = protection_service
 
     def get_effects(self, discord_id: int, guild_id: int | None) -> ManaEffects:
         """Get active mana effects for a player.
@@ -133,33 +138,81 @@ class ManaEffectsService:
         return amount
 
     def execute_siphon(self, discord_id: int, guild_id: int | None) -> dict | None:
-        """Execute Swamp's parasitic siphon: steal 1-3 JC from a random player.
+        """Execute Swamp's parasitic siphon against a random eligible player.
 
         Returns dict with siphon details or None if no valid target.
         {
             "victim_id": int,
-            "amount": int,
+            "amount": int,  # amount that landed after protection
+            "attempted_amount": int,
+            "absorbed_amount": int,
             "anonymous": bool,  # True ~60% of time (dark message), False ~40% (mana hint)
         }
         """
-        # Pick a random victim with positive balance (SQL-level, no full table scan)
-        victim = self.player_repo.get_random_eligible_target(guild_id, exclude_id=discord_id)
+        # Pick an eligible victim in SQL (no full table scan). Hostile systems
+        # share one minimum-balance policy so a low-balance player is not safe
+        # from one attack but unexpectedly exposed to another.
+        victim = self.player_repo.get_random_eligible_target(
+            guild_id,
+            exclude_id=discord_id,
+            min_balance=HOSTILE_LOSS_MIN_BALANCE,
+        )
         if not victim:
             return None
-        amount = random.randint(1, 3)
+        amount = scale_minigame_jc_delta(random.randint(1, 3))
         # Don't steal more than they have
         amount = min(amount, victim.jopacoin_balance)
         if amount <= 0:
             return None
 
-        # Atomic steal
+        event_key = f"swamp_siphon:{uuid.uuid4().hex}:{victim.discord_id}"
+
+        # Atomic protected steal. The destination is the siphoner, so the
+        # gateway keeps victim debit, shield consumption, and thief credit in
+        # one transaction.
         try:
-            self.player_repo.steal_atomic(
-                thief_discord_id=discord_id,
-                victim_discord_id=victim.discord_id,
-                guild_id=guild_id,
-                amount=amount,
-            )
+            if self.protection_service is not None:
+                outcome = self.protection_service.apply_hostile_loss(
+                    victim.discord_id,
+                    guild_id,
+                    amount,
+                    kind="swamp_siphon",
+                    actor_id=discord_id,
+                    event_key=event_key,
+                    destination="player",
+                    recipient_id=discord_id,
+                    clamp_to_balance=True,
+                )
+                if isinstance(outcome, dict):
+                    applied = int(outcome.get("applied_loss", outcome.get("applied", amount)))
+                    absorbed = int(outcome.get("absorbed_amount", outcome.get("absorbed", 0)))
+                else:
+                    applied = int(
+                        getattr(outcome, "applied_loss", getattr(outcome, "applied", amount))
+                    )
+                    absorbed = int(
+                        getattr(outcome, "absorbed_amount", getattr(outcome, "absorbed", 0))
+                    )
+            else:
+                self.player_repo.steal_atomic(
+                    thief_discord_id=discord_id,
+                    victim_discord_id=victim.discord_id,
+                    guild_id=guild_id,
+                    amount=amount,
+                    source="mana",
+                    actor_id=discord_id,
+                    related_type="hostile_loss",
+                    related_id=event_key,
+                    reason="swamp siphon",
+                    metadata={
+                        "kind": "swamp_siphon",
+                        "attempted_loss": amount,
+                        "destination": "player",
+                        "recipient_id": discord_id,
+                    },
+                )
+                applied = amount
+                absorbed = 0
         except Exception as e:
             logger.warning("Siphon failed for %s: %s", discord_id, e)
             return None
@@ -169,7 +222,9 @@ class ManaEffectsService:
 
         return {
             "victim_id": victim.discord_id,
-            "amount": amount,
+            "amount": applied,
+            "attempted_amount": amount,
+            "absorbed_amount": absorbed,
             "anonymous": anonymous,
         }
 

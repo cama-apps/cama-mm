@@ -151,6 +151,12 @@ BET_UNDERDOG_PING_RATIO = _parse_float("BET_UNDERDOG_PING_RATIO", 4.0)
 HOUSE_PAYOUT_MULTIPLIER = _parse_float("HOUSE_PAYOUT_MULTIPLIER", 1.0)
 DOTA_BET_SEED_AMOUNT = _parse_int("DOTA_BET_SEED_AMOUNT", 50)
 
+# Shared minigame/PvP economy policy. Keep the hostile-loss eligibility floor
+# independent from auto-liquidity so tuning betting does not silently retune
+# who can be targeted by hostile effects.
+MINIGAME_JC_DELTA_SCALE = _parse_float("MINIGAME_JC_DELTA_SCALE", 0.8)
+HOSTILE_LOSS_MIN_BALANCE = _parse_int("HOSTILE_LOSS_MIN_BALANCE", 50)
+
 # Auto-liquidity (blind bets) configuration
 AUTO_BLIND_ENABLED = _parse_bool("AUTO_BLIND_ENABLED", True)  # Enable auto-blind bets in pool mode
 AUTO_BLIND_THRESHOLD = _parse_int("AUTO_BLIND_THRESHOLD", 50)  # Min balance to trigger blind (inclusive)

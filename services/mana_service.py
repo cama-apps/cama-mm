@@ -60,6 +60,18 @@ def get_today_pst() -> str:
     return effective.strftime("%Y-%m-%d")
 
 
+def get_mana_day_start_timestamp(now: datetime | None = None) -> int:
+    """Return the current mana day's 4 AM Los Angeles boundary as Unix time."""
+    from zoneinfo import ZoneInfo
+
+    la_tz = ZoneInfo(RESET_TZ)
+    now_la = now.astimezone(la_tz) if now is not None else datetime.now(la_tz)
+    boundary = now_la.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0)
+    if now_la < boundary:
+        boundary -= timedelta(days=1)
+    return int(boundary.timestamp())
+
+
 class ManaService:
     """Handles daily mana assignment and weight calculation."""
 
@@ -70,12 +82,16 @@ class ManaService:
         gambling_stats_service: "GamblingStatsService",
         bankruptcy_service: "BankruptcyService",
         tip_repo: "TipRepository",
+        protection_service=None,
     ):
         self.mana_repo = mana_repo
         self.player_repo = player_repo
         self.gambling_stats_service = gambling_stats_service
         self.bankruptcy_service = bankruptcy_service
         self.tip_repo = tip_repo
+        # ProtectionService is built later in the production container and is
+        # back-filled there. Keeping this optional preserves lightweight tests.
+        self.protection_service = protection_service
 
     # ------------------------------------------------------------------
     # Public API
@@ -104,6 +120,12 @@ class ManaService:
             "color": LAND_COLORS.get(land, "Unknown"),
             "emoji": LAND_EMOJIS.get(land, "❓"),
             "assigned_date": row["assigned_date"],
+            "guardian_remaining": (
+                int(row.get("white_shield_remaining", 0) or 0)
+                if land == "Plains"
+                else 0
+            ),
+            "consumed": bool(row.get("consumed_today", 0)),
         }
 
     def is_mana_consumed(self, discord_id: int, guild_id: int | None) -> bool:
@@ -160,10 +182,36 @@ class ManaService:
         if not claimed:
             raise ValueError("Already assigned today")
 
+        retro_refund = 0
+        if land == "Plains" and self.protection_service is not None:
+            try:
+                retro_refund = self.protection_service.reconcile_guardian(
+                    discord_id,
+                    guild_id,
+                    get_mana_day_start_timestamp(),
+                )
+            except Exception:
+                # A reconciliation failure must not invalidate an otherwise
+                # successful, atomically claimed daily land.
+                logger.exception(
+                    "Failed to reconcile White Guardian losses for player %s in guild %s",
+                    discord_id,
+                    guild_id,
+                )
+
+        guardian_remaining = (
+            self.mana_repo.get_white_shield_remaining(discord_id, guild_id)
+            if land == "Plains"
+            else 0
+        )
         return {
             "land": land,
             "color": LAND_COLORS[land],
             "emoji": LAND_EMOJIS[land],
+            "assigned_date": today,
+            "retro_refund": retro_refund,
+            "guardian_remaining": guardian_remaining,
+            "consumed": False,
         }
 
     # ------------------------------------------------------------------

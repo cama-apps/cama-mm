@@ -9,7 +9,10 @@ buffs (e.g. Aegis absorbing one PvP attack).
 
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING
+
+from utils.economy_scaling import scale_minigame_jc_delta
 
 logger = logging.getLogger("cama_bot.services.buff")
 
@@ -19,6 +22,7 @@ if TYPE_CHECKING:
 
 # Buff type keys
 BUFF_COUNTERSPELL = "counterspell"
+BUFF_REPRIEVE = "reprieve"
 BUFF_AEGIS = "aegis"
 BUFF_OVERGROWTH = "overgrowth"
 BUFF_SANCTUARY = "sanctuary"
@@ -28,7 +32,12 @@ BUFF_FIRST_AEGIS_TODAY = "first_aegis_today"  # Auto-granted by White mana
 BUFF_COMMUNION_BLESSING = "communion_blessing"  # Single-charge +10% next match win
 
 # All PvP-defending buff types (any of these blocks Pyroclasm/Soul-Harvest/Sabotage/etc.)
-PVP_DEFENSE_BUFFS = (BUFF_COUNTERSPELL, BUFF_AEGIS, BUFF_SANCTUARY, BUFF_FIRST_AEGIS_TODAY)
+PVP_DEFENSE_BUFFS = (
+    BUFF_COUNTERSPELL,
+    BUFF_AEGIS,
+    BUFF_SANCTUARY,
+    BUFF_FIRST_AEGIS_TODAY,
+)
 
 # Hours
 HOURS = 3600
@@ -37,8 +46,12 @@ HOURS = 3600
 class BuffService:
     """Manages 24h manashop buffs via BuffRepository."""
 
-    def __init__(self, buff_repo: "BuffRepository"):
+    def __init__(self, buff_repo: "BuffRepository", protection_service=None):
         self.buff_repo = buff_repo
+        # Back-filled by the service container because ProtectionService itself
+        # depends on the buff repository.  Keeping the dependency optional also
+        # preserves the lightweight service construction used by tests.
+        self.protection_service = protection_service
 
     # ------------------------------------------------------------------
     # Grant helpers
@@ -53,10 +66,52 @@ class BuffService:
             discord_id, guild_id, BUFF_COUNTERSPELL, self._expires(24)
         )
 
-    def grant_aegis(self, discord_id: int, guild_id: int | None) -> int:
-        """Single-charge: absorbs the next PvP attack. Expires after 24h."""
+    @staticmethod
+    def _protection_pool_data(
+        capacity: int,
+        rate: float,
+        *,
+        shared: bool = False,
+        rolling_retroactive: bool = False,
+        **extra,
+    ) -> dict:
+        """Return the stable payload consumed by ``ProtectionService``."""
+        return {
+            "capacity": capacity,
+            "capacity_remaining": capacity,
+            "rate": rate,
+            "shared": shared,
+            "rolling_retroactive": rolling_retroactive,
+            **extra,
+        }
+
+    def grant_reprieve(self, discord_id: int, guild_id: int | None) -> int:
+        """24h personal pool: absorb 50% of hostile losses, up to 25 JC.
+
+        Reprieve is the retroactive tier.  The command reconciles eligible
+        losses from the preceding rolling 24-hour window immediately after the
+        row is granted, then the remaining capacity protects future losses.
+        """
         return self.buff_repo.grant(
-            discord_id, guild_id, BUFF_AEGIS, self._expires(24)
+            discord_id,
+            guild_id,
+            BUFF_REPRIEVE,
+            self._expires(24),
+            data=self._protection_pool_data(
+                25,
+                0.50,
+                rolling_retroactive=True,
+            ),
+        )
+
+    def grant_aegis(self, discord_id: int, guild_id: int | None) -> int:
+        """24h personal pool: fully absorb up to 75 JC of hostile losses."""
+        return self.buff_repo.grant(
+            discord_id,
+            guild_id,
+            BUFF_AEGIS,
+            self._expires(24),
+            data=self._protection_pool_data(75, 1.0),
         )
 
     def grant_overgrowth(self, discord_id: int, guild_id: int | None) -> int:
@@ -77,13 +132,21 @@ class BuffService:
     def grant_sanctuary(
         self, caster_id: int, guild_id: int | None, ally_id: int
     ) -> int:
-        """24h: caster + ally both gain PvP immunity and +15% match-win bonus."""
+        """24h shared pool for caster + ally: fully absorb up to 150 JC."""
         return self.buff_repo.grant(
             caster_id,
             guild_id,
             BUFF_SANCTUARY,
             self._expires(24),
             target_id=ally_id,
+            data=self._protection_pool_data(
+                150,
+                1.0,
+                shared=True,
+                caster_id=caster_id,
+                ally_id=ally_id,
+                protected_user_ids=[caster_id, ally_id],
+            ),
         )
 
     def grant_blood_pact(
@@ -154,17 +217,26 @@ class BuffService:
     # ------------------------------------------------------------------
 
     def has_pvp_immunity(self, discord_id: int, guild_id: int | None) -> bool:
-        """Counterspell or Sanctuary covers ALL PvP attacks for 24h."""
+        """Counterspell or Sanctuary covers non-JC PvP attacks for 24h."""
         if self.buff_repo.has_active(discord_id, guild_id, BUFF_COUNTERSPELL):
             return True
-        # Sanctuary protects both caster and ally
+        # Sanctuary protects both caster and ally. Its JC capacity is consumed
+        # by ProtectionService; non-JC sabotage remains part of its immunity.
         if self.buff_repo.has_active(discord_id, guild_id, BUFF_SANCTUARY):
             return True
-        return bool(self.buff_repo.active_targeted_at(discord_id, guild_id, BUFF_SANCTUARY))
+        return bool(
+            self.buff_repo.active_targeted_at(
+                discord_id, guild_id, BUFF_SANCTUARY
+            )
+        )
 
     def consume_aegis_charge(self, discord_id: int, guild_id: int | None) -> bool:
-        """If the player has any Aegis charge (manual or first-sabotage-today),
-        consume the most recent one and return True."""
+        """Consume Aegis to absorb one non-JC attack such as sabotage.
+
+        A capacity-backed Aegis may protect multiple JC losses, or it may be
+        spent wholesale to stop one non-JC attack. The latter intentionally
+        marks the complete buff row triggered.
+        """
         for buff_type in (BUFF_AEGIS, BUFF_FIRST_AEGIS_TODAY):
             buffs = self.buff_repo.active_for(discord_id, guild_id, buff_type)
             if not buffs:
@@ -186,10 +258,9 @@ class BuffService:
     def has_sanctuary_match_bonus(
         self, discord_id: int, guild_id: int | None
     ) -> bool:
-        """True if either caster or ally has an active Sanctuary."""
-        if self.buff_repo.has_active(discord_id, guild_id, BUFF_SANCTUARY):
-            return True
-        return bool(self.buff_repo.active_targeted_at(discord_id, guild_id, BUFF_SANCTUARY))
+        """Sanctuary no longer copies a match-win bonus."""
+        _ = (discord_id, guild_id)
+        return False
 
     def get_blood_pact_skimmer(
         self, target_id: int, guild_id: int | None
@@ -243,20 +314,58 @@ class BuffService:
             return 0
         if not skim:
             return 0
-        amount = int(skim["amount"])
+        reserved_amount = int(skim["amount"])
+        amount = scale_minigame_jc_delta(reserved_amount)
         skimmer_id = int(skim["skimmer_id"])
         buff_id = int(skim["buff_id"])
         try:
+            if self.protection_service is not None:
+                settlement = self.protection_service.apply_hostile_loss(
+                    target_id,
+                    guild_id,
+                    amount,
+                    "blood_pact",
+                    actor_id=skimmer_id,
+                    event_key=f"blood-pact:{buff_id}:{uuid.uuid4().hex}",
+                    destination="player",
+                    recipient_id=skimmer_id,
+                    clamp_to_balance=False,
+                    metadata={"buff_id": buff_id, "earning": earning},
+                )
+                applied = int(settlement.applied)
+                if applied < reserved_amount:
+                    # Capacity is based on what the pact actually collected,
+                    # not the portion White mana prevented.
+                    try:
+                        self.buff_repo.revert_blood_pact_skim(
+                            buff_id, reserved_amount - applied
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to release shielded Blood Pact capacity for buff %d",
+                            buff_id,
+                        )
+                return applied
             player_repo.add_balance_many(
                 {target_id: -amount, skimmer_id: amount},
                 guild_id,
             )
+            if amount < reserved_amount:
+                try:
+                    self.buff_repo.revert_blood_pact_skim(
+                        buff_id, reserved_amount - amount
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to release scaled Blood Pact capacity for buff %d",
+                        buff_id,
+                    )
         except Exception:
             logger.exception(
                 "Failed to transfer Blood Pact skim for player %d", target_id
             )
             try:
-                self.buff_repo.revert_blood_pact_skim(buff_id, amount)
+                self.buff_repo.revert_blood_pact_skim(buff_id, reserved_amount)
             except Exception:
                 logger.exception(
                     "Failed to revert Blood Pact skim for buff %d", buff_id

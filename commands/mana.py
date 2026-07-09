@@ -247,6 +247,22 @@ def _build_single_embed(
     )
     embed.add_field(name="Land", value=f"{emoji} **{land}** · {color_name} Mana", inline=False)
     embed.add_field(name="Assigned", value=date_label, inline=True)
+    if land == "Plains" and not mana.get("consumed", False):
+        remaining = int(mana.get("guardian_remaining", 0) or 0)
+        retro_refund = int(mana.get("retro_refund", 0) or 0)
+        retro_line = (
+            f" Recovered **{retro_refund} JC** from earlier hostile losses."
+            if retro_refund > 0
+            else ""
+        )
+        embed.add_field(
+            name="🌾 Guardian Aura",
+            value=(
+                "Absorbs 50% of hostile JC losses until the 4 AM reset "
+                f"(**{remaining}/25 JC** capacity remaining).{retro_line}"
+            ),
+            inline=False,
+        )
     if stipend_paid > 0:
         embed.add_field(
             name="Stipend",

@@ -545,7 +545,7 @@ _BASE_GOLDEN_WHEEL_WEDGES = [
     ("DIVIDEND", "DIVIDEND", "#4a7000"),
     ("TRICKLE", "TRICKLE_DOWN", "#5c7a00"),
     ("TAKEOVER", "HOSTILE_TAKEOVER", "#6a2a80"),
-    ("+100", "COMPOUND_INTEREST", "#6b8c00"),
+    ("COMPOUND", "COMPOUND_INTEREST", "#6b8c00"),
     ("HEIST", "HEIST", "#7a5c00"),
     ("HEIST", "HEIST", "#7a5c00"),
     ("CRASH", "MARKET_CRASH", "#8a4000"),
@@ -797,7 +797,7 @@ def apply_war_effects(
       - BANKRUPT value is reduced by REBELLION_BANKRUPT_WEAKEN_RATE
 
     For 'defenders_win' wars:
-      - A "WAR TROPHY 🏆" wedge (+80 JC) is injected
+      - A "WAR TROPHY 🏆" wedge with a scaled configured reward is injected
       - A "RETRIBUTION ⚔️" wedge (special string) is injected
       - BANKRUPT value is increased by REBELLION_BANKRUPT_STRENGTHEN_RATE
 
@@ -839,7 +839,8 @@ def apply_war_effects(
             else:
                 modified.append((label, value, color))
         # Inject WAR TROPHY and RETRIBUTION wedges
-        modified.append(("WAR TROPHY 🏆", REBELLION_WAR_TROPHY_VALUE, "#ffd700"))
+        trophy_value = scale_minigame_jc_delta(REBELLION_WAR_TROPHY_VALUE)
+        modified.append(("WAR TROPHY 🏆", trophy_value, "#ffd700"))
         modified.append(("RETRIBUTION ⚔️", "RETRIBUTION", "#8b0000"))
         return modified
 

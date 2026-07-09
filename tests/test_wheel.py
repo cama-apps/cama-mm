@@ -15,6 +15,11 @@ from config import (
     WHEEL_RED_SHELL_EST_EV,
     WHEEL_TARGET_EV,
 )
+from domain.models.hostile_loss import (
+    HostileLossDestination,
+    HostileLossKind,
+    HostileLossResult,
+)
 from domain.models.mana_effects import ManaEffects
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
@@ -1667,6 +1672,332 @@ def _make_wheel_player_service(spinner_balance: int = 100):
     return player_service
 
 
+def _make_wheel_protection_service():
+    from services.protection_service import ProtectionService
+
+    return MagicMock(spec=ProtectionService)
+
+
+def _attach_wheel_protection(bot, protection_service) -> None:
+    """Attach a real-spec protection mock and disable unrelated bot hooks."""
+    bot.protection_service = protection_service
+    bot.bankruptcy_service = None
+    bot.buff_service = None
+    bot.garnishment_service = None
+    bot.mana_effects_service = None
+    bot.curse_service = None
+    bot.gambling_stats_service = None
+    bot.player_repo = None
+    bot.rebellion_service = None
+    bot.reminder_service = None
+
+
+def _hostile_loss_result(
+    victim_id: int,
+    guild_id: int,
+    amount: int,
+    kind: str,
+    *,
+    actor_id: int,
+    event_key: str,
+    destination: str = "burn",
+    recipient_id: int | None = None,
+    absorbed: int = 0,
+    victim_balance_before: int = 100,
+    destination_balance_after: int | None = None,
+    **_kwargs,
+) -> HostileLossResult:
+    """Build the backend result returned by a ProtectionService test double."""
+    applied = amount - absorbed
+    return HostileLossResult(
+        event_id=victim_id,
+        event_key=event_key,
+        kind=HostileLossKind(kind),
+        destination=HostileLossDestination(destination),
+        victim_id=victim_id,
+        guild_id=guild_id,
+        actor_id=actor_id,
+        recipient_id=recipient_id,
+        requested=amount,
+        attempted=amount,
+        absorbed=absorbed,
+        applied=applied,
+        victim_balance_before=victim_balance_before,
+        victim_balance_after=victim_balance_before - applied,
+        destination_balance_before=None,
+        destination_balance_after=destination_balance_after,
+        shieldable=actor_id != victim_id,
+        duplicate=False,
+    )
+
+
+def _edited_wheel_embed(interaction):
+    message = interaction.followup.send.return_value
+    message.edit.assert_awaited_once()
+    return message.edit.call_args.kwargs["embed"]
+
+
+async def _inline_to_thread(function, /, *args, **kwargs):
+    """Run command collaborators inline so mock side effects fail synchronously."""
+    return function(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_red_shell_partial_absorption_routes_only_applied_transfer():
+    bot = MagicMock()
+    protection_service = _make_wheel_protection_service()
+    _attach_wheel_protection(bot, protection_service)
+    betting_service = MagicMock()
+    match_service = MagicMock()
+
+    spinner_id = 7300
+    victim = SimpleNamespace(name="Richer", discord_id=7301, jopacoin_balance=100)
+    player_service = _make_wheel_player_service(spinner_balance=50)
+    player_service.get_leaderboard = MagicMock(return_value=[])
+    player_service.get_player_above = MagicMock(return_value=victim)
+    player_service.steal_atomic = MagicMock()
+
+    def settle(*args, **kwargs):
+        return _hostile_loss_result(
+            *args,
+            **kwargs,
+            absorbed=1,
+            victim_balance_before=100,
+            destination_balance_after=51,
+        )
+
+    protection_service.apply_hostile_loss.side_effect = settle
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(bot, betting_service, match_service, player_service)
+    red_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == "RED_SHELL")
+
+    with patch("commands.betting.random.randint", side_effect=[red_idx, 2]):
+        with patch("commands.betting.random.uniform", return_value=0.03):
+            with patch("commands.betting.random.random", return_value=1.0):
+                with patch(
+                    "commands.betting.asyncio.to_thread",
+                    new=_inline_to_thread,
+                ):
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                            await cmds.gamba.callback(cmds, interaction)
+
+    protection_service.apply_hostile_loss.assert_called_once()
+    call = protection_service.apply_hostile_loss.call_args
+    assert call.args[:4] == (victim.discord_id, 123, 2, "red_shell")
+    assert call.kwargs["actor_id"] == spinner_id
+    assert call.kwargs["destination"] == "player"
+    assert call.kwargs["recipient_id"] == spinner_id
+    assert call.kwargs["event_key"].endswith(f":red_shell:{victim.discord_id}")
+    player_service.steal_atomic.assert_not_called()
+    player_service.adjust_balance.assert_not_called()
+
+    embed = _edited_wheel_embed(interaction)
+    assert "stole **1**" in embed.description.lower()
+    shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
+    assert "**1**" in shield_field.value
+
+
+@pytest.mark.asyncio
+async def test_lightning_mixed_absorption_uses_actual_reserve_total_without_double_credit():
+    bot = MagicMock()
+    protection_service = _make_wheel_protection_service()
+    _attach_wheel_protection(bot, protection_service)
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 7400
+    players = [
+        SimpleNamespace(name="Spinner", discord_id=spinner_id, jopacoin_balance=1000),
+        SimpleNamespace(name="Full", discord_id=7401, jopacoin_balance=500),
+        SimpleNamespace(name="Partial", discord_id=7402, jopacoin_balance=100),
+    ]
+    player_service = _make_wheel_player_service(spinner_balance=1000)
+
+    def leaderboard(*_args, **kwargs):
+        return [] if kwargs.get("limit") == 3 else players
+
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard)
+    absorbed_by_victim = {spinner_id: 0, 7401: 8, 7402: 1}
+
+    def settle(*args, **kwargs):
+        victim_id = args[0]
+        return _hostile_loss_result(
+            *args,
+            **kwargs,
+            absorbed=absorbed_by_victim[victim_id],
+            victim_balance_before=next(
+                player.jopacoin_balance for player in players if player.discord_id == victim_id
+            ),
+            destination_balance_after=1000,
+        )
+
+    protection_service.apply_hostile_loss.side_effect = settle
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(
+        bot,
+        betting_service,
+        match_service,
+        player_service,
+        loan_service=loan_service,
+    )
+    bolt_idx = next(
+        i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == "LIGHTNING_BOLT"
+    )
+
+    with patch("commands.betting.random.randint", return_value=bolt_idx):
+        with patch("commands.betting.random.uniform", return_value=0.02):
+            with patch("commands.betting.random.random", return_value=1.0):
+                with patch("commands.betting.asyncio.to_thread", new=_inline_to_thread):
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                            await cmds.gamba.callback(cmds, interaction)
+
+    calls = protection_service.apply_hostile_loss.call_args_list
+    assert len(calls) == 3
+    assert all(call.kwargs["destination"] == "reserve" for call in calls)
+    event_keys = [call.kwargs["event_key"] for call in calls]
+    assert len({key.rsplit(":", 1)[0] for key in event_keys}) == 1
+    assert {key.rsplit(":", 1)[1] for key in event_keys} == {
+        str(spinner_id),
+        "7401",
+        "7402",
+    }
+    player_service.adjust_balance.assert_not_called()
+    loan_service.add_to_nonprofit_fund.assert_not_called()
+
+    embed = _edited_wheel_embed(interaction)
+    assert "total of **17**" in embed.description
+    assert "**2** players hit" in embed.description
+    shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
+    assert "2 shield activation(s)" in shield_field.value
+    assert "**9**" in shield_field.value
+
+
+@pytest.mark.asyncio
+async def test_trickle_down_mixed_absorption_does_not_double_credit_spinner():
+    bot = MagicMock()
+    protection_service = _make_wheel_protection_service()
+    _attach_wheel_protection(bot, protection_service)
+    betting_service = MagicMock()
+    match_service = MagicMock()
+
+    spinner_id = 7500
+    spinner = SimpleNamespace(name="Spinner", discord_id=spinner_id, jopacoin_balance=500)
+    full = SimpleNamespace(name="Full", discord_id=7501, jopacoin_balance=1000)
+    partial = SimpleNamespace(name="Partial", discord_id=7502, jopacoin_balance=100)
+    top_players = [spinner, full, partial]
+    player_service = _make_wheel_player_service(spinner_balance=500)
+    player_service.get_total_positive_balance = MagicMock(return_value=1600)
+    player_service.get_leaderboard_bottom = MagicMock(return_value=[])
+
+    def leaderboard(*_args, **kwargs):
+        if kwargs.get("limit") == 4:
+            return top_players
+        return top_players
+
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard)
+    absorbed_by_victim = {full.discord_id: 16, partial.discord_id: 1}
+
+    def settle(*args, **kwargs):
+        victim_id = args[0]
+        return _hostile_loss_result(
+            *args,
+            **kwargs,
+            absorbed=absorbed_by_victim[victim_id],
+            victim_balance_before=(1000 if victim_id == full.discord_id else 100),
+            destination_balance_after=501,
+        )
+
+    protection_service.apply_hostile_loss.side_effect = settle
+    interaction = _make_wheel_interaction(spinner_id)
+    interaction.channel.send = AsyncMock()
+    cmds = BettingCommands(bot, betting_service, match_service, player_service)
+
+    with patch(
+        "commands.betting.compute_live_golden_wedges",
+        return_value=[("TRICKLE_DOWN", "TRICKLE_DOWN", "#ffd700")],
+    ):
+        with patch("commands.betting.random.randint", return_value=0):
+            with patch("commands.betting.random.uniform", return_value=0.02):
+                with patch("commands.betting.random.random", return_value=1.0):
+                    with patch("commands.betting.asyncio.to_thread", new=_inline_to_thread):
+                        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                            with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                                await cmds.gamba.callback(cmds, interaction)
+
+    calls = protection_service.apply_hostile_loss.call_args_list
+    assert len(calls) == 2
+    assert all(call.kwargs["destination"] == "player" for call in calls)
+    assert all(call.kwargs["recipient_id"] == spinner_id for call in calls)
+    player_service.steal_atomic.assert_not_called()
+    player_service.adjust_balance.assert_not_called()
+
+    embed = _edited_wheel_embed(interaction)
+    assert "Total received: **1**" in embed.description
+    assert "taxed **1** players" in embed.description
+    shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
+    assert "**17**" in shield_field.value
+
+
+@pytest.mark.asyncio
+async def test_bomb_omb_mixed_absorption_burns_only_applied_amounts():
+    bot = MagicMock()
+    protection_service = _make_wheel_protection_service()
+    _attach_wheel_protection(bot, protection_service)
+    betting_service = MagicMock()
+    match_service = MagicMock()
+
+    spinner_id = 7600
+    victims = [
+        SimpleNamespace(name="Full", discord_id=7601, jopacoin_balance=100),
+        SimpleNamespace(name="Partial", discord_id=7602, jopacoin_balance=100),
+        SimpleNamespace(name="Open", discord_id=7603, jopacoin_balance=100),
+    ]
+    player_service = _make_wheel_player_service()
+    player_service.get_leaderboard = MagicMock(return_value=victims)
+    absorbed_by_victim = {7601: 12, 7602: 5, 7603: 0}
+
+    def settle(*args, **kwargs):
+        victim_id = args[0]
+        return _hostile_loss_result(
+            *args,
+            **kwargs,
+            absorbed=absorbed_by_victim[victim_id],
+            victim_balance_before=100,
+        )
+
+    protection_service.apply_hostile_loss.side_effect = settle
+    interaction = _make_wheel_interaction(spinner_id)
+    cmds = BettingCommands(bot, betting_service, match_service, player_service)
+    bomb_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == "BOMB_OMB")
+
+    with patch("commands.betting.random.randint", side_effect=[bomb_idx, 15, 15, 15]):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.to_thread", new=_inline_to_thread):
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                        await cmds.gamba.callback(cmds, interaction)
+
+    calls = protection_service.apply_hostile_loss.call_args_list
+    assert len(calls) == 3
+    assert all(call.kwargs["destination"] == "burn" for call in calls)
+    event_keys = [call.kwargs["event_key"] for call in calls]
+    assert len({key.rsplit(":", 1)[0] for key in event_keys}) == 1
+    assert {key.rsplit(":", 1)[1] for key in event_keys} == {"7601", "7602", "7603"}
+    player_service.adjust_balance.assert_not_called()
+
+    embed = _edited_wheel_embed(interaction)
+    assert "Total burned: **19**" in embed.description
+    assert "**Full** lost" not in embed.description
+    assert "**Partial** lost **7**" in embed.description
+    assert "**Open** lost **12**" in embed.description
+    shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
+    assert "2 shield activation(s)" in shield_field.value
+    assert "**17**" in shield_field.value
+
+
 @pytest.mark.asyncio
 async def test_golden_trickle_down_skips_players_below_auto_blind_threshold():
     bot = MagicMock()
@@ -1799,8 +2130,8 @@ async def test_banana_peel_misses_when_no_player_below():
 
 
 @pytest.mark.asyncio
-async def test_banana_peel_clamps_to_victim_balance():
-    """BANANA_PEEL clamps the loss to the victim's available balance."""
+async def test_banana_peel_skips_victim_below_hostile_loss_floor():
+    """BANANA_PEEL does not drain players below the shared PvP floor."""
     bot = MagicMock()
     bot.bankruptcy_service = None
     bot.garnishment_service = None
@@ -1809,7 +2140,7 @@ async def test_banana_peel_clamps_to_victim_balance():
     loan_service = MagicMock()
 
     spinner_id = 7003
-    # Victim only has 5 JC; loss roll would be 25 → clamped to 5
+    # Victim only has 5 JC, below the hostile-loss eligibility floor.
     victim_below = MagicMock(name="Below", discord_id=8002, jopacoin_balance=5)
     player_service = _make_wheel_player_service()
     player_service.get_player_below = MagicMock(return_value=victim_below)
@@ -1820,18 +2151,13 @@ async def test_banana_peel_clamps_to_victim_balance():
     )
 
     banana_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BANANA_PEEL")
-    # side_effect: [wedge_idx, 25] — 25 > 5, must clamp
-    with patch("commands.betting.random.randint", side_effect=[banana_idx, 25]):
+    with patch("commands.betting.random.randint", side_effect=[banana_idx]):
         with patch("commands.betting.random.random", return_value=1.0):
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
                     await cmds.gamba.callback(cmds, interaction)
 
-    assert player_service.adjust_balance.call_count == 1
-    call = player_service.adjust_balance.call_args
-    assert call[0][0] == 8002
-    # Loss clamped: delta is -5 (victim ends at 0, not negative)
-    assert call[0][2] == -5, f"Expected -5 clamped loss, got {call[0][2]}"
+    player_service.adjust_balance.assert_not_called()
 
 
 @pytest.mark.asyncio

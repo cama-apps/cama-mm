@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,12 +12,17 @@ from repositories.buff_repository import BuffRepository
 from repositories.mana_repository import ManaRepository
 from repositories.slow_drip_repository import SlowDripRepository
 from services.buff_service import (
+    BUFF_AEGIS,
     BUFF_COUNTERSPELL,
     BUFF_DARK_BARGAIN,
     BUFF_OVERGROWTH,
+    BUFF_REPRIEVE,
+    BUFF_SANCTUARY,
     BuffService,
 )
+from services.mana_effects_service import ManaEffectsService
 from tests.conftest import TEST_GUILD_ID
+from utils.economy_scaling import scale_minigame_jc_delta
 
 USER = 111
 ALLY = 222
@@ -118,6 +125,89 @@ def test_sanctuary_protects_both_caster_and_ally(buff_service):
     # Ally is the target_id of the sanctuary buff cast by USER.
     assert buff_service.has_pvp_immunity(ALLY, TEST_GUILD_ID) is True
 
+    active = buff_service.buff_repo.active_for(
+        USER, TEST_GUILD_ID, BUFF_SANCTUARY
+    )
+    assert active[0]["target_id"] == ALLY
+    assert active[0]["data"] == {
+        "capacity": 150,
+        "capacity_remaining": 150,
+        "rate": 1.0,
+        "shared": True,
+        "rolling_retroactive": False,
+        "caster_id": USER,
+        "ally_id": ALLY,
+        "protected_user_ids": [USER, ALLY],
+    }
+    assert buff_service.has_sanctuary_match_bonus(USER, TEST_GUILD_ID) is False
+    assert buff_service.has_sanctuary_match_bonus(ALLY, TEST_GUILD_ID) is False
+
+
+def test_reprieve_grants_rolling_partial_protection_pool(buff_service):
+    buff_service.grant_reprieve(USER, TEST_GUILD_ID)
+
+    active = buff_service.buff_repo.active_for(
+        USER, TEST_GUILD_ID, BUFF_REPRIEVE
+    )
+    assert active[0]["data"] == {
+        "capacity": 25,
+        "capacity_remaining": 25,
+        "rate": 0.5,
+        "shared": False,
+        "rolling_retroactive": True,
+    }
+
+
+def test_aegis_grants_full_75_jc_protection_pool(buff_service):
+    buff_service.grant_aegis(USER, TEST_GUILD_ID)
+
+    active = buff_service.buff_repo.active_for(USER, TEST_GUILD_ID, BUFF_AEGIS)
+    assert active[0]["data"] == {
+        "capacity": 75,
+        "capacity_remaining": 75,
+        "rate": 1.0,
+        "shared": False,
+        "rolling_retroactive": False,
+    }
+
+
+def test_swamp_siphon_routes_through_protection_gateway(monkeypatch):
+    player_repo = MagicMock()
+    player_repo.get_random_eligible_target.return_value = SimpleNamespace(
+        discord_id=TARGET,
+        jopacoin_balance=100,
+    )
+    protection_service = MagicMock()
+    protection_service.apply_hostile_loss.return_value = SimpleNamespace(
+        attempted_loss=2,
+        absorbed_amount=1,
+        applied_loss=1,
+    )
+    service = ManaEffectsService(
+        MagicMock(),
+        player_repo,
+        MagicMock(),
+        MagicMock(),
+        protection_service=protection_service,
+    )
+    monkeypatch.setattr("services.mana_effects_service.random.randint", lambda *_: 3)
+    monkeypatch.setattr("services.mana_effects_service.random.random", lambda: 0.1)
+
+    result = service.execute_siphon(USER, TEST_GUILD_ID)
+
+    assert result["amount"] == 1
+    assert result["attempted_amount"] == 2
+    assert result["absorbed_amount"] == 1
+    player_repo.steal_atomic.assert_not_called()
+    call = protection_service.apply_hostile_loss.call_args
+    assert call.args[:3] == (TARGET, TEST_GUILD_ID, 2)
+    assert call.kwargs["kind"] == "swamp_siphon"
+    assert call.kwargs["actor_id"] == USER
+    assert call.kwargs["event_key"].startswith("swamp_siphon:")
+    assert call.kwargs["destination"] == "player"
+    assert call.kwargs["recipient_id"] == USER
+    assert call.kwargs["clamp_to_balance"] is True
+
 
 def test_consume_aegis_charge_returns_true_then_false(buff_service):
     buff_service.grant_aegis(USER, TEST_GUILD_ID)
@@ -197,9 +287,46 @@ def test_blood_pact_apply_transfers_balances(repo_db_path, buff_service):
         TARGET, TEST_GUILD_ID, 400, player_repo
     )
 
-    assert skimmed == 100
-    assert player_repo.get_balance(TARGET, TEST_GUILD_ID) == 400
-    assert player_repo.get_balance(USER, TEST_GUILD_ID) == skimmer_before + 100
+    expected = scale_minigame_jc_delta(100)
+    assert skimmed == expected
+    assert player_repo.get_balance(TARGET, TEST_GUILD_ID) == 500 - expected
+    assert player_repo.get_balance(USER, TEST_GUILD_ID) == skimmer_before + expected
+
+
+def test_blood_pact_uses_applied_loss_and_releases_shielded_capacity(
+    repo_db_path, buff_service
+):
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=USER, discord_username="Skimmer", guild_id=TEST_GUILD_ID)
+    player_repo.add(discord_id=TARGET, discord_username="Target", guild_id=TEST_GUILD_ID)
+    player_repo.update_balance(TARGET, TEST_GUILD_ID, 500)
+    buff_service.grant_blood_pact(USER, TEST_GUILD_ID, TARGET)
+    protection = MagicMock()
+    protection.apply_hostile_loss.return_value = SimpleNamespace(
+        attempted=80,
+        absorbed=40,
+        applied=40,
+    )
+    buff_service.protection_service = protection
+
+    skimmed = buff_service.apply_blood_pact_skim(
+        TARGET, TEST_GUILD_ID, 400, player_repo
+    )
+
+    assert skimmed == 40
+    pact = buff_service.get_blood_pact_skimmer(TARGET, TEST_GUILD_ID)
+    assert pact["data"]["skimmed_total"] == 40
+    call = protection.apply_hostile_loss.call_args
+    assert call.args[:4] == (
+        TARGET,
+        TEST_GUILD_ID,
+        scale_minigame_jc_delta(100),
+        "blood_pact",
+    )
+    assert call.kwargs["destination"] == "player"
+    assert call.kwargs["recipient_id"] == USER
 
 
 def test_record_blood_pact_skim_preserves_stored_cap_and_rate(buff_repo, buff_service):

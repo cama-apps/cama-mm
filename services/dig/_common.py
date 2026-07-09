@@ -48,7 +48,11 @@ def _splash_trigger_matches(trigger: str, succeeded: bool) -> bool:
 
 def _splash_to_dict(result) -> dict | None:
     """Serialize a :class:`SplashResult` for return from resolve_event."""
-    if result is None or not getattr(result, "victims", None):
+    if result is None:
+        return None
+    if not getattr(result, "victims", None) and not getattr(
+        result, "absorbed_total", 0
+    ):
         return None
     return {
         "strategy": result.strategy,
@@ -56,6 +60,8 @@ def _splash_to_dict(result) -> dict | None:
         "victims": [{"discord_id": vid, "amount": amt} for vid, amt in result.victims],
         "total_burned": result.total_burned,
         "mode": getattr(result, "mode", "burn"),
+        "absorbed_total": getattr(result, "absorbed_total", 0),
+        "shielded_count": getattr(result, "shielded_count", 0),
     }
 
 
