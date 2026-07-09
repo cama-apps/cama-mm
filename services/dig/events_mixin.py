@@ -8,6 +8,7 @@ carries no state of its own and is composed into ``DigService``.
 
 import json
 import random
+import uuid
 
 import services.dig_service as dig_service
 from services.dig._common import (
@@ -533,6 +534,10 @@ class EventsMixin:
                 victim_count=int(splash_cfg.get("victim_count", 0)),
                 penalty_jc=int(splash_cfg.get("penalty_jc", 0)),
                 mode=splash_cfg.get("mode", "burn"),
+                protection_service=getattr(self, "protection_service", None),
+                event_key_prefix=(
+                    f"dig-event:{guild_id}:{discord_id}:{event_id}:{uuid.uuid4().hex}"
+                ),
             )
 
         # A burn-on-success event only pays out in proportion to the JC it

@@ -1,4 +1,7 @@
+import config
+from commands.betting import _eruption_reward
 from commands.betting_helpers.messages import WHEEL_EXPLOSION_REWARD
+from commands.betting_helpers.wheel_embeds import build_wheel_result_embed
 from services.dig_splash import resolve_splash
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES, WHEEL_WEDGES
@@ -14,6 +17,13 @@ def test_scale_minigame_jc_delta_uses_half_up_rounding_and_preserves_sign():
     assert scale_minigame_jc_delta(-1) == -1
     assert scale_minigame_jc_delta(-3) == -2
     assert scale_minigame_jc_delta(-15) == -12
+
+
+def test_scale_minigame_jc_delta_reads_configured_policy(monkeypatch):
+    monkeypatch.setattr(config, "MINIGAME_JC_DELTA_SCALE", 0.5)
+
+    assert scale_minigame_jc_delta(100) == 50
+    assert scale_minigame_jc_delta(-15) == -8
 
 
 def test_wheel_numeric_wedges_are_scaled_for_display_and_payout():
@@ -42,6 +52,26 @@ def test_golden_wheel_numeric_wedges_are_scaled_for_display_and_payout():
 
 def test_wheel_explosion_keeps_legacy_sixty_seven_reward():
     assert WHEEL_EXPLOSION_REWARD == 67
+
+
+def test_emergency_embed_displays_scaled_loss_cap():
+    embed = build_wheel_result_embed(
+        ("EMERGENCY", "EMERGENCY", "#2a1a00"),
+        new_balance=100,
+        garnished=0,
+        next_spin_time=0,
+        emergency_count=3,
+        emergency_total=48,
+    )
+
+    expected_cap = scale_minigame_jc_delta(20)
+    assert f"up to **{expected_cap}**" in embed.description
+
+
+def test_eruption_does_not_rescale_a_settled_spin():
+    assert _eruption_reward({"result": 40}) == 80
+    assert _eruption_reward({"result": -24}) == 48
+    assert _eruption_reward(None) == scale_minigame_jc_delta(50)
 
 
 class _FakePlayerRepo:

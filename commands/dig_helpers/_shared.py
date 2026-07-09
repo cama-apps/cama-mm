@@ -246,6 +246,13 @@ def _splash_aftermath_lines(splash: dict) -> list[str]:
         f"<@{v['discord_id']}>: {sign}{v['amount']} {JOPACOIN_EMOTE}"
         for v in victims
     )
+    absorbed = int(splash.get("absorbed_total", 0) or 0) if splash else 0
+    shielded = int(splash.get("shielded_count", 0) or 0) if splash else 0
+    if absorbed > 0:
+        lines.append(
+            f"🌾 {shielded} White shield activation(s) absorbed "
+            f"{absorbed} {JOPACOIN_EMOTE}."
+        )
     return lines
 
 

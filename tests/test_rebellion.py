@@ -1292,6 +1292,8 @@ class TestApplyWarEffects:
             assert bankrupt_after == expected
 
     def test_defender_win_adds_trophy_and_retribution(self):
+        from config import REBELLION_WAR_TROPHY_VALUE
+        from utils.economy_scaling import scale_minigame_jc_delta
         from utils.wheel_drawing import apply_war_effects
         war_state = {"outcome": "defenders_win"}
         wedges = self._get_normal_wedges()
@@ -1300,6 +1302,8 @@ class TestApplyWarEffects:
         labels = [w[0] for w in modified]
         assert "WAR TROPHY 🏆" in labels
         assert "RETRIBUTION ⚔️" in labels
+        trophy = next(value for label, value, _color in modified if label == "WAR TROPHY 🏆")
+        assert trophy == scale_minigame_jc_delta(REBELLION_WAR_TROPHY_VALUE)
 
     def test_defender_win_strengthens_bankrupt(self):
         from config import REBELLION_BANKRUPT_STRENGTHEN_RATE

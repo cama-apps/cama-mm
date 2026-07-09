@@ -26,7 +26,9 @@ class ManaRepository(BaseRepository, IManaRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT current_land, assigned_date FROM player_mana WHERE discord_id = ? AND guild_id = ?",
+                "SELECT current_land, assigned_date, consumed_today, "
+                "white_shield_remaining FROM player_mana "
+                "WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, gid),
             )
             row = cursor.fetchone()
@@ -64,6 +66,7 @@ class ManaRepository(BaseRepository, IManaRepository):
         has mana assigned for ``assigned_date``.
         """
         gid = self.normalize_guild_id(guild_id)
+        white_shield_remaining = 25 if land == "Plains" else 0
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -78,20 +81,40 @@ class ManaRepository(BaseRepository, IManaRepository):
                 INSERT INTO player_mana (
                     discord_id, guild_id, current_land, assigned_date,
                     bankrupt_insurance_used, bankrupt_reroll_used, consumed_today,
-                    updated_at
+                    white_shield_remaining, updated_at
                 )
-                VALUES (?, ?, ?, ?, 0, 0, 0, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 0, 0, 0, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                     current_land            = excluded.current_land,
                     assigned_date           = excluded.assigned_date,
                     bankrupt_insurance_used = 0,
                     bankrupt_reroll_used    = 0,
                     consumed_today          = 0,
+                    white_shield_remaining  = excluded.white_shield_remaining,
                     updated_at              = CURRENT_TIMESTAMP
                 """,
-                (discord_id, gid, land, assigned_date),
+                (
+                    discord_id,
+                    gid,
+                    land,
+                    assigned_date,
+                    white_shield_remaining,
+                ),
             )
             return True
+
+    def get_white_shield_remaining(
+        self, discord_id: int, guild_id: int | None
+    ) -> int:
+        """Return the player's current Guardian capacity, or zero."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT white_shield_remaining FROM player_mana "
+                "WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            ).fetchone()
+            return int(row["white_shield_remaining"] or 0) if row else 0
 
     def is_bankrupt_buff_used(
         self, discord_id: int, guild_id: int | None, buff: str
@@ -228,4 +251,3 @@ class ManaRepository(BaseRepository, IManaRepository):
                 (gid,),
             )
             return [dict(row) for row in cursor.fetchall()]
-

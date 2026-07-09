@@ -487,6 +487,15 @@ class SchemaManager:
             # match on the matches row so a retry after a post-core failure
             # (bet settlement / loan repayment raising) can't double-record.
             ("add_pending_match_id_to_matches", self._migration_add_pending_match_id_to_matches),
+            # White-mana hostile-loss protection and its auditable event stream.
+            (
+                "add_white_shield_remaining_to_player_mana",
+                self._migration_add_white_shield_remaining_to_player_mana,
+            ),
+            (
+                "create_mana_protection_tables",
+                self._migration_create_mana_protection_tables,
+            ),
         ]
 
     # --- Migrations ---
@@ -4334,4 +4343,101 @@ class SchemaManager:
         cursor.execute("ALTER TABLE mafia_games_new RENAME TO mafia_games")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_mafia_games_guild_phase ON mafia_games(guild_id, phase)"
+        )
+
+    def _migration_add_white_shield_remaining_to_player_mana(self, cursor) -> None:
+        """Add the per-mana-day capacity used by White's Guardian ward."""
+        self._add_column_if_not_exists(
+            cursor,
+            "player_mana",
+            "white_shield_remaining",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        # Preserve protection for a Plains player who already claimed today's
+        # mana before this migration deployed. Stale rows are harmless because
+        # ProtectionService also requires assigned_date == the active mana day.
+        cursor.execute(
+            """
+            UPDATE player_mana
+            SET white_shield_remaining = 25
+            WHERE current_land = 'Plains' AND consumed_today = 0
+              AND white_shield_remaining = 0
+            """
+        )
+
+    def _migration_create_mana_protection_tables(self, cursor) -> None:
+        """Create idempotent hostile-loss and protection-consumption ledgers."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hostile_loss_events (
+                event_id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id                   INTEGER NOT NULL DEFAULT 0,
+                victim_id                  INTEGER NOT NULL,
+                actor_id                   INTEGER,
+                event_key                  TEXT NOT NULL,
+                kind                       TEXT NOT NULL,
+                destination                TEXT NOT NULL
+                                               CHECK(destination IN ('burn', 'player', 'reserve')),
+                recipient_id               INTEGER,
+                requested                  INTEGER NOT NULL CHECK(requested >= 0),
+                attempted                  INTEGER NOT NULL CHECK(attempted >= 0),
+                absorbed                   INTEGER NOT NULL CHECK(absorbed >= 0),
+                applied                    INTEGER NOT NULL CHECK(applied >= 0),
+                victim_balance_before      INTEGER NOT NULL,
+                victim_balance_after       INTEGER NOT NULL,
+                destination_balance_before INTEGER,
+                destination_balance_after  INTEGER,
+                shieldable                 INTEGER NOT NULL DEFAULT 1,
+                retro_covered              INTEGER NOT NULL DEFAULT 0,
+                protection_details         TEXT NOT NULL DEFAULT '[]',
+                metadata                   TEXT,
+                occurred_at                INTEGER NOT NULL,
+                created_at                 INTEGER NOT NULL,
+                UNIQUE(guild_id, victim_id, event_key)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_hostile_loss_retro
+            ON hostile_loss_events(
+                guild_id, victim_id, shieldable, occurred_at, event_id
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_hostile_loss_kind
+            ON hostile_loss_events(guild_id, kind, occurred_at)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mana_protection_events (
+                protection_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hostile_loss_event_id INTEGER NOT NULL,
+                guild_id              INTEGER NOT NULL DEFAULT 0,
+                victim_id             INTEGER NOT NULL,
+                protection_type       TEXT NOT NULL,
+                pool_key              TEXT NOT NULL,
+                buff_id               INTEGER,
+                amount                INTEGER NOT NULL CHECK(amount >= 0),
+                rate                  REAL NOT NULL,
+                capacity_before       INTEGER,
+                capacity_after        INTEGER,
+                retroactive           INTEGER NOT NULL DEFAULT 0,
+                created_at            INTEGER NOT NULL,
+                details               TEXT,
+                UNIQUE(hostile_loss_event_id, pool_key, retroactive),
+                FOREIGN KEY(hostile_loss_event_id)
+                    REFERENCES hostile_loss_events(event_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mana_protection_victim
+            ON mana_protection_events(guild_id, victim_id, created_at)
+            """
         )

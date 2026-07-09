@@ -13,6 +13,8 @@ import functools
 import logging
 import random
 import time
+import uuid
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import discord
@@ -99,7 +101,7 @@ from commands.betting_helpers.wheel_views import (
 )
 from commands.checks import require_gamba_channel, require_guild
 from config import (
-    AUTO_BLIND_THRESHOLD,
+    HOSTILE_LOSS_MIN_BALANCE,
     LIGHTNING_BOLT_MIN_TAX,
     LIGHTNING_BOLT_PCT_MAX,
     LIGHTNING_BOLT_PCT_MIN,
@@ -137,6 +139,15 @@ from utils.wheel_drawing import (
 )
 
 logger = logging.getLogger("cama_bot.commands.betting")
+
+
+def _eruption_reward(last_spin: dict | None) -> int:
+    """Return Eruption's reward without scaling an already-settled spin twice."""
+    if last_spin and isinstance(last_spin.get("result"), int):
+        copied_amount = abs(last_spin["result"])
+        if copied_amount > 0:
+            return copied_amount * 2
+    return scale_minigame_jc_delta(50)
 
 
 class BettingCommands(commands.Cog):
@@ -193,6 +204,143 @@ class BettingCommands(commands.Cog):
             related_id=outcome,
             reason=reason,
             metadata=metadata,
+        )
+
+    async def _apply_hostile_gamba_loss(
+        self,
+        *,
+        victim_id: int,
+        guild_id: int,
+        amount: int,
+        actor_id: int,
+        event_key: str,
+        outcome: str,
+        destination: str = "burn",
+        recipient_id: int | None = None,
+        clamp_to_balance: bool = False,
+        min_balance: int | None = None,
+        victim_balance: int | None = None,
+        legacy_aggregate_transfer: bool = False,
+        metadata: dict | None = None,
+    ):
+        """Settle one already-scaled hostile wheel loss through White shields.
+
+        The fallback preserves the pre-protection behavior for lightweight
+        command tests and deployments that have not wired ProtectionService.
+        """
+        protection_service = getattr(self.bot, "protection_service", None)
+        try:
+            from services.protection_service import ProtectionService
+        except ImportError:  # pragma: no cover - only during partial deployments
+            ProtectionService = ()  # type: ignore[assignment,misc]
+
+        if isinstance(protection_service, ProtectionService):
+            result = await asyncio.to_thread(
+                functools.partial(
+                    protection_service.apply_hostile_loss,
+                    victim_id,
+                    guild_id,
+                    amount,
+                    outcome.lower(),
+                    actor_id=actor_id,
+                    event_key=event_key,
+                    destination=destination,
+                    recipient_id=recipient_id,
+                    clamp_to_balance=clamp_to_balance,
+                    min_balance=min_balance,
+                    metadata={"outcome": outcome, **(metadata or {})},
+                )
+            )
+            return SimpleNamespace(
+                event_key=result.event_key,
+                requested=result.requested,
+                attempted=result.attempted,
+                absorbed=result.absorbed,
+                applied=result.applied,
+                victim_balance_before=result.victim_balance_before,
+                victim_balance_after=result.victim_balance_after,
+                destination_balance_after=result.destination_balance_after,
+                duplicate=result.duplicate,
+                details=result.details,
+                centralized=True,
+            )
+
+        attempted = max(0, int(amount))
+        before = victim_balance
+        if before is None:
+            before = await asyncio.to_thread(
+                self.player_service.get_balance, victim_id, guild_id
+            )
+        if min_balance is not None and before < min_balance:
+            attempted = 0
+        if clamp_to_balance:
+            attempted = min(attempted, max(0, before))
+
+        victim_after = before
+        destination_after = None
+        applied = attempted
+        ledger_metadata = {"outcome": outcome, **(metadata or {})}
+        if applied > 0 and destination == "player" and not legacy_aggregate_transfer:
+            if recipient_id is None:
+                raise ValueError("recipient_id is required for player destination")
+            transfer = await asyncio.to_thread(
+                functools.partial(
+                    self.player_service.steal_atomic,
+                    thief_discord_id=recipient_id,
+                    victim_discord_id=victim_id,
+                    guild_id=guild_id,
+                    amount=applied,
+                    source="gamba",
+                    actor_id=actor_id,
+                    related_type="wheel_spin",
+                    related_id=outcome,
+                    reason=f"gamba {outcome.lower().replace('_', ' ')} transfer",
+                    metadata=ledger_metadata,
+                )
+            )
+            applied = int(transfer.get("amount", applied))
+            victim_after = transfer.get("victim_new_balance", before - applied)
+            destination_after = transfer.get("thief_new_balance")
+        elif applied > 0:
+            victim_after = await asyncio.to_thread(
+                self._adjust_gamba_balance,
+                actor_id,
+                victim_id,
+                guild_id,
+                -applied,
+                f"gamba {outcome.lower().replace('_', ' ')} debit",
+                outcome,
+                ledger_metadata,
+            )
+            if (
+                destination == "reserve"
+                and self.loan_service is not None
+                and not legacy_aggregate_transfer
+            ):
+                await asyncio.to_thread(
+                    self.loan_service.add_to_nonprofit_fund,
+                    guild_id,
+                    applied,
+                    source="gamba",
+                    actor_id=actor_id,
+                    related_type="wheel_spin",
+                    related_id=outcome,
+                    reason=f"gamba {outcome.lower().replace('_', ' ')} reserve credit",
+                    metadata=ledger_metadata,
+                )
+
+        return SimpleNamespace(
+            event_key=event_key,
+            requested=max(0, int(amount)),
+            attempted=attempted,
+            absorbed=0,
+            applied=applied,
+            victim_balance_before=before,
+            victim_balance_after=victim_after,
+            destination_balance_after=destination_after,
+            duplicate=False,
+            details=(),
+            centralized=False,
         )
 
     async def _credit_gamba_outcome(
@@ -727,17 +875,10 @@ class BettingCommands(commands.Cog):
             result_idx = random.randint(0, len(wedges) - 1)
             result_wedge = wedges[result_idx % len(wedges)]
 
-        # Plains Guardian Aura: BANKRUPT -> LOSE
-        _guardian_activated = False
-        if effects and effects.plains_guardian_aura and isinstance(result_wedge[1], int) and result_wedge[1] < 0:
-            result_wedge = ("LOSE", 0, "#4a4a4a")
-            _guardian_activated = True
-
         # Green mana: bankrupt insurance — first BANKRUPT per mana day downgraded to LOSE
         _insurance_activated = False
         if (
-            not _guardian_activated
-            and effects
+            effects
             and effects.color == "Green"
             and is_eligible_for_bad_gamba
             and isinstance(result_wedge[1], int)
@@ -986,6 +1127,7 @@ class BettingCommands(commands.Cog):
         emergency_total: int = 0
         commune_total: int = 0
         commune_count: int = 0
+        commune_centralized: bool = False
         pardon_consumed: bool = False
 
         # Golden wheel mechanic tracking
@@ -1018,6 +1160,14 @@ class BettingCommands(commands.Cog):
         bomb_omb_victims: list[tuple[str, int, int]] = []
         bomb_omb_burn_total: int = 0
         bomb_omb_missed: bool = False
+        shield_absorbed_total: int = 0
+        shielded_count: int = 0
+        interaction_event_id = getattr(interaction, "id", None)
+        if not isinstance(interaction_event_id, int):
+            interaction_event_id = uuid.uuid4().hex
+        hostile_event_prefix = (
+            f"wheel:{guild_id}:{interaction_event_id}:{str(result_value).lower()}"
+        )
 
         if result_value == "RETRIBUTION":
             # War effect: steal from attackers, LOSE for everyone else
@@ -1102,19 +1252,24 @@ class BettingCommands(commands.Cog):
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             for p in all_players_em:
-                if p.jopacoin_balance >= AUTO_BLIND_THRESHOLD:
+                if p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE:
                     loss = min(p.jopacoin_balance, scale_minigame_jc_delta(20))
-                    await asyncio.to_thread(
-                        self._adjust_gamba_balance,
-                        user_id,
-                        p.discord_id,
-                        guild_id,
-                        -loss,
-                        "gamba emergency tax",
-                        "EMERGENCY",
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=p.discord_id,
+                        guild_id=guild_id,
+                        amount=loss,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{p.discord_id}",
+                        outcome="EMERGENCY",
+                        clamp_to_balance=True,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=p.jopacoin_balance,
                     )
-                    emergency_total += loss
-                    emergency_count += 1
+                    emergency_total += settled.applied
+                    emergency_count += int(settled.applied > 0)
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
             # Re-fetch spinner's balance (may have changed)
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
@@ -1124,27 +1279,41 @@ class BettingCommands(commands.Cog):
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
             for p in all_players_cm:
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD:
-                    await asyncio.to_thread(
-                        self._adjust_gamba_balance,
-                        user_id,
-                        p.discord_id,
-                        guild_id,
-                        -1,
-                        "gamba commune donation",
-                        "COMMUNE",
+                if p.discord_id != user_id and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE:
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=p.discord_id,
+                        guild_id=guild_id,
+                        amount=1,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{p.discord_id}",
+                        outcome="COMMUNE",
+                        destination="player",
+                        recipient_id=user_id,
+                        clamp_to_balance=True,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=p.jopacoin_balance,
+                        legacy_aggregate_transfer=True,
                     )
-                    commune_total += 1
-                    commune_count += 1
+                    commune_centralized = commune_centralized or settled.centralized
+                    commune_total += settled.applied
+                    commune_count += int(settled.applied > 0)
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
             if commune_total > 0:
-                new_balance, garnished_amount = await self._credit_gamba_outcome(
-                    user_id,
-                    guild_id,
-                    new_balance,
-                    commune_total,
-                    "COMMUNE",
-                    "gamba commune collected donations",
-                )
+                if commune_centralized:
+                    new_balance = await asyncio.to_thread(
+                        self.player_service.get_balance, user_id, guild_id
+                    )
+                else:
+                    new_balance, garnished_amount = await self._credit_gamba_outcome(
+                        user_id,
+                        guild_id,
+                        new_balance,
+                        commune_total,
+                        "COMMUNE",
+                        "gamba commune collected donations",
+                    )
 
         elif result_value == "COMEBACK":
             # Grant one-use pardon token: next BANKRUPT becomes LOSE
@@ -1159,12 +1328,8 @@ class BettingCommands(commands.Cog):
             last_spin = await asyncio.to_thread(
                 self.player_service.get_last_normal_wheel_spin, guild_id
             )
-            eruption_amount = 50  # fallback
-            if last_spin and isinstance(last_spin.get("result"), int):
-                eruption_amount = abs(last_spin["result"]) * 2
-                if eruption_amount == 0:
-                    eruption_amount = 50
-            eruption_amount = scale_minigame_jc_delta(eruption_amount)
+            # Stored wheel results are already scaled at wedge generation.
+            eruption_amount = _eruption_reward(last_spin)
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
                 guild_id,
@@ -1212,33 +1377,48 @@ class BettingCommands(commands.Cog):
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=4)
             )
             decay_total = 0
+            decay_centralized = False
             for i, p in enumerate(top_4):
                 if p.discord_id == user_id:
                     continue
-                if p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
+                if p.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                     continue
                 loss = scale_minigame_jc_delta(80 if i == 3 else 60)
                 loss = min(loss, max(0, p.jopacoin_balance))
                 if loss > 0:
-                    await asyncio.to_thread(
-                        self._adjust_gamba_balance,
-                        user_id,
-                        p.discord_id,
-                        guild_id,
-                        -loss,
-                        "gamba decay tax",
-                        "DECAY",
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=p.discord_id,
+                        guild_id=guild_id,
+                        amount=loss,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{p.discord_id}",
+                        outcome="DECAY",
+                        destination="player",
+                        recipient_id=user_id,
+                        clamp_to_balance=True,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=p.jopacoin_balance,
+                        legacy_aggregate_transfer=True,
                     )
-                    decay_total += loss
+                    decay_centralized = decay_centralized or settled.centralized
+                    decay_total += settled.applied
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
             if decay_total > 0:
-                new_balance, garnished_amount = await self._credit_gamba_outcome(
-                    user_id,
-                    guild_id,
-                    new_balance,
-                    decay_total,
-                    "DECAY",
-                    "gamba decay collected taxes",
-                )
+                if decay_centralized:
+                    new_balance = await asyncio.to_thread(
+                        self.player_service.get_balance, user_id, guild_id
+                    )
+                else:
+                    new_balance, garnished_amount = await self._credit_gamba_outcome(
+                        user_id,
+                        guild_id,
+                        new_balance,
+                        decay_total,
+                        "DECAY",
+                        "gamba decay collected taxes",
+                    )
 
         elif result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 2-7% of balance from player ranked above
@@ -1246,27 +1426,32 @@ class BettingCommands(commands.Cog):
                 self.player_service.get_player_above, user_id, guild_id
             )
 
-            if player_above:
+            if (
+                player_above
+                and player_above.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
+            ):
                 pct_amount = max(1, int(player_above.jopacoin_balance * random.uniform(0.02, 0.07)))
                 flat_amount = random.randint(2, 10)
                 shell_amount = scale_minigame_jc_delta(max(pct_amount, flat_amount))
-                # Atomic steal from player above (can push victim below MAX_DEBT - intentional)
-                steal_result = await asyncio.to_thread(
-                    functools.partial(
-                        self.player_service.steal_atomic,
-                        thief_discord_id=user_id,
-                        victim_discord_id=player_above.discord_id,
-                        guild_id=guild_id,
-                        amount=shell_amount,
-                        source="gamba",
-                        actor_id=user_id,
-                        related_type="wheel_spin",
-                        related_id="RED_SHELL",
-                        reason="gamba red shell steal",
-                    )
+                settled = await self._apply_hostile_gamba_loss(
+                    victim_id=player_above.discord_id,
+                    guild_id=guild_id,
+                    amount=shell_amount,
+                    actor_id=user_id,
+                    event_key=f"{hostile_event_prefix}:{player_above.discord_id}",
+                    outcome="RED_SHELL",
+                    destination="player",
+                    recipient_id=user_id,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                    victim_balance=player_above.jopacoin_balance,
                 )
-                shell_victim_new_balance = steal_result["victim_new_balance"]
-                new_balance = steal_result["thief_new_balance"]
+                shell_amount = settled.applied
+                shell_victim_new_balance = settled.victim_balance_after
+                if settled.destination_balance_after is not None:
+                    new_balance = settled.destination_balance_after
+                if settled.absorbed > 0:
+                    shield_absorbed_total += settled.absorbed
+                    shielded_count += 1
                 # Try to get Discord member for mention
                 if interaction.guild:
                     shell_victim = interaction.guild.get_member(player_above.discord_id)
@@ -1287,54 +1472,47 @@ class BettingCommands(commands.Cog):
                 pct_amount = max(1, int(new_balance * random.uniform(0.02, 0.07)))
                 flat_amount = random.randint(4, 20)
                 shell_amount = scale_minigame_jc_delta(max(pct_amount, flat_amount))
-                await asyncio.to_thread(
-                    self._adjust_gamba_balance,
-                    user_id,
-                    user_id,
-                    guild_id,
-                    -shell_amount,
-                    "gamba blue shell self-hit",
-                    "BLUE_SHELL",
+                settled = await self._apply_hostile_gamba_loss(
+                    victim_id=user_id,
+                    guild_id=guild_id,
+                    amount=shell_amount,
+                    actor_id=user_id,
+                    event_key=f"{hostile_event_prefix}:{user_id}",
+                    outcome="BLUE_SHELL",
+                    destination="reserve",
+                    victim_balance=new_balance,
                 )
-                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-                # Credit nonprofit fund with the self-hit loss
-                if self.loan_service:
-                    try:
-                        await asyncio.to_thread(
-                            self.loan_service.add_to_nonprofit_fund,
-                            guild_id,
-                            shell_amount,
-                            source="gamba",
-                            actor_id=user_id,
-                            related_type="wheel_spin",
-                            related_id="BLUE_SHELL",
-                            reason="gamba blue shell self-hit reserve credit",
-                            metadata={"amount": shell_amount},
-                        )
-                    except Exception:
-                        logger.warning("Failed to add blue shell self-hit to nonprofit fund")
-            elif leaderboard:
-                # Atomic steal from richest (can push victim below MAX_DEBT - intentional)
+                shell_amount = settled.applied
+                new_balance = settled.victim_balance_after
+            elif (
+                leaderboard
+                and leaderboard[0].jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
+            ):
+                # The richest player is hit; White protection reduces only the
+                # amount actually transferred to the spinner.
                 richest = leaderboard[0]
                 pct_amount = max(1, int(richest.jopacoin_balance * random.uniform(0.02, 0.07)))
                 flat_amount = random.randint(4, 20)
                 shell_amount = scale_minigame_jc_delta(max(pct_amount, flat_amount))
-                steal_result = await asyncio.to_thread(
-                    functools.partial(
-                        self.player_service.steal_atomic,
-                        thief_discord_id=user_id,
-                        victim_discord_id=richest.discord_id,
-                        guild_id=guild_id,
-                        amount=shell_amount,
-                        source="gamba",
-                        actor_id=user_id,
-                        related_type="wheel_spin",
-                        related_id="BLUE_SHELL",
-                        reason="gamba blue shell steal",
-                    )
+                settled = await self._apply_hostile_gamba_loss(
+                    victim_id=richest.discord_id,
+                    guild_id=guild_id,
+                    amount=shell_amount,
+                    actor_id=user_id,
+                    event_key=f"{hostile_event_prefix}:{richest.discord_id}",
+                    outcome="BLUE_SHELL",
+                    destination="player",
+                    recipient_id=user_id,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                    victim_balance=richest.jopacoin_balance,
                 )
-                shell_victim_new_balance = steal_result["victim_new_balance"]
-                new_balance = steal_result["thief_new_balance"]
+                shell_amount = settled.applied
+                shell_victim_new_balance = settled.victim_balance_after
+                if settled.destination_balance_after is not None:
+                    new_balance = settled.destination_balance_after
+                if settled.absorbed > 0:
+                    shield_absorbed_total += settled.absorbed
+                    shielded_count += 1
                 # Try to get Discord member for mention
                 if interaction.guild:
                     shell_victim = interaction.guild.get_member(richest.discord_id)
@@ -1352,27 +1530,38 @@ class BettingCommands(commands.Cog):
             lightning_total = 0
             lightning_count = 0
             lightning_victims = []  # (name, amount, discord_id) for embed
+            lightning_centralized = False
             for p in all_players:
-                if p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
+                if p.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                     continue
                 tax = scale_minigame_jc_delta(
                     max(LIGHTNING_BOLT_MIN_TAX, int(p.jopacoin_balance * lightning_pct))
                 )
-                await asyncio.to_thread(
-                    self._adjust_gamba_balance,
-                    user_id,
-                    p.discord_id,
-                    guild_id,
-                    -tax,
-                    "gamba lightning bolt tax",
-                    "LIGHTNING_BOLT",
-                    {"tax_pct": lightning_pct},
+                settled = await self._apply_hostile_gamba_loss(
+                    victim_id=p.discord_id,
+                    guild_id=guild_id,
+                    amount=tax,
+                    actor_id=user_id,
+                    event_key=f"{hostile_event_prefix}:{p.discord_id}",
+                    outcome="LIGHTNING_BOLT",
+                    destination="reserve",
+                    clamp_to_balance=True,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                    victim_balance=p.jopacoin_balance,
+                    legacy_aggregate_transfer=True,
+                    metadata={"tax_pct": lightning_pct},
                 )
-                lightning_total += tax
-                lightning_count += 1
-                lightning_victims.append((p.name, tax, p.discord_id))
-            # Send total to nonprofit
-            if self.loan_service and lightning_total > 0:
+                lightning_centralized = lightning_centralized or settled.centralized
+                lightning_total += settled.applied
+                lightning_count += int(settled.applied > 0)
+                if settled.applied > 0:
+                    lightning_victims.append((p.name, settled.applied, p.discord_id))
+                if settled.absorbed > 0:
+                    shield_absorbed_total += settled.absorbed
+                    shielded_count += 1
+            # Legacy fallback credits the aggregate; ProtectionService credits
+            # each victim's applied loss atomically and must not be double-paid.
+            if self.loan_service and lightning_total > 0 and not lightning_centralized:
                 try:
                     await asyncio.to_thread(
                         self.loan_service.add_to_nonprofit_fund,
@@ -1405,7 +1594,7 @@ class BettingCommands(commands.Cog):
             below = await asyncio.to_thread(
                 self.player_service.get_player_below, user_id, guild_id
             )
-            if not below or below.jopacoin_balance <= 0:
+            if not below or below.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                 banana_missed = True
             else:
                 raw_loss = random.randint(
@@ -1416,15 +1605,21 @@ class BettingCommands(commands.Cog):
                     below.jopacoin_balance,
                 )
                 try:
-                    await asyncio.to_thread(
-                        self._adjust_gamba_balance,
-                        user_id,
-                        below.discord_id,
-                        guild_id,
-                        -banana_victim_loss,
-                        "gamba banana peel burn",
-                        "BANANA_PEEL",
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=below.discord_id,
+                        guild_id=guild_id,
+                        amount=banana_victim_loss,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{below.discord_id}",
+                        outcome="BANANA_PEEL",
+                        clamp_to_balance=True,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=below.jopacoin_balance,
                     )
+                    banana_victim_loss = settled.applied
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
                 except Exception as exc:
                     logger.warning(
                         "BANANA_PEEL: failed to burn from victim %s in guild %s: %s",
@@ -1455,7 +1650,10 @@ class BettingCommands(commands.Cog):
             )
             eligible_gs = [
                 p for p in leaderboard_gs
-                if p.discord_id != user_id and p.jopacoin_balance > 0
+                if (
+                    p.discord_id != user_id
+                    and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
+                )
             ]
             if not eligible_gs:
                 green_shell_missed = True
@@ -1472,21 +1670,24 @@ class BettingCommands(commands.Cog):
                     green_shell_missed = True
                 else:
                     try:
-                        steal_res = await asyncio.to_thread(
-                            functools.partial(
-                                self.player_service.steal_atomic,
-                                thief_discord_id=user_id,
-                                victim_discord_id=victim_p.discord_id,
-                                guild_id=guild_id,
-                                amount=green_shell_amount,
-                                source="gamba",
-                                actor_id=user_id,
-                                related_type="wheel_spin",
-                                related_id="GREEN_SHELL",
-                                reason="gamba green shell steal",
-                            )
+                        settled = await self._apply_hostile_gamba_loss(
+                            victim_id=victim_p.discord_id,
+                            guild_id=guild_id,
+                            amount=green_shell_amount,
+                            actor_id=user_id,
+                            event_key=f"{hostile_event_prefix}:{victim_p.discord_id}",
+                            outcome="GREEN_SHELL",
+                            destination="player",
+                            recipient_id=user_id,
+                            min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                            victim_balance=victim_p.jopacoin_balance,
                         )
-                        new_balance = steal_res["thief_new_balance"]
+                        green_shell_amount = settled.applied
+                        if settled.destination_balance_after is not None:
+                            new_balance = settled.destination_balance_after
+                        if settled.absorbed > 0:
+                            shield_absorbed_total += settled.absorbed
+                            shielded_count += 1
                         green_shell_victim_name = victim_p.name
                         if interaction.guild:
                             green_shell_victim = interaction.guild.get_member(victim_p.discord_id)
@@ -1515,7 +1716,7 @@ class BettingCommands(commands.Cog):
             )
             eligible_bo = [
                 p for p in leaderboard_bo
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+                if p.discord_id != user_id and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
             sample_size = min(WHEEL_BOMB_OMB_VICTIM_COUNT, len(eligible_bo))
             if sample_size <= 0:
@@ -1530,17 +1731,25 @@ class BettingCommands(commands.Cog):
                     if loss <= 0:
                         continue
                     try:
-                        await asyncio.to_thread(
-                            self._adjust_gamba_balance,
-                            user_id,
-                            vp.discord_id,
-                            guild_id,
-                            -loss,
-                            "gamba bomb-omb burn",
-                            "BOMB_OMB",
+                        settled = await self._apply_hostile_gamba_loss(
+                            victim_id=vp.discord_id,
+                            guild_id=guild_id,
+                            amount=loss,
+                            actor_id=user_id,
+                            event_key=f"{hostile_event_prefix}:{vp.discord_id}",
+                            outcome="BOMB_OMB",
+                            clamp_to_balance=True,
+                            min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                            victim_balance=vp.jopacoin_balance,
                         )
-                        bomb_omb_victims.append((vp.name, loss, vp.discord_id))
-                        bomb_omb_burn_total += loss
+                        if settled.applied > 0:
+                            bomb_omb_victims.append(
+                                (vp.name, settled.applied, vp.discord_id)
+                            )
+                            bomb_omb_burn_total += settled.applied
+                        if settled.absorbed > 0:
+                            shield_absorbed_total += settled.absorbed
+                            shielded_count += 1
                     except Exception as exc:
                         logger.warning(
                             "BOMB_OMB: failed to burn from victim=%s (spinner=%s guild=%s): %s",
@@ -1563,7 +1772,7 @@ class BettingCommands(commands.Cog):
             # Exclude the spinner themselves
             victims = [
                 p for p in bottom_players
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+                if p.discord_id != user_id and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
             heist_total = 0
             heist_count = 0
@@ -1572,25 +1781,26 @@ class BettingCommands(commands.Cog):
                     max(1, int(victim.jopacoin_balance * random.uniform(0.05, 0.12)))
                 )
                 try:
-                    await asyncio.to_thread(
-                        functools.partial(
-                            self.player_service.steal_atomic,
-                            thief_discord_id=user_id,
-                            victim_discord_id=victim.discord_id,
-                            guild_id=guild_id,
-                            amount=steal_amt,
-                            source="gamba",
-                            actor_id=user_id,
-                            related_type="wheel_spin",
-                            related_id="HEIST",
-                            reason="gamba heist steal",
-                        )
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=victim.discord_id,
+                        guild_id=guild_id,
+                        amount=steal_amt,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{victim.discord_id}",
+                        outcome="HEIST",
+                        destination="player",
+                        recipient_id=user_id,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=victim.jopacoin_balance,
                     )
-                    heist_total += steal_amt
-                    heist_count += 1
+                    heist_total += settled.applied
+                    heist_count += int(settled.attempted > 0)
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
                 except Exception as e:
                     logger.warning("Failed to execute heist steal from victim %s: %s", victim.discord_id, e)
-            if heist_count == 0:
+            if not victims:
                 # Fallback: no eligible victims
                 fallback = scale_minigame_jc_delta(20)
                 heist_total = fallback
@@ -1612,7 +1822,7 @@ class BettingCommands(commands.Cog):
             )
             crash_victims = [
                 p for p in top_3
-                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+                if p.discord_id != user_id and p.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
             ]
             market_crash_total = 0
             market_crash_count = 0
@@ -1621,25 +1831,26 @@ class BettingCommands(commands.Cog):
                     max(1, int(victim.jopacoin_balance * random.uniform(0.08, 0.15)))
                 )
                 try:
-                    await asyncio.to_thread(
-                        functools.partial(
-                            self.player_service.steal_atomic,
-                            thief_discord_id=user_id,
-                            victim_discord_id=victim.discord_id,
-                            guild_id=guild_id,
-                            amount=tax_amt,
-                            source="gamba",
-                            actor_id=user_id,
-                            related_type="wheel_spin",
-                            related_id="MARKET_CRASH",
-                            reason="gamba market crash tax",
-                        )
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=victim.discord_id,
+                        guild_id=guild_id,
+                        amount=tax_amt,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{victim.discord_id}",
+                        outcome="MARKET_CRASH",
+                        destination="player",
+                        recipient_id=user_id,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=victim.jopacoin_balance,
                     )
-                    market_crash_total += tax_amt
-                    market_crash_count += 1
+                    market_crash_total += settled.applied
+                    market_crash_count += int(settled.attempted > 0)
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
                 except Exception as e:
                     logger.warning("Failed to execute market crash tax on victim %s: %s", victim.discord_id, e)
-            if market_crash_count == 0:
+            if not crash_victims:
                 # Fallback: spinner is only top-3 player
                 market_crash_total = scale_minigame_jc_delta(25)
                 await asyncio.to_thread(
@@ -1674,31 +1885,46 @@ class BettingCommands(commands.Cog):
             trickle_pct = random.uniform(LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
             trickle_total = 0
             trickle_count = 0
+            trickle_centralized = False
             for p in all_players_td:
-                if p.discord_id == user_id or p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
+                if p.discord_id == user_id or p.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                     continue
                 tax = scale_minigame_jc_delta(max(1, int(p.jopacoin_balance * trickle_pct)))
-                await asyncio.to_thread(
-                    self._adjust_gamba_balance,
-                    user_id,
-                    p.discord_id,
-                    guild_id,
-                    -tax,
-                    "gamba trickle down tax",
-                    "TRICKLE_DOWN",
-                    {"tax_pct": trickle_pct},
+                settled = await self._apply_hostile_gamba_loss(
+                    victim_id=p.discord_id,
+                    guild_id=guild_id,
+                    amount=tax,
+                    actor_id=user_id,
+                    event_key=f"{hostile_event_prefix}:{p.discord_id}",
+                    outcome="TRICKLE_DOWN",
+                    destination="player",
+                    recipient_id=user_id,
+                    clamp_to_balance=True,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                    victim_balance=p.jopacoin_balance,
+                    legacy_aggregate_transfer=True,
+                    metadata={"tax_pct": trickle_pct},
                 )
-                trickle_total += tax
-                trickle_count += 1
+                trickle_centralized = trickle_centralized or settled.centralized
+                trickle_total += settled.applied
+                trickle_count += int(settled.applied > 0)
+                if settled.absorbed > 0:
+                    shield_absorbed_total += settled.absorbed
+                    shielded_count += 1
             if trickle_total > 0:
-                new_balance, garnished_amount = await self._credit_gamba_outcome(
-                    user_id,
-                    guild_id,
-                    new_balance,
-                    trickle_total,
-                    "TRICKLE_DOWN",
-                    "gamba trickle down collected taxes",
-                )
+                if trickle_centralized:
+                    new_balance = await asyncio.to_thread(
+                        self.player_service.get_balance, user_id, guild_id
+                    )
+                else:
+                    new_balance, garnished_amount = await self._credit_gamba_outcome(
+                        user_id,
+                        guild_id,
+                        new_balance,
+                        trickle_total,
+                        "TRICKLE_DOWN",
+                        "gamba trickle down collected taxes",
+                    )
 
         elif result_value == "DIVIDEND":
             # Earn 0.5% of total positive JC in guild (min 10 JC)
@@ -1725,26 +1951,29 @@ class BettingCommands(commands.Cog):
             takeover_missed = False
             takeover_amount = 0
             takeover_victim_name = "rank #4"
-            if rank4 and rank4.jopacoin_balance > 0:
+            if rank4 and rank4.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE:
                 takeover_amount = scale_minigame_jc_delta(
                     max(1, int(rank4.jopacoin_balance * random.uniform(0.08, 0.15)))
                 )
                 try:
-                    steal_result = await asyncio.to_thread(
-                        functools.partial(
-                            self.player_service.steal_atomic,
-                            thief_discord_id=user_id,
-                            victim_discord_id=rank4.discord_id,
-                            guild_id=guild_id,
-                            amount=takeover_amount,
-                            source="gamba",
-                            actor_id=user_id,
-                            related_type="wheel_spin",
-                            related_id="HOSTILE_TAKEOVER",
-                            reason="gamba hostile takeover steal",
-                        )
+                    settled = await self._apply_hostile_gamba_loss(
+                        victim_id=rank4.discord_id,
+                        guild_id=guild_id,
+                        amount=takeover_amount,
+                        actor_id=user_id,
+                        event_key=f"{hostile_event_prefix}:{rank4.discord_id}",
+                        outcome="HOSTILE_TAKEOVER",
+                        destination="player",
+                        recipient_id=user_id,
+                        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                        victim_balance=rank4.jopacoin_balance,
                     )
-                    new_balance = steal_result["thief_new_balance"]
+                    takeover_amount = settled.applied
+                    if settled.destination_balance_after is not None:
+                        new_balance = settled.destination_balance_after
+                    if settled.absorbed > 0:
+                        shield_absorbed_total += settled.absorbed
+                        shielded_count += 1
                     if interaction.guild:
                         rank4_member = interaction.guild.get_member(rank4.discord_id)
                         takeover_victim_name = rank4_member.mention if rank4_member else rank4.name
@@ -1784,8 +2013,9 @@ class BettingCommands(commands.Cog):
             spinner_balance_before = new_balance
             top_n = WHEEL_GOLDEN_TOP_N
             mid_end = WHEEL_GOLDEN_RECESSION_MID_RANK_END
+            recession_centralized = False
             for rank_idx, p in enumerate(all_players_rec):
-                if p.jopacoin_balance < AUTO_BLIND_THRESHOLD:
+                if p.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                     continue
                 if rank_idx < top_n:
                     pct = WHEEL_GOLDEN_RECESSION_TOP_PCT
@@ -1800,19 +2030,27 @@ class BettingCommands(commands.Cog):
                 loss = min(p.jopacoin_balance, loss)
                 if loss <= 0:
                     continue
-                await asyncio.to_thread(
-                    self._adjust_gamba_balance,
-                    user_id,
-                    p.discord_id,
-                    guild_id,
-                    -loss,
-                    "gamba recession tax",
-                    "RECESSION",
-                    {"rank_index": rank_idx},
+                settled = await self._apply_hostile_gamba_loss(
+                    victim_id=p.discord_id,
+                    guild_id=guild_id,
+                    amount=loss,
+                    actor_id=user_id,
+                    event_key=f"{hostile_event_prefix}:{p.discord_id}",
+                    outcome="RECESSION",
+                    destination="reserve",
+                    clamp_to_balance=True,
+                    min_balance=HOSTILE_LOSS_MIN_BALANCE,
+                    victim_balance=p.jopacoin_balance,
+                    legacy_aggregate_transfer=True,
+                    metadata={"rank_index": rank_idx},
                 )
-                recession_total += loss
-                recession_count += 1
-            if self.loan_service and recession_total > 0:
+                recession_centralized = recession_centralized or settled.centralized
+                recession_total += settled.applied
+                recession_count += int(settled.applied > 0)
+                if settled.absorbed > 0:
+                    shield_absorbed_total += settled.absorbed
+                    shielded_count += 1
+            if self.loan_service and recession_total > 0 and not recession_centralized:
                 try:
                     await asyncio.to_thread(
                         self.loan_service.add_to_nonprofit_fund,
@@ -2076,15 +2314,9 @@ class BettingCommands(commands.Cog):
             bomb_omb_victims=bomb_omb_victims,
             bomb_omb_burn_total=bomb_omb_burn_total,
             bomb_omb_missed=bomb_omb_missed,
+            shield_absorbed_total=shield_absorbed_total,
+            shielded_count=shielded_count,
         )
-
-        # Add Guardian Aura notification if it triggered
-        if _guardian_activated:
-            result_embed.add_field(
-                name="🌾 Guardian Aura",
-                value="Plains mana converted BANKRUPT to LOSE!",
-                inline=False,
-            )
 
         # Add Green insurance notification if it triggered
         if _insurance_activated:
