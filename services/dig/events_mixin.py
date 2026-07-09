@@ -27,6 +27,7 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_FORCE_RISKY,
     NEGATIVE_EVENT_JC_MULTIPLIER,
 )
+from utils.economy_scaling import scale_minigame_jc_delta
 
 
 class EventsMixin:
@@ -328,6 +329,7 @@ class EventsMixin:
                             discord_id, guild_id, tunnel, next_boss,
                         )
                 tunnel_updates["depth"] = max(0, depth + depth_delta)
+            jc_delta = scale_minigame_jc_delta(jc_delta)
 
             # JC + depth + audit log commit together so a crash can't credit
             # JC without the depth move (or vice versa).
@@ -543,7 +545,7 @@ class EventsMixin:
             and jc > 0
         ):
             nominal_burn = int(splash_cfg.get("victim_count", 0)) * int(
-                splash_cfg.get("penalty_jc", 0)
+                scale_minigame_jc_delta(splash_cfg.get("penalty_jc", 0))
             )
             burn_ratio = (
                 min(1.0, splash_result.total_burned / nominal_burn)
@@ -556,6 +558,8 @@ class EventsMixin:
                     event_id, burn_ratio, splash_result.total_burned, nominal_burn,
                 )
             jc = int(round(jc * burn_ratio))
+
+        jc = scale_minigame_jc_delta(jc)
 
         # Depth shift + JC credit/debit + optional buff + audit log commit
         # together, so the actor can't be paid without the depth/buff
@@ -635,4 +639,3 @@ class EventsMixin:
     # ------------------------------------------------------------------
     # Abandon Tunnel
     # ------------------------------------------------------------------
-

@@ -21,6 +21,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_data.aliases import EVENT_POOL
 from services.dig_service import DigService
+from utils.economy_scaling import scale_minigame_jc_delta
 
 
 @pytest.fixture
@@ -138,9 +139,9 @@ def test_high_p2_event_rewards_are_modestly_trimmed(
     monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.0)
 
     expected = {
-        "necro_s3": {"risky": 13, "desperate": 20},
-        "necro_s4": {"risky": 13, "desperate": 20},
-        "necro_s5": {"risky": 17, "desperate": 27},
+        "necro_s3": {"risky": scale_minigame_jc_delta(13), "desperate": scale_minigame_jc_delta(20)},
+        "necro_s4": {"risky": scale_minigame_jc_delta(13), "desperate": scale_minigame_jc_delta(20)},
+        "necro_s5": {"risky": scale_minigame_jc_delta(17), "desperate": scale_minigame_jc_delta(27)},
     }
     for event_id, payouts in expected.items():
         for branch, want in payouts.items():

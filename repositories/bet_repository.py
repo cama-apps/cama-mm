@@ -49,6 +49,12 @@ class BetRepository(BaseRepository, IBetRepository):
     """
 
     VALID_TEAMS = {"radiant", "dire"}
+    _PENDING_SEED_FIELDS = (
+        "bet_seed_reserved",
+        "bet_seed_radiant",
+        "bet_seed_dire",
+        "bet_seed_bonus",
+    )
 
     def create_bet(
         self, guild_id: int | None, discord_id: int, team: str, amount: int, bet_time: int
@@ -784,6 +790,9 @@ class BetRepository(BaseRepository, IBetRepository):
         betting_mode: str = "pool",
         pending_match_id: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
+        bet_seed_radiant: int = 0,
+        bet_seed_dire: int = 0,
+        bet_seed_bonus: int = 0,
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
@@ -805,6 +814,18 @@ class BetRepository(BaseRepository, IBetRepository):
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            seed_fields = self._consume_pending_match_seed_in_txn(
+                cursor,
+                normalized_guild,
+                pending_match_id,
+                bet_seed_reserved=0,
+                bet_seed_radiant=bet_seed_radiant,
+                bet_seed_dire=bet_seed_dire,
+                bet_seed_bonus=bet_seed_bonus,
+            )
+            bet_seed_radiant = seed_fields["bet_seed_radiant"]
+            bet_seed_dire = seed_fields["bet_seed_dire"]
+            bet_seed_bonus = seed_fields["bet_seed_bonus"]
 
             if pending_match_id is not None:
                 # Match by pending_match_id OR legacy bets (NULL) with matching timestamp
@@ -828,15 +849,43 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
             rows = cursor.fetchall()
             if not rows:
+                seed_return = int(bet_seed_radiant) + int(bet_seed_dire) + int(bet_seed_bonus)
+                if seed_return > 0:
+                    self._credit_nonprofit_fund_in_txn(
+                        cursor,
+                        normalized_guild,
+                        seed_return,
+                        source="dota_bet_seed_return",
+                        related_id=pending_match_id if pending_match_id is not None else since_ts,
+                        reason="unused betting seed returned",
+                    )
+                    distributions["seed_returned"] = [{"amount": seed_return}]
                 return distributions
 
             if betting_mode == "pool":
                 distributions, balance_deltas, payout_updates = self._calculate_pool_payouts(
-                    rows, winning_team
+                    rows,
+                    winning_team,
+                    bet_seed_radiant=bet_seed_radiant,
+                    bet_seed_dire=bet_seed_dire,
                 )
             else:
                 distributions, balance_deltas, payout_updates = self._calculate_house_payouts(
-                    rows, winning_team, house_payout_multiplier
+                    rows,
+                    winning_team,
+                    house_payout_multiplier,
+                    bet_seed_bonus=bet_seed_bonus,
+                )
+
+            seed_return = sum(item["amount"] for item in distributions.get("seed_returned", []))
+            if seed_return > 0:
+                self._credit_nonprofit_fund_in_txn(
+                    cursor,
+                    normalized_guild,
+                    seed_return,
+                    source="dota_bet_seed_return",
+                    related_id=pending_match_id if pending_match_id is not None else since_ts,
+                    reason="retained betting seed returned",
                 )
 
             if bankruptcy_penalty_rate is not None:
@@ -904,6 +953,96 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return distributions
 
+    def _consume_pending_match_seed_in_txn(
+        self,
+        cursor,
+        normalized_guild: int,
+        pending_match_id: int | None,
+        *,
+        bet_seed_reserved: int = 0,
+        bet_seed_radiant: int = 0,
+        bet_seed_dire: int = 0,
+        bet_seed_bonus: int = 0,
+    ) -> dict[str, int]:
+        """Read and zero pending-match seed fields inside the active transaction."""
+        fallback = {
+            "bet_seed_reserved": int(bet_seed_reserved or 0),
+            "bet_seed_radiant": int(bet_seed_radiant or 0),
+            "bet_seed_dire": int(bet_seed_dire or 0),
+            "bet_seed_bonus": int(bet_seed_bonus or 0),
+        }
+        if pending_match_id is None:
+            return fallback
+
+        cursor.execute(
+            """
+            SELECT payload
+            FROM pending_matches
+            WHERE pending_match_id = ? AND guild_id = ?
+            """,
+            (pending_match_id, normalized_guild),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return dict.fromkeys(self._PENDING_SEED_FIELDS, 0)
+
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+
+        consumed = {
+            key: int(payload.get(key, 0) or 0)
+            for key in self._PENDING_SEED_FIELDS
+        }
+        if any(consumed.values()):
+            for key in self._PENDING_SEED_FIELDS:
+                payload[key] = 0
+            cursor.execute(
+                """
+                UPDATE pending_matches
+                SET payload = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE pending_match_id = ? AND guild_id = ?
+                """,
+                (json.dumps(payload), pending_match_id, normalized_guild),
+            )
+        return consumed
+
+    def _credit_nonprofit_fund_in_txn(
+        self,
+        cursor,
+        normalized_guild: int,
+        amount: int,
+        *,
+        source: str,
+        related_id: str | int | None,
+        reason: str,
+    ) -> None:
+        """Credit the nonprofit fund inside an existing transaction."""
+        if amount <= 0:
+            return
+        self._set_economy_ledger_context(
+            cursor,
+            source=source,
+            related_type="pending_match",
+            related_id=related_id,
+            reason=reason,
+            metadata={"amount": amount},
+        )
+        try:
+            cursor.execute(
+                """
+                INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    total_collected = total_collected + excluded.total_collected,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_guild, amount),
+            )
+        finally:
+            self._clear_economy_ledger_context(cursor)
+
     def _apply_bankruptcy_penalty_in_txn(
         self, cursor, distributions: dict, balance_deltas: dict[int, int],
         normalized_guild: int, penalty_rate: float,
@@ -945,12 +1084,19 @@ class BetRepository(BaseRepository, IBetRepository):
         return penalties
 
     def _calculate_house_payouts(
-        self, rows: list, winning_team: str, house_payout_multiplier: float
+        self,
+        rows: list,
+        winning_team: str,
+        house_payout_multiplier: float,
+        *,
+        bet_seed_bonus: int = 0,
     ) -> tuple:
         """Calculate house mode payouts (1:1) with leverage support."""
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         balance_deltas: dict[int, int] = {}
         payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
+        winning_entries: list[dict] = []
+        effective_by_user: dict[int, int] = {}
 
         for row in rows:
             bet = dict(row)
@@ -972,14 +1118,61 @@ class BetRepository(BaseRepository, IBetRepository):
 
             # Payout based on effective bet (amount * leverage)
             payout = int(effective_bet * (1 + house_payout_multiplier))
-            balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
-            payout_updates.append((payout, bet["bet_id"]))
             entry["payout"] = payout
-            distributions["winners"].append(entry)
+            winning_entries.append(entry)
+            effective_by_user[bet["discord_id"]] = (
+                effective_by_user.get(bet["discord_id"], 0) + effective_bet
+            )
+
+        total_winning_effective = sum(effective_by_user.values())
+        if total_winning_effective <= 0:
+            if bet_seed_bonus > 0:
+                distributions["seed_returned"] = [{"amount": int(bet_seed_bonus)}]
+            return distributions, balance_deltas, payout_updates
+
+        bonus_by_user: dict[int, int] = {}
+        if bet_seed_bonus > 0:
+            allocated = 0
+            users = list(effective_by_user.items())
+            for index, (discord_id, effective_total) in enumerate(users):
+                if index == len(users) - 1:
+                    bonus = int(bet_seed_bonus) - allocated
+                else:
+                    bonus = int((effective_total / total_winning_effective) * int(bet_seed_bonus))
+                    allocated += bonus
+                bonus_by_user[discord_id] = bonus
+
+        entries_by_user: dict[int, list[dict]] = {}
+        for entry in winning_entries:
+            entries_by_user.setdefault(entry["discord_id"], []).append(entry)
+
+        for discord_id, entries in entries_by_user.items():
+            user_bonus = bonus_by_user.get(discord_id, 0)
+            user_effective = sum(e["effective_bet"] for e in entries)
+            allocated_bonus = 0
+            for index, entry in enumerate(entries):
+                if user_bonus and index == len(entries) - 1:
+                    entry_bonus = user_bonus - allocated_bonus
+                elif user_bonus:
+                    entry_bonus = int((entry["effective_bet"] / user_effective) * user_bonus)
+                    allocated_bonus += entry_bonus
+                else:
+                    entry_bonus = 0
+                entry["payout"] += entry_bonus
+                balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + entry["payout"]
+                payout_updates.append((entry["payout"], entry["bet_id"]))
+                distributions["winners"].append(entry)
 
         return distributions, balance_deltas, payout_updates
 
-    def _calculate_pool_payouts(self, rows: list, winning_team: str) -> tuple:
+    def _calculate_pool_payouts(
+        self,
+        rows: list,
+        winning_team: str,
+        *,
+        bet_seed_radiant: int = 0,
+        bet_seed_dire: int = 0,
+    ) -> tuple:
         """Calculate pool mode payouts (proportional from total pool) with leverage support.
 
         Payouts are aggregated per user before applying ceiling to prevent exploits
@@ -999,16 +1192,15 @@ class BetRepository(BaseRepository, IBetRepository):
             for row in rows
             if row["team_bet_on"] == winning_team
         )
+        winning_seed = int(bet_seed_radiant) if winning_team == "radiant" else int(bet_seed_dire)
+        losing_seed = int(bet_seed_dire) if winning_team == "radiant" else int(bet_seed_radiant)
 
-        # Edge case: no bets on winning side - refund all effective bets
+        # Edge case: no real bets on winning side - losing bets burn and seed returns.
         if winner_pool == 0:
             for row in rows:
                 bet = dict(row)
                 leverage = bet.get("leverage", 1) or 1
                 effective_bet = bet["amount"] * leverage
-                balance_deltas[bet["discord_id"]] = (
-                    balance_deltas.get(bet["discord_id"], 0) + effective_bet
-                )
                 distributions["losers"].append(
                     {
                         "bet_id": bet["bet_id"],
@@ -1017,12 +1209,17 @@ class BetRepository(BaseRepository, IBetRepository):
                         "leverage": leverage,
                         "effective_bet": effective_bet,
                         "team": bet["team_bet_on"],
-                        "refunded": True,
                     }
                 )
+            seed_return = int(bet_seed_radiant) + int(bet_seed_dire)
+            if seed_return > 0:
+                distributions["seed_returned"] = [{"amount": seed_return}]
             return distributions, balance_deltas, payout_updates
 
+        total_pool += losing_seed
         multiplier = total_pool / winner_pool
+        if winning_seed > 0:
+            distributions["seed_returned"] = [{"amount": winning_seed}]
 
         # First pass: calculate raw payouts and group winning bets by user
         winning_bets_by_user: dict[int, list[dict]] = {}
@@ -1084,7 +1281,12 @@ class BetRepository(BaseRepository, IBetRepository):
         return distributions, balance_deltas, payout_updates
 
     def refund_pending_bets_atomic(
-        self, *, guild_id: int | None, since_ts: int, pending_match_id: int | None = None
+        self,
+        *,
+        guild_id: int | None,
+        since_ts: int,
+        pending_match_id: int | None = None,
+        bet_seed_reserved: int = 0,
     ) -> int:
         """
         Atomically refund + delete pending bets for the current match window.
@@ -1099,6 +1301,13 @@ class BetRepository(BaseRepository, IBetRepository):
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            seed_fields = self._consume_pending_match_seed_in_txn(
+                cursor,
+                normalized_guild,
+                pending_match_id,
+                bet_seed_reserved=bet_seed_reserved,
+            )
+            bet_seed_reserved = seed_fields["bet_seed_reserved"]
 
             if pending_match_id is not None:
                 # Match by pending_match_id OR legacy bets (NULL) with matching timestamp
@@ -1122,6 +1331,15 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
             rows = cursor.fetchall()
             if not rows:
+                if bet_seed_reserved > 0:
+                    self._credit_nonprofit_fund_in_txn(
+                        cursor,
+                        normalized_guild,
+                        int(bet_seed_reserved),
+                        source="dota_bet_seed_return",
+                        related_id=pending_match_id if pending_match_id is not None else since_ts,
+                        reason="aborted betting seed returned",
+                    )
                 return 0
 
             refund_deltas: dict[int, int] = {}
@@ -1163,6 +1381,15 @@ class BetRepository(BaseRepository, IBetRepository):
                 cursor.execute(
                     f"DELETE FROM bets WHERE bet_id IN ({placeholders})",
                     bet_ids,
+                )
+            if bet_seed_reserved > 0:
+                self._credit_nonprofit_fund_in_txn(
+                    cursor,
+                    normalized_guild,
+                    int(bet_seed_reserved),
+                    source="dota_bet_seed_return",
+                    related_id=pending_match_id if pending_match_id is not None else since_ts,
+                    reason="aborted betting seed returned",
                 )
             return len(bet_ids)
 

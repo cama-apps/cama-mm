@@ -547,10 +547,12 @@ class RebellionService:
 
     def _pick_war_scar_wedge(self) -> str:
         """Pick a random positive wedge to be scarred."""
-        # These are representative positive labels from the normal wheel
+        from utils.wheel_drawing import WHEEL_WEDGES
+
         positive_labels = [
-            "5", "10", "15", "20", "25", "30", "35", "40", "45", "50",
-            "55", "60", "65", "70", "75", "80", "85", "90", "95", "100",
+            str(value)
+            for _label, value, _color in WHEEL_WEDGES
+            if isinstance(value, int) and value > 0
         ]
         return random.choice(positive_labels)
 

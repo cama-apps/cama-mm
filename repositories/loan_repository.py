@@ -251,6 +251,75 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"]
 
+    def deduct_up_to_nonprofit_fund(
+        self,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
+        """Atomically deduct up to amount from the nonprofit fund.
+
+        Returns the amount actually deducted. If the reserve is empty, returns 0.
+        """
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+
+        normalized_id = self.normalize_guild_id(guild_id)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            )
+            row = cursor.fetchone()
+            current = row["total_collected"] if row else 0
+            deduction = min(int(amount), int(current))
+            if deduction <= 0:
+                return 0
+
+            has_context = any(
+                value is not None
+                for value in (
+                    source,
+                    actor_id,
+                    related_type,
+                    related_id,
+                    reason,
+                    metadata,
+                )
+            )
+            if has_context:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=reason,
+                    metadata=metadata,
+                )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE nonprofit_fund
+                    SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                    """,
+                    (deduction, normalized_id),
+                )
+            finally:
+                if has_context:
+                    self._clear_economy_ledger_context(cursor)
+
+            return deduction
+
     def get_and_deduct_nonprofit_fund_atomic(
         self,
         guild_id: int | None,

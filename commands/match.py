@@ -932,6 +932,7 @@ class MatchCommands(commands.Cog):
         betting_service = getattr(self.bot, "betting_service", None)
         totals = {"radiant": 0, "dire": 0}
         lock_until = None
+        seed_radiant = seed_dire = seed_bonus = 0
         if betting_service:
             pending_state = await asyncio.to_thread(
                 self.match_service.get_last_shuffle,
@@ -942,9 +943,19 @@ class MatchCommands(commands.Cog):
                 betting_service.get_pot_odds, guild_id, pending_state=pending_state
             )
             lock_until = pending_state.bet_lock_until if pending_state else None
+            if pending_state:
+                seed_radiant = pending_state.bet_seed_radiant
+                seed_dire = pending_state.bet_seed_dire
+                seed_bonus = pending_state.bet_seed_bonus
 
         wager_field_name, wager_field_value = format_betting_display(
-            totals["radiant"], totals["dire"], mode, lock_until
+            totals["radiant"],
+            totals["dire"],
+            mode,
+            lock_until,
+            seed_radiant=seed_radiant,
+            seed_dire=seed_dire,
+            seed_bonus=seed_bonus,
         )
         embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 

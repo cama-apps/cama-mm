@@ -31,6 +31,9 @@ import logging
 import random
 from dataclasses import dataclass
 
+from config import AUTO_BLIND_THRESHOLD
+from utils.economy_scaling import scale_minigame_jc_delta
+
 logger = logging.getLogger("cama_bot.services.dig_splash")
 
 ACTIVE_DIGGERS_LOOKBACK_DAYS = 7
@@ -243,6 +246,12 @@ def resolve_splash(
             strategy=strategy, event_name=event_name, victims=[],
             total_burned=0, mode=mode,
         )
+    scaled_penalty_jc = scale_minigame_jc_delta(penalty_jc)
+    if scaled_penalty_jc <= 0:
+        return SplashResult(
+            strategy=strategy, event_name=event_name, victims=[],
+            total_burned=0, mode=mode,
+        )
 
     repos = _ReposBundle(player_repo, dig_repo)
     victim_ids = selector(repos, guild_id, digger_id, victim_count)
@@ -252,13 +261,14 @@ def resolve_splash(
         "strategy": strategy,
         "digger_id": digger_id,
         "penalty_requested": penalty_jc,
+        "penalty_scaled": scaled_penalty_jc,
         "mode": mode,
     })
 
     victims: list[tuple[int, int]] = []
     for vid in victim_ids:
         if mode == "grant":
-            actual = int(penalty_jc)
+            actual = int(scaled_penalty_jc)
             player_repo.add_balance(
                 vid,
                 guild_id,
@@ -285,7 +295,14 @@ def resolve_splash(
             victims.append((vid, actual))
             continue
         if mode == "steal":
-            actual = int(penalty_jc)
+            actual = int(scaled_penalty_jc)
+            try:
+                current_balance = player_repo.get_balance(vid, guild_id)
+            except Exception:
+                logger.exception("Splash steal: get_balance failed for victim %s in guild %s", vid, guild_id)
+                continue
+            if current_balance < AUTO_BLIND_THRESHOLD:
+                continue
             try:
                 player_repo.steal_atomic(
                     thief_discord_id=digger_id,
@@ -332,9 +349,9 @@ def resolve_splash(
         except Exception:
             logger.exception("Splash: get_balance failed for victim %s in guild %s", vid, guild_id)
             continue
-        if current_balance <= 0:
+        if current_balance < AUTO_BLIND_THRESHOLD:
             continue
-        actual = int(min(penalty_jc, current_balance))
+        actual = int(min(scaled_penalty_jc, current_balance))
         if actual <= 0:
             continue
         player_repo.add_balance(

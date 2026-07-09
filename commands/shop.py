@@ -17,6 +17,7 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from config import (
+    AUTO_BLIND_THRESHOLD,
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
     PACKAGE_DEAL_GAMES_DURATION,
     SHOP_ANNOUNCE_COST,
@@ -1812,7 +1813,10 @@ class ShopCommands(commands.Cog):
             all_players = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
-            eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            eligible = [
+                p for p in all_players
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+            ]
             if not eligible:
                 await _refund("No eligible targets to scorch; refunded.")
                 return
@@ -1939,7 +1943,10 @@ class ShopCommands(commands.Cog):
             all_players = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
-            eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            eligible = [
+                p for p in all_players
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+            ]
             if not eligible:
                 await _refund("No living souls to drain; refunded.")
                 return
@@ -2053,7 +2060,10 @@ class ShopCommands(commands.Cog):
             all_players = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
-            eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            eligible = [
+                p for p in all_players
+                if p.discord_id != user_id and p.jopacoin_balance >= AUTO_BLIND_THRESHOLD
+            ]
             total_drained = 0
             for p in eligible:
                 drain = random.randint(4, 12)

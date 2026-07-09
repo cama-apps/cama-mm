@@ -23,6 +23,7 @@ from commands.dig import EventEncounterView
 from repositories.dig_repository import DigRepository
 from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
 from services.dig_service import DigService
+from utils.economy_scaling import scale_minigame_jc_delta
 
 
 @pytest.fixture
@@ -641,11 +642,12 @@ class TestJcThreat:
 
         result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
         assert result["success"]
-        # Negative-event tuning scales the authored loss: -200 * 1.3 -> -260.
-        assert result["jc_delta"] == -260
+        # Negative-event tuning scales the authored loss, then economy scaling applies.
+        expected_loss = scale_minigame_jc_delta(-260)
+        assert result["jc_delta"] == expected_loss
         # The balance went negative — into the debt system, no floor at 0.
         balance = player_repository.get_balance(10001, 12345)
-        assert balance == balance_before - 260
+        assert balance == balance_before + expected_loss
         assert balance < 0
         # resolve_event surfaces the negative resulting balance for the embed.
         assert result.get("balance_after") == balance
@@ -670,8 +672,9 @@ class TestJcThreat:
 
         result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
         assert result["success"]
-        assert result["jc_delta"] == 40
-        assert player_repository.get_balance(10001, 12345) == balance_before + 40
+        expected_gain = scale_minigame_jc_delta(40)
+        assert result["jc_delta"] == expected_gain
+        assert player_repository.get_balance(10001, 12345) == balance_before + expected_gain
         # No debt surfaced on a positive outcome.
         assert result.get("balance_after") is None
 

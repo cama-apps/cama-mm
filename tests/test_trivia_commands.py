@@ -130,6 +130,39 @@ class TestTriviaPayout:
         assert session.total_jc == 2
         assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 2
 
+    @pytest.mark.asyncio
+    async def test_correct_answer_scales_larger_trivia_payout(
+        self, player_service, registered_player, monkeypatch
+    ):
+        import commands.trivia as trivia_mod
+
+        bot = SimpleNamespace(
+            player_service=player_service,
+            mana_effects_service=None,
+            bankruptcy_service=None,
+        )
+        cog = trivia_mod.TriviaCog(bot)
+        session = trivia_mod.TriviaSession(
+            user_id=registered_player,
+            guild_id=TEST_GUILD_ID,
+            user=_trivia_user(registered_player),
+            streak=9,
+        )
+        cog._sessions[(registered_player, TEST_GUILD_ID)] = session
+        view = trivia_mod.TriviaView(session, _trivia_question(), 10, cog)
+        interaction = MagicMock()
+        interaction.user.id = registered_player
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        monkeypatch.setattr(trivia_mod, "generate_question", lambda _streak, _recent: None)
+
+        initial = player_service.get_balance(registered_player, TEST_GUILD_ID)
+        await view._handle_answer(interaction, 1)
+
+        assert session.streak == 10
+        assert session.total_jc == 2
+        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 2
+
 
 class TestTriviaCooldown:
     def test_first_session_succeeds(self, player_service, registered_player):

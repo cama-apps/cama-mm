@@ -52,6 +52,7 @@ from services.dig_constants import (
     cave_in_band,
     roll_catastrophic_cave_in,
 )
+from utils.economy_scaling import scale_minigame_jc_delta
 
 # Public surface plus the module-level names other modules and the dig test
 # suite import directly from ``services.dig_service``. The helpers and
@@ -1037,13 +1038,15 @@ class DigService(
 
         jc_earned += streak_bonus
 
-        # Plains tithe / Blue tax apply to the full payout (base + milestone +
-        # streak) so the deflationary pressure matches /roll and /betting.
+        jc_earned = scale_minigame_jc_delta(jc_earned)
+
+        # Plains tithe / Blue tax apply to the scaled full payout (base +
+        # milestone + streak) so the transferred/burned amounts are scaled too.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
 
         # Helltide bell: a flat per-dig tax while the guild modifier is active.
         # Pure deflation — coins burn, not transferred.
-        helltide_tax = self._helltide_tax(guild_id)
+        helltide_tax = scale_minigame_jc_delta(self._helltide_tax(guild_id))
         if helltide_tax > 0:
             jc_earned = max(0, jc_earned - helltide_tax)
 

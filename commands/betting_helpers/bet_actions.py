@@ -21,7 +21,7 @@ from config import (
     JOPACOIN_MIN_BET,
 )
 from services.permissions import has_admin_permission
-from utils.formatting import JOPACOIN_EMOTE
+from utils.formatting import JOPACOIN_EMOTE, calculate_pool_odds
 from utils.interaction_safety import safe_defer
 from utils.neon_helpers import send_neon_result
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -310,11 +310,12 @@ async def mybets_action(
             bets_by_team.setdefault(side, []).append(bet)
 
         betting_mode = pending_state.betting_mode if pending_state else "pool"
-        pool_totals = None
-        if betting_mode == "pool" and pending_state:
-            pool_totals = await asyncio.to_thread(
+        match_totals = None
+        if pending_state:
+            match_totals = await asyncio.to_thread(
                 functools.partial(cog.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
             )
+        pool_totals = match_totals if betting_mode == "pool" else None
 
         team_sections = []
         for team_key in ("radiant", "dire"):
@@ -361,16 +362,33 @@ async def mybets_action(
                 my_team_total = pool_totals[team_key]
                 if my_team_total > 0 and total_pool > 0:
                     my_share = total_effective / my_team_total
-                    potential_payout = int(total_pool * my_share)
-                    other_team = "dire" if team_key == "radiant" else "radiant"
-                    odds_ratio = pool_totals[other_team] / my_team_total if my_team_total > 0 else 0
+                    seed_against = (
+                        pending_state.bet_seed_dire
+                        if team_key == "radiant"
+                        else pending_state.bet_seed_radiant
+                    )
+                    seeded_pool = total_pool + seed_against
+                    potential_payout = int(seeded_pool * my_share)
+                    odds_ratio = (seeded_pool / my_team_total) - 1
                     section_msg += (
                         f"\n📊 If {team_name} wins: ~{potential_payout} {JOPACOIN_EMOTE} "
                         f"({odds_ratio:.2f}:1)"
                     )
             elif betting_mode == "house":
                 potential_payout = total_effective * 2
-                section_msg += f"\nIf {team_name} wins: {potential_payout} {JOPACOIN_EMOTE} (1:1)"
+                bonus = 0
+                if pending_state and match_totals and pending_state.bet_seed_bonus:
+                    team_total = match_totals[team_key]
+                    if team_total > 0:
+                        bonus = int(
+                            pending_state.bet_seed_bonus * total_effective / team_total
+                        )
+                        potential_payout += bonus
+                bonus_text = f" + ~{bonus} bonus" if bonus else ""
+                section_msg += (
+                    f"\nIf {team_name} wins: {potential_payout} {JOPACOIN_EMOTE} "
+                    f"(1:1{bonus_text})"
+                )
 
             team_sections.append(section_msg)
 
@@ -485,24 +503,43 @@ async def bets_action(
         functools.partial(cog.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
     )
     total_pool = totals["radiant"] + totals["dire"]
-    radiant_mult = total_pool / totals["radiant"] if totals["radiant"] > 0 else None
-    dire_mult = total_pool / totals["dire"] if totals["dire"] > 0 else None
+    betting_mode = pending_state.betting_mode
 
     # Build embed
     match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
+    mode_label = "Pool" if betting_mode == "pool" else "House"
     embed = discord.Embed(
-        title=f"📊 {match_label}Pool Bets ({len(all_bets)} bets)",
+        title=f"📊 {match_label}{mode_label} Bets ({len(all_bets)} bets)",
         color=discord.Color.gold(),
     )
 
     # Current odds header
     lock_until = pending_state.bet_lock_until
-    radiant_odds_str = f"{radiant_mult:.2f}x" if radiant_mult else "—"
-    dire_odds_str = f"{dire_mult:.2f}x" if dire_mult else "—"
-    odds_text = (
-        f"🟢 Radiant: {totals['radiant']} {JOPACOIN_EMOTE} ({radiant_odds_str}) | "
-        f"🔴 Dire: {totals['dire']} {JOPACOIN_EMOTE} ({dire_odds_str})"
-    )
+    if betting_mode == "pool":
+        radiant_mult, dire_mult = calculate_pool_odds(
+            totals["radiant"],
+            totals["dire"],
+            seed_radiant=pending_state.bet_seed_radiant,
+            seed_dire=pending_state.bet_seed_dire,
+        )
+        radiant_odds_str = f"{radiant_mult:.2f}x" if radiant_mult else "—"
+        dire_odds_str = f"{dire_mult:.2f}x" if dire_mult else "—"
+        odds_text = (
+            f"🟢 Radiant: {totals['radiant']} {JOPACOIN_EMOTE} ({radiant_odds_str}) | "
+            f"🔴 Dire: {totals['dire']} {JOPACOIN_EMOTE} ({dire_odds_str})"
+        )
+        if pending_state.bet_seed_radiant or pending_state.bet_seed_dire:
+            odds_text += (
+                f"\nSeed: Radiant {pending_state.bet_seed_radiant} {JOPACOIN_EMOTE} | "
+                f"Dire {pending_state.bet_seed_dire} {JOPACOIN_EMOTE}"
+            )
+    else:
+        odds_text = (
+            f"🟢 Radiant: {totals['radiant']} {JOPACOIN_EMOTE} (1:1) | "
+            f"🔴 Dire: {totals['dire']} {JOPACOIN_EMOTE} (1:1)"
+        )
+        if pending_state.bet_seed_bonus:
+            odds_text += f"\nWinner bonus: {pending_state.bet_seed_bonus} {JOPACOIN_EMOTE}"
     if lock_until:
         odds_text += f"\nBetting closes <t:{lock_until}:R>"
     embed.add_field(name="Current Odds", value=odds_text, inline=False)
@@ -568,14 +605,22 @@ async def bets_action(
             inline=False,
         )
 
-    # Pool summary
+    # Mode summary
     radiant_pct = (totals["radiant"] / total_pool * 100) if total_pool > 0 else 0
     dire_pct = (totals["dire"] / total_pool * 100) if total_pool > 0 else 0
-    summary_text = (
-        f"**Total:** {total_pool} {JOPACOIN_EMOTE} effective\n"
-        f"Radiant: {totals['radiant']} ({radiant_pct:.0f}%) | Dire: {totals['dire']} ({dire_pct:.0f}%)"
-    )
-    embed.add_field(name="Pool Summary", value=summary_text, inline=False)
+    if betting_mode == "pool":
+        summary_name = "Pool Summary"
+        summary_text = (
+            f"**Total:** {total_pool} {JOPACOIN_EMOTE} effective\n"
+            f"Radiant: {totals['radiant']} ({radiant_pct:.0f}%) | Dire: {totals['dire']} ({dire_pct:.0f}%)"
+        )
+    else:
+        summary_name = "House Summary"
+        summary_text = (
+            f"**Total staked:** {total_pool} {JOPACOIN_EMOTE} effective\n"
+            f"Radiant: {totals['radiant']} ({radiant_pct:.0f}%) | Dire: {totals['dire']} ({dire_pct:.0f}%)"
+        )
+    embed.add_field(name=summary_name, value=summary_text, inline=False)
 
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -664,6 +709,3 @@ async def balance_action(
     if neon:
         neon_result = await neon.on_balance_check(user_id, guild_id, balance)
         await send_neon_result(interaction, neon_result)
-
-
-
