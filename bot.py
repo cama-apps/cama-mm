@@ -823,6 +823,22 @@ def _is_jopacoin_emoji(emoji) -> bool:
     return emoji.id == JOPACOIN_EMOJI_ID or emoji.name == "jopacoin"
 
 
+def _should_force_regular_join_for_conditional_click(
+    lobby,
+    user_id: int,
+    ready_threshold: int = LOBBY_READY_THRESHOLD,
+) -> bool:
+    """Return True when a frogling click should fill a regular lobby slot."""
+    if not lobby:
+        return False
+
+    players = getattr(lobby, "players", set())
+    conditional_players = getattr(lobby, "conditional_players", set())
+    already_in_lobby = user_id in players or user_id in conditional_players
+    projected_total = lobby.get_total_count() if already_in_lobby else lobby.get_total_count() + 1
+    return projected_total <= ready_threshold
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
     """Handle reaction adds for lobby joining, readycheck confirmations, and gamba notifications."""
@@ -989,14 +1005,30 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
+        force_regular_from_frogling = is_frogling and _should_force_regular_join_for_conditional_click(
+            lobby,
+            payload.user_id,
+            getattr(bot.lobby_service, "ready_threshold", LOBBY_READY_THRESHOLD),
+        )
+
         # Handle mutual exclusivity: join first (atomically moves between sets),
         # then remove the old reaction. This order prevents on_raw_reaction_remove
         # from seeing the player still in the old set and posting a spurious leave.
-        if is_sword:
+        post_join_activity = True
+        if is_sword or force_regular_from_frogling:
             success, reason, pending_info = await asyncio.to_thread(
                 bot.lobby_service.join_lobby, payload.user_id, guild_id
             )
             join_type = "regular"
+            if (
+                not success
+                and force_regular_from_frogling
+                and reason == "already_joined"
+                and payload.user_id in lobby.players
+            ):
+                success = True
+                reason = ""
+                post_join_activity = False
             if success:
                 # Remove frogling after join so the reaction_remove handler finds nothing to leave
                 try:
@@ -1050,6 +1082,9 @@ async def on_raw_reaction_add(payload):
         # is from before the join, so under concurrent reactions it can lag.
         lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
         if not lobby:
+            return
+
+        if not post_join_activity:
             return
 
         await update_lobby_message(message, lobby, payload.guild_id)
