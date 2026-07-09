@@ -681,6 +681,13 @@ class TestWarFlow:
         assert war["outcome"] == "attackers_win"
         assert war["wheel_effect_spins_remaining"] == REBELLION_WHEEL_EFFECT_SPINS
         assert war["war_scar_wedge_label"] is not None
+        from utils.wheel_drawing import WHEEL_WEDGES
+        positive_labels = {
+            str(value)
+            for _label, value, _color in WHEEL_WEDGES
+            if isinstance(value, int) and value > 0
+        }
+        assert war["war_scar_wedge_label"] in positive_labels
         assert war["celebration_spin_expires_at"] is not None
 
     def test_defender_win_rewards(self, rebellion_service, rebellion_repo, player_repo, bankruptcy_repo):
@@ -1260,8 +1267,9 @@ class TestApplyWarEffects:
 
     def test_attacker_win_scars_first_matching_wedge(self):
         from utils.wheel_drawing import apply_war_effects
-        war_state = {"outcome": "attackers_win", "war_scar_wedge_label": "50"}
         wedges = self._get_normal_wedges()
+        scar_value = next(value for _label, value, _color in wedges if isinstance(value, int) and value > 0)
+        war_state = {"outcome": "attackers_win", "war_scar_wedge_label": str(scar_value)}
         modified = apply_war_effects(wedges, war_state)
 
         scar_wedges = [w for w in modified if w[0] == "WAR SCAR 💀"]
