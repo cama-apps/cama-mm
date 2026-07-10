@@ -106,17 +106,6 @@ MAFIA_CHANNEL_ID: int = 1514997325385306132
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
 
-# OpenSkill display constants. These are canonical: CamaOpenSkillSystem in
-# openskill_rating_system.py reads its MIN_MU / DISPLAY_SCALE class attributes
-# from here, and domain models use them without importing infrastructure.
-OPENSKILL_MIN_MU = 25.0  # mu floor (display rating 0)
-# Display scale factor: (mu - MIN_MU) * DISPLAY_SCALE = display rating.
-# Chosen so that mmr_to_os_mu(MMR_MAX) produces display == Glicko-2 RATING_MAX.
-# With mmr_to_os_mu(mmr) = 25 + mmr/200 and MMR_MAX=12000 → mu=85, and
-# Glicko-2 RATING_MAX=3000, we need factor = 3000 / (85 - 25) = 50.
-# This keeps OpenSkill and Glicko-2 display ratings on the same 0-3000 scale
-# so team-value computations do not inflate OpenSkill-rated players.
-OPENSKILL_DISPLAY_SCALE = 50.0
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
@@ -318,9 +307,6 @@ WHEEL_BOMB_OMB_VICTIM_COUNT = _parse_int("WHEEL_BOMB_OMB_VICTIM_COUNT", 3)
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)
 TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%
-
-# Steam/Valve API
-STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
 # AI/LLM Configuration (Groq or Cerebras via LiteLLM)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")

@@ -12,7 +12,6 @@ from config import LOAN_COOLDOWN_SECONDS, LOAN_FEE_RATE, LOAN_MAX_AMOUNT, MAX_DE
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
 from services import error_codes
-from services.interfaces import ILoanService
 from services.result import Result
 
 
@@ -75,7 +74,7 @@ class RepaymentResult:
     nonprofit_total: int
 
 
-class LoanService(ILoanService):
+class LoanService:
     """
     Handles loan applications and fee collection.
 

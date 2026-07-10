@@ -18,7 +18,7 @@ from utils.http_safety import parse_json_bounded, retry_after_seconds
 
 logger = logging.getLogger("cama_bot.opendota")
 
-# Default timeout for all HTTP calls (seconds). Matches steam_api.py.
+# Default timeout for all HTTP calls (seconds).
 _REQUEST_TIMEOUT = 30
 
 # Status codes that are worth retrying (429 rate-limit + transient 5xx).
@@ -230,8 +230,7 @@ class OpenDotaAPI:
         bound — by the time we call ``.content`` the body is already in memory
         — but it still protects downstream JSON decoding and any later consumers
         from pathologically large replies on unbounded endpoints like
-        ``/players/{id}/matches``. Implementation lives in
-        :mod:`utils.http_safety` so ``steam_api`` can apply the same cap.
+        ``/players/{id}/matches``.
         """
         return parse_json_bounded(response, context, max_bytes=_MAX_RESPONSE_BYTES)
 
@@ -433,9 +432,6 @@ class OpenDotaAPI:
     def get_match_details(self, match_id: int) -> dict | None:
         """
         Get detailed match data from OpenDota.
-
-        Note: Valve's GetMatchDetails API has been broken since May 2024 (patch 7.36).
-        OpenDota parses replay files directly, so it still works.
 
         Args:
             match_id: The Dota 2 match ID

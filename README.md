@@ -15,7 +15,7 @@ A Discord bot for balanced team shuffling in Dota 2 inhouse games for the Camara
 - **Betting System**: Jopacoin wagering on match outcomes with leverage (2x-5x), house/pool modes
 - **Prediction Markets**: Create yes/no predictions with community resolution voting
 - **Economy Features**: Loans, bankruptcy, Jopacoin Reserve, disbursement voting, tipping, Wheel of Fortune
-- **Match Enrichment**: Automatic stats from OpenDota/Valve APIs (K/D/A, heroes, GPM, fantasy points)
+- **Match Enrichment**: Automatic stats from OpenDota (K/D/A, heroes, GPM, fantasy points)
 - **Dota 2 Reference**: Hero and ability lookup with autocomplete
 - **Trivia**: Dota 2 trivia with escalating difficulty streaks, covering heroes, items, abilities, facets, and voicelines
 - **Stats Visualization**: Image generation for match tables, radar graphs, and charts
@@ -35,12 +35,13 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 
 ## Installation
 
+**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
 1. **Clone the repository or navigate to the project directory**
 
-2. **Create virtual environment and install dependencies:**
+2. **Install dependencies:**
    ```bash
-   uv venv
-   uv sync
+   uv sync --frozen
    ```
 
 3. **Set up Discord Bot:**
@@ -69,10 +70,9 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
      ```
      DB_PATH=/path/to/cama_shuffle.db   # overrides the default sqlite file
      OPENDOTA_API_KEY=your_opendota_key  # unlocks the 1200 req/min rate limit
-     STEAM_API_KEY=your_steam_api_key    # enables Valve API match enrichment
      DIG_CHANNEL_ID=123456789012345678   # gates /dig commands and routes output to this channel
      ```
-     Both default to sane values (`cama_shuffle.db` and no API key) if omitted.
+     `DB_PATH` defaults to `cama_shuffle.db`; the API and channel settings are optional.
 
    **Dig channel setup:** when `DIG_CHANNEL_ID` is set, all `/dig *` invocations
    must happen in that channel (or a thread under it) and public dig output
@@ -401,13 +401,13 @@ Extend the betting window after shuffle.
 - `minutes`: Extension time (1-60)
 
 #### `/setleague`
-Set Valve league ID for automatic match enrichment.
+Set the Dota 2 league ID used by OpenDota for automatic match discovery.
 
 **Options:**
-- `league_id`: The Valve league ID
+- `league_id`: The Dota 2 league ID
 
 #### `/enrichmatch`
-Manually enrich a match with Valve API data.
+Manually enrich a match with OpenDota data.
 
 #### `/autodiscover`
 Auto-discover Dota matches from configured league ID.
@@ -439,8 +439,6 @@ Set these in your `.env` file:
 | `ADMIN_USER_IDS` | [] | Comma-separated Discord user IDs for admin access |
 | `DB_PATH` | cama_shuffle.db | Database file path |
 | `OPENDOTA_API_KEY` | None | OpenDota API key for higher rate limits (60→1200 req/min) |
-| `STEAM_API_KEY` | None | Valve Web API key for match enrichment |
-| `DEBUG_LOG_PATH` | None | Enable JSONL debug logging when set |
 
 ### Advanced Configuration
 
@@ -483,18 +481,18 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 Run the test suite:
 
 ```bash
-uv run pytest -n auto
+uv run --locked pytest
 ```
 
 ## Troubleshooting
 
-**Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN` and run `uv venv && uv sync`
+**Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN` and run `uv sync --frozen`
 
 **Commands not showing:** Wait a few minutes for Discord to sync, or use `/sync` command (admin only)
 
 **Database issues:** Only run one bot instance. Delete `cama_shuffle.db` to reset database if needed.
 
-**Match enrichment failing:** Ensure `STEAM_API_KEY` is set for Valve API access, or `OPENDOTA_API_KEY` for OpenDota.
+**Match enrichment failing:** Check OpenDota availability and verify `OPENDOTA_API_KEY` if one is configured.
 
 ## License
 

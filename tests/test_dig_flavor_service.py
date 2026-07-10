@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from repositories.dig_repository import DigRepository
-from repositories.player_repository import PlayerRepository
 from services.dig_flavor_service import (
     DigFlavorService,
     classify_play_style,
@@ -45,9 +44,6 @@ def dig_repo(repo_db_path):
     return DigRepository(repo_db_path)
 
 
-@pytest.fixture
-def player_repository(repo_db_path):
-    return PlayerRepository(repo_db_path)
 
 
 @pytest.fixture

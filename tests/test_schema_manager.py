@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from infrastructure.schema_manager import SchemaManager
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
@@ -62,6 +64,125 @@ def test_schema_manager_initialize_is_idempotent(tmp_path):
 
     assert applied == distinct
     assert applied > 0
+
+
+def test_failed_pending_batch_rolls_back_all_schema_and_migration_rows(tmp_path):
+    db_path = str(tmp_path / "failed-pending-batch.db")
+    manager = SchemaManager(db_path)
+    migration_names = ("synthetic_batch_a", "synthetic_batch_b")
+
+    def migration_a(cursor):
+        cursor.execute("CREATE TABLE synthetic_batch_a (value TEXT NOT NULL)")
+        cursor.execute("INSERT INTO synthetic_batch_a (value) VALUES ('a')")
+
+    def migration_b(cursor):
+        cursor.execute("CREATE TABLE synthetic_batch_b (value TEXT NOT NULL)")
+        cursor.execute("INSERT INTO synthetic_batch_b (value) VALUES ('b')")
+        raise RuntimeError("synthetic migration B failed")
+
+    manager._get_migrations = lambda: [
+        (migration_names[0], migration_a),
+        (migration_names[1], migration_b),
+    ]
+
+    with pytest.raises(RuntimeError, match="synthetic migration B failed"):
+        manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        rolled_back_tables = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name IN (?, ?)
+            """,
+            migration_names,
+        ).fetchall()
+        migration_rows = conn.execute(
+            "SELECT name FROM schema_migrations WHERE name IN (?, ?)",
+            migration_names,
+        ).fetchall()
+
+    assert rolled_back_tables == []
+    assert migration_rows == []
+
+
+def test_failed_pending_batch_retries_cleanly(tmp_path):
+    db_path = str(tmp_path / "retry-pending-batch.db")
+    manager = SchemaManager(db_path)
+    migration_names = ("synthetic_retry_a", "synthetic_retry_b")
+
+    def initial_migration_a(cursor):
+        cursor.execute("CREATE TABLE synthetic_retry_a (value TEXT NOT NULL)")
+        cursor.execute("INSERT INTO synthetic_retry_a (value) VALUES ('a')")
+
+    def failing_migration_b(cursor):
+        cursor.execute("CREATE TABLE synthetic_retry_b (value TEXT NOT NULL)")
+        cursor.execute("INSERT INTO synthetic_retry_b (value) VALUES ('b')")
+        raise RuntimeError("synthetic migration B failed")
+
+    manager._get_migrations = lambda: [
+        (migration_names[0], initial_migration_a),
+        (migration_names[1], failing_migration_b),
+    ]
+
+    with pytest.raises(RuntimeError, match="synthetic migration B failed"):
+        manager.initialize()
+
+    def successful_migration_a(cursor):
+        cursor.execute("CREATE TABLE synthetic_retry_a (value TEXT NOT NULL)")
+        cursor.execute("INSERT INTO synthetic_retry_a (value) VALUES ('a')")
+
+    def successful_migration_b(cursor):
+        cursor.execute("CREATE TABLE synthetic_retry_b (value TEXT NOT NULL)")
+        cursor.execute("INSERT INTO synthetic_retry_b (value) VALUES ('b')")
+
+    manager._get_migrations = lambda: [
+        (migration_names[0], successful_migration_a),
+        (migration_names[1], successful_migration_b),
+    ]
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM synthetic_retry_a").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM synthetic_retry_b").fetchone()[0] == 1
+        migration_counts = dict(
+            conn.execute(
+                """
+                SELECT name, COUNT(*)
+                FROM schema_migrations
+                WHERE name IN (?, ?)
+                GROUP BY name
+                """,
+                migration_names,
+            ).fetchall()
+        )
+
+    assert migration_counts == {
+        migration_names[0]: 1,
+        migration_names[1]: 1,
+    }
+
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM synthetic_retry_a").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM synthetic_retry_b").fetchone()[0] == 1
+        migration_counts = dict(
+            conn.execute(
+                """
+                SELECT name, COUNT(*)
+                FROM schema_migrations
+                WHERE name IN (?, ?)
+                GROUP BY name
+                """,
+                migration_names,
+            ).fetchall()
+        )
+
+    assert migration_counts == {
+        migration_names[0]: 1,
+        migration_names[1]: 1,
+    }
 
 
 def test_migration_normalize_null_guild_id_registered_on_initialize(tmp_path):

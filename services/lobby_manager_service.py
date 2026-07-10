@@ -420,5 +420,3 @@ class LobbyManagerService:
                 self.origin_channel_ids[guild_id] = data["origin_channel_id"]
 
 
-# Backward compatibility alias - allows gradual migration
-LobbyManager = LobbyManagerService

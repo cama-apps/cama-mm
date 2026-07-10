@@ -2,7 +2,15 @@
 Tests for hero lookup utility.
 """
 
-from utils.hero_lookup import get_all_heroes, get_hero_name, get_hero_short_name
+from utils.hero_lookup import (
+    classify_hero_role,
+    get_all_heroes,
+    get_hero_color,
+    get_hero_image_url,
+    get_hero_name,
+    get_hero_roles,
+    get_hero_short_name,
+)
 
 
 class TestHeroLookup:
@@ -71,3 +79,23 @@ class TestHeroData:
         for hero_id, name in expected_heroes:
             assert hero_id in heroes
             assert heroes[hero_id] == name
+
+
+
+class TestDotabaseBackedHeroMetadata:
+    def test_image_and_color_come_from_bundled_hero_data(self):
+        assert get_hero_image_url(1) == (
+            "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/"
+            "dota_react/heroes/antimage.png"
+        )
+        assert get_hero_image_url(1, size="icon") == (
+            "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/"
+            "dota_react/heroes/icons/antimage.png"
+        )
+        assert get_hero_color(1) == 0x784094
+
+    def test_roles_come_from_bundled_hero_data(self):
+        assert get_hero_roles(1) == ["Carry", "Escape", "Nuker"]
+        assert classify_hero_role(1) == "Core"
+        assert get_hero_roles(5) == ["Support", "Disabler", "Nuker"]
+        assert classify_hero_role(5) == "Support"

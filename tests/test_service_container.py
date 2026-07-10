@@ -1,6 +1,8 @@
 """Tests for ServiceContainer."""
 
 
+from inspect import signature
+
 from infrastructure.service_container import ServiceContainer
 
 
@@ -27,12 +29,55 @@ class TestServiceContainerInitialization:
         container.initialize()
         assert container._initialized is True
 
+    def test_constructor_has_single_optional_llm_transport(self, repo_db_path):
+        """The container accepts and stores only the supported LLM API key."""
+        parameters = signature(ServiceContainer).parameters
+        removed = {
+            "loan_cooldown_seconds",
+            "loan_max_amount",
+            "loan_fee_rate",
+            "cerebras_api_key",
+        }
+
+        assert {name for name in parameters if name.endswith("_api_key")} == {
+            "llm_api_key"
+        }
+        assert parameters["llm_api_key"].default is None
+        assert removed.isdisjoint(parameters)
+
+        container = ServiceContainer(repo_db_path, llm_api_key="sentinel-key")
+        assert container.llm_api_key == "sentinel-key"
+        assert removed.isdisjoint(vars(container))
+
+    def test_llm_api_key_is_passed_to_ai_service(self, repo_db_path, monkeypatch):
+        """AIService receives the configured LLM API key unchanged."""
+        import services.ai_service as ai_service_module
+
+        captured = {}
+
+        class CapturingAIService:
+            def __init__(self, *, model, api_key, timeout, max_tokens):
+                captured.update(
+                    model=model,
+                    api_key=api_key,
+                    timeout=timeout,
+                    max_tokens=max_tokens,
+                )
+
+        monkeypatch.setattr(ai_service_module, "AIService", CapturingAIService)
+
+        container = ServiceContainer(repo_db_path, llm_api_key="sentinel-key")
+        container.initialize()
+
+        assert captured["api_key"] == "sentinel-key"
+        assert isinstance(container._components["ai_service"], CapturingAIService)
+
 
 class TestServiceContainerBotExposure:
     """Tests for expose_to_bot functionality."""
 
-    def test_expose_to_bot_sets_attributes(self, repo_db_path):
-        """expose_to_bot sets all expected attributes on bot."""
+    def test_expose_to_bot_sets_supported_attributes_by_identity(self, repo_db_path):
+        """expose_to_bot publishes only the supported component surface."""
         container = ServiceContainer(repo_db_path)
         container.initialize()
 
@@ -42,51 +87,88 @@ class TestServiceContainerBotExposure:
         bot = MockBot()
         container.expose_to_bot(bot)
 
-        # Check repositories
-        assert hasattr(bot, "player_repo")
-        assert hasattr(bot, "match_repo")
-        assert hasattr(bot, "pairings_repo")
-        assert hasattr(bot, "guild_config_repo")
-        assert hasattr(bot, "prediction_repo")
-        assert hasattr(bot, "bankruptcy_repo")
-        assert hasattr(bot, "soft_avoid_repo")
-        assert hasattr(bot, "package_deal_repo")
-        assert hasattr(bot, "tip_repository")
+        expected = {
+            "player_repo": "player_repo",
+            "match_repo": "match_repo",
+            "pairings_repo": "pairings_repo",
+            "bankruptcy_repo": "bankruptcy_repo",
+            "player_service": "player_service",
+            "match_service": "match_service",
+            "betting_service": "betting_service",
+            "loan_service": "loan_service",
+            "bankruptcy_service": "bankruptcy_service",
+            "prediction_service": "prediction_service",
+            "lobby_service": "lobby_service",
+            "lobby_manager": "lobby_manager",
+            "gambling_stats_service": "gambling_stats_service",
+            "balance_history_service": "balance_history_service",
+            "guild_config_service": "guild_config_service",
+            "recalibration_service": "recalibration_service",
+            "disburse_service": "disburse_service",
+            "tax_service": "tax_service",
+            "match_enrichment_service": "match_enrichment_service",
+            "match_discovery_service": "match_discovery_service",
+            "pairings_service": "pairings_service",
+            "soft_avoid_service": "soft_avoid_service",
+            "package_deal_service": "package_deal_service",
+            "tip_service": "tip_service",
+            "opendota_player_service": "opendota_player_service",
+            "rating_comparison_service": "rating_comparison_service",
+            "neon_degen_service": "neon_degen_service",
+            "wrapped_service": "wrapped_service",
+            "rebellion_service": "rebellion_service",
+            "mana_service": "mana_service",
+            "mana_repo": "mana_repo",
+            "mana_effects_service": "mana_effects_service",
+            "protection_service": "protection_service",
+            "buff_service": "buff_service",
+            "dig_service": "dig_service",
+            "dig_flavor_service": "dig_flavor_service",
+            "reminder_service": "reminder_service",
+            "curse_service": "curse_service",
+            "mafia_service": "mafia_service",
+            "mafia_flavor_service": "mafia_flavor_service",
+            "sql_query_service": "sql_query_service",
+            "flavor_text_service": "flavor_text_service",
+        }
+        removed = {
+            "ADMIN_USER_IDS",
+            "ai_service",
+            "buff_repo",
+            "curse_repo",
+            "db",
+            "dig_guild_modifier_repo",
+            "dig_quest_repo",
+            "dig_quest_service",
+            "dig_repo",
+            "economy_ledger_repo",
+            "format_role_display",
+            "guild_config_repo",
+            "mafia_repo",
+            "notification_repo",
+            "package_deal_repo",
+            "prediction_repo",
+            "protection_repo",
+            "rebellion_repo",
+            "role_emojis",
+            "role_names",
+            "slow_drip_repo",
+            "soft_avoid_repo",
+            "tax_repo",
+            "tip_repository",
+        }
 
-        # Check services
-        assert hasattr(bot, "player_service")
-        assert hasattr(bot, "match_service")
-        assert hasattr(bot, "betting_service")
-        assert hasattr(bot, "loan_service")
-        assert hasattr(bot, "bankruptcy_service")
-        assert hasattr(bot, "prediction_service")
-        assert hasattr(bot, "lobby_service")
-        assert hasattr(bot, "lobby_manager")
-        assert hasattr(bot, "gambling_stats_service")
-        assert hasattr(bot, "guild_config_service")
-        assert hasattr(bot, "recalibration_service")
-        assert hasattr(bot, "disburse_service")
-        assert hasattr(bot, "match_enrichment_service")
-        assert hasattr(bot, "match_discovery_service")
-        assert hasattr(bot, "rating_comparison_service")
-        assert hasattr(bot, "opendota_player_service")
-        assert hasattr(bot, "pairings_service")
-        assert hasattr(bot, "soft_avoid_service")
-        assert hasattr(bot, "package_deal_service")
-        assert hasattr(bot, "tip_service")
-        assert hasattr(bot, "neon_degen_service")
-        assert hasattr(bot, "wrapped_service")
-
-        # Check constants
-        assert hasattr(bot, "role_emojis")
-        assert hasattr(bot, "role_names")
-        assert hasattr(bot, "format_role_display")
-        assert hasattr(bot, "ADMIN_USER_IDS")
-
-        # AI services default to None without key
-        assert bot.ai_service is None
-        assert bot.sql_query_service is None
-        assert bot.flavor_text_service is None
+        assert set(vars(bot)) == set(expected)
+        for attribute, component in expected.items():
+            assert getattr(bot, attribute) is container._components[component]
+        for attribute in removed:
+            assert not hasattr(bot, attribute)
+        for attribute in (
+            "dig_flavor_service",
+            "sql_query_service",
+            "flavor_text_service",
+        ):
+            assert getattr(bot, attribute) is None
 
 
 class TestServiceDependencies:

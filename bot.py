@@ -45,7 +45,6 @@ from config import (
     AI_MAX_TOKENS,
     AI_MODEL,
     AI_TIMEOUT_SECONDS,
-    CEREBRAS_API_KEY,
     DB_PATH,
     GARNISHMENT_PERCENTAGE,
     LEVERAGE_TIERS,
@@ -59,7 +58,6 @@ from config import (
 )
 from infrastructure.service_container import ServiceContainer
 from services.monitoring_service import MonitoringService, UsageMonitor, set_global_usage_monitor
-from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 from utils.thread_safety import ensure_thread_writable
 
@@ -365,7 +363,7 @@ def _init_services():
     if _container is not None:
         return
 
-    _container = ServiceContainer(
+    container = ServiceContainer(
         db_path=DB_PATH,
         admin_user_ids=ADMIN_USER_IDS,
         lobby_ready_threshold=LOBBY_READY_THRESHOLD,
@@ -374,15 +372,16 @@ def _init_services():
         max_debt=MAX_DEBT,
         leverage_tiers=LEVERAGE_TIERS,
         garnishment_percentage=GARNISHMENT_PERCENTAGE,
-        cerebras_api_key=CEREBRAS_API_KEY,
         llm_api_key=LLM_API_KEY,
         ai_model=AI_MODEL,
         ai_timeout_seconds=AI_TIMEOUT_SECONDS,
         ai_max_tokens=AI_MAX_TOKENS,
     )
-    _container.initialize()
-    _container.expose_to_bot(bot)
-    bot.monitoring_service = MonitoringService(DB_PATH, usage_monitor=usage_monitor)
+    container.initialize()
+    monitoring_service = MonitoringService(DB_PATH, usage_monitor=usage_monitor)
+    container.expose_to_bot(bot)
+    bot.monitoring_service = monitoring_service
+    _container = container
 
 
 
@@ -459,25 +458,8 @@ async def _load_extensions():
     )
 
 
-def _ensure_extensions_loaded_for_import():
-    """
-    When the module is imported in tests (without running the bot),
-    load extensions so command definitions exist on the command tree.
-    """
-    # asyncio.get_event_loop() emits a DeprecationWarning in 3.10+ and raises
-    # RuntimeError in 3.12+ when there is no running loop. Use the modern
-    # path: get_running_loop() to detect "already inside an event loop", and
-    # asyncio.run() for the standalone case.
-    try:
-        asyncio.get_running_loop()
-        return
-    except RuntimeError:
-        asyncio.run(_load_extensions())
 
 
-def get_existing_command_names():
-    """Return the set of command names currently registered on the bot."""
-    return {command.name for command in bot.tree.walk_commands()}
 
 
 async def update_lobby_message(message, lobby, guild_id=None):
@@ -633,8 +615,6 @@ def clear_lobby_rally_cooldowns(guild_id: int) -> None:
 @bot.event
 async def setup_hook():
     """Load command cogs."""
-    # Initialize database and services before loading extensions
-    _init_services()
     await _load_extensions()
 
 

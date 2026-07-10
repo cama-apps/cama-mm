@@ -336,6 +336,15 @@ class TestDistributionCalculations:
         assert result["Mid"] == 25.0  # 1/4 = 25%
         assert count == 4
 
+    def test_dotabase_role_weights_use_bundled_hero_data(self, mock_player_repo):
+        service = OpenDotaPlayerService(mock_player_repo)
+
+        roles = service._get_hero_roles()
+
+        assert len(roles) > 100
+        assert roles[1] == {"Carry": 3, "Escape": 3, "Nuker": 1}
+        assert roles[5] == {"Support": 3, "Disabler": 2, "Nuker": 2}
+
     def test_get_full_stats_no_steam_id(self, mock_player_repo):
         """Test get_full_stats when player has no steam_id."""
         mock_player_repo.get_steam_id.return_value = None

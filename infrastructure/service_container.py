@@ -38,12 +38,6 @@ class ServiceContainer:
         max_debt: int = 500,
         leverage_tiers: list[int] | None = None,
         garnishment_percentage: float = 1.0,
-        # Loan
-        loan_cooldown_seconds: int = 259200,
-        loan_max_amount: int = 100,
-        loan_fee_rate: float = 0.20,
-        # AI (optional)
-        cerebras_api_key: str | None = None,
         llm_api_key: str | None = None,
         ai_model: str = "groq/qwen/qwen3-32b",
         # Defaults mirror config.py (AI_TIMEOUT_SECONDS / AI_MAX_TOKENS) so a
@@ -59,10 +53,7 @@ class ServiceContainer:
         self.max_debt = max_debt
         self.leverage_tiers = leverage_tiers or [2, 3, 5]
         self.garnishment_percentage = garnishment_percentage
-        self.loan_cooldown_seconds = loan_cooldown_seconds
-        self.loan_max_amount = loan_max_amount
-        self.loan_fee_rate = loan_fee_rate
-        self.cerebras_api_key = llm_api_key or cerebras_api_key
+        self.llm_api_key = llm_api_key
         self.ai_model = ai_model
         self.ai_timeout_seconds = ai_timeout_seconds
         self.ai_max_tokens = ai_max_tokens
@@ -310,13 +301,13 @@ class ServiceContainer:
         )
 
     def _init_ai_services(self) -> None:
-        """Optional AI services (only if cerebras_api_key is set)."""
+        """Optional AI services (only if llm_api_key is set)."""
         c = self._components
         ai_service = None
         sql_query_service = None
         flavor_text_service = None
 
-        if self.cerebras_api_key:
+        if self.llm_api_key:
             try:
                 from repositories.ai_query_repository import AIQueryRepository
                 from services.ai_service import AIService
@@ -325,7 +316,7 @@ class ServiceContainer:
 
                 ai_service = AIService(
                     model=self.ai_model,
-                    api_key=self.cerebras_api_key,
+                    api_key=self.llm_api_key,
                     timeout=self.ai_timeout_seconds,
                     max_tokens=self.ai_max_tokens,
                 )
@@ -551,26 +542,14 @@ class ServiceContainer:
         This provides backward compatibility with existing cog code
         that accesses services via bot.<service_name>.
         """
-        from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
         c = self._components
-
-        # Database
-        bot.db = c["db"]
 
         # Repositories accessed directly by cogs
         bot.player_repo = c["player_repo"]
         bot.match_repo = c["match_repo"]
         bot.pairings_repo = c["pairings_repo"]
-        bot.guild_config_repo = c["guild_config_repo"]
-        bot.prediction_repo = c["prediction_repo"]
         bot.bankruptcy_repo = c["bankruptcy_repo"]
-        bot.soft_avoid_repo = c["soft_avoid_repo"]
-        bot.package_deal_repo = c["package_deal_repo"]
-        bot.tip_repository = c["tip_repo"]
-        bot.economy_ledger_repo = c["economy_ledger_repo"]
-        bot.protection_repo = c["protection_repo"]
-        bot.tax_repo = c["tax_repo"]
 
         # Services
         bot.player_service = c["player_service"]
@@ -598,37 +577,20 @@ class ServiceContainer:
         bot.neon_degen_service = c["neon_degen_service"]
         bot.wrapped_service = c["wrapped_service"]
         bot.rebellion_service = c["rebellion_service"]
-        bot.rebellion_repo = c["rebellion_repo"]
         bot.mana_service = c["mana_service"]
         bot.mana_repo = c["mana_repo"]
         bot.mana_effects_service = c["mana_effects_service"]
         bot.protection_service = c["protection_service"]
         bot.buff_service = c["buff_service"]
-        bot.buff_repo = c["buff_repo"]
-        bot.slow_drip_repo = c["slow_drip_repo"]
         bot.dig_service = c["dig_service"]
-        bot.dig_repo = c["dig_repo"]
         bot.dig_flavor_service = c.get("dig_flavor_service")
-        bot.notification_repo = c["notification_repo"]
         bot.reminder_service = c["reminder_service"]
-        bot.curse_repo = c["curse_repo"]
         bot.curse_service = c["curse_service"]
-        bot.dig_guild_modifier_repo = c["dig_guild_modifier_repo"]
-        bot.dig_quest_service = c["dig_quest_service"]
-        bot.dig_quest_repo = c["dig_quest_repo"]
         bot.mafia_service = c["mafia_service"]
-        bot.mafia_repo = c["mafia_repo"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
 
         # AI services (may be None)
-        bot.ai_service = c["ai_service"]
         bot.sql_query_service = c["sql_query_service"]
         bot.flavor_text_service = c["flavor_text_service"]
-
-        # Constants and helpers
-        bot.role_emojis = ROLE_EMOJIS
-        bot.role_names = ROLE_NAMES
-        bot.format_role_display = format_role_display
-        bot.ADMIN_USER_IDS = self.admin_user_ids
 
         logger.info("Services exposed to bot object")

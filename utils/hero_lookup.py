@@ -135,7 +135,7 @@ def _load_hero_info_from_dotabase():
         return
 
     try:
-        from dotabase import Hero, dotabase_session
+        from dotabase_integration import Hero, dotabase_session
 
         session = dotabase_session()
         heroes = session.query(Hero).all()
@@ -219,7 +219,7 @@ def _load_hero_roles():
         return
 
     try:
-        from dotabase import Hero, dotabase_session
+        from dotabase_integration import Hero, dotabase_session
 
         session = dotabase_session()
         for hero in session.query(Hero).all():
@@ -263,30 +263,6 @@ def is_support_hero(hero_id: int) -> bool:
     return "Support" in roles
 
 
-def is_core_hero(hero_id: int) -> bool:
-    """
-    Check if a hero is primarily a core (carry/mid/offlane).
-
-    A hero is considered core if 'Carry' is in their roles and not primarily support,
-    OR if they have no Support role.
-
-    Args:
-        hero_id: The Dota 2 hero ID
-
-    Returns:
-        True if hero is primarily played as core
-    """
-    roles = get_hero_roles(hero_id)
-    if not roles:
-        return True  # Default to core if unknown
-
-    # If hero has Carry but not Support, definitely core
-    if "Carry" in roles and "Support" not in roles:
-        return True
-
-    # If hero has Support, not core
-    # Otherwise (Initiator, Durable, etc. without Support) = core
-    return "Support" not in roles
 
 
 def classify_hero_role(hero_id: int) -> str:

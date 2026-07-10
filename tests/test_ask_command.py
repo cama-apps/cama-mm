@@ -186,9 +186,9 @@ class TestAskHappyPath:
         await cog.ask.callback(cog, interaction, "who wins the most?")
 
         sql.query.assert_awaited_once()
-        kwargs = sql.query.call_args.kwargs
-        # asker_discord_id forwarded
-        assert kwargs.get("asker_discord_id") == 42
+        args, kwargs = sql.query.await_args
+        assert args[:2] == (12345, "who wins the most?")
+        assert kwargs["asker_discord_id"] == 42
 
         # Embed posted via followup
         assert interaction.followup.messages

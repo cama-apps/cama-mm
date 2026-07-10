@@ -36,8 +36,6 @@ logger = logging.getLogger("cama_bot.commands.info")
 # Page sizes differ by tab type due to Discord embed field limits (1024 chars)
 SINGLE_SECTION_PAGE_SIZE = 20  # Balance, Glicko, OpenSkill (single list)
 MULTI_SECTION_PAGE_SIZE = 8  # Gambling (4 sections)
-LEADERBOARD_PAGE_SIZE = 20  # Legacy alias
-GAMBLING_PAGE_SIZE = 8  # Legacy alias
 
 
 class LeaderboardTab(Enum):
@@ -818,8 +816,6 @@ class InfoCommands(commands.Cog):
         bot: commands.Bot,
         player_service,
         match_service,
-        role_emojis: dict,
-        role_names: dict,
         *,
         flavor_text_service=None,
         guild_config_service=None,
@@ -830,8 +826,6 @@ class InfoCommands(commands.Cog):
         self.bot = bot
         self.player_service = player_service
         self.match_service = match_service
-        self.role_emojis = role_emojis
-        self.role_names = role_names
         self.flavor_text_service = flavor_text_service
         self.guild_config_service = guild_config_service
         self.gambling_stats_service = gambling_stats_service
@@ -966,7 +960,7 @@ class InfoCommands(commands.Cog):
                     "`/admin sync` - Force sync commands\n"
                     "`/admin givecoin` - Give jopacoin to a user\n"
                     "`/admin setrating` - Set initial rating for a player\n"
-                    "`/enrich match` - Enrich match with Valve API data\n"
+                    "`/enrich match` - Enrich match with OpenDota data\n"
                     "`/enrich discover` - Auto-discover Dota match IDs\n"
                     "`/enrich config` - View server configuration\n"
                     "`/enrich rebuildpairings` - Rebuild pairwise stats"
@@ -1875,8 +1869,6 @@ async def setup(bot: commands.Bot):
     # Get services from bot
     player_service = getattr(bot, "player_service", None)
     match_service = getattr(bot, "match_service", None)
-    role_emojis = getattr(bot, "role_emojis", {})
-    role_names = getattr(bot, "role_names", {})
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     guild_config_service = getattr(bot, "guild_config_service", None)
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
@@ -1888,8 +1880,6 @@ async def setup(bot: commands.Bot):
             bot,
             player_service,
             match_service,
-            role_emojis,
-            role_names,
             flavor_text_service=flavor_text_service,
             guild_config_service=guild_config_service,
             gambling_stats_service=gambling_stats_service,

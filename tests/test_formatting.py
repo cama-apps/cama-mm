@@ -2,7 +2,20 @@
 
 import pytest
 
-from utils.formatting import JOPACOIN_EMOTE, calculate_pool_odds, format_betting_display
+from utils.formatting import (
+    JOPACOIN_EMOTE,
+    ROLE_EMOJIS,
+    ROLE_NAMES,
+    calculate_pool_odds,
+    format_betting_display,
+    format_role_display,
+)
+
+
+def test_format_role_display_uses_role_configuration():
+    """Role labels are formatted by the utility that owns the role maps."""
+    for role in ("1", "2", "3", "4", "5"):
+        assert format_role_display(role) == f"{ROLE_EMOJIS[role]} {ROLE_NAMES[role]}"
 
 
 class TestPoolOdds:

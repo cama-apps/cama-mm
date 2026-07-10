@@ -27,19 +27,9 @@ class RegistrationCommands(commands.Cog):
 
     player = app_commands.Group(name="player", description="Player registration and profile management")
 
-    def __init__(
-        self,
-        bot: commands.Bot,
-        db,
-        player_service,
-        role_emojis: dict,
-        role_names: dict,
-    ):
+    def __init__(self, bot: commands.Bot, player_service):
         self.bot = bot
-        self.db = db
         self.player_service = player_service
-        self.role_emojis = role_emojis
-        self.role_names = role_names
 
     @player.command(name="register", description="Register yourself as a player")
     @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
@@ -556,12 +546,6 @@ class RegistrationCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
-    # Get db and config from bot
-    db = getattr(bot, "db", None)
     player_service = getattr(bot, "player_service", None)
-    role_emojis = getattr(bot, "role_emojis", {})
-    role_names = getattr(bot, "role_names", {})
 
-    await bot.add_cog(
-        RegistrationCommands(bot, db, player_service, role_emojis, role_names)
-    )
+    await bot.add_cog(RegistrationCommands(bot, player_service))

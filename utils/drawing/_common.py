@@ -104,12 +104,6 @@ def signed_log(x: float) -> float:
     return sign * math.log1p(abs(x))
 
 
-def signed_log_inverse(y: float) -> float:
-    """Inverse of :func:`signed_log`."""
-    if y == 0:
-        return 0.0
-    sign = 1 if y > 0 else -1
-    return sign * (math.exp(abs(y)) - 1)
 
 
 @dataclass

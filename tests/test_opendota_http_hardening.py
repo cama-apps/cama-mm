@@ -1,5 +1,5 @@
 """
-Tests for Branch E HTTP hardening in opendota_integration.py and steam_api.py.
+Tests for OpenDota HTTP hardening.
 
 Covers:
 - timeout propagation on outgoing requests
@@ -17,9 +17,7 @@ import pytest
 import requests
 
 import opendota_integration
-import steam_api
 from opendota_integration import OpenDotaAPI
-from steam_api import SteamAPI
 
 # =============================================================================
 # Helpers
@@ -62,19 +60,16 @@ def _make_response(status_code: int, *, json_body=None, text: str | None = None,
 
 @pytest.fixture(autouse=True)
 def _reset_shared_rate_limiters():
-    """Reset shared singletons so tests don't share state."""
+    """Reset the OpenDota rate limiter so tests don't share state."""
     OpenDotaAPI._rate_limiter = None
-    SteamAPI._rate_limiter = None
     yield
     OpenDotaAPI._rate_limiter = None
-    SteamAPI._rate_limiter = None
 
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
     """Retries call time.sleep; make it a no-op so tests stay fast."""
     monkeypatch.setattr(opendota_integration.time, "sleep", lambda _s: None)
-    monkeypatch.setattr(steam_api.time, "sleep", lambda _s: None)
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +78,6 @@ def _fast_retry_delays(monkeypatch):
     but have a known, finite budget.
     """
     monkeypatch.setattr(opendota_integration, "ENRICHMENT_RETRY_DELAYS", [0, 0, 0])
-    monkeypatch.setattr(steam_api, "ENRICHMENT_RETRY_DELAYS", [0, 0, 0])
 
 
 # =============================================================================
@@ -250,100 +244,6 @@ class TestOpenDotaResponseSizeCap:
 
 
 # =============================================================================
-# Steam API tests
-# =============================================================================
-
-
-class TestSteamAPIHardening:
-    """Timeout + retry + malformed JSON for Steam API."""
-
-    def test_steam_passes_timeout(self):
-        api = SteamAPI(api_key="test_key")
-        captured: dict = {}
-
-        def _get(url, params=None, timeout=None):
-            captured["timeout"] = timeout
-            return _make_response(200, json_body={"result": {"match_id": 1}})
-
-        with patch.object(api.session, "get", side_effect=_get):
-            api.get_match_details(1)
-
-        assert captured["timeout"] is not None
-        assert captured["timeout"] >= 5
-
-    def test_steam_retries_on_429_then_succeeds(self):
-        api = SteamAPI(api_key="test_key")
-        responses = [
-            _make_response(429),
-            _make_response(200, json_body={"result": {"match_id": 42}}),
-        ]
-        call_count = {"n": 0}
-
-        def _get(url, params=None, timeout=None):
-            idx = call_count["n"]
-            call_count["n"] += 1
-            return responses[min(idx, len(responses) - 1)]
-
-        with patch.object(api.session, "get", side_effect=_get):
-            result = api.get_match_details(42)
-
-        assert result == {"match_id": 42}
-        assert call_count["n"] == 2
-
-    def test_steam_no_retry_on_403(self):
-        api = SteamAPI(api_key="test_key")
-        call_count = {"n": 0}
-
-        def _get(url, params=None, timeout=None):
-            call_count["n"] += 1
-            return _make_response(403)
-
-        with patch.object(api.session, "get", side_effect=_get):
-            result = api.get_match_details(42)
-
-        assert result is None
-        assert call_count["n"] == 1
-
-    def test_steam_malformed_json_returns_none(self):
-        api = SteamAPI(api_key="test_key")
-        bad = _make_response(200, text="notjson")
-
-        with patch.object(api.session, "get", return_value=bad):
-            result = api.get_match_details(42)
-
-        assert result is None
-
-    def test_steam_retry_exhausted_returns_none(self):
-        api = SteamAPI(api_key="test_key")
-        call_count = {"n": 0}
-
-        def _get(url, params=None, timeout=None):
-            call_count["n"] += 1
-            return _make_response(500)
-
-        with patch.object(api.session, "get", side_effect=_get):
-            result = api.get_match_details(42)
-
-        assert result is None
-        # 3 configured retries + 1 initial = 4 attempts
-        assert call_count["n"] == 4
-
-    def test_steam_rejects_oversized_content_length(self):
-        """Steam endpoints should share the same 5 MB body cap as OpenDota."""
-        api = SteamAPI(api_key="test_key")
-        huge = _make_response(
-            200,
-            json_body={"result": {"match_id": 1}},
-            content_length=str(10 * 1024 * 1024),  # 10 MB > 5 MB cap
-        )
-
-        with patch.object(api.session, "get", return_value=huge):
-            result = api.get_match_details(1)
-
-        assert result is None
-
-
-# =============================================================================
 # Retry-After honoring (shared helper)
 # =============================================================================
 
@@ -440,33 +340,6 @@ class TestRetryAfterHonoring:
         # Falls back to configured backoff (0 from the fixture) and still
         # succeeds on the retry.
         assert result == {"profile": {}}
-
-    def test_steam_honors_retry_after_larger_than_delay(self, monkeypatch):
-        """Steam should apply the same Retry-After preference as OpenDota."""
-        api = SteamAPI(api_key="test_key")
-        sleeps: list[float] = []
-        monkeypatch.setattr(
-            steam_api.time,
-            "sleep",
-            lambda s: sleeps.append(s),
-        )
-
-        responses = [
-            _make_response(429, retry_after="60"),
-            _make_response(200, json_body={"result": {"match_id": 42}}),
-        ]
-        call_count = {"n": 0}
-
-        def _get(url, params=None, timeout=None):
-            idx = call_count["n"]
-            call_count["n"] += 1
-            return responses[min(idx, len(responses) - 1)]
-
-        with patch.object(api.session, "get", side_effect=_get):
-            result = api.get_match_details(42)
-
-        assert result == {"match_id": 42}
-        assert 60 in sleeps
 
 
 class TestOpenDotaGetPlayerRolesNoneCheck:

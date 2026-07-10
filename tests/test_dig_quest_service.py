@@ -11,7 +11,6 @@ from repositories.bet_repository import BetRepository
 from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
 from repositories.dig_quest_repository import DigQuestRepository
 from repositories.dig_repository import DigRepository
-from repositories.player_repository import PlayerRepository
 from services.dig_constants import (
     EventChoice,
     EventOutcome,
@@ -93,9 +92,6 @@ def guild_modifier_repo(repo_db_path):
     return DigGuildModifierRepository(repo_db_path)
 
 
-@pytest.fixture
-def player_repository(repo_db_path):
-    return PlayerRepository(repo_db_path)
 
 
 def _make_tunnel(dig_repo, discord_id, guild_id, *, depth=0, prestige_level=0):

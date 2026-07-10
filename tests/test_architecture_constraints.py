@@ -9,6 +9,8 @@ These tests verify that the layered architecture is maintained:
 """
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -18,22 +20,23 @@ def get_project_root() -> Path:
     return Path(__file__).parent.parent
 
 
-def get_imports_from_file(file_path: Path) -> set[str]:
-    """Extract all import statements from a Python file."""
-    imports = set()
-    try:
-        with open(file_path, encoding="utf-8") as f:
-            tree = ast.parse(f.read(), filename=str(file_path))
+def parse_python_file(file_path: Path) -> ast.Module:
+    """Parse a Python file, allowing syntax errors to fail the architecture test."""
+    with open(file_path, encoding="utf-8") as f:
+        return ast.parse(f.read(), filename=str(file_path))
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    imports.add(alias.name)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imports.add(node.module)
-    except SyntaxError:
-        # Skip files with syntax errors
-        pass
+
+def get_imports_from_file(file_path: Path) -> set[str]:
+    """Extract all absolute import targets from a Python file."""
+    imports = set()
+    tree = parse_python_file(file_path)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imports.add(node.module)
     return imports
 
 
@@ -105,80 +108,112 @@ class _AsyncCallScanner(ast.NodeVisitor):
         self.parents.pop()
 
 
+class TestPackageInitializerConstraints:
+    """Tests for inert package initializers and isolated submodule imports."""
+
+    def test_package_initializers_are_import_free(self):
+        """Package initializers must not eagerly import any modules."""
+        root = get_project_root()
+        initializer_paths = (
+            Path("services/__init__.py"),
+            Path("repositories/__init__.py"),
+            Path("domain/models/__init__.py"),
+            Path("domain/services/__init__.py"),
+            Path("utils/__init__.py"),
+        )
+        violations = []
+
+        for relative_path in initializer_paths:
+            file_path = root / relative_path
+            assert file_path.is_file(), f"expected {file_path} to exist"
+            tree = parse_python_file(file_path)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    violations.append(
+                        f"{relative_path}:{node.lineno}:{type(node).__name__}"
+                    )
+
+        assert not violations, (
+            "Package initializers must not contain imports:\n" + "\n".join(violations)
+        )
+
+    def test_submodule_imports_do_not_eagerly_load_implementations(self):
+        """Leaf/interface imports must not trigger concrete package imports."""
+        root = get_project_root()
+        probes = (
+            (
+                "repositories.interfaces",
+                (
+                    'name == "database" or name.startswith("database.") '
+                    "or (name.startswith(\"repositories.\") "
+                    'and name.endswith("_repository"))'
+                ),
+            ),
+            (
+                "services.error_codes",
+                (
+                    'name == "repositories" or name.startswith("repositories.") '
+                    "or (name.startswith(\"services.\") "
+                    'and name.endswith("_service"))'
+                ),
+            ),
+        )
+
+        for module_name, forbidden_expression in probes:
+            script = (
+                "import importlib, sys\n"
+                f"importlib.import_module({module_name!r})\n"
+                "forbidden = sorted(\n"
+                "    name for name in sys.modules\n"
+                f"    if {forbidden_expression}\n"
+                ")\n"
+                "assert not forbidden, forbidden\n"
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            assert completed.returncode == 0, (
+                f"Fresh import of {module_name} loaded forbidden modules:\n"
+                f"{completed.stderr or completed.stdout}"
+            )
+
+
 class TestDomainLayerConstraints:
     """Tests for domain layer architecture constraints."""
 
-    def test_domain_models_have_no_repository_imports(self):
-        """Domain models should not import from repositories."""
+    def test_domain_has_no_outward_layer_imports(self):
+        """Every domain module must remain independent of outward application layers."""
         root = get_project_root()
-        domain_models = root / "domain" / "models"
+        domain_dir = root / "domain"
+        forbidden_roots = {
+            "config",
+            "services",
+            "repositories",
+            "database",
+            "infrastructure",
+            "commands",
+            "utils",
+        }
 
-        assert domain_models.is_dir(), f"expected {domain_models} to exist"
+        assert domain_dir.is_dir(), f"expected {domain_dir} to exist"
 
-        for file_path in get_all_python_files(domain_models):
+        violations = []
+        for file_path in sorted(get_all_python_files(domain_dir)):
             imports = get_imports_from_file(file_path)
-            repository_imports = [
-                imp for imp in imports
-                if imp.startswith("repositories") or "repository" in imp.lower()
-            ]
-            assert not repository_imports, (
-                f"{file_path.name} imports repositories: {repository_imports}. "
-                "Domain models should not depend on infrastructure."
-            )
+            for imported_module in sorted(imports):
+                import_root = imported_module.partition(".")[0]
+                if import_root in forbidden_roots:
+                    relative_path = file_path.relative_to(root)
+                    violations.append(f"{relative_path}: imports {imported_module}")
 
-    def test_domain_models_have_no_database_imports(self):
-        """Domain models should not import database modules."""
-        root = get_project_root()
-        domain_models = root / "domain" / "models"
-
-        assert domain_models.is_dir(), f"expected {domain_models} to exist"
-
-        for file_path in get_all_python_files(domain_models):
-            imports = get_imports_from_file(file_path)
-            db_imports = [
-                imp for imp in imports
-                if imp in ("database", "sqlite3") or "database" in imp.lower()
-            ]
-            assert not db_imports, (
-                f"{file_path.name} imports database modules: {db_imports}. "
-                "Domain models should not depend on database infrastructure."
-            )
-
-    def test_domain_models_have_no_service_imports(self):
-        """Domain models should not import from services layer."""
-        root = get_project_root()
-        domain_models = root / "domain" / "models"
-
-        assert domain_models.is_dir(), f"expected {domain_models} to exist"
-
-        for file_path in get_all_python_files(domain_models):
-            imports = get_imports_from_file(file_path)
-            service_imports = [
-                imp for imp in imports
-                if imp.startswith("services")
-            ]
-            assert not service_imports, (
-                f"{file_path.name} imports services: {service_imports}. "
-                "Domain models should not depend on service layer."
-            )
-
-    def test_domain_services_have_no_repository_imports(self):
-        """Domain services should not import from repositories."""
-        root = get_project_root()
-        domain_services = root / "domain" / "services"
-
-        assert domain_services.is_dir(), f"expected {domain_services} to exist"
-
-        for file_path in get_all_python_files(domain_services):
-            imports = get_imports_from_file(file_path)
-            repository_imports = [
-                imp for imp in imports
-                if imp.startswith("repositories") or "repository" in imp.lower()
-            ]
-            assert not repository_imports, (
-                f"{file_path.name} imports repositories: {repository_imports}. "
-                "Domain services should not depend on infrastructure."
-            )
+        assert not violations, (
+            "Domain modules import forbidden outward layers:\n" + "\n".join(violations)
+        )
 
 
 class TestCommandLayerConstraints:

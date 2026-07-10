@@ -10,8 +10,9 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 
-from dotabase import Ability, Hero, Item, Response, dotabase_session
 from sqlalchemy.orm import joinedload
+
+from dotabase_integration import Ability, Hero, Item, Response, dotabase_session
 
 _STEAM_CDN = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react"
 

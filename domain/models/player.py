@@ -4,7 +4,7 @@ Player domain model.
 
 from dataclasses import dataclass
 
-from config import OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU
+from domain.rating_constants import OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU
 
 
 @dataclass
@@ -70,8 +70,8 @@ class Player:
         if use_openskill:
             if self.os_mu is not None:
                 # Convert OpenSkill mu to a display rating on the same 0-3000
-                # scale as Glicko-2. Canonical constants live in config;
-                # CamaOpenSkillSystem reads them from there too.
+                # scale as Glicko-2. CamaOpenSkillSystem uses the same canonical
+                # constants from domain.rating_constants.
                 return max(
                     0.0,
                     (self.os_mu - OPENSKILL_MIN_MU) * OPENSKILL_DISPLAY_SCALE,
