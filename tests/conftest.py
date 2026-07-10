@@ -27,7 +27,6 @@ from services.garnishment_service import GarnishmentService
 from services.guild_config_service import GuildConfigService
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.match_service import MatchService
-from utils.role_assignment_cache import clear_role_assignment_cache
 
 # =============================================================================
 # CENTRALIZED CONSTANTS
@@ -42,17 +41,6 @@ TEST_GUILD_ID_SECONDARY = 67890
 """Secondary guild ID for multi-guild isolation tests."""
 
 
-@pytest.fixture(autouse=True)
-def clear_caches():
-    """
-    Clear global caches before and after each test to prevent cross-test contamination.
-
-    The role assignment cache is process-global (LRU cache) and can cause
-    intermittent failures in parallel test execution if stale data persists.
-    """
-    clear_role_assignment_cache()
-    yield
-    clear_role_assignment_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -301,102 +289,3 @@ def match_service_with_betting(
         pairings_repo=pairings_repository,
     )
 
-
-# =============================================================================
-# PLAYER FIXTURES
-# =============================================================================
-
-
-@pytest.fixture
-def registered_players(player_repository, guild_id):
-    """Create 10 registered players with standard ratings.
-
-    Returns list of discord_ids: [10001, 10002, ..., 10010]
-
-    All players have:
-    - Glicko rating: 1500-1680 (incrementing by 20)
-    - MMR: 1500-1950 (incrementing by 50)
-    - RD: 350 (uncalibrated)
-    - Default jopacoin balance: 3
-
-    Use this for most shuffle and match tests to avoid repetitive setup.
-    """
-    player_ids = list(range(10001, 10011))
-    for idx, pid in enumerate(player_ids):
-        player_repository.add(
-            discord_id=pid,
-            discord_username=f"TestPlayer{idx}",
-            guild_id=guild_id,
-            initial_mmr=1500 + idx * 50,
-            glicko_rating=1500.0 + idx * 20,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-    return player_ids
-
-
-@pytest.fixture
-def registered_players_with_balance(player_repository, guild_id):
-    """Create 10 registered players with 100 jopacoin each.
-
-    Returns list of discord_ids: [10001, 10002, ..., 10010]
-
-    Like registered_players but with 100 JC balance for betting tests.
-    """
-    player_ids = list(range(10001, 10011))
-    for idx, pid in enumerate(player_ids):
-        player_repository.add(
-            discord_id=pid,
-            discord_username=f"TestPlayer{idx}",
-            guild_id=guild_id,
-            initial_mmr=1500 + idx * 50,
-            glicko_rating=1500.0 + idx * 20,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-        player_repository.update_balance(pid, guild_id, 100)
-    return player_ids
-
-
-@pytest.fixture
-def registered_players_12(player_repository, guild_id):
-    """Create 12 registered players for exclusion/overflow tests.
-
-    Returns list of discord_ids: [10001, 10002, ..., 10012]
-
-    Use when testing 10-player selection from larger pool.
-    """
-    player_ids = list(range(10001, 10013))
-    for idx, pid in enumerate(player_ids):
-        player_repository.add(
-            discord_id=pid,
-            discord_username=f"TestPlayer{idx}",
-            guild_id=guild_id,
-            initial_mmr=1500 + idx * 50,
-            glicko_rating=1500.0 + idx * 20,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-    return player_ids
-
-
-@pytest.fixture
-def registered_players_14(player_repository, guild_id):
-    """Create 14 registered players (max lobby size).
-
-    Returns list of discord_ids: [10001, 10002, ..., 10014]
-
-    Use for max-lobby and conditional player tests.
-    """
-    player_ids = list(range(10001, 10015))
-    for idx, pid in enumerate(player_ids):
-        player_repository.add(
-            discord_id=pid,
-            discord_username=f"TestPlayer{idx}",
-            guild_id=guild_id,
-            initial_mmr=1500 + idx * 50,
-            glicko_rating=1500.0 + idx * 20,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-    return player_ids

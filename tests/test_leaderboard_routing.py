@@ -138,8 +138,6 @@ class TestLeaderboardTypeRouting:
             bot=mock_bot,
             player_service=player_repo,
             match_service=mock_match_repo,
-            role_emojis={},
-            role_names={},
             gambling_stats_service=mock_gambling_service,
             bankruptcy_service=None,
         )
@@ -215,8 +213,6 @@ class TestLeaderboardTypeRouting:
             bot=MagicMock(),
             player_service=player_repo,
             match_service=MagicMock(),
-            role_emojis={},
-            role_names={},
             gambling_stats_service=None,
             prediction_service=None,
         )
@@ -251,8 +247,6 @@ class TestLeaderboardLimitParameter:
             bot=MagicMock(),
             player_service=player_repo,
             match_service=MagicMock(),
-            role_emojis={},
-            role_names={},
         )
 
     @pytest.mark.asyncio
@@ -336,8 +330,6 @@ class TestLeaderboardGamblingContent:
             bot=MagicMock(),
             player_service=player_repo,
             match_service=MagicMock(),
-            role_emojis={},
-            role_names={},
             gambling_stats_service=mock_gambling_service,
         )
 

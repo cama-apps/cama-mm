@@ -17,7 +17,6 @@ from config import (
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.player_repository import PlayerRepository
 from services import error_codes
-from services.interfaces import IBankruptcyService
 from services.result import Result
 
 
@@ -51,7 +50,7 @@ class PenaltyApplication:
     penalty_applied: int
 
 
-class BankruptcyService(IBankruptcyService):
+class BankruptcyService:
     """
     Handles bankruptcy declarations and penalties.
 

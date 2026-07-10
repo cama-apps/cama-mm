@@ -11,7 +11,6 @@ Sections:
 
 import math
 import random
-import tempfile
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -122,21 +121,6 @@ class TestE2EAdminCommands:
     def test_db(self, repo_db_path):
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
-
-    def test_admin_permission_check(self):
-        """Test admin permission checking logic."""
-        import bot
-
-        # Test with admin user ID (fake test ID for security)
-        admin_id = 999999999999999999  # Fake test admin ID
-        MockDiscordInteraction(admin_id, "AdminUser")
-
-        # Mock has_admin_permission to check ADMIN_USER_IDS
-        # In real bot, this checks Discord permissions
-        # For test, we verify the logic exists
-        assert hasattr(bot, "has_admin_permission"), "Admin permission function should exist"
-        assert hasattr(bot, "ADMIN_USER_IDS"), "Admin user IDs should be configured"
-        assert isinstance(bot.ADMIN_USER_IDS, list), "ADMIN_USER_IDS should be a list"
 
     def test_resetuser_requires_admin(self, test_db):
         """Test that resetuser command requires admin permissions."""
@@ -987,20 +971,12 @@ class TestE2ESoftAvoid:
 # =============================================================================
 
 
-@pytest.fixture
-def rd_decay_test_db():
-    """Create a fresh database for each RD-decay integration test."""
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    tmp.close()
-    db = Database(tmp.name)
-    yield db
-    # Database uses context managers internally, no explicit close needed
 
 
-def test_last_match_date_updated_after_record(rd_decay_test_db):
+def test_last_match_date_updated_after_record(test_db_with_schema):
     """Verify last_match_date is set when a match is recorded."""
-    player_repo = PlayerRepository(rd_decay_test_db.db_path)
-    match_repo = MatchRepository(rd_decay_test_db.db_path)
+    player_repo = PlayerRepository(test_db_with_schema.db_path)
+    match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
     # Create 10 players using player_repo.add() with guild_id
@@ -1038,10 +1014,10 @@ def test_last_match_date_updated_after_record(rd_decay_test_db):
         assert (now - last_match_dt).total_seconds() < 60, "last_match_date should be recent"
 
 
-def test_rd_decay_not_applied_when_match_just_recorded(rd_decay_test_db):
+def test_rd_decay_not_applied_when_match_just_recorded(test_db_with_schema):
     """After recording a match, loading the player should NOT apply decay."""
-    player_repo = PlayerRepository(rd_decay_test_db.db_path)
-    match_repo = MatchRepository(rd_decay_test_db.db_path)
+    player_repo = PlayerRepository(test_db_with_schema.db_path)
+    match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
     # Create 10 players with known RD
@@ -1073,10 +1049,10 @@ def test_rd_decay_not_applied_when_match_just_recorded(rd_decay_test_db):
     assert player.rd <= start_rd, f"RD should not increase after a match (got {player.rd})"
 
 
-def test_rd_decay_applied_for_inactive_player(rd_decay_test_db):
+def test_rd_decay_applied_for_inactive_player(test_db_with_schema):
     """Verify RD decay is applied when loading a player with old last_match_date."""
-    player_repo = PlayerRepository(rd_decay_test_db.db_path)
-    match_repo = MatchRepository(rd_decay_test_db.db_path)
+    player_repo = PlayerRepository(test_db_with_schema.db_path)
+    match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
     # Create a player
@@ -1108,10 +1084,10 @@ def test_rd_decay_applied_for_inactive_player(rd_decay_test_db):
         f"RD should decay from {start_rd} to ~{expected_rd}, got {player.rd}"
 
 
-def test_rd_decay_respects_grace_period(rd_decay_test_db):
+def test_rd_decay_respects_grace_period(test_db_with_schema):
     """Verify RD decay is NOT applied within the grace period."""
-    player_repo = PlayerRepository(rd_decay_test_db.db_path)
-    match_repo = MatchRepository(rd_decay_test_db.db_path)
+    player_repo = PlayerRepository(test_db_with_schema.db_path)
+    match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
     # Create a player
@@ -1137,10 +1113,10 @@ def test_rd_decay_respects_grace_period(rd_decay_test_db):
     assert player.rd == start_rd, f"RD should not decay within grace period (got {player.rd})"
 
 
-def test_bulk_update_and_last_match_date_are_both_applied(rd_decay_test_db):
+def test_bulk_update_and_last_match_date_are_both_applied(test_db_with_schema):
     """Verify both rating updates AND last_match_date are saved after match."""
-    player_repo = PlayerRepository(rd_decay_test_db.db_path)
-    match_repo = MatchRepository(rd_decay_test_db.db_path)
+    player_repo = PlayerRepository(test_db_with_schema.db_path)
+    match_repo = MatchRepository(test_db_with_schema.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
     # Create 10 players

@@ -52,12 +52,12 @@ class EnrichmentCommands(commands.Cog):
         self.pairings_service = pairings_service
 
     @enrich.command(
-        name="setleague", description="Set the Valve league ID for this server (Admin)"
+        name="setleague", description="Set the Dota 2 league ID used by OpenDota discovery (Admin)"
     )
-    @app_commands.describe(league_id="The Valve/Dota 2 league ID")
+    @app_commands.describe(league_id="The Dota 2 league ID used by OpenDota discovery")
     @require_guild
     async def setleague(self, interaction: discord.Interaction, league_id: int):
-        """Set the league ID for match discovery."""
+        """Set the Dota 2 league ID used by OpenDota match discovery."""
         logger.info(f"Setleague command: User {interaction.user.id} setting league to {league_id}")
 
         if not has_admin_permission(interaction):
@@ -79,7 +79,7 @@ class EnrichmentCommands(commands.Cog):
 
     @enrich.command(
         name="match",
-        description="Enrich a match with Valve API data (Admin)",
+        description="Enrich a match with OpenDota data (Admin)",
     )
     @app_commands.describe(
         valve_match_id="The Dota 2 match ID (optional - defaults to enriching most recent match)",
@@ -93,7 +93,7 @@ class EnrichmentCommands(commands.Cog):
         internal_match_id: int | None = None,
     ):
         """
-        Manually enrich a match with Valve API data.
+        Manually enrich a match with OpenDota data.
 
         If valve_match_id is not provided, prompts user to provide it.
         If internal_match_id is not provided, uses the most recent match.
@@ -208,7 +208,7 @@ class EnrichmentCommands(commands.Cog):
 
             response = (
                 f"Match #{internal_match_id} enriched successfully!\n\n"
-                f"**Valve Match ID:** {valve_match_id}\n"
+                f"**Dota 2 Match ID:** {valve_match_id}\n"
                 f"**Duration:** {duration_min}:{duration_sec:02d}\n"
                 f"**Score:** Radiant {result.get('radiant_score', 0)} - {result.get('dire_score', 0)} Dire\n"
                 f"**Winner:** {winner}\n"

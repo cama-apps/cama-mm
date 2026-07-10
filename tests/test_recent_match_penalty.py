@@ -4,7 +4,6 @@ import pytest
 
 from config import SHUFFLER_SETTINGS
 from domain.models.player import Player
-from repositories.match_repository import MatchRepository
 from shuffler import BalancedShuffler
 from tests.conftest import TEST_GUILD_ID
 
@@ -15,10 +14,6 @@ def shuffler():
     return BalancedShuffler()
 
 
-@pytest.fixture
-def match_repository(repo_db_path):
-    """Create a match repository with initialized schema."""
-    return MatchRepository(repo_db_path)
 
 
 @pytest.fixture

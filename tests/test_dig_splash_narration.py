@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from repositories.dig_repository import DigRepository
-from repositories.player_repository import PlayerRepository
 from services.dig_flavor_service import DigFlavorService
 from services.dig_flavor_validator import validate_splash_narrative
 from services.dig_llm_prompts import (
@@ -25,9 +24,6 @@ def dig_repo(repo_db_path):
     return DigRepository(repo_db_path)
 
 
-@pytest.fixture
-def player_repository(repo_db_path):
-    return PlayerRepository(repo_db_path)
 
 
 @dataclass

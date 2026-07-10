@@ -3,7 +3,11 @@ Tests for bot initialization and basic setup.
 These tests verify that the bot can be imported and configured without connecting to Discord.
 """
 
-import asyncio
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -18,80 +22,247 @@ def test_bot_import():
     assert hasattr(bot, "_init_services")
 
 
-def test_bot_commands_registered():
-    """Test that bot commands are registered in the command tree."""
-    import bot
+def test_bot_commands_registered(tmp_path):
+    """Load every extension and inspect representative commands in an isolated process."""
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["DB_PATH"] = str(tmp_path / "bot-smoke.db")
+    script = textwrap.dedent(
+        """
+        import asyncio
 
-    # Ensure extensions are loaded so commands are registered
-    asyncio.run(bot._load_extensions())
+        async def main():
+            import bot
 
-    # Get all registered commands
-    commands = bot.bot.tree.get_commands()
-    command_names = [cmd.name for cmd in commands]
+            try:
+                await bot._load_extensions()
+                missing_extensions = [
+                    extension
+                    for extension in bot.EXTENSIONS
+                    if extension not in bot.bot.extensions
+                ]
+                assert not missing_extensions, (
+                    f"Extensions failed to load: {missing_extensions}"
+                )
 
-    # Verify key commands exist (groups register as top-level command names)
-    expected_commands = [
-        "player",  # Group: /player register, /player roles, etc.
-        "draft",  # Group: /draft start, /draft captain, etc.
-        "predict",  # Group: /predict create, /predict list, etc.
-        "admin",  # Group: /admin addfake, /admin resetuser, etc.
-        "enrich",  # Group: /enrich match, /enrich discover, etc.
-        "dota",  # Group: /dota hero, /dota ability
-        "lobby",
-        "shuffle",
-        "record",
-        "profile",  # Replaces stats, gambastats, pairwise, dotastats, etc.
-        "leaderboard",  # Now includes type parameter for balance/gambling/predictions
-        "help",
+                command_names = {
+                    command.name for command in bot.bot.tree.get_commands()
+                }
+                expected_commands = (
+                    "player",
+                    "draft",
+                    "predict",
+                    "admin",
+                    "enrich",
+                    "dota",
+                    "lobby",
+                    "shuffle",
+                    "record",
+                    "profile",
+                    "leaderboard",
+                    "help",
+                )
+                for command_name in expected_commands:
+                    assert command_name in command_names, (
+                        f"Command {command_name!r} not found in registered commands"
+                    )
+            finally:
+                await bot.bot.close()
+
+        asyncio.run(main())
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=180,
+    )
+
+    assert completed.returncode == 0, (
+        "Fresh bot extension load failed.\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ("constructor", "initialize", "monitoring", "expose"),
+)
+def test_init_services_failure_is_retryable_and_success_is_idempotent(
+    monkeypatch, failure_stage
+):
+    """A failed composition attempt must not poison the module singleton."""
+    import bot as bot_module
+
+    class ExpectedInitializationError(RuntimeError):
+        pass
+
+    events = []
+    containers = {}
+    monitors = {}
+    factory_attempts = 0
+    original_monitor = object()
+
+    class FakeBot:
+        def __init__(self):
+            self._monitoring_service = original_monitor
+
+        @property
+        def monitoring_service(self):
+            return self._monitoring_service
+
+        @monitoring_service.setter
+        def monitoring_service(self, value):
+            events.append(("assign_monitoring", factory_attempts))
+            assert bot_module._container is None
+            self._monitoring_service = value
+
+    fake_bot = FakeBot()
+
+    class FakeContainer:
+        def __init__(self, attempt):
+            self.attempt = attempt
+            self.expose_calls = 0
+
+        def initialize(self):
+            events.append(("initialize", self.attempt))
+            if self.attempt == 1 and failure_stage == "initialize":
+                raise ExpectedInitializationError("initialize")
+
+        def expose_to_bot(self, target):
+            events.append(("expose", self.attempt))
+            self.expose_calls += 1
+            assert target is fake_bot
+            assert bot_module._container is None
+            if self.attempt == 1 and failure_stage == "expose":
+                raise ExpectedInitializationError("expose")
+
+    def container_factory(**_kwargs):
+        nonlocal factory_attempts
+        factory_attempts += 1
+        events.append(("constructor", factory_attempts))
+        if factory_attempts == 1 and failure_stage == "constructor":
+            raise ExpectedInitializationError("constructor")
+        container = FakeContainer(factory_attempts)
+        containers[factory_attempts] = container
+        return container
+
+    def monitoring_factory(db_path, *, usage_monitor):
+        assert db_path == bot_module.DB_PATH
+        assert usage_monitor is bot_module.usage_monitor
+        events.append(("monitoring", factory_attempts))
+        if factory_attempts == 1 and failure_stage == "monitoring":
+            raise ExpectedInitializationError("monitoring")
+        monitor = object()
+        monitors[factory_attempts] = monitor
+        return monitor
+
+    monkeypatch.setattr(bot_module, "_container", None)
+    monkeypatch.setattr(bot_module, "bot", fake_bot)
+    monkeypatch.setattr(bot_module, "ServiceContainer", container_factory)
+    monkeypatch.setattr(bot_module, "MonitoringService", monitoring_factory)
+
+    with pytest.raises(ExpectedInitializationError, match=failure_stage):
+        bot_module._init_services()
+
+    assert bot_module._container is None
+    assert fake_bot.monitoring_service is original_monitor
+    assert factory_attempts == 1
+    if failure_stage == "monitoring":
+        assert containers[1].expose_calls == 0
+
+    bot_module._init_services()
+
+    successful_container = containers[2]
+    assert factory_attempts == 2
+    assert bot_module._container is successful_container
+    assert successful_container.expose_calls == 1
+    assert fake_bot.monitoring_service is monitors[2]
+    success_start = events.index(("constructor", 2))
+    assert events[success_start:] == [
+        ("constructor", 2),
+        ("initialize", 2),
+        ("monitoring", 2),
+        ("expose", 2),
+        ("assign_monitoring", 2),
     ]
 
-    for cmd_name in expected_commands:
-        assert cmd_name in command_names, f"Command '{cmd_name}' not found in registered commands"
+    completed_events = list(events)
+    bot_module._init_services()
+
+    assert bot_module._container is successful_container
+    assert fake_bot.monitoring_service is monitors[2]
+    assert events == completed_events
+    assert factory_attempts == 2
 
 
-def test_role_configuration():
-    """Test that role emojis and names are configured after init."""
-    import bot
+def test_init_services_passes_only_the_unified_llm_api_key(monkeypatch):
+    """The composition root forwards the resolved external key exactly once."""
+    import bot as bot_module
 
-    # Trigger lazy init
-    bot._init_services()
+    class FakeBot:
+        pass
 
-    # After init, these are on the bot object
-    assert hasattr(bot.bot, "role_emojis")
-    assert hasattr(bot.bot, "role_names")
-    assert len(bot.bot.role_emojis) == 5
-    assert len(bot.bot.role_names) == 5
+    fake_bot = FakeBot()
+    monitor = object()
+    instances = []
 
-    # Verify all roles 1-5 are present
-    for role in ["1", "2", "3", "4", "5"]:
-        assert role in bot.bot.role_emojis
-        assert role in bot.bot.role_names
+    class CapturingContainer:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.initialized = False
+            self.exposed = False
+            instances.append(self)
 
+        def initialize(self):
+            self.initialized = True
 
-def test_format_role_display():
-    """Test the format_role_display helper function."""
-    import bot
+        def expose_to_bot(self, target):
+            assert self.initialized
+            assert target is fake_bot
+            self.exposed = True
 
-    # Trigger lazy init
-    bot._init_services()
+    def monitoring_factory(db_path, *, usage_monitor):
+        assert db_path == bot_module.DB_PATH
+        assert usage_monitor is bot_module.usage_monitor
+        return monitor
 
-    # Test formatting for each role
-    for role in ["1", "2", "3", "4", "5"]:
-        formatted = bot.bot.format_role_display(role)
-        assert bot.bot.role_names[role] in formatted
-        assert bot.bot.role_emojis[role] in formatted
+    monkeypatch.setattr(bot_module, "_container", None)
+    monkeypatch.setattr(bot_module, "bot", fake_bot)
+    monkeypatch.setattr(bot_module, "LLM_API_KEY", "sentinel-key")
+    monkeypatch.setattr(bot_module, "ServiceContainer", CapturingContainer)
+    monkeypatch.setattr(bot_module, "MonitoringService", monitoring_factory)
 
+    bot_module._init_services()
 
-def test_admin_configuration():
-    """Test that admin configuration exists."""
-    import bot
-
-    # Trigger lazy init
-    bot._init_services()
-
-    assert hasattr(bot.bot, "ADMIN_USER_IDS")
-    assert isinstance(bot.bot.ADMIN_USER_IDS, list)
-    assert hasattr(bot, "has_admin_permission")
+    assert len(instances) == 1
+    container = instances[0]
+    assert container.kwargs == {
+        "db_path": bot_module.DB_PATH,
+        "admin_user_ids": bot_module.ADMIN_USER_IDS,
+        "lobby_ready_threshold": bot_module.LOBBY_READY_THRESHOLD,
+        "lobby_max_players": bot_module.LOBBY_MAX_PLAYERS,
+        "use_glicko": bot_module.USE_GLICKO,
+        "max_debt": bot_module.MAX_DEBT,
+        "leverage_tiers": bot_module.LEVERAGE_TIERS,
+        "garnishment_percentage": bot_module.GARNISHMENT_PERCENTAGE,
+        "llm_api_key": bot_module.LLM_API_KEY,
+        "ai_model": bot_module.AI_MODEL,
+        "ai_timeout_seconds": bot_module.AI_TIMEOUT_SECONDS,
+        "ai_max_tokens": bot_module.AI_MAX_TOKENS,
+    }
+    assert container.kwargs["llm_api_key"] == "sentinel-key"
+    assert "cerebras_api_key" not in container.kwargs
+    assert container.initialized
+    assert container.exposed
+    assert fake_bot.monitoring_service is monitor
+    assert bot_module._container is container
 
 
 if __name__ == "__main__":

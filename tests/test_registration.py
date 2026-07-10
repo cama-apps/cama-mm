@@ -150,6 +150,26 @@ class TestPlayerServiceSetRoles:
             player_service.set_roles(99999, TEST_GUILD_ID, ["1", "2"])
 
 
+class TestRegistrationCommandsConstructor:
+    """Tests for the supported registration-cog dependency surface."""
+
+    def test_constructor_signature_is_bot_and_player_service_only(self):
+        from inspect import Parameter, signature
+
+        from discord.ext import commands
+
+        from commands.registration import RegistrationCommands
+
+        parameters = signature(RegistrationCommands.__init__).parameters
+
+        assert list(parameters) == ["self", "bot", "player_service"]
+        assert parameters["bot"].annotation is commands.Bot
+        assert all(
+            parameter.kind is Parameter.POSITIONAL_OR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+
 class TestMMRPromptViewSignature:
     """Tests for the MMRPromptView button callback signature.
 

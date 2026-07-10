@@ -608,12 +608,40 @@ class TestCriticalCommandsAlwaysLoaded:
             bot=mock_bot,
             player_service=MagicMock(),
             match_service=MagicMock(),
-            role_emojis={},
-            role_names={},
         )
 
         assert cog is not None, "InfoCommands should instantiate successfully"
         assert cog.bot is mock_bot, "Bot should be stored on cog"
+
+    def test_info_cog_constructor_exposes_only_supported_dependencies(self):
+        """Verify the InfoCommands constructor's supported dependency surface."""
+        from inspect import Parameter, signature
+
+        from discord.ext import commands
+
+        from commands.info import InfoCommands
+
+        parameters = signature(InfoCommands.__init__).parameters
+        required = ["self", "bot", "player_service", "match_service"]
+        optional = [
+            "flavor_text_service",
+            "guild_config_service",
+            "gambling_stats_service",
+            "prediction_service",
+            "bankruptcy_service",
+        ]
+
+        assert list(parameters) == [*required, *optional]
+        assert parameters["bot"].annotation is commands.Bot
+        assert all(
+            parameters[name].kind is Parameter.POSITIONAL_OR_KEYWORD
+            for name in required
+        )
+        assert all(
+            parameters[name].kind is Parameter.KEYWORD_ONLY
+            and parameters[name].default is None
+            for name in optional
+        )
 
     def test_profile_cog_can_be_instantiated(self):
         """Verify ProfileCommands cog can be instantiated with mock dependencies."""

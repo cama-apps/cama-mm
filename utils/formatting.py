@@ -2,7 +2,6 @@
 Shared formatting helpers and role constants.
 """
 
-from collections.abc import Iterable
 
 # Role configuration with emojis and friendly names
 ROLE_EMOJIS = {
@@ -40,9 +39,6 @@ def format_role_display(role: str) -> str:
     return f"{emoji} {name}".strip()
 
 
-def format_roles_list(roles: Iterable[str]) -> str:
-    """Return comma-separated roles with emoji display."""
-    return ", ".join(format_role_display(r) for r in roles)
 
 
 def calculate_pool_odds(

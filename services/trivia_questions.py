@@ -6,7 +6,6 @@ Each generator returns a TriviaQuestion or None (if insufficient data).
 
 from __future__ import annotations
 
-import json
 import random
 from dataclasses import dataclass
 
@@ -763,40 +762,6 @@ def gen_item_by_icon() -> TriviaQuestion | None:
     )
 
 
-def gen_enchantment_effect() -> TriviaQuestion | None:
-    """M5: Which neutral item enchantment provides these bonuses?"""
-    enchantments = [
-        i for i in load_items()
-        if i.is_neutral_enhancement and i.neutral_tier and i.ability_special
-    ]
-    if len(enchantments) < 4:
-        return None
-    chosen = random.choice(enchantments)
-    try:
-        specials = json.loads(chosen.ability_special)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    footers = [
-        f"{s.get('header', '')}{s.get('footer', '')}"
-        for s in specials if s.get('footer')
-    ]
-    if not footers:
-        return None
-    bonus_text = ", ".join(footers)
-    pool = [e.localized_name for e in enchantments if e.localized_name != chosen.localized_name]
-    distractors = _pick_distractors(chosen.localized_name, pool)
-    if not distractors:
-        return None
-    options, idx = _shuffle_options(chosen.localized_name, distractors)
-    return TriviaQuestion(
-        text=f"Which neutral item enchantment provides these bonuses: {bonus_text}?",
-        options=options,
-        correct_index=idx,
-        difficulty="medium",
-        image_url=None,
-        category="enchantment_effect",
-        explanation=f"{chosen.localized_name} (Tier {chosen.neutral_tier}): {bonus_text}",
-    )
 
 
 # ---------------------------------------------------------------------------

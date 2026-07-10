@@ -51,13 +51,5 @@ def get_cached_role_assignments(
         return _compute_cached_role_assignments(player_roles_key)
 
 
-def clear_role_assignment_cache() -> None:
-    """Clear the role assignment cache. Useful for testing."""
-    with _cache_lock:
-        _compute_cached_role_assignments.cache_clear()
 
 
-def get_cache_info():
-    """Get cache statistics. Useful for monitoring/debugging."""
-    with _cache_lock:
-        return _compute_cached_role_assignments.cache_info()

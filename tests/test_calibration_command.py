@@ -171,8 +171,6 @@ class TestIndividualCalibrationProfile:
             bot=MagicMock(),
             player_service=player_service,
             match_service=None,  # skips history-dependent branches
-            role_emojis={},
-            role_names={},
         )
 
         # The real safe_followup runs and awaits interaction.followup.send;

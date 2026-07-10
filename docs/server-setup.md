@@ -55,14 +55,15 @@ Add these secrets to the repo (Settings → Secrets → Actions):
 |--------|-------|
 | `SSH_HOST` | Your server IP/hostname |
 | `SSH_KEY` | Contents of `/home/cama/.ssh/id_ed25519` (private key) |
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID |
+| `TS_OAUTH_SECRET` | Tailscale OAuth client secret |
 
 ## First deploy
 
 ```bash
 sudo -u cama bash -c '
 cd ~/cama-mm
-docker compose build
-docker compose up -d
+docker compose up -d --build
 '
 ```
 

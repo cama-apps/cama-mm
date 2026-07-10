@@ -586,7 +586,7 @@ class OpenDotaPlayerService:
         Weights come from dotabase role_levels (e.g., "3|3|1" -> weights)
         """
         try:
-            from dotabase import Hero, dotabase_session
+            from dotabase_integration import Hero, dotabase_session
 
             session = dotabase_session()
             try:

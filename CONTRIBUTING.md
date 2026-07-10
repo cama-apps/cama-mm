@@ -2,12 +2,13 @@
 
 ## Getting Started
 
+**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
 1. Clone the repo and set up your environment:
    ```bash
    git clone https://github.com/cama-apps/cama-mm.git
    cd cama-mm
-   uv venv
-   uv sync
+   uv sync --frozen
    ```
 
 2. Create a `.env` file with your test bot token:
@@ -25,9 +26,10 @@
 
 2. Make your changes and add tests for new functionality
 
-3. Run tests:
+3. Run lint checks and tests:
    ```bash
-   uv run pytest -n auto
+   uv run --locked ruff check .
+   uv run --locked pytest
    ```
 
 4. Commit with a descriptive message:
@@ -48,7 +50,7 @@ All new functionality must include tests:
 - **Integration tests** for services and repositories
 - **E2E tests** for complete workflows (see `tests/test_e2e_*.py`)
 
-Use `temp_db_path` fixture for database isolation. Follow existing patterns.
+Repository tests use `repo_db_path`, which provides an initialized schema. Use `temp_db_path` only for tests that deliberately require a database without an initialized schema. Follow existing patterns.
 
 ## Pull Request Process
 

@@ -8,9 +8,9 @@ from functools import lru_cache
 import discord
 from discord import app_commands
 from discord.ext import commands
-from dotabase import Ability, Hero, dotabase_session
 from sqlalchemy.orm import joinedload
 
+from dotabase_integration import Ability, Hero, dotabase_session
 from utils.embed_safety import truncate_field
 from utils.hero_lookup import get_hero_image_url
 from utils.interaction_safety import safe_defer, safe_followup

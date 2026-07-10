@@ -30,5 +30,4 @@ jobs:
             cd ~/cama-mm
             git fetch origin main
             git checkout --force "$DEPLOY_SHA"
-            GIT_SHA="$DEPLOY_SHA" docker compose build
-            docker compose up -d
+            GIT_SHA="$DEPLOY_SHA" docker compose up -d --build

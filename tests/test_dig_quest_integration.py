@@ -18,7 +18,6 @@ from repositories.bet_repository import BetRepository
 from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
 from repositories.dig_quest_repository import DigQuestRepository
 from repositories.dig_repository import DigRepository
-from repositories.player_repository import PlayerRepository
 from services import dig_constants
 from services.dig_constants import (
     EventChoice,
@@ -130,9 +129,6 @@ def quest_repo(repo_db_path):
     return DigQuestRepository(repo_db_path)
 
 
-@pytest.fixture
-def player_repository(repo_db_path):
-    return PlayerRepository(repo_db_path)
 
 
 def _register_player(player_repository, discord_id=10001, guild_id=TEST_GUILD_ID, balance=100):

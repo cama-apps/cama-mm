@@ -14,9 +14,6 @@ import json
 
 import pytest
 
-# Ensure e2e fixtures (e2e_test_db) are registered for win/loss section.
-pytest_plugins = ["tests.conftest_e2e"]
-
 from database import Database
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
@@ -895,20 +892,20 @@ class TestE2ELeaderboardEdgeCases:
 # =============================================================================
 
 
-def test_record_to_stats_and_leaderboard_flow(e2e_test_db):
+def test_record_to_stats_and_leaderboard_flow(test_db_with_schema):
     """End-to-end record → stats → leaderboard pass for a single match."""
-    player_ids = _create_players(e2e_test_db)
+    player_ids = _create_players(test_db_with_schema)
     radiant = player_ids[:5]
     dire = player_ids[5:]
 
     # Record a Radiant win
-    e2e_test_db.record_match(
+    test_db_with_schema.record_match(
         radiant_team_ids=radiant,
         dire_team_ids=dire,
         winning_team="radiant",
     )
 
-    repo = PlayerRepository(e2e_test_db.db_path)
+    repo = PlayerRepository(test_db_with_schema.db_path)
     service = PlayerService(repo)
 
     winner_stats = service.get_stats(radiant[0], guild_id=LEGACY_GUILD_ID)
@@ -931,13 +928,13 @@ def test_record_to_stats_and_leaderboard_flow(e2e_test_db):
     assert all(w == 0 for w in bottom_wins)
 
 
-def test_multi_match_accumulation_and_nonparticipant(e2e_test_db):
+def test_multi_match_accumulation_and_nonparticipant(test_db_with_schema):
     """Multi-match accumulation; non-participant bench player should stay at 0-0."""
-    player_ids = _create_players(e2e_test_db, start_id=92001)
+    player_ids = _create_players(test_db_with_schema, start_id=92001)
     radiant = player_ids[:5]
     dire = player_ids[5:]
     bench = 93001
-    e2e_test_db.add_player(
+    test_db_with_schema.add_player(
         discord_id=bench,
         discord_username="BenchPlayer",
         initial_mmr=1500,
@@ -947,10 +944,10 @@ def test_multi_match_accumulation_and_nonparticipant(e2e_test_db):
     )
 
     # Two matches, alternating winners
-    e2e_test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant")
-    e2e_test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
+    test_db_with_schema.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant")
+    test_db_with_schema.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
 
-    repo = PlayerRepository(e2e_test_db.db_path)
+    repo = PlayerRepository(test_db_with_schema.db_path)
     service = PlayerService(repo)
 
     for pid in radiant + dire:

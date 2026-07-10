@@ -4,7 +4,7 @@
 
 When committing, do not include the Co-Authored-By trailer.
 
-**Before pushing**, always run `uv run ruff check .` and fix any lint errors. Use `uv run ruff check --fix .` for auto-fixable issues.
+**Before pushing**, always run `uv run --locked ruff check .` and fix any lint errors. Use `uv run --locked ruff check --fix .` for auto-fixable issues.
 
 ## Project Overview
 
@@ -17,28 +17,29 @@ Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements
 - **Jopacoin betting system** with house/pool modes, leverage (2x-5x), debt, and bankruptcy (unified for shuffle and draft)
 - **Prediction markets** for yes/no outcomes with resolution voting and payouts
 - **Jopacoin economy**: Loans, nonprofit disbursements, shop purchases, tipping, Wheel of Fortune
-- **Match enrichment** via OpenDota/Valve APIs for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
+- **Match enrichment** via OpenDota for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
 - **Dota 2 reference** commands for hero/ability lookup (via dotabase)
 - **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations) - **AI features** (optional): Flavor text generation, natural language SQL queries via Cerebras LLM
 
 ## Commands
 
+**Prerequisites:** Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
 ```bash
-# Create venv and install dependencies
-uv venv
-uv sync
+# Install dependencies
+uv sync --frozen
 
 # Run the bot
 uv run python bot.py
 
 # Run all tests (parallel)
-uv run pytest -n auto
+uv run --locked pytest
 
 # Run specific test file
-uv run pytest tests/test_e2e_workflow.py -v
+uv run --locked pytest tests/test_e2e_core.py -v
 
 # Run single test
-uv run pytest tests/test_betting_service.py::TestBettingService::test_place_bet -v
+uv run --locked pytest tests/test_betting_service.py::TestBettingCore::test_can_place_multiple_bets_same_team -v
 
 # Restart the bot (use anchored pattern to avoid killing the shell itself)
 pkill -f "^uv run python bot.py$" 2>/dev/null || true; sleep 1; nohup uv run python bot.py > /tmp/bot.log 2>&1 &
@@ -109,12 +110,12 @@ If you need more information on Slash Commands, read `README.md`
 
 ## Testing
 
-**All new functionality must include tests.** Run `uv run pytest -n auto` before committing.
+**All new functionality must include tests.** Run `uv run --locked pytest` before committing.
 
 ### Test Types
 - **Unit tests**: Single method/class in isolation (`test_repositories.py`)
 - **Integration tests**: Services + repositories + DB (`test_betting_service.py`)
-- **E2E tests**: Complete workflows (`test_e2e_workflow.py`)
+- **E2E tests**: Complete workflows (`test_e2e_core.py`)
 
 ### Key Fixtures (conftest.py)
 ```python

@@ -22,14 +22,11 @@ class SchemaManager:
         self.use_uri = use_uri
 
     def initialize(self) -> None:
-        """Create base schema and apply migrations.
+        """Create the base schema and apply pending migrations.
 
-        Each migration runs inside its own BEGIN IMMEDIATE / COMMIT so that a
-        crash mid-migration rolls back both the DDL body and the
-        ``schema_migrations`` insert together. Without this, a mixed DDL + DML
-        migration that failed during the backfill step could leave the schema
-        partially mutated while ``schema_migrations`` either over- or
-        under-represented what was actually applied.
+        All migrations pending at the start of the locked pass and their
+        ``schema_migrations`` rows commit in one ``BEGIN IMMEDIATE`` batch, or
+        the entire pending batch rolls back.
         """
         logger.info(f"Initializing database schema: {self.db_path}")
         conn = self._connect()
@@ -166,19 +163,20 @@ class SchemaManager:
         )
 
     def _run_migrations(self, cursor) -> None:
+        """Apply the locked pass's pending migrations as one atomic batch.
+
+        Every migration action and its ``schema_migrations`` row commits
+        together, or a failure rolls back the entire pending batch.
+        """
         applied = {row["name"] for row in cursor.execute("SELECT name FROM schema_migrations")}
         pending = [(name, action) for name, action in self._get_migrations() if name not in applied]
         if not pending:
             return
-        # Outer BEGIN IMMEDIATE: take an exclusive write lock for the duration
-        # of the unapplied migrations so two bot instances starting against
-        # the same SQLite file can't both observe the same migration as
-        # un-applied and double-execute it (which would, for example,
-        # double-backfill dig_gear weapon rows). Inside the outer lock each
-        # migration runs in its own SAVEPOINT so a partial failure rolls back
-        # just that migration (and its schema_migrations insert) instead of
-        # the whole batch — the next startup will then retry only the
-        # migrations that didn't land.
+        # BEGIN IMMEDIATE serializes migration writers so two bot instances
+        # cannot execute the same unapplied migration concurrently. Every
+        # migration still pending once the lock is held and its ledger row
+        # belongs to this one transaction: COMMIT publishes the whole batch,
+        # while any failure reaches the outer ROLLBACK and discards it.
         cursor.execute("BEGIN IMMEDIATE")
         try:
             # Re-read applied inside the lock — another instance may have
@@ -188,25 +186,11 @@ class SchemaManager:
                 if name in applied:
                     continue
                 logger.info(f"Applying migration: {name}")
-                savepoint = f"migration_{abs(hash(name))}"
-                cursor.execute(f"SAVEPOINT {savepoint}")
-                try:
-                    action(cursor)
-                    cursor.execute(
-                        "INSERT INTO schema_migrations (name) VALUES (?)",
-                        (name,),
-                    )
-                    cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
-                except Exception:
-                    try:
-                        cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                        cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
-                    except sqlite3.Error as rollback_exc:
-                        logger.error(
-                            "Savepoint rollback failed during migration %s: %s",
-                            name, rollback_exc,
-                        )
-                    raise
+                action(cursor)
+                cursor.execute(
+                    "INSERT INTO schema_migrations (name) VALUES (?)",
+                    (name,),
+                )
             cursor.execute("COMMIT")
         except Exception:
             try:

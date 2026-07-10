@@ -1240,17 +1240,8 @@ def _draw_wedge_labels(
         draw.text((text_x, text_y), text, fill="#ffffff", font=font)
 
 
-def wheel_image_to_bytes(img: Image.Image) -> io.BytesIO:
-    """Convert PIL Image to bytes buffer for Discord."""
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-    return buffer
 
 
-def get_wedge_at_index(idx: int) -> tuple[str, int, str]:
-    """Get wedge info (label, value, color) at given index."""
-    return WHEEL_WEDGES[idx % len(WHEEL_WEDGES)]
 
 
 # Block characters for glitch transition

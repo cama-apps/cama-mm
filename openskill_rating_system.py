@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from openskill.models import PlackettLuce
 
-from config import OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU
+from domain.rating_constants import OPENSKILL_DISPLAY_SCALE, OPENSKILL_MIN_MU
 
 if TYPE_CHECKING:
     from openskill.rate import Rating
@@ -71,7 +71,7 @@ class CamaOpenSkillSystem:
     FP_WEIGHT_BLEND = 0.10
 
     # Display constants. Canonical values (with full rationale) live in
-    # config.py as OPENSKILL_MIN_MU / OPENSKILL_DISPLAY_SCALE.
+    # domain.rating_constants.
     MIN_MU = OPENSKILL_MIN_MU  # mu floor (display rating 0)
     DISPLAY_SCALE = OPENSKILL_DISPLAY_SCALE  # (mu - MIN_MU) * scale = display
 
