@@ -1273,6 +1273,17 @@ class MatchCommands(commands.Cog):
             # Cancel any pending betting reminders when recording completes (success or failure)
             self._cancel_betting_tasks(guild_id)
 
+        # Finalize lobby thread as soon as the match is committed. Everything
+        # below this point is presentation/notification work and may fail
+        # independently of the persisted match result.
+        asyncio.create_task(
+            self._finalize_lobby_thread(
+                guild_id, winning_result,
+                thread_id=thread_id_for_finalize,
+                pending_match_id=pending_match_id,
+            )
+        )
+
         distributions = record_result.get("bet_distributions", {})
         winners = distributions.get("winners", [])
         losers = distributions.get("losers", [])
@@ -1308,18 +1319,6 @@ class MatchCommands(commands.Cog):
         await self._send_record_announcement(interaction, message, flavor_text)
 
         self._spawn_curse_flames(interaction, guild, guild_id, winners, losers, record_result)
-
-        # Finalize lobby thread with results (use saved thread_id since pending
-        # state is cleared; pass pending_match_id so the fallback lookup can't
-        # resolve to a different concurrent match's thread). Run as a task so
-        # the pre-archive sleep doesn't delay the rest of the record flow.
-        asyncio.create_task(
-            self._finalize_lobby_thread(
-                guild_id, winning_result,
-                thread_id=thread_id_for_finalize,
-                pending_match_id=pending_match_id,
-            )
-        )
 
         await self._run_neon_match_hooks(interaction, guild_id, winners, losers, record_result)
 
