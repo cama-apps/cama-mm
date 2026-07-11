@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from services.dig_data.artifacts import ALL_ARTIFACTS
 from services.dig_data.balance import MAX_INVENTORY_SLOTS, PROGRESSIVE_TIPS
-from services.dig_data.bosses import BOSSES, PINNACLE_DEPTH
+from services.dig_data.bosses import BOSSES
 from services.dig_data.event_art import EVENT_ASCII_ART
 from services.dig_data.event_definitions import RANDOM_EVENTS
 from services.dig_data.event_types import _choice_to_dict
@@ -48,12 +48,6 @@ MAX_INVENTORY_SIZE: int = MAX_INVENTORY_SLOTS
 INJURY_SLOW_COOLDOWN: int = 6 * 3600  # 6 hours in seconds (injury slower cooldown)
 
 BOSS_BOUNDARIES: list[int] = LAYER_BOUNDARIES  # [25, 50, 75, 100, 150, 200, 275]
-BOSS_DEPTHS: list[int] = LAYER_BOUNDARIES
-
-# All encounter boundaries including the pinnacle. Used by service layer to
-# detect when to trigger any boss (regular or pinnacle).
-ALL_BOSS_BOUNDARIES: list[int] = LAYER_BOUNDARIES + [PINNACLE_DEPTH]
-
 BOSS_NAMES: dict[int, str] = {d: b.name for d, b in BOSSES.items()}
 BOSS_DIALOGUE: dict[int, list[str]] = {d: b.dialogue for d, b in BOSSES.items()}
 BOSS_ASCII: dict[int, str] = {d: b.ascii_art for d, b in BOSSES.items()}

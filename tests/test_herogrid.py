@@ -115,7 +115,7 @@ class TestGetPlayersWithEnrichedData:
         player_repository.add(discord_id=200, discord_username="Bob", guild_id=TEST_GUILD_ID)
 
         # Alice: 2 enriched matches
-        for i in range(2):
+        for _ in range(2):
             m = match_repository.record_match(team1_ids=[100], team2_ids=[200], winning_team=1, guild_id=TEST_GUILD_ID)
             match_repository.update_participant_stats(
                 match_id=m, discord_id=100, hero_id=1,
@@ -460,7 +460,7 @@ class TestResolvePlayerIds:
     def test_source_lobby_fails_gracefully(self):
         """source=lobby with nothing found -> returns empty list."""
         cog = _make_cog()
-        ids, label = cog._resolve_player_ids("lobby", guild_id=99)
+        ids, _ = cog._resolve_player_ids("lobby", guild_id=99)
         assert ids == []
 
 

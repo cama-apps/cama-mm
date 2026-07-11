@@ -296,42 +296,6 @@ class BankruptcyService:
             )
         )
 
-    def calculate_penalized_winnings(
-        self, discord_id: int, amount: int, guild_id: int | None = None
-    ) -> Result[PenaltyApplication]:
-        """
-        Calculate penalized winnings for a player under bankruptcy penalty.
-
-        This does NOT apply the penalty - just calculates what it would be.
-        Use this for display purposes or before actually applying.
-
-        Returns:
-            Result.ok(PenaltyApplication) - always succeeds
-        """
-        penalty_games = self.bankruptcy_repo.get_penalty_games(discord_id, guild_id)
-
-        if penalty_games <= 0:
-            return Result.ok(
-                PenaltyApplication(
-                    original=amount,
-                    penalized=amount,
-                    penalty_applied=0,
-                )
-            )
-
-        # Floor the penalty (the amount withheld), not the kept winnings, so a
-        # fractional rate never rounds a small payout (e.g. a 1 JC trivia
-        # milestone) all the way down to zero.
-        penalty_applied = int(amount * (1 - self.penalty_rate))
-        penalized = amount - penalty_applied
-
-        return Result.ok(
-            PenaltyApplication(
-                original=amount,
-                penalized=penalized,
-                penalty_applied=penalty_applied,
-            )
-        )
 
     # --- Admin operations ---
 

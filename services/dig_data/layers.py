@@ -63,7 +63,6 @@ FIRST_DIG_ADVANCE_MIN: int = 3
 FIRST_DIG_ADVANCE_MAX: int = 7
 FIRST_DIG_JC_MIN: int = 1
 FIRST_DIG_JC_MAX: int = 5
-FIRST_DIG_CAVE_IN: bool = False
 BASE_DIG_JC_PAYOUT_CAP: int = 20
 
 # Milestone rewards: depth -> JC bonus.

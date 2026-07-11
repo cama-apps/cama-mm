@@ -77,7 +77,7 @@ class TestConditionalPlayerSelection:
             make_player("C5", rating=1200.0),
         ]
 
-        player_ids, players, included, excluded = select_players_for_shuffle(
+        player_ids, _, included, excluded = select_players_for_shuffle(
             regular_ids, regular_players, conditional_ids, conditional_players
         )
 
@@ -101,7 +101,7 @@ class TestConditionalPlayerSelection:
             make_player("CHigh", rating=1700.0),
         ]
 
-        player_ids, players, included, excluded = select_players_for_shuffle(
+        player_ids, _, included, excluded = select_players_for_shuffle(
             regular_ids, regular_players, conditional_ids, conditional_players
         )
 
@@ -125,7 +125,7 @@ class TestConditionalPlayerSelection:
             make_player("C2", rating=1900.0),
         ]
 
-        player_ids, players, included, excluded = select_players_for_shuffle(
+        player_ids, _, included, excluded = select_players_for_shuffle(
             regular_ids, regular_players, conditional_ids, conditional_players
         )
 
@@ -145,7 +145,7 @@ class TestConditionalPlayerSelection:
             make_player("C2", rating=1900.0),
         ]
 
-        player_ids, players, included, excluded = select_players_for_shuffle(
+        player_ids, _, included, excluded = select_players_for_shuffle(
             regular_ids, regular_players, conditional_ids, conditional_players
         )
 

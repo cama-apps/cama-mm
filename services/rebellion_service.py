@@ -560,9 +560,6 @@ class RebellionService:
         state = self.bankruptcy_repo.get_state(discord_id, guild_id)
         return state.get("penalty_games_remaining", 0) if state else 0
 
-    def _get_last_bankruptcy_at(self, discord_id: int, guild_id: int) -> int:
-        state = self.bankruptcy_repo.get_state(discord_id, guild_id)
-        return state.get("last_bankruptcy_at", 0) if state else 0
 
     # ------------------------------------------------------------------
     # Wheel effect integration
@@ -607,9 +604,6 @@ class RebellionService:
     # History / Stats
     # ------------------------------------------------------------------
 
-    def get_war_history(self, guild_id: int, limit: int = 5) -> list[dict]:
-        """Get recent war history for a guild."""
-        return self.rebellion_repo.get_recent_wars(guild_id, limit)
 
     def get_player_war_stats(self, discord_id: int, guild_id: int) -> dict:
         """Get rebellion stats for a player."""

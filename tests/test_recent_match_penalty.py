@@ -117,7 +117,7 @@ class TestRecentMatchPenaltyInExclusion:
         # All players have same exclusion count
         exclusion_counts = {p.name: 5 for p in sample_players}
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(
+        *_, excluded = shuffler.shuffle_from_pool(
             sample_players, exclusion_counts, recent_names
         )
 
@@ -143,7 +143,7 @@ class TestRecentMatchPenaltyInExclusion:
 
         results = []
         for _ in range(5):
-            team1, team2, excluded = shuffler.shuffle_from_pool(
+            *_, excluded = shuffler.shuffle_from_pool(
                 sample_players, exclusion_counts, recent_names, rng=_random.Random(0)
             )
             excluded_names = frozenset(p.name for p in excluded)
@@ -164,12 +164,12 @@ class TestRecentMatchPenaltyInGoodnessScore:
         all_names = {p.name for p in sample_players}
         exclusion_counts = {p.name: 0 for p in sample_players}
 
-        team1, team2, excluded, score_with_all = shuffler._greedy_shuffle(
+        *_, score_with_all = shuffler._greedy_shuffle(
             sample_players, exclusion_counts, all_names
         )
 
         # No recent players
-        team1b, team2b, excluded_b, score_with_none = shuffler._greedy_shuffle(
+        *_, score_with_none = shuffler._greedy_shuffle(
             sample_players, exclusion_counts, set()
         )
 
@@ -233,7 +233,7 @@ class TestRecentMatchPenaltyEdgeCases:
         shuffler = BalancedShuffler()
         exclusion_counts = {p.name: 0 for p in sample_players}
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(
+        team1, team2, _ = shuffler.shuffle_from_pool(
             sample_players, exclusion_counts, set()
         )
 
@@ -245,7 +245,7 @@ class TestRecentMatchPenaltyEdgeCases:
         shuffler = BalancedShuffler()
         exclusion_counts = {p.name: 0 for p in sample_players}
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(
+        team1, team2, _ = shuffler.shuffle_from_pool(
             sample_players, exclusion_counts, None
         )
 

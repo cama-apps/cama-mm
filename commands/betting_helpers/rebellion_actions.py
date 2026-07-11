@@ -291,7 +291,6 @@ async def incite_action(
     # Build result embed
     if outcome == "attackers_win":
         result_embed = build_attacker_win_embed(
-            interaction=interaction,
             battle_roll=battle_roll,
             victory_threshold=victory_threshold,
             resolution=resolution,
@@ -301,13 +300,11 @@ async def incite_action(
         # Note: we do NOT apply cooldown to attackers — they *won*
     else:  # defenders_win
         result_embed = build_defender_win_embed(
-            interaction=interaction,
             battle_roll=battle_roll,
             victory_threshold=victory_threshold,
             resolution=resolution,
             meta_bet_result=meta_bet_result,
             inciter_name=inciter_name,
-            bankruptcy_count=bankruptcy_count,
         )
         # Attackers get +48h gamba cooldown as punishment
         now_ts = int(time.time())

@@ -75,19 +75,6 @@ class LoanRepository(BaseRepository, ILoanRepository):
                  negative_loans_taken, outstanding_principal, outstanding_fee),
             )
 
-    def clear_outstanding_loan(self, discord_id: int, guild_id: int | None = None) -> None:
-        """Clear the outstanding loan (set principal and fee to 0)."""
-        normalized_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE loan_state
-                SET outstanding_principal = 0, outstanding_fee = 0, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (discord_id, normalized_id),
-            )
 
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the total collected in the nonprofit fund for a guild."""

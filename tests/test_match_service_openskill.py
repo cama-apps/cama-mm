@@ -113,7 +113,7 @@ def test_update_openskill_for_match_no_fantasy_data_skips(repo_db_path):
 
     It must report success with everyone skipped and leave player mu untouched.
     """
-    service, player_repo, match_repo = _build_service(repo_db_path)
+    service, player_repo, _ = _build_service(repo_db_path)
     player_ids = _seed_players(player_repo)
     match_id = _record_a_match(service, player_ids)
 

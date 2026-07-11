@@ -218,7 +218,7 @@ def test_roll_event_excludes_quest_event_when_player_on_different_step(
 ):
     """Player is on stage 3; stage 1 of the same quest must NOT appear."""
     quest, _ = _make_test_quest()
-    svc, qs = _make_dig_service(
+    svc, _ = _make_dig_service(
         dig_repo, player_repository, quest_repo, bet_repo, guild_modifier_repo,
         quests=(quest,), monkeypatch=monkeypatch,
     )
@@ -398,7 +398,7 @@ def test_chain_event_filter_excludes_quest_events(
     monkeypatch.setattr(random, "random", lambda: 0.0)
     chained = svc._chain_event(
         depth=50, prestige_level=7,
-        trigger_rarity="common", luminosity=100,
+        trigger_rarity="common",
         trigger_event_id="some_other_event",
     )
     assert chained is None, "quest event leaked into _chain_event pool"
@@ -501,7 +501,7 @@ def test_roll_event_passes_tunnel_through_to_quest_filter(
     """roll_event must thread the in-scope tunnel through to the quest
     eligibility filter, avoiding a second DB fetch."""
     quest, _ = _make_test_quest()
-    svc, qs = _make_dig_service(
+    svc, _ = _make_dig_service(
         dig_repo, player_repository, quest_repo, bet_repo, guild_modifier_repo,
         quests=(quest,), monkeypatch=monkeypatch,
     )

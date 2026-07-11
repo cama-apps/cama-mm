@@ -90,26 +90,12 @@ class Player:
 
         return self.mmr if self.mmr is not None else 0
 
-    def get_win_loss_differential(self) -> int:
-        """Get wins minus losses."""
-        return self.wins - self.losses
 
     def get_total_games(self) -> int:
         """Get total games played."""
         return self.wins + self.losses
 
-    def get_win_rate(self) -> float | None:
-        """Get win rate as a percentage, or None if no games played."""
-        total = self.get_total_games()
-        if total == 0:
-            return None
-        return (self.wins / total) * 100
 
-    def has_role(self, role: str) -> bool:
-        """Check if player has a specific preferred role."""
-        if not self.preferred_roles:
-            return False
-        return role in self.preferred_roles
 
     def __str__(self) -> str:
         mmr_str = f"{self.mmr}" if self.mmr else "No MMR"

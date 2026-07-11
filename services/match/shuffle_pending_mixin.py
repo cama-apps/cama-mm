@@ -10,7 +10,6 @@ no state of its own and is composed into ``MatchService``.
 import random
 import time
 from datetime import UTC, datetime
-from typing import Any
 
 from config import BET_LOCK_SECONDS, DOTA_BET_SEED_AMOUNT
 from domain.models.pending_match_state import PendingMatchState
@@ -114,13 +113,7 @@ class ShufflePendingMixin:
             cost=cost,
         )
 
-    def _ensure_pending_state(self, guild_id: int | None) -> PendingMatchState:
-        """Get the pending state, raising error if none exists (delegates to state_service)."""
-        return self.state_service.ensure_pending_state(guild_id)
 
-    def _ensure_record_submissions(self, state: PendingMatchState) -> dict[int, dict[str, Any]]:
-        """Ensure record_submissions dict exists in state (delegates to state_service)."""
-        return self.state_service.ensure_record_submissions(state)
 
     def _build_pending_match_payload(self, state: PendingMatchState) -> dict:
         """Build payload for database persistence (delegates to state_service)."""
@@ -381,7 +374,7 @@ class ShufflePendingMixin:
         )
 
         # Calculate Glicko-2 win probability for Radiant
-        radiant_glicko_rating, radiant_glicko_rd, _ = self.rating_system.aggregate_team_stats(
+        radiant_glicko_rating, _, _ = self.rating_system.aggregate_team_stats(
             [
                 self.rating_system.create_player_from_rating(
                     p.glicko_rating or self.rating_system.mmr_to_rating(p.mmr or 4000),
@@ -402,7 +395,7 @@ class ShufflePendingMixin:
             ]
         )
         glicko_radiant_win_prob = self.rating_system.expected_outcome(
-            radiant_glicko_rating, radiant_glicko_rd, dire_glicko_rating, dire_glicko_rd
+            radiant_glicko_rating, dire_glicko_rating, dire_glicko_rd
         )
 
         # Calculate OpenSkill win probability for Radiant

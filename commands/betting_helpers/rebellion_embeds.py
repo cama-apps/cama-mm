@@ -6,7 +6,6 @@ import discord
 
 
 def build_attacker_win_embed(
-    interaction: discord.Interaction,
     battle_roll: int,
     victory_threshold: int,
     resolution: dict,
@@ -34,13 +33,11 @@ def build_attacker_win_embed(
 
 
 def build_defender_win_embed(
-    interaction: discord.Interaction,
     battle_roll: int,
     victory_threshold: int,
     resolution: dict,
     meta_bet_result: dict,
     inciter_name: str,
-    bankruptcy_count: int,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="🎰 THE WHEEL STANDS VICTORIOUS! THE REBELLION IS CRUSHED! 🎰",

@@ -667,7 +667,7 @@ def test_payout_cap_overflow(mafia_service):
     # cap, so each clamps to 50 and the rest overflows to the nonprofit fund.
     pot_total = 15 * 15
     winning_ids = [1, 2, 3, 4]
-    deltas, payout_per_winner, overflow = mafia_service._compute_payout_deltas(
+    deltas, _, overflow = mafia_service._compute_payout_deltas(
         pot_total, winning_ids, mvp_id=1, bookie_id=None
     )
     assert all(v <= MAX_WINNER_PAYOUT for v in deltas.values())

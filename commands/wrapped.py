@@ -233,16 +233,16 @@ def _build_slides(
     # --- Slides 5-9: Personal Records ---
     if records_wrapped and records_wrapped.records:
         record_slides = records_wrapped.get_slides()
-        for idx, (title, color_key, records) in enumerate(record_slides):
+        for title, color_key, records in record_slides:
             accent = SLIDE_COLORS.get(color_key, (241, 196, 15))
             # Bind loop variables explicitly
             def _render_records(
                 t=title, a=accent, r=records,
                 u=records_wrapped.discord_username,
                 m=records_wrapped.year_label,
-                si=idx+1, ts=len(record_slides), hn=hero_names,
+                hn=hero_names,
             ):
-                return draw_records_slide(t, a, r, u, m, si, ts, hn)
+                return draw_records_slide(t, a, r, u, m, hn)
             slides.append(WrappedSlide(f"records_{color_key}", title, _render_records))
 
     # --- Slide 10: Hero Spotlight ---

@@ -78,18 +78,18 @@ class TestBettingDisplay:
 
     def test_format_pool_mode_empty_side(self):
         """Pool mode with empty side shows dash."""
-        field_name, field_value = format_betting_display(0, 100, "pool")
+        _, field_value = format_betting_display(0, 100, "pool")
         assert "(—)" in field_value  # Radiant has no bets
 
     def test_format_with_lock_time(self):
         """Lock time is included in the display."""
         lock_ts = 1704067200  # Some timestamp
-        field_name, field_value = format_betting_display(100, 100, "house", lock_ts)
+        _, field_value = format_betting_display(100, 100, "house", lock_ts)
         assert f"<t:{lock_ts}:R>" in field_value
 
     def test_format_pool_mode_equal_bets(self):
         """Pool mode with equal bets shows 2x for both."""
-        field_name, field_value = format_betting_display(100, 100, "pool")
+        _, field_value = format_betting_display(100, 100, "pool")
         assert "(2.00x)" in field_value
 
     def test_format_locked_pool_shows_closed_not_countdown(self):
@@ -103,7 +103,7 @@ class TestBettingDisplay:
 
     def test_format_locked_house_shows_closed_not_countdown(self):
         """Locked house display shows a closed state instead of a countdown."""
-        field_name, field_value = format_betting_display(
+        _, field_value = format_betting_display(
             100, 200, "house", lock_until=1704067200, locked=True
         )
         assert "Betting closed" in field_value

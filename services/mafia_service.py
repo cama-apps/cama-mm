@@ -240,7 +240,7 @@ class MafiaService:
 
         # Determine mafia kill targets.
         mafia_kill_targets = self._tally_mafia_kill(
-            kill_actions, alive_ids, mafia_ids, by_id, twist=game.twist_event
+            kill_actions, alive_ids, mafia_ids, twist=game.twist_event
         )
 
         # Doctor save: blocks ONE mafia kill matching the saved target.
@@ -1040,7 +1040,6 @@ class MafiaService:
         kill_actions: list[dict],
         alive_ids: set[int],
         mafia_ids: set[int],
-        by_id: dict[int, MafiaPlayer],
         twist: MafiaTwist | None,
     ) -> list[int]:
         """Return ordered list of mafia kill targets (1 normally, 2 under BLOOD_MOON)."""
@@ -1091,19 +1090,6 @@ class MafiaService:
             return None  # tie → no lynch
         return leaders[0]
 
-    def _kill_player(
-        self,
-        game_id: int,
-        discord_id: int,
-        phase: MafiaPhase,
-        by_id: dict[int, MafiaPlayer],
-    ) -> None:
-        self.repo.set_player_alive(
-            game_id, discord_id, alive=False, eliminated_phase=phase
-        )
-        if discord_id in by_id:
-            by_id[discord_id].is_alive = False
-            by_id[discord_id].eliminated_phase = phase
 
     def _record_detective_results(
         self, game: MafiaGame, by_id: dict[int, MafiaPlayer]

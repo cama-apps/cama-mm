@@ -672,7 +672,7 @@ class TestV3IndividualGlickoWithCap:
         team1, team2 = high_rd_on_strong_team
         original_rating = team1[0][0].rating  # high_rd_low_rating
 
-        t1_updated, t2_updated = rating_system.update_ratings_after_match(
+        t1_updated, _ = rating_system.update_ratings_after_match(
             team1, team2, winning_team=1
         )
 
@@ -694,7 +694,7 @@ class TestV3IndividualGlickoWithCap:
         team1, team2 = high_rd_on_strong_team
         original_rating = team1[0][0].rating
 
-        t1_updated, t2_updated = rating_system.update_ratings_after_match(
+        t1_updated, _ = rating_system.update_ratings_after_match(
             team1, team2, winning_team=2
         )
 
@@ -715,7 +715,7 @@ class TestV3IndividualGlickoWithCap:
         team (expected) but gains a lot when winning (upset). This is correct.
         V3 ensures both are capped.
         """
-        team1, team2 = high_rd_on_strong_team
+        team1, _ = high_rd_on_strong_team
         original_rating = team1[0][0].rating
 
         # Test win
@@ -1023,7 +1023,7 @@ class TestV3TeamBasedExpectedOutcome:
         ]
 
         # Team 1 (favorite) LOSES - this is an upset
-        t1_updated, t2_updated = rating_system.update_ratings_after_match(
+        t1_updated, _ = rating_system.update_ratings_after_match(
             team1, team2, winning_team=2
         )
 
@@ -1056,7 +1056,7 @@ class TestV3TeamBasedExpectedOutcome:
         ]
 
         # Team 1 (underdog) WINS - this is an upset
-        t1_updated, t2_updated = rating_system.update_ratings_after_match(
+        t1_updated, _ = rating_system.update_ratings_after_match(
             team1, team2, winning_team=1
         )
 

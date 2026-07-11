@@ -102,7 +102,7 @@ class TestLobbyServicePendingMatchCheck:
             match_state_service=None,
         )
 
-        success, reason, pending_info = service.join_lobby(discord_id=12345, guild_id=999)
+        success, _, pending_info = service.join_lobby(discord_id=12345, guild_id=999)
 
         assert success is True
         assert pending_info is None

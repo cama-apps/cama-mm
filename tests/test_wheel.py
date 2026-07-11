@@ -1510,7 +1510,7 @@ def test_bankrupt_wheel_extension_slices_have_dark_red_colors():
     extend_wedges = [w for w in BANKRUPT_WHEEL_WEDGES if w[1] in ("EXTEND_1", "EXTEND_2")]
     assert len(extend_wedges) == 2, "Should have exactly 2 extension wedges"
 
-    for label, value, color in extend_wedges:
+    for _, _, color in extend_wedges:
         # Colors should be dark red variants (#8B0000, #660000)
         assert color.startswith("#"), f"Color should be hex format, got {color}"
         # Convert hex to RGB and check it's reddish

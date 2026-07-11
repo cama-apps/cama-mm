@@ -4,7 +4,6 @@ import pytest
 
 from commands.dota_info import (
     _format_ability_values,
-    _format_stat,
     _get_ability_by_name,
     _get_all_abilities,
     _get_all_heroes,
@@ -71,16 +70,6 @@ class TestAbilityLookup:
 
 
 class TestFormatting:
-    @pytest.mark.parametrize(
-        "label,value,suffix,expected",
-        [
-            ("Damage", 100, "", "**Damage:** 100"),
-            ("Magic Resist", 25, "%", "**Magic Resist:** 25%"),
-            ("Damage", None, "", ""),
-        ],
-    )
-    def test_format_stat(self, label, value, suffix, expected):
-        assert _format_stat(label, value, suffix) == expected
 
     def test_format_ability_values_empty(self):
         class MockAbility:

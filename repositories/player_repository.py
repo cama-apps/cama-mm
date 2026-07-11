@@ -580,19 +580,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     (timestamp, discord_id, guild_id),
                 )
 
-    def update_mmr(self, discord_id: int, guild_id: int, new_mmr: float) -> None:
-        """Update player's current MMR."""
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET current_mmr = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-            """,
-                (new_mmr, discord_id, guild_id),
-            )
 
     def get_balance(self, discord_id: int, guild_id: int) -> int:
         """Get a player's jopacoin balance."""
@@ -1677,43 +1664,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
-    def apply_interest_bulk(self, updates: list[tuple[int, int]], guild_id: int) -> int:
-        """
-        Apply interest charges to multiple players in a single transaction.
-
-        Interest is subtracted from balance (making debt larger/more negative).
-
-        Args:
-            updates: List of (discord_id, interest_amount) tuples
-            guild_id: Guild ID
-
-        Returns:
-            Number of rows updated.
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        if not updates:
-            return 0
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            self._set_economy_ledger_context(
-                cursor,
-                source="debt_interest",
-                related_type="debt_interest",
-                reason="debt interest charge",
-                metadata={"charge_count": len(updates)},
-            )
-            try:
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [(interest, discord_id, guild_id) for discord_id, interest in updates],
-                )
-            finally:
-                self._clear_economy_ledger_context(cursor)
-            return cursor.rowcount
 
     def increment_wins(self, discord_id: int, guild_id: int) -> None:
         """Increment player's win count."""
@@ -1728,42 +1678,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
 
-    def increment_losses(self, discord_id: int, guild_id: int) -> None:
-        """Increment player's loss count."""
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-            """,
-                (discord_id, guild_id),
-            )
 
-    def correct_win_loss_counts(
-        self,
-        old_winner_ids: list[int],
-        old_loser_ids: list[int],
-        guild_id: int,
-    ) -> None:
-        """Swap win/loss counts for match correction.
-
-        Old winners get wins--, losses++. Old losers get losses--, wins++.
-        Runs under BEGIN IMMEDIATE so concurrent readers see a consistent
-        snapshot across both sides of the swap.
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-            cursor.executemany(
-                "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ? AND guild_id = ?",
-                [(pid, normalized_guild) for pid in old_winner_ids],
-            )
-            cursor.executemany(
-                "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ? AND guild_id = ?",
-                [(pid, normalized_guild) for pid in old_loser_ids],
-            )
 
     def apply_match_outcome(self, winning_ids: list[int], losing_ids: list[int], guild_id: int) -> None:
         """
@@ -1911,25 +1826,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return True
 
-    def delete_all(self, guild_id: int) -> int:
-        """
-        Delete all players in a guild (for testing).
-
-        Returns:
-            Number of players deleted
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT COUNT(*) FROM players WHERE guild_id = ?", (guild_id,))
-            count = cursor.fetchone()[0]
-
-            cursor.execute("DELETE FROM players WHERE guild_id = ?", (guild_id,))
-            cursor.execute("DELETE FROM match_participants WHERE guild_id = ?", (guild_id,))
-            cursor.execute("DELETE FROM rating_history WHERE guild_id = ?", (guild_id,))
-
-            return count
 
     def get_by_steam_id(self, steam_id: int, guild_id: int) -> Player | None:
         """
@@ -2203,26 +2099,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return {row["discord_id"]: row["lowest_balance_ever"] for row in cursor.fetchall()}
 
-    def update_lowest_balance_if_lower(self, discord_id: int, guild_id: int, new_balance: int) -> bool:
-        """
-        Update lowest_balance_ever if new_balance is lower than current record.
-
-        Returns True if the record was updated, False otherwise.
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET lowest_balance_ever = ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                AND (lowest_balance_ever IS NULL OR lowest_balance_ever > ?)
-                """,
-                (new_balance, discord_id, guild_id, new_balance),
-            )
-            return cursor.rowcount > 0
 
     # =========================================================================
     # Easter Egg Tracking Methods (JOPA-T expansion)
@@ -2287,17 +2163,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return row["total_bets_placed"] if row and row["total_bets_placed"] else 0
 
-    def get_total_bets_placed(self, discord_id: int, guild_id: int) -> int:
-        """Get player's total bets placed."""
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT total_bets_placed FROM players WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, guild_id),
-            )
-            row = cursor.fetchone()
-            return row["total_bets_placed"] if row and row["total_bets_placed"] else 0
 
     def mark_first_leverage_used(self, discord_id: int, guild_id: int) -> bool:
         """
@@ -2320,17 +2185,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return cursor.rowcount > 0
 
-    def has_used_first_leverage(self, discord_id: int, guild_id: int) -> bool:
-        """Check if player has already used their first leverage bet."""
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT first_leverage_used FROM players WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, guild_id),
-            )
-            row = cursor.fetchone()
-            return bool(row["first_leverage_used"]) if row and row["first_leverage_used"] else False
 
     def get_first_calibrated_at(self, discord_id: int, guild_id: int) -> int | None:
         """
@@ -2349,28 +2203,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return row["first_calibrated_at"] if row and row["first_calibrated_at"] else None
 
-    def set_first_calibrated_at(self, discord_id: int, guild_id: int, timestamp: int) -> None:
-        """
-        Set the first calibration timestamp for a player.
-
-        Only sets if not already set (first calibration is permanent).
-
-        Args:
-            discord_id: Player's Discord ID
-            guild_id: Guild ID
-            timestamp: Unix timestamp when player first became calibrated
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET first_calibrated_at = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ? AND first_calibrated_at IS NULL
-                """,
-                (timestamp, discord_id, guild_id),
-            )
 
     def get_registered_player_count(self, guild_id: int) -> int:
         """

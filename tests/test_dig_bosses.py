@@ -121,7 +121,7 @@ class TestLuminosityCombatPenalty:
 
     def test_below_dim_threshold_uses_dark(self):
         # Lum 25 = inside Dark band (1..25)
-        offset, dmg = _luminosity_combat_penalty(25)
+        offset, _ = _luminosity_combat_penalty(25)
         assert offset == pytest.approx(-0.08)
 
 
@@ -406,7 +406,7 @@ class TestPinnacleConstants:
         assert len(PINNACLE_POOL_IDS) == 3
 
     def test_each_pinnacle_has_three_phases(self):
-        for pid, pinnacle in PINNACLE_BOSSES.items():
+        for pinnacle in PINNACLE_BOSSES.values():
             assert len(pinnacle.phases) == 3
 
     def test_relic_pool_non_empty(self):
@@ -723,7 +723,7 @@ class TestSkippedBossCatchup:
         )
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         bp_dict = dig_service._get_boss_progress(dict(tunnel))
-        assert dig_service._next_boss_boundary(250, bp_dict) == 200
+        assert dig_service._next_boss_boundary(bp_dict) == 200
 
     def test_at_boundary_fires_for_parked_player(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -765,7 +765,7 @@ class TestSkippedBossCatchup:
         )
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         bp_dict = dig_service._get_boss_progress(dict(tunnel))
-        assert dig_service._next_boss_boundary(250, bp_dict) == 100
+        assert dig_service._next_boss_boundary(bp_dict) == 100
         assert dig_service._at_boss_boundary(250, bp_dict) == 100
 
     def test_partial_phase_state_also_catches_up(

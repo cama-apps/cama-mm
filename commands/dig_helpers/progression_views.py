@@ -234,10 +234,10 @@ class MutationSelectionView(discord.ui.View):
                 style=discord.ButtonStyle.primary,
                 custom_id=f"mutation_select_{i}",
             )
-            btn.callback = self._make_callback(i, mut)
+            btn.callback = self._make_callback(mut)
             self.add_item(btn)
 
-    def _make_callback(self, index: int, mut: dict):
+    def _make_callback(self, mut: dict):
         async def callback(interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your prestige.", ephemeral=True)

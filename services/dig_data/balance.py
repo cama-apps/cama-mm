@@ -1,4 +1,4 @@
-"""Decay, sabotage/defense, cave-in, injury, and tip balance knobs for /dig.
+"""Sabotage, cave-in, event, and progression balance knobs for /dig.
 
 Extracted from the original ``dig_constants`` module; see
 ``services.dig_constants`` for the public facade.
@@ -7,30 +7,6 @@ Extracted from the original ``dig_constants`` module; see
 from __future__ import annotations
 
 import random
-
-# ---------------------------------------------------------------------------
-# Decay Constants
-# ---------------------------------------------------------------------------
-
-# Blocks lost per day of inactivity, per layer (after first 24h)
-DECAY_RATE_PER_DAY: dict[str, int] = {
-    "Dirt": 1,
-    "Stone": 2,
-    "Crystal": 3,
-    "Magma": 4,
-    "Abyss": 5,
-    "Fungal Depths": 6,
-    "Frozen Core": 7,
-    "The Hollow": 8,
-}
-
-DECAY_START_HOURS: int = 24                        # decay begins after this
-DECAY_ACCELERATED_HOURS: int = 72                  # 2x rate after this
-DECAY_ACCELERATED_MULTIPLIER: float = 2.0
-DECAY_FLOOR_DEPTHS: list[int] = [25, 50, 75, 100, 150, 200]  # decay cannot cross these
-DECAY_HELPER_REDUCTION: float = 0.5                 # per helper in last 24h
-DECAY_HELPER_MIN_MULTIPLIER: float = 0.25           # floor on helper reduction
-
 
 # ---------------------------------------------------------------------------
 # Sabotage / Defense Constants
@@ -46,12 +22,6 @@ SABOTAGE_COOLDOWN_SECONDS: int = 43_200    # 12 hours
 INSURANCE_BASE_COST: int = 5
 INSURANCE_COST_DEPTH_DIVISOR: int = 25     # cost = INSURANCE_BASE_COST + depth // INSURANCE_COST_DEPTH_DIVISOR
 INSURANCE_DURATION_SECONDS: int = 86_400   # 24 hours
-INSURANCE_REDUCTION: float = 0.50
-REINFORCEMENT_SABOTAGE_REDUCTION: float = 0.25
-MAX_COMBINED_SABOTAGE_REDUCTION: float = 0.70
-
-REVENGE_DISCOUNT_WINDOW_SECONDS: int = 3600   # 1 hour
-REVENGE_FREE_WINDOW_SECONDS: int = 1800       # 30 minutes
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +30,6 @@ REVENGE_FREE_WINDOW_SECONDS: int = 1800       # 30 minutes
 
 CAVE_IN_BLOCK_LOSS_MIN: int = 6
 CAVE_IN_BLOCK_LOSS_MAX: int = 14
-CAVE_IN_STUN_HOURS_MIN: int = 2
-CAVE_IN_STUN_HOURS_MAX: int = 4
-CAVE_IN_MEDICAL_BILL_DIVISOR: int = 6       # cost = max(1, depth // divisor)
-CAVE_IN_MEDICAL_BILL_MIN: int = 1
 
 # Depth bands. Cave-ins escalate as the tunnel goes deeper.
 CAVE_IN_BAND_SHALLOW: str = "shallow"
@@ -160,7 +126,6 @@ CURSE_DURATION_BONUS_DIGS: int = 1          # +N digs on every applied curse
 # every dig in the guild burns this many JC from its yield (pure deflation,
 # coins are destroyed not transferred).
 HELLTIDE_MODIFIER_ID: str = "helltide_active"
-HELLTIDE_MODIFIER_DURATION_SECONDS: int = 1800  # 30 minutes
 HELLTIDE_TAX_PER_DIG: int = 5
 
 
@@ -220,25 +185,10 @@ def roll_catastrophic_cave_in(band: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Injuries
-# ---------------------------------------------------------------------------
-
-INJURY_TYPES: list[str] = ["reduced_advance", "slower_cooldown", "layer_debuff"]
-
-INJURY_DURATIONS: dict[str, dict[str, int]] = {
-    "reduced_advance": {"digs": 3},
-    "slower_cooldown": {"hours": 24, "cooldown_hours": 6},
-    "layer_debuff": {"digs": 3},
-}
-
-
-# ---------------------------------------------------------------------------
 # Miscellaneous
 # ---------------------------------------------------------------------------
 
 MAX_INVENTORY_SLOTS: int = 8
-ABANDON_COOLDOWN_SECONDS: int = 86_400     # 24 hours
-ABANDON_MIN_DEPTH: int = 10
 ABANDON_REFUND_PCT: float = 0.10           # 10% of depth in JC
 
 

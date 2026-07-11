@@ -652,13 +652,6 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
             return [dict(row) for row in cursor.fetchall()]
 
-    def delete_bets_for_guild(self, guild_id: int | None) -> int:
-        """Remove all bets for the specified guild."""
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM bets WHERE guild_id = ?", (normalized_guild,))
-            return cursor.rowcount
 
     def get_total_bets_by_guild(
         self, guild_id: int | None, since_ts: int | None = None,
@@ -708,76 +701,7 @@ class BetRepository(BaseRepository, IBetRepository):
             totals = {row["team_bet_on"]: row["total"] for row in cursor.fetchall()}
             return {team: totals.get(team, 0) for team in self.VALID_TEAMS}
 
-    def assign_match_id(
-        self, guild_id: int | None, match_id: int, since_ts: int | None = None,
-        pending_match_id: int | None = None,
-    ) -> None:
-        """Tie all pending bets for the current match window to a recorded match.
 
-        Args:
-            pending_match_id: If provided, only update bets for this specific pending match
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-
-            if pending_match_id is not None:
-                cursor.execute(
-                    """
-                    UPDATE bets
-                    SET match_id = ?
-                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
-                    """,
-                    (match_id, normalized_guild, pending_match_id),
-                )
-            elif since_ts is not None:
-                cursor.execute(
-                    """
-                    UPDATE bets
-                    SET match_id = ?
-                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
-                    """,
-                    (match_id, normalized_guild, since_ts),
-                )
-            else:
-                cursor.execute(
-                    """
-                    UPDATE bets
-                    SET match_id = ?
-                    WHERE guild_id = ? AND match_id IS NULL
-                    """,
-                    (match_id, normalized_guild),
-                )
-
-    def delete_pending_bets(
-        self, guild_id: int | None, since_ts: int | None = None,
-        pending_match_id: int | None = None,
-    ) -> int:
-        """Delete pending bets (match_id IS NULL) for the current match window.
-
-        Args:
-            pending_match_id: If provided, only delete bets for this specific pending match
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-
-            if pending_match_id is not None:
-                cursor.execute(
-                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?",
-                    (normalized_guild, pending_match_id),
-                )
-            elif since_ts is not None:
-                cursor.execute(
-                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?",
-                    (normalized_guild, since_ts),
-                )
-            else:
-                cursor.execute(
-                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL",
-                    (normalized_guild,),
-                )
-            return cursor.rowcount
 
     def settle_pending_bets_atomic(
         self,
@@ -1837,7 +1761,6 @@ class BetRepository(BaseRepository, IBetRepository):
 
     def reverse_bet_payouts_for_correction(
         self,
-        match_id: int,
         old_winners: list[dict],
     ) -> dict[int, int]:
         """
@@ -1847,7 +1770,6 @@ class BetRepository(BaseRepository, IBetRepository):
         Does NOT refund losers (they already lost their stake).
 
         Args:
-            match_id: The match being corrected
             old_winners: List of bet dicts for bets that previously won
 
         Returns:
@@ -1968,7 +1890,7 @@ class BetRepository(BaseRepository, IBetRepository):
         gid = self.normalize_guild_id(guild_id)
 
         # Reversal is pure compute: subtract each old winner's stale payout.
-        reversal_deltas = self.reverse_bet_payouts_for_correction(match_id, old_winners)
+        reversal_deltas = self.reverse_bet_payouts_for_correction(old_winners)
 
         # New payouts are pure compute too; bet-row payout updates come along.
         new_deltas, payout_updates = self._compute_new_bet_payouts(

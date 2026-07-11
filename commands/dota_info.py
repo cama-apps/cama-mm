@@ -91,11 +91,6 @@ def _get_ability_by_name(name: str) -> Ability | None:
     return None
 
 
-def _format_stat(label: str, value, suffix: str = "") -> str:
-    """Format a stat line."""
-    if value is None:
-        return ""
-    return f"**{label}:** {value}{suffix}"
 
 
 def _format_ability_values(ability: Ability) -> str:

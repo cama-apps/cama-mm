@@ -235,7 +235,7 @@ class TestE2EAdminCommands:
         for pid in player_ids:
             rating_data = test_db.get_player_glicko_rating(pid, guild_id=TEST_GUILD_ID)
             if rating_data:
-                rating, rd, vol = rating_data
+                rating, rd, _ = rating_data
                 # Initial rating was 1500.0, after a match it should have changed
                 if rating != 1500.0 or rd != 350.0:
                     updated_ratings += 1
@@ -1004,7 +1004,7 @@ def test_last_match_date_updated_after_record(test_db_with_schema):
     for pid in player_ids:
         dates = player_repo.get_last_match_date(pid, TEST_GUILD_ID)
         assert dates is not None, f"Player {pid} should have dates tuple"
-        last_match, created_at = dates
+        last_match, _ = dates
         assert last_match is not None, f"Player {pid} should have last_match_date set"
         # Verify it's recent (within last minute)
         last_match_dt = datetime.fromisoformat(last_match)

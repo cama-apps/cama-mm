@@ -264,7 +264,7 @@ def test_advance_ignores_event_mismatched_to_active_stage(
 
 
 def test_advance_through_to_finale_dispatches_relic(
-    quest_repo, dig_repo, bet_repo, guild_modifier_repo, monkeypatch,
+    quest_repo, dig_repo, bet_repo, guild_modifier_repo,
 ):
     quest, _ = _make_5_stage_quest()
     svc = DigQuestService(quest_repo, dig_repo, bet_repo, guild_modifier_repo, quests=(quest,))

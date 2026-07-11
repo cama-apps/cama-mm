@@ -372,7 +372,7 @@ class QueriesMixin:
         # Aggregate hero stats across all players
         aggregated: dict[int, dict] = {}  # hero_id -> {games, wins, losses, roles}
 
-        for discord_id, heroes in player_stats.items():
+        for heroes in player_stats.values():
             for hero in heroes:
                 hero_id = hero["hero_id"]
                 if hero_id not in aggregated:

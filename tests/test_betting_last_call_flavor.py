@@ -99,7 +99,7 @@ async def test_enabled_with_leader_uses_player_context(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enabled_ai_none_falls_back_to_static():
-    svc, ai_service = _service(ai_enabled=True, ai_result=None)
+    svc, _ = _service(ai_enabled=True, ai_result=None)
     result = await svc.generate_betting_last_call(
         TEST_GUILD_ID, {"standings": "x", "seconds_left": 60}, leader_discord_id=None
     )
@@ -154,7 +154,7 @@ async def test_warning_without_underdog_uses_crowd_angle():
 
 @pytest.mark.asyncio
 async def test_warning_ai_none_falls_back_to_static():
-    svc, ai_service = _service(ai_enabled=True, ai_result=None)
+    svc, _ = _service(ai_enabled=True, ai_result=None)
     result = await svc.generate_betting_warning(
         TEST_GUILD_ID, {"standings": "x", "seconds_left": 300}, underdog_side="dire"
     )

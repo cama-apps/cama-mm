@@ -28,7 +28,6 @@ from services.dig_service import DigService
 from utils.economy_scaling import scale_minigame_jc_delta
 
 TRAP_EVENT_IDS = ("sealed_reliquary", "grenths_tithe")
-WHALE_EVENT_IDS = ("rhystic_tollgate", "underworld_reclaims")
 
 
 @pytest.fixture

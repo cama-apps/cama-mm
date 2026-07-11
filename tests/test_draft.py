@@ -1922,7 +1922,7 @@ class TestHandlePlayerPick:
             get_cog=lambda _name: None,
             get_channel=lambda cid: thread if cid == thread_id else None,
         )
-        cog, state = _make_final_pick_scenario(
+        cog, _ = _make_final_pick_scenario(
             player_repository, guild_id, player_ids,
             bot=bot, match_service=match_service,
         )

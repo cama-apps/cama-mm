@@ -462,49 +462,6 @@ class BalancedShuffler:
 
         return team1, team2, excluded, total_score
 
-    def _compute_value_diff_lower_bound(
-        self,
-        team1_sum: float,
-        team2_sum: float,
-        remaining_values: list[float],
-        need_t1: int,
-        need_t2: int,
-    ) -> float:
-        """
-        Compute lower bound on achievable value difference.
-
-        Given partial team sums and remaining player values to assign,
-        compute the minimum possible final value difference.
-
-        Args:
-            team1_sum: Current sum of team1 values
-            team2_sum: Current sum of team2 values
-            remaining_values: Sorted (descending) values of unassigned players
-            need_t1: Number of players still needed for team1
-            need_t2: Number of players still needed for team2
-
-        Returns:
-            Lower bound on value difference
-        """
-        if not remaining_values:
-            return abs(team1_sum - team2_sum)
-
-        # Greedy optimal assignment: always give to the team that's behind
-        t1, t2 = team1_sum, team2_sum
-        n1, n2 = need_t1, need_t2
-
-        for val in remaining_values:
-            if n1 == 0:
-                t2 += val
-                n2 -= 1
-            elif n2 == 0 or t1 <= t2:
-                t1 += val
-                n1 -= 1
-            else:
-                t2 += val
-                n2 -= 1
-
-        return abs(t1 - t2)
 
     def _get_cached_role_assignments(self, players: list[Player]) -> list[list[str]]:
         """
@@ -1443,7 +1400,7 @@ class BalancedShuffler:
                 outside = [c for c in candidates if c.name not in pool_set]
 
                 # Try all single-player swaps: remove one from pool, add one from outside
-                for i, out_player in enumerate(pool):
+                for i, _ in enumerate(pool):
                     for in_player in outside:
                         # Create new pool with swap
                         new_pool = pool[:i] + [in_player] + pool[i + 1:]

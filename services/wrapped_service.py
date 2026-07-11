@@ -722,7 +722,6 @@ class WrappedService:
         # Generate awards
         awards = self._generate_awards(
             match_stats=match_stats,
-            hero_stats=hero_stats,
             player_heroes=player_heroes,
             rating_changes=rating_changes,
             betting_stats=betting_stats,
@@ -1564,7 +1563,6 @@ class WrappedService:
     def _generate_awards(
         self,
         match_stats: list[dict],
-        hero_stats: list[dict],
         player_heroes: list[dict],
         rating_changes: list[dict],
         betting_stats: list[dict],

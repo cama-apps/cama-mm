@@ -478,7 +478,6 @@ class GamblingStatsService:
         for s in summaries:
             discord_id = s["discord_id"]
             degen = self._calculate_degen_score_from_batch(
-                discord_id=discord_id,
                 leverage_dist=bulk_leverage.get(discord_id, {}),
                 loss_chase_data=bulk_loss_chase.get(discord_id, {"sequences_analyzed": 0, "times_increased_after_loss": 0}),
                 bankruptcy_count=bulk_bankruptcy.get(discord_id, 0),
@@ -562,7 +561,6 @@ class GamblingStatsService:
 
     def _calculate_degen_score_from_batch(
         self,
-        discord_id: int,
         leverage_dist: dict[int, int],
         loss_chase_data: dict,
         bankruptcy_count: int,

@@ -157,7 +157,6 @@ def test_tax_player_recent_ledger_splits_long_field():
     embed = tax_commands._build_player_embed(
         user,
         _player_snapshot(rows),
-        tax_service=object(),
     )
 
     assert validate_embed(embed) == []

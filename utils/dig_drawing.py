@@ -452,7 +452,7 @@ def draw_event_scene(layer_name: str, event_id: str) -> io.BytesIO:
     return buf
 
 
-def draw_boss_scene(layer_name: str, boss_name: str) -> io.BytesIO:
+def draw_boss_scene(layer_name: str) -> io.BytesIO:
     """Generate a pixel art scene for a boss encounter."""
     width, height = SCENE_WIDTH, SCENE_HEIGHT
 
@@ -478,7 +478,7 @@ def draw_boss_scene(layer_name: str, boss_name: str) -> io.BytesIO:
     return buf
 
 
-def draw_boss_result_scene(layer_name: str, boss_name: str, won: bool) -> io.BytesIO:
+def draw_boss_result_scene(layer_name: str, won: bool) -> io.BytesIO:
     """Generate a pixel art scene for a boss fight result (victory or defeat)."""
     width, height = SCENE_WIDTH, SCENE_HEIGHT
     img = _get_layer_background(layer_name, width, height)
@@ -774,7 +774,7 @@ def animate_dig_reveal(
     return _save_dig_gif(frames, durations)
 
 
-def animate_legendary_relic(layer_name: str, relic_name: str) -> io.BytesIO:
+def animate_legendary_relic(relic_name: str) -> io.BytesIO:
     """Bespoke set-piece: a legendary relic ascends from the void with a particle bloom."""
     name_font = _dig_font(16, bold=True)
     relic = _draw_item_sprite("crystal")
@@ -863,7 +863,7 @@ def animate_cave_in(layer_name: str, depth_before: int, depth_after: int) -> io.
     return _save_dig_gif(frames, durations)
 
 
-def animate_pinnacle(layer_name: str, *, prestige: bool) -> io.BytesIO:
+def animate_pinnacle(*, prestige: bool) -> io.BytesIO:
     """Bespoke endgame: depth-350 Pinnacle descent, or depth-400 prestige ascension."""
     title_font = _dig_font(18, bold=True)
     sub_font = _dig_font(12)

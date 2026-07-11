@@ -4,7 +4,6 @@ Repository for managing prediction market data.
 
 from __future__ import annotations
 
-import json
 import time
 
 from repositories.base_repository import BaseRepository
@@ -87,20 +86,6 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def get_active_predictions(self, guild_id: int) -> list[dict]:
-        """Get all open/locked predictions for a guild."""
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM predictions
-                WHERE guild_id = ? AND status IN ('open', 'locked')
-                ORDER BY created_at DESC
-                """,
-                (normalized_guild,),
-            )
-            return [dict(row) for row in cursor.fetchall()]
 
     def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
         """Get predictions filtered by status."""
@@ -175,110 +160,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     (close_message_id, prediction_id),
                 )
 
-    def add_resolution_vote(
-        self, prediction_id: int, user_id: int, outcome: str, is_admin: bool
-    ) -> dict:
-        """
-        Add a resolution vote. Returns vote counts and admin status.
 
-        Votes are stored as JSON in the resolution_votes column:
-        {"user_id": {"outcome": "yes", "is_admin": false}, ...}
-        """
-        if outcome not in self.VALID_POSITIONS:
-            raise ValueError(f"Invalid outcome: {outcome}")
 
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
 
-            # Get current votes
-            cursor.execute(
-                "SELECT resolution_votes FROM predictions WHERE prediction_id = ?",
-                (prediction_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError("Prediction not found.")
-
-            votes_json = row["resolution_votes"]
-            votes = json.loads(votes_json) if votes_json else {}
-
-            # Check if user already voted differently
-            user_key = str(user_id)
-            existing = votes.get(user_key)
-            if existing and existing.get("outcome") != outcome:
-                raise ValueError("You already voted for a different outcome.")
-
-            # Add/update vote
-            votes[user_key] = {"outcome": outcome, "is_admin": is_admin}
-
-            cursor.execute(
-                "UPDATE predictions SET resolution_votes = ? WHERE prediction_id = ?",
-                (json.dumps(votes), prediction_id),
-            )
-
-            # Calculate vote counts
-            yes_count = sum(1 for v in votes.values() if v["outcome"] == "yes")
-            no_count = sum(1 for v in votes.values() if v["outcome"] == "no")
-            has_admin_vote = any(
-                v["is_admin"] and v["outcome"] == outcome for v in votes.values()
-            )
-
-            return {
-                "yes_count": yes_count,
-                "no_count": no_count,
-                "has_admin_vote": has_admin_vote,
-                "voted_outcome": outcome,
-            }
-
-    def get_resolution_votes(self, prediction_id: int) -> dict:
-        """Get current resolution vote counts: {"yes": n, "no": m}."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT resolution_votes FROM predictions WHERE prediction_id = ?",
-                (prediction_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                return {"yes": 0, "no": 0}
-
-            votes_json = row["resolution_votes"]
-            if not votes_json:
-                return {"yes": 0, "no": 0}
-
-            votes = json.loads(votes_json)
-            yes_count = sum(1 for v in votes.values() if v["outcome"] == "yes")
-            no_count = sum(1 for v in votes.values() if v["outcome"] == "no")
-            return {"yes": yes_count, "no": no_count}
-
-    def resolve_prediction(
-        self, prediction_id: int, outcome: str, resolved_by: int
-    ) -> None:
-        """Mark prediction as resolved with outcome."""
-        if outcome not in self.VALID_POSITIONS:
-            raise ValueError(f"Invalid outcome: {outcome}")
-        resolved_at = int(time.time())
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE predictions
-                SET status = 'resolved', outcome = ?, resolved_at = ?, resolved_by = ?
-                WHERE prediction_id = ?
-                """,
-                (outcome, resolved_at, resolved_by, prediction_id),
-            )
-
-    def cancel_prediction(self, prediction_id: int) -> None:
-        """Cancel a prediction (status -> cancelled)."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE predictions SET status = 'cancelled' WHERE prediction_id = ?
-                """,
-                (prediction_id,),
-            )
 
     # =========================================================================
     # Order-book mechanic (feat/predict-orderbook)

@@ -210,7 +210,7 @@ async def test_readycheck_allowed_under_10_players(monkeypatch):
     """No 10-player gate: a 4-person lobby posts, with a 'need 6 more' note."""
     env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE, 4: ONLINE})
 
-    status, info = await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    status, _ = await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
 
     assert status == "ok"
     assert "need 6 more for a full game" in _posted_embed(env).description

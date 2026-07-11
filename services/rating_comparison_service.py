@@ -202,7 +202,7 @@ class RatingComparisonService:
             buckets[bucket_key]["count"] += 1
 
         # Finalize bucket stats
-        for key, bucket in buckets.items():
+        for bucket in buckets.values():
             if bucket["count"] > 0:
                 bucket["avg_predicted"] = bucket["predicted"] / bucket["count"]
                 bucket["actual_rate"] = bucket["actual_wins"] / bucket["count"]
@@ -302,7 +302,7 @@ class RatingComparisonService:
         def extract_curve_data(buckets: dict) -> list[tuple[float, float, int]]:
             """Extract (predicted, actual, count) tuples for non-empty buckets."""
             data = []
-            for key, bucket in buckets.items():
+            for bucket in buckets.values():
                 if bucket["count"] > 0:
                     data.append((
                         bucket["avg_predicted"],

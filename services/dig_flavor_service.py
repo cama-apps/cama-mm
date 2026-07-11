@@ -470,7 +470,6 @@ class DigFlavorService:
         self,
         discord_id: int,
         guild_id: int,
-        action_type: str,
         choice: str | None = None,
         details: dict | None = None,
     ) -> None:
@@ -490,7 +489,7 @@ class DigFlavorService:
             histogram[choice] = histogram.get(choice, 0) + 1
 
         if details:
-            moment = _extract_notable_moment(action_type, details)
+            moment = _extract_notable_moment(details)
             if moment:
                 notable.append(moment)
                 notable = notable[-10:]  # keep last 10
@@ -502,7 +501,7 @@ class DigFlavorService:
         self.dig_repo.upsert_personality(discord_id, guild_id, personality)
 
 
-def _extract_notable_moment(action_type: str, details: dict) -> str | None:
+def _extract_notable_moment(details: dict) -> str | None:
     """Extract a notable moment string from action details, if any."""
     notable_keys = {
         "first_boss_kill": "Slew their first boss",

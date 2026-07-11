@@ -320,7 +320,7 @@ class TestSQLQueryService:
         ]
 
         for query in dangerous_queries:
-            is_valid, error = service._validate_sql(query)
+            is_valid, _ = service._validate_sql(query)
             assert not is_valid, f"Should reject: {query}"
 
     def test_validate_sql_rejects_blocked_columns(self):

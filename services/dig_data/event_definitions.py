@@ -4490,4 +4490,3 @@ RANDOM_EVENTS: list[RandomEvent] = [
 # Event chaining knobs
 # ---------------------------------------------------------------------------
 EVENT_CHAIN_CHANCE: float = 0.15
-EVENT_CHAIN_JC_MULTIPLIER: float = 1.2

@@ -587,7 +587,7 @@ class TestApplyOptionOutcome:
         # Option 0: Dodge left — 0.70 prob of 0 dmg, 0.30 prob of -1 dmg
         # Pin random.random to 0.0 → selects the first (0.70) branch.
         monkeypatch.setattr(random, "random", lambda: 0.0)
-        narrative, player_hp, boss_hp, effects = dig_service._apply_option_outcome_to_state(
+        _, player_hp, boss_hp, _ = dig_service._apply_option_outcome_to_state(
             option=mech.options[0], player_hp=5, boss_hp=5, status_effects={},
         )
         assert player_hp == 5  # no damage on the first branch
@@ -597,7 +597,7 @@ class TestApplyOptionOutcome:
         mech = MECHANIC_REGISTRY["pudge_hook"]
         # Option 2 (grab): 0.25 prob of dealing 4 to boss, 0.75 prob of -3 self
         monkeypatch.setattr(random, "random", lambda: 0.0)  # first branch
-        narrative, player_hp, boss_hp, effects = dig_service._apply_option_outcome_to_state(
+        _, player_hp, boss_hp, _ = dig_service._apply_option_outcome_to_state(
             option=mech.options[2], player_hp=5, boss_hp=5, status_effects={},
         )
         assert boss_hp == 1  # 5 - 4
@@ -608,7 +608,7 @@ class TestApplyOptionOutcome:
         # Option 1 (dodge right into swing), branch 2: skip_next_round_for=player
         # Branch 1 is prob 0.50, branch 2 is prob 0.50. Random = 0.99 picks branch 2.
         monkeypatch.setattr(random, "random", lambda: 0.99)
-        narrative, _, _, effects = dig_service._apply_option_outcome_to_state(
+        _, _, _, effects = dig_service._apply_option_outcome_to_state(
             option=mech.options[1], player_hp=5, boss_hp=5, status_effects={},
         )
         assert effects.get("skip_next_round_for") == "player"
@@ -617,7 +617,7 @@ class TestApplyOptionOutcome:
         mech = MECHANIC_REGISTRY["cm_frostbite"]
         # Option 1 (close distance): branch 2 (prob 0.55) applies frostbite
         monkeypatch.setattr(random, "random", lambda: 0.99)  # Select second branch.
-        narrative, _, _, effects = dig_service._apply_option_outcome_to_state(
+        _, _, _, effects = dig_service._apply_option_outcome_to_state(
             option=mech.options[1], player_hp=5, boss_hp=5, status_effects={},
         )
         assert effects.get("frostbite_next_round") is True

@@ -64,7 +64,7 @@ class EventsMixin:
         return any(_has_negative_jc(outcome) for outcome in (event.get("outcomes") or {}).values())
 
     def _chain_event(self, depth: int, prestige_level: int,
-                     trigger_rarity: str, luminosity: int = 100,
+                     trigger_rarity: str,
                      trigger_event_id: str | None = None) -> dict | None:
         """P7+: 25% chance to chain another event of same or higher rarity.
 
@@ -322,7 +322,7 @@ class EventsMixin:
                 depth_delta = random.randint(depth_range[0], depth_range[1]) if isinstance(depth_range, list) else depth_range
                 if depth_delta > 0:
                     boss_progress = self._get_boss_progress(tunnel)
-                    next_boss = self._next_boss_boundary(depth, boss_progress)
+                    next_boss = self._next_boss_boundary(boss_progress)
                     if next_boss is not None and depth + depth_delta >= next_boss:
                         depth_delta = max(0, next_boss - 1 - depth)
                         boss_encounter = True
@@ -429,7 +429,7 @@ class EventsMixin:
 
         if advance > 0:
             boss_progress = self._get_boss_progress(tunnel)
-            next_boss = self._next_boss_boundary(depth, boss_progress)
+            next_boss = self._next_boss_boundary(boss_progress)
             if next_boss is not None and depth + advance >= next_boss:
                 advance = max(0, next_boss - 1 - depth)
                 boss_encounter = True
@@ -598,7 +598,6 @@ class EventsMixin:
         chain_event = self._chain_event(
             new_depth, prestige_level,
             event.get("rarity", "common"),
-            tunnel.get("luminosity", 100),
             trigger_event_id=event_id,
         )
 

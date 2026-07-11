@@ -80,7 +80,7 @@ def make_bot(match_service=None):
 
 @pytest.mark.asyncio
 async def test_resetlobby_allows_admin(monkeypatch):
-    lobby_manager, lobby_service = make_lobby_service()
+    _, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
     lobby.add_player(42)
     interaction = FakeInteraction(user_id=1)
@@ -98,7 +98,7 @@ async def test_resetlobby_allows_admin(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resetlobby_allows_creator(monkeypatch):
-    lobby_manager, lobby_service = make_lobby_service()
+    _, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=7, guild_id=123)
     lobby.add_player(7)
     interaction = FakeInteraction(user_id=7)
@@ -122,7 +122,7 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
         def get_last_shuffle(self, _guild_id):
             return PendingMatchState(shuffle_message_jump_url="http://example.com")
 
-    lobby_manager, lobby_service = make_lobby_service()
+    _, lobby_service = make_lobby_service()
     lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
     interaction = FakeInteraction(user_id=1)
 
@@ -141,7 +141,7 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
-    lobby_manager, lobby_service = make_lobby_service()
+    _, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=5, guild_id=123)
     lobby.add_player(5)
     interaction = FakeInteraction(user_id=6)
@@ -160,7 +160,7 @@ async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
 @pytest.mark.asyncio
 async def test_resetlobby_new_lobby_is_empty(monkeypatch):
     """After reset, creating a new lobby should have zero players."""
-    lobby_manager, lobby_service = make_lobby_service()
+    _, lobby_service = make_lobby_service()
 
     # Create lobby and add players
     lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)

@@ -128,9 +128,8 @@ class TestLossWeightInversion:
         team1_fantasy = [30.0, 5.0]
         team2_fantasy = [30.0, 5.0]
 
-        # Team 1 wins (doesn't affect weights - no inversion)
         team1_weights, team2_weights = system.compute_match_weights(
-            team1_fantasy, team2_fantasy, team1_won=True
+            team1_fantasy, team2_fantasy
         )
 
         # Both teams should have same weights (no inversion)

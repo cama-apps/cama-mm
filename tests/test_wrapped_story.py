@@ -183,7 +183,7 @@ class TestNewDataclasses:
 
 class TestGetPersonalSummaryWrapped:
     def test_returns_none_when_player_not_found(self):
-        svc, wrapped_repo, player_repo = _build_service()
+        svc, _, player_repo = _build_service()
         player_repo.get_by_id.return_value = None
         result = svc.get_personal_summary_wrapped(111, 2026, guild_id=0)
         assert result is None
@@ -511,13 +511,13 @@ class TestGetPackageDealWrappedConsumedDeals:
 
 class TestGetHeroSpotlightWrapped:
     def test_returns_none_when_no_heroes(self):
-        svc, wrapped_repo, player_repo = _build_service()
+        svc, wrapped_repo, _ = _build_service()
         wrapped_repo.get_month_player_heroes.return_value = []
         result = svc.get_hero_spotlight_wrapped(111, 2026, guild_id=0)
         assert result is None
 
     def test_returns_none_when_no_heroes_for_player(self):
-        svc, wrapped_repo, player_repo = _build_service()
+        svc, wrapped_repo, _ = _build_service()
         wrapped_repo.get_month_player_heroes.return_value = [
             {"discord_id": 999, "hero_id": 1, "picks": 5, "wins": 3},
         ]
@@ -528,7 +528,7 @@ class TestGetHeroSpotlightWrapped:
     def test_returns_hero_spotlight(self, mock_hero_name):
         mock_hero_name.side_effect = lambda hid: {1: "Anti-Mage", 2: "Axe", 3: "Bane"}.get(hid)
 
-        svc, wrapped_repo, player_repo = _build_service()
+        svc, wrapped_repo, _ = _build_service()
         wrapped_repo.get_month_player_heroes.return_value = [
             {"discord_id": 111, "hero_id": 1, "picks": 8, "wins": 5},
             {"discord_id": 111, "hero_id": 2, "picks": 5, "wins": 4},

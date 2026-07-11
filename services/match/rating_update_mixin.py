@@ -188,35 +188,6 @@ class RatingUpdateMixin:
             "players_skipped": len(participants) - updated_count,
         }
 
-    def _update_rating_history_openskill(
-        self,
-        match_id: int,
-        discord_id: int,
-        os_mu_before: float | None,
-        os_mu_after: float,
-        os_sigma_before: float | None,
-        os_sigma_after: float,
-        fantasy_weight: float | None,
-    ) -> None:
-        """
-        Update an existing rating_history entry with OpenSkill data.
-
-        If no existing entry exists, this is a no-op (OpenSkill updates happen
-        after enrichment, so rating_history should already exist from record_match).
-        """
-        updated = self.match_repo.update_rating_history_openskill(
-            match_id=match_id,
-            discord_id=discord_id,
-            os_mu_before=os_mu_before,
-            os_mu_after=os_mu_after,
-            os_sigma_before=os_sigma_before,
-            os_sigma_after=os_sigma_after,
-            fantasy_weight=fantasy_weight,
-        )
-        if not updated:
-            logger.warning(
-                f"No rating_history entry found for match {match_id}, player {discord_id}"
-            )
 
     def backfill_openskill_ratings(self, guild_id: int | None = None, reset_first: bool = True) -> dict:
         """
@@ -313,13 +284,15 @@ class RatingUpdateMixin:
 
                 if has_fantasy:
                     # Use FP-weighted update (with blending)
-                    result = self._backfill_match_with_fantasy(match_id, match_guild_id, participants, winning_team)
+                    result = self._backfill_match_with_fantasy(
+                        match_guild_id, participants, winning_team
+                    )
                     if result.get("success"):
                         matches_with_fantasy += 1
                 else:
                     # Use equal-weight update
                     result = self._backfill_match_equal_weight(
-                        match_id, match_guild_id, radiant_ids, dire_ids, winning_team
+                        match_guild_id, radiant_ids, dire_ids, winning_team
                     )
                     if result.get("success"):
                         matches_equal_weight += 1
@@ -357,7 +330,6 @@ class RatingUpdateMixin:
 
     def _backfill_match_with_fantasy(
         self,
-        match_id: int,
         guild_id: int | None,
         participants: list[dict],
         winning_team: int,
@@ -405,7 +377,6 @@ class RatingUpdateMixin:
 
     def _backfill_match_equal_weight(
         self,
-        match_id: int,
         guild_id: int | None,
         radiant_ids: list[int],
         dire_ids: list[int],

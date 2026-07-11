@@ -716,7 +716,7 @@ class DigCoreMixin:
 
         # Boss boundary
         boss_progress = self._get_boss_progress(tunnel)
-        next_boss = self._next_boss_boundary(depth_before, boss_progress)
+        next_boss = self._next_boss_boundary(boss_progress)
         boss_encounter = False
         boss_info = None
         if next_boss is not None and depth_before + advance >= next_boss:
@@ -1152,7 +1152,7 @@ class DigCoreMixin:
 
             # Boss boundary cap (DM cannot skip bosses)
             boss_progress = self._get_boss_progress(tunnel)
-            next_boss = self._next_boss_boundary(depth_before, boss_progress)
+            next_boss = self._next_boss_boundary(boss_progress)
             boss_encounter = False
             boss_info = None
             if next_boss is not None and depth_before + advance >= next_boss:

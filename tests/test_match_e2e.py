@@ -702,7 +702,7 @@ class TestEndToEndRadiantDireBug:
                 break
 
         assert reporter_stats is not None, "BugReporter not found in leaderboard"
-        reporter_player, reporter_wins, reporter_losses, reporter_win_rate, reporter_rating = (
+        _, reporter_wins, reporter_losses, reporter_win_rate, _ = (
             reporter_stats
         )
 

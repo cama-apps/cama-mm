@@ -298,7 +298,7 @@ class LobbyCommands(commands.Cog):
             return False, "⚠️ Set your preferred roles with `/player roles` to auto-join."
 
         # Attempt to join (pending match check now inside LobbyService)
-        success, reason, pending_info = await asyncio.to_thread(
+        success, reason, _ = await asyncio.to_thread(
             self.lobby_service.join_lobby, user_id, guild_id
         )
         if not success:
@@ -338,7 +338,7 @@ class LobbyCommands(commands.Cog):
                 if not is_ready:
                     await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
                 else:
-                    await notify_lobby_ready(channel, lobby, guild_id=guild_id or 0)
+                    await notify_lobby_ready(channel, guild_id=guild_id or 0)
             except Exception as exc:
                 logger.warning(f"Failed to send rally/ready notification on auto-join: {exc}")
 
@@ -678,7 +678,7 @@ class LobbyCommands(commands.Cog):
                 if not is_ready:
                     await notify_lobby_rally(channel, thread, lobby, guild_id)
                 else:
-                    await notify_lobby_ready(channel, lobby, guild_id=guild_id)
+                    await notify_lobby_ready(channel, guild_id=guild_id)
             except Exception as exc:
                 logger.warning(f"Failed to send rally/ready notification: {exc}")
 

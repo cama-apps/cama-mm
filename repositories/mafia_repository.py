@@ -982,50 +982,6 @@ class MafiaRepository(BaseRepository):
                 self._clear_economy_ledger_context(cursor)
             return {"paid": paid, "reward": reward_total}
 
-    # ── Meta (hall of fame) ─────────────────────────────────────────────────
-
-    def get_hall_of_fame_message_id(self, guild_id: int | None) -> int | None:
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT hall_of_fame_message_id FROM mafia_meta WHERE guild_id = ?",
-                (gid,),
-            )
-            row = cursor.fetchone()
-            return row["hall_of_fame_message_id"] if row else None
-
-    def set_hall_of_fame_message_id(self, guild_id: int | None, message_id: int) -> None:
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            conn.cursor().execute(
-                """
-                INSERT INTO mafia_meta (guild_id, hall_of_fame_message_id, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    hall_of_fame_message_id = excluded.hall_of_fame_message_id,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (gid, message_id),
-            )
-
-    def get_recent_winners(self, guild_id: int | None, limit: int = 10) -> list[dict]:
-        """Resolved games (most recent first) for the hall of fame."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT game_id, game_date, winner, mvp_id, payout_per_winner
-                FROM mafia_games
-                WHERE guild_id = ? AND phase = ? AND status = 'ACTIVE'
-                  AND winner IS NOT NULL AND winner != ?
-                ORDER BY game_id DESC LIMIT ?
-                """,
-                (gid, MafiaPhase.RESOLVED.value, MafiaWinner.NONE.value, limit),
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
     # ── Eligibility & opt-out ───────────────────────────────────────────────
 
     def get_eligible_player_ids(

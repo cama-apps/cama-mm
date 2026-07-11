@@ -488,7 +488,7 @@ class BossCombatMixin:
         except (json.JSONDecodeError, TypeError):
             return []
 
-    def _next_boss_boundary(self, depth: int, boss_progress: dict) -> int | None:
+    def _next_boss_boundary(self, boss_progress: dict) -> int | None:
         """Return the lowest undefeated boss boundary, regardless of current depth.
 
         A boundary is "undefeated" if its status is still active or only
@@ -547,33 +547,6 @@ class BossCombatMixin:
             ):
                 return PINNACLE_DEPTH
         return None
-
-    def encounter_boss(self, discord_id: int, guild_id) -> dict:
-        """Check if player is at boss boundary. Return boss info."""
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return self._error("You don't have a tunnel.")
-
-        tunnel = dict(tunnel)
-        boss_progress = self._get_boss_progress(tunnel)
-        at_boss = self._at_boss_boundary(tunnel.get("depth", 0), boss_progress)
-
-        if at_boss is None:
-            return self._error("You're not at a boss boundary.")
-
-        boss_info = self._build_boss_info(discord_id, guild_id, tunnel, at_boss)
-        attempts = tunnel.get("boss_attempts", 0) or 0
-
-        return self._ok(
-            boundary=at_boss,
-            boss_id=boss_info["boss_id"],
-            boss_name=boss_info["name"],
-            dialogue=boss_info["dialogue"],
-            ascii_art=boss_info["ascii_art"],
-            attempts=attempts,
-            options=["cautious", "bold", "reckless"],
-            luminosity_display=self._luminosity_combat_display(tunnel),
-        )
 
     def fight_boss(self, discord_id: int, guild_id, risk_tier: str, wager: int = 0) -> dict:
         """
