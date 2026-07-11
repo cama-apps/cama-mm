@@ -14,7 +14,10 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_constants import EVENT_POOL
 from services.dig_service import DigService
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 # Authored spec for each encounter event, mirrored from the design table so
 # the invariant test compares against intent rather than reading the value
@@ -165,7 +168,7 @@ class TestEncounterEndToEnd:
         assert result["success"] is True
         assert result["succeeded"] is True
         payout = scale_minigame_jc_delta(5)
-        burn = scale_minigame_jc_delta(5)
+        burn = scale_deflationary_minigame_jc_delta(5)
         assert result["jc_delta"] == payout
         assert result["splash"] is not None
         assert result["splash"]["mode"] == "burn"
@@ -253,8 +256,9 @@ class TestEncounterEndToEnd:
         result = dig_service.resolve_event(digger, guild_id, "hungering_dark", "risky")
         assert result["succeeded"] is False
         assert result["splash"] is None
-        # Authored failure -5 is first tuned by the negative multiplier, then economy-scaled.
-        assert result["jc_delta"] == scale_minigame_jc_delta(-6)
+        # Authored failure -5 is first tuned by the negative multiplier, then
+        # deflation-strengthened before economy scaling.
+        assert result["jc_delta"] == scale_deflationary_minigame_jc_delta(-6)
         assert player_repository.get_balance(10002, guild_id) == 1000  # untouched
 
     def test_active_diggers_burn_full_when_funded(
@@ -280,7 +284,7 @@ class TestEncounterEndToEnd:
         result = dig_service.resolve_event(digger, guild_id, "turf_war", "risky")
         assert result["succeeded"] is True
         payout = scale_minigame_jc_delta(8)
-        burn = scale_minigame_jc_delta(6)
+        burn = scale_deflationary_minigame_jc_delta(6)
         assert result["jc_delta"] == payout
         for vid in (10002, 10003, 10004):
             assert player_repository.get_balance(vid, guild_id) == 100 - burn
@@ -320,7 +324,7 @@ class TestEncounterEndToEnd:
         result = dig_service.resolve_event(digger, guild_id, "the_tear", "risky")
         assert result["succeeded"] is True
         payout = scale_minigame_jc_delta(10)
-        burn = scale_minigame_jc_delta(8)
+        burn = scale_deflationary_minigame_jc_delta(8)
         assert result["jc_delta"] == payout
         burned = sum(
             100 - player_repository.get_balance(v, guild_id) for v in (10002, 10003, 10004)

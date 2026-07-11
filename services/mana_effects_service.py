@@ -229,7 +229,7 @@ class ManaEffectsService:
         }
 
     def apply_blue_tax(self, discord_id: int, guild_id: int | None, gain: int) -> int:
-        """Apply Blue's 5% tax on JC gains. Returns the tax amount deducted."""
+        """Apply Blue's 5.5% tax on JC gains. Returns the tax amount deducted."""
         effects = self.get_effects(discord_id, guild_id)
         if effects.blue_tax_rate <= 0 or gain <= 0:
             return 0

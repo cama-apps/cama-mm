@@ -52,7 +52,10 @@ from services.dig_constants import (
     cave_in_band,
     roll_catastrophic_cave_in,
 )
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 # Public surface plus the module-level names other modules and the dig test
 # suite import directly from ``services.dig_service``. The helpers and
@@ -1046,7 +1049,7 @@ class DigService(
 
         # Helltide bell: a flat per-dig tax while the guild modifier is active.
         # Pure deflation — coins burn, not transferred.
-        helltide_tax = scale_minigame_jc_delta(self._helltide_tax(guild_id))
+        helltide_tax = scale_deflationary_minigame_jc_delta(self._helltide_tax(guild_id))
         if helltide_tax > 0:
             jc_earned = max(0, jc_earned - helltide_tax)
 

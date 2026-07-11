@@ -64,7 +64,7 @@ class TestManaEffects:
         assert e.blue_gamba_scrying is True
         assert e.blue_gamba_reduction == 0.25
         assert e.blue_cashback_rate == 0.05
-        assert e.blue_tax_rate == 0.05
+        assert e.blue_tax_rate == 0.055
 
     def test_green_effects(self):
         """Green/Forest has steady bonus, gain cap, and compressed variance."""
@@ -296,7 +296,7 @@ class TestManaEffectsService:
         effects = service["effects_service"].get_effects(10003, GID)
         assert effects.color == "Blue"
         assert effects.blue_gamba_scrying is True
-        assert effects.blue_tax_rate == 0.05
+        assert effects.blue_tax_rate == 0.055
 
     def test_get_effects_green(self, service):
         """Player with Green mana gets Green effects."""
@@ -381,15 +381,15 @@ class TestManaEffectsService:
     # -------------------------------------------------------------------------
 
     def test_apply_blue_tax(self, service):
-        """Blue tax deducts 5% of gains."""
+        """Blue tax deducts the stronger 5.5% of gains."""
         _register_player(service["player_repo"], 40001, balance=100)
         today = get_today_pst()
         service["mana_repo"].set_mana(40001, GID, "Island", today)
 
-        tax = service["effects_service"].apply_blue_tax(40001, GID, 100)
-        assert tax == 5  # 5% of 100
+        tax = service["effects_service"].apply_blue_tax(40001, GID, 200)
+        assert tax == 11  # 5.5% of 200
         bal = service["player_repo"].get_balance(40001, GID)
-        assert bal == 95  # 100 - 5
+        assert bal == 89  # 100 - 11
 
     def test_apply_blue_tax_minimum_one(self, service):
         """Blue tax is at least 1 JC for any positive gain."""
@@ -398,7 +398,7 @@ class TestManaEffectsService:
         service["mana_repo"].set_mana(40003, GID, "Island", today)
 
         tax = service["effects_service"].apply_blue_tax(40003, GID, 5)
-        assert tax == 1  # max(1, int(5 * 0.05)) = max(1, 0) = 1
+        assert tax == 1  # max(1, int(5 * 0.055)) = max(1, 0) = 1
 
     def test_apply_blue_tax_zero_gain(self, service):
         """Blue tax returns 0 for zero gain."""

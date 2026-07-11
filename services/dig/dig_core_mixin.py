@@ -36,7 +36,10 @@ from services.dig_constants import (
     pick_cave_in_consequence,
     roll_catastrophic_cave_in,
 )
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 
 class DigCoreMixin:
@@ -830,7 +833,7 @@ class DigCoreMixin:
         # Plains tithe / Blue tax apply to the scaled full payout.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
         # Helltide bell: flat per-dig tax while the guild modifier is active.
-        helltide_tax = scale_minigame_jc_delta(self._helltide_tax(guild_id))
+        helltide_tax = scale_deflationary_minigame_jc_delta(self._helltide_tax(guild_id))
         if helltide_tax > 0:
             jc_earned = max(0, jc_earned - helltide_tax)
 
@@ -1294,7 +1297,7 @@ class DigCoreMixin:
             # Plains tithe / Blue tax apply to the scaled full payout.
             jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
             # Helltide bell: flat per-dig tax while the guild modifier is active.
-            helltide_tax = scale_minigame_jc_delta(self._helltide_tax(guild_id))
+            helltide_tax = scale_deflationary_minigame_jc_delta(self._helltide_tax(guild_id))
             if helltide_tax > 0:
                 jc_earned = max(0, jc_earned - helltide_tax)
 

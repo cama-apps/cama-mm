@@ -3,7 +3,11 @@ from commands.betting import _eruption_reward
 from commands.betting_helpers.messages import WHEEL_EXPLOSION_REWARD
 from commands.betting_helpers.wheel_embeds import build_wheel_result_embed
 from services.dig_splash import resolve_splash
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    DEFLATIONARY_MINIGAME_JC_DELTA_MULTIPLIER,
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES, WHEEL_WEDGES
 
 
@@ -24,6 +28,16 @@ def test_scale_minigame_jc_delta_reads_configured_policy(monkeypatch):
 
     assert scale_minigame_jc_delta(100) == 50
     assert scale_minigame_jc_delta(-15) == -8
+
+
+def test_scale_deflationary_minigame_jc_delta_is_ten_percent_stronger():
+    assert DEFLATIONARY_MINIGAME_JC_DELTA_MULTIPLIER == 1.10
+    assert scale_deflationary_minigame_jc_delta(5) == 5
+    assert scale_deflationary_minigame_jc_delta(10) == 9
+    assert scale_deflationary_minigame_jc_delta(20) == 18
+    assert scale_deflationary_minigame_jc_delta(-5) == -5
+    assert scale_deflationary_minigame_jc_delta(-20) == -18
+    assert scale_deflationary_minigame_jc_delta(20) > scale_minigame_jc_delta(20)
 
 
 def test_wheel_numeric_wedges_are_scaled_for_display_and_payout():
@@ -120,6 +134,6 @@ def test_dig_splash_burn_skips_players_below_auto_blind_threshold():
         mode="burn",
     )
 
-    assert result.victims == [(3, 8)]
-    assert player_repo.balances == {2: 49, 3: 42}
-    assert player_repo.deltas == [(3, -8)]
+    assert result.victims == [(3, 9)]
+    assert player_repo.balances == {2: 49, 3: 41}
+    assert player_repo.deltas == [(3, -9)]
