@@ -48,6 +48,37 @@ from utils.streaming import get_streaming_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
 
+DISCORD_MESSAGE_MAX_CHARS = 2000
+
+
+def _chunk_discord_content(
+    content: str, max_chars: int = DISCORD_MESSAGE_MAX_CHARS
+) -> list[str]:
+    """Split message content at natural boundaries within Discord's limit."""
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+
+    remaining = content.strip()
+    chunks: list[str] = []
+
+    while len(remaining) > max_chars:
+        split_at = remaining.rfind("\n", 0, max_chars + 1)
+        separator_length = 1
+
+        if split_at <= 0:
+            split_at = remaining.rfind(" ", 0, max_chars + 1)
+
+        if split_at <= 0:
+            split_at = max_chars
+            separator_length = 0
+
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at + separator_length :].lstrip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
 
 def priority_key(player) -> tuple[float, float]:
     """Priority key for conditional player selection: higher rating first,
@@ -1252,7 +1283,7 @@ class MatchCommands(commands.Cog):
         )
         distribution_text += self._format_stake_distribution(record_result)
         distribution_text += self._format_streak_bonus(distributions)
-        distribution_text += await self._generate_record_flavor(
+        flavor_text = await self._generate_record_flavor(
             guild_id, winners, losers, record_result
         )
         distribution_text += await self._award_streaming_bonus_at_record(
@@ -1274,7 +1305,7 @@ class MatchCommands(commands.Cog):
             else ""
         )
         message = f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
-        await interaction.followup.send(message, ephemeral=False)
+        await self._send_record_announcement(interaction, message, flavor_text)
 
         self._spawn_curse_flames(interaction, guild, guild_id, winners, losers, record_result)
 
@@ -1298,6 +1329,19 @@ class MatchCommands(commands.Cog):
             asyncio.create_task(
                 self._trigger_auto_discovery(guild_id, match_id, interaction.channel)
             )
+
+    async def _send_record_announcement(
+        self,
+        interaction: discord.Interaction,
+        result_message: str,
+        flavor_text: str,
+    ) -> None:
+        """Send result details and flavor separately, chunking either if needed."""
+        for content in _chunk_discord_content(result_message):
+            await interaction.followup.send(content, ephemeral=False)
+
+        for content in _chunk_discord_content(flavor_text):
+            await interaction.followup.send(content, ephemeral=False)
 
     def _format_bet_distribution(
         self, winners: list[dict], losers: list[dict],

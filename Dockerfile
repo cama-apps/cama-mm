@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
-# Install DejaVu fonts (needed by PIL for GIF text rendering)
-RUN apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core && \
+# Install debugging tools and DejaVu fonts (needed by PIL for GIF text rendering)
+RUN apt-get update && apt-get install -y --no-install-recommends gdb procps fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user first
