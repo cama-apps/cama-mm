@@ -1955,6 +1955,110 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
     # ================================================================
     # TIER 150 — late-prestige additions
     # ================================================================
+    # Prestige-2 entries share this section with the deeper prestige-gated bosses.
+    "aegis_reclaim": BossMechanic(
+        id="aegis_reclaim",
+        archetype="second_life",
+        trigger_round=4,
+        prompt_title="The aegis lights with a borrowed heartbeat",
+        prompt_description="The Warden lifts the shield. The next mistake wants to happen twice.",
+        options=(
+            MechanicOption(
+                label="Crack the shield edge",
+                flavor="You swing for the weakest glow.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -3, None, "reveal", "The shield cracks; his return flickers."),
+                    OutcomeRoll(0.45, -2, 0, None, None, "The shield rolls the blow aside and numbs your arm."),
+                ),
+            ),
+            MechanicOption(
+                label="Wait out the glow",
+                flavor="You hold distance and count breaths.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70, -1, 0, None, None, "The glow fades before it can spend itself."),
+                    OutcomeRoll(0.30, -2, 0, "player", None, "You waited too long; he retakes the tempo."),
+                ),
+            ),
+            MechanicOption(
+                label="Bait the return",
+                flavor="You offer a false opening.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, 0, -4, None, None, "He commits to the return; you punish the second step."),
+                    OutcomeRoll(0.65, -3, 0, None, "bleed", "He reads the bait and shieldsmashes through it."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+    "heartspire_intent": BossMechanic(
+        id="heartspire_intent",
+        archetype="telegraphed_intent",
+        trigger_round=5,
+        prompt_title="The Heartspire shows its intent",
+        prompt_description="A red line, a shielded line, and a lie pulse across the stone.",
+        options=(
+            MechanicOption(
+                label="Block the red line",
+                flavor="You trust the obvious threat.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -1, 0, None, None, "The line strikes your guard and breaks there."),
+                    OutcomeRoll(0.35, -2, 0, None, "silence", "The obvious threat was only half of it."),
+                ),
+            ),
+            MechanicOption(
+                label="Strike the shielded line",
+                flavor="You attack the defense.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -3, None, "reveal", "The shielded line opens. The heart is briefly exposed."),
+                    OutcomeRoll(0.55, -3, 0, None, None, "You hit the guard and the guard hits back."),
+                ),
+            ),
+            MechanicOption(
+                label="Ignore the lie",
+                flavor="You choose the line that is not pulsing.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, 0, -4, None, None, "The hidden line was the real path. Your pick finds it."),
+                    OutcomeRoll(0.60, -3, 0, "player", "bleed", "The lie was bait. The spire was counting on you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "emberwright_overclock": BossMechanic(
+        id="emberwright_overclock",
+        archetype="forge_overheat",
+        trigger_round=6,
+        prompt_title="The ember engine overclocks",
+        prompt_description="Gears glow white. The forge starts eating its own light.",
+        options=(
+            MechanicOption(
+                label="Vent the engine",
+                flavor="You break open a pressure valve.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, -2, None, None, "Steam and sparks vent upward. The engine stutters."),
+                    OutcomeRoll(0.40, -2, 0, None, "burn", "The valve vents through you first."),
+                ),
+            ),
+            MechanicOption(
+                label="Kick slag into the gears",
+                flavor="Jam the machine with its own waste.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, -1, -3, None, "reveal", "The gears choke on slag. The forge is exposed."),
+                    OutcomeRoll(0.50, -3, 0, None, None, "The gears spit the slag back, still molten."),
+                ),
+            ),
+            MechanicOption(
+                label="Ride the heat wave",
+                flavor="Use the blast to close distance.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -2, -4, None, None, "You surf the blast straight into a brutal strike."),
+                    OutcomeRoll(0.65, -4, 0, "player", "burn", "The wave lifts you, then the ceiling returns you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
     "xalatath_void_pull": BossMechanic(
         id="xalatath_void_pull",
         archetype="hook_pull",
