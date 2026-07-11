@@ -193,7 +193,7 @@ class TestRecalibrationService:
 
         # Verify rating is preserved
         rating_data = player_repo.get_glicko_rating(12345, TEST_GUILD_ID)
-        rating, rd, vol = rating_data
+        rating, _, _ = rating_data
         assert rating == 2000.0
 
     def test_recalibrate_increments_count(self, services):

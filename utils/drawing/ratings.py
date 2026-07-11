@@ -240,14 +240,13 @@ def draw_rating_history_chart(
 
 
 def draw_rating_distribution(
-    ratings: list[float], avg_rating: float | None = None, median_rating: float | None = None
+    ratings: list[float], median_rating: float | None = None
 ) -> BytesIO:
     """
     Generate a histogram with fitted normal distribution curve overlay.
 
     Args:
         ratings: List of player ratings
-        avg_rating: Optional average rating to display
         median_rating: Optional median rating to display
 
     Returns:
@@ -277,10 +276,10 @@ def draw_rating_distribution(
     # Shapiro-Wilk test for normality (only reliable for n < 5000)
     if len(ratings_arr) >= 3:
         if len(ratings_arr) <= 5000:
-            shapiro_stat, shapiro_p = stats.shapiro(ratings_arr)
+            _, shapiro_p = stats.shapiro(ratings_arr)
         else:
             # Use D'Agostino-Pearson for larger samples
-            shapiro_stat, shapiro_p = stats.normaltest(ratings_arr)
+            _, shapiro_p = stats.normaltest(ratings_arr)
     else:
         _shapiro_stat, shapiro_p = None, None
 
@@ -295,7 +294,7 @@ def draw_rating_distribution(
     bins = np.arange(min_rating, max_rating + bin_width, bin_width)
 
     # Plot histogram (density=True to normalize for PDF overlay)
-    n, bins_edges, patches = ax.hist(
+    ax.hist(
         ratings_arr,
         bins=bins,
         density=True,

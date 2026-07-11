@@ -66,15 +66,6 @@ class DraftStateManager:
         logger.info(f"Created new draft state for guild {normalized}")
         return state
 
-    def set_state(self, guild_id: int | None, state: DraftState) -> None:
-        """
-        Store draft state for a guild.
-
-        Args:
-            guild_id: Guild ID (or None for DMs)
-            state: Draft state to store
-        """
-        self._states[normalize_guild_id(guild_id)] = state
 
     def clear_state(self, guild_id: int | None) -> DraftState | None:
         """
@@ -100,10 +91,6 @@ class DraftStateManager:
         # Draft is active if not complete
         return state.phase != DraftPhase.COMPLETE
 
-    def get_draft_phase(self, guild_id: int | None = None) -> DraftPhase | None:
-        """Get the current phase of the draft."""
-        state = self.get_state(guild_id)
-        return state.phase if state else None
 
     def advance_phase(self, guild_id: int | None, new_phase: DraftPhase) -> bool:
         """

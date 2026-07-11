@@ -121,7 +121,6 @@ class CamaOpenSkillSystem:
         self,
         team1_fantasy: list[float | None],
         team2_fantasy: list[float | None],
-        team1_won: bool,
     ) -> tuple[list[float], list[float]]:
         """
         Compute weights with blending (no inversion needed).
@@ -143,7 +142,6 @@ class CamaOpenSkillSystem:
         Args:
             team1_fantasy: Fantasy points for team 1 players (may contain None)
             team2_fantasy: Fantasy points for team 2 players (may contain None)
-            team1_won: True if team 1 won (unused, kept for API compatibility)
 
         Returns:
             Tuple of (team1_weights, team2_weights)
@@ -240,7 +238,7 @@ class CamaOpenSkillSystem:
         team1_ids = []
         team1_original_mu = []
 
-        for discord_id, mu, sigma, fantasy_points in team1_data:
+        for discord_id, mu, sigma, _ in team1_data:
             actual_mu = mu if mu is not None else self.DEFAULT_MU
             rating = self.create_rating(mu, sigma, name=str(discord_id))
             team1_ratings.append(rating)
@@ -251,19 +249,18 @@ class CamaOpenSkillSystem:
         team2_ids = []
         team2_original_mu = []
 
-        for discord_id, mu, sigma, fantasy_points in team2_data:
+        for discord_id, mu, sigma, _ in team2_data:
             actual_mu = mu if mu is not None else self.DEFAULT_MU
             rating = self.create_rating(mu, sigma, name=str(discord_id))
             team2_ratings.append(rating)
             team2_ids.append(discord_id)
             team2_original_mu.append(actual_mu)
 
-        # Compute weights with blending and loss inversion
-        team1_won = winning_team == 1
+        # Compute blended fantasy weights for both teams
         team1_fantasy = [fp for _, _, _, fp in team1_data]
         team2_fantasy = [fp for _, _, _, fp in team2_data]
         team1_weights, team2_weights = self.compute_match_weights(
-            team1_fantasy, team2_fantasy, team1_won
+            team1_fantasy, team2_fantasy
         )
 
         # Set ranks based on winning team (1 = winner, 2 = loser)

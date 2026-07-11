@@ -51,18 +51,18 @@ class TestDrawBossScene:
     """Tests for boss scene generation."""
 
     def test_encounter_returns_valid_png(self):
-        buf = draw_boss_scene("Dirt", "grothak")
+        buf = draw_boss_scene("Dirt")
         img = Image.open(buf)
         assert img.format == "PNG"
         assert img.size == (320, 180)
 
     def test_result_victory_returns_valid_png(self):
-        buf = draw_boss_result_scene("Crystal", "crystalia", won=True)
+        buf = draw_boss_result_scene("Crystal", won=True)
         img = Image.open(buf)
         assert img.format == "PNG"
 
     def test_result_defeat_returns_valid_png(self):
-        buf = draw_boss_result_scene("Magma", "magmus", won=False)
+        buf = draw_boss_result_scene("Magma", won=False)
         img = Image.open(buf)
         assert img.format == "PNG"
 

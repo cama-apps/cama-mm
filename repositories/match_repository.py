@@ -1286,31 +1286,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def delete_all_matches(self, guild_id: int) -> int:
-        """
-        Delete all matches in a guild (for testing).
-
-        Returns:
-            Number of matches deleted
-        """
-        with self.connection() as conn:
-            cursor = conn.cursor()
-
-            cursor.execute("SELECT COUNT(*) FROM matches WHERE guild_id = ?", (guild_id,))
-            count = cursor.fetchone()[0]
-
-            # Get match IDs for this guild to clean up predictions
-            cursor.execute("SELECT match_id FROM matches WHERE guild_id = ?", (guild_id,))
-            match_ids = [row["match_id"] for row in cursor.fetchall()]
-            if match_ids:
-                placeholders = ",".join("?" * len(match_ids))
-                cursor.execute(f"DELETE FROM match_predictions WHERE match_id IN ({placeholders})", match_ids)
-
-            cursor.execute("DELETE FROM matches WHERE guild_id = ?", (guild_id,))
-            cursor.execute("DELETE FROM match_participants WHERE guild_id = ?", (guild_id,))
-            cursor.execute("DELETE FROM rating_history WHERE guild_id = ?", (guild_id,))
-
-            return count
 
     def get_match_count(self, guild_id: int) -> int:
         """Get total match count for a guild."""
@@ -1331,46 +1306,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
             row = cursor.fetchone()
             return row["count"] if row else 0
 
-    def add_match_prediction(
-        self,
-        match_id: int,
-        radiant_rating: float,
-        dire_rating: float,
-        radiant_rd: float,
-        dire_rd: float,
-        expected_radiant_win_prob: float,
-    ) -> None:
-        """Store pre-match expected win probability and team stats."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO match_predictions (
-                    match_id,
-                    radiant_rating,
-                    dire_rating,
-                    radiant_rd,
-                    dire_rd,
-                    expected_radiant_win_prob
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(match_id) DO UPDATE SET
-                    radiant_rating = excluded.radiant_rating,
-                    dire_rating = excluded.dire_rating,
-                    radiant_rd = excluded.radiant_rd,
-                    dire_rd = excluded.dire_rd,
-                    expected_radiant_win_prob = excluded.expected_radiant_win_prob,
-                    timestamp = CURRENT_TIMESTAMP
-            """,
-                (
-                    match_id,
-                    radiant_rating,
-                    dire_rating,
-                    radiant_rd,
-                    dire_rd,
-                    expected_radiant_win_prob,
-                ),
-            )
 
     def get_recent_match_predictions(self, guild_id: int | None, limit: int = 200) -> list[dict]:
         """Get recent match predictions with outcomes for a guild."""
@@ -2804,49 +2739,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def update_rating_history_openskill_bulk(
-        self, match_id: int, updates: list[dict]
-    ) -> int:
-        """
-        Bulk update rating_history entries with OpenSkill data.
-
-        Args:
-            match_id: The match ID
-            updates: List of dicts with keys:
-                - discord_id (required)
-                - os_mu_before, os_mu_after, os_sigma_before, os_sigma_after, fantasy_weight
-
-        Returns:
-            Number of rows updated
-        """
-        if not updates:
-            return 0
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.executemany(
-                """
-                UPDATE rating_history
-                SET os_mu_before = ?,
-                    os_mu_after = ?,
-                    os_sigma_before = ?,
-                    os_sigma_after = ?,
-                    fantasy_weight = ?
-                WHERE match_id = ? AND discord_id = ?
-                """,
-                [
-                    (
-                        u.get("os_mu_before"),
-                        u.get("os_mu_after"),
-                        u.get("os_sigma_before"),
-                        u.get("os_sigma_after"),
-                        u.get("fantasy_weight"),
-                        match_id,
-                        u["discord_id"],
-                    )
-                    for u in updates
-                ],
-            )
-            return cursor.rowcount
 
     def get_os_baseline_for_match(
         self, match_id: int, guild_id: int | None = None
@@ -3118,99 +3010,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             return correction_id
 
-    def update_match_result(self, match_id: int, new_winning_team: int) -> None:
-        """
-        Update the winning_team for a match and update match_participants.won accordingly.
-
-        Args:
-            match_id: The match ID to update
-            new_winning_team: 1 for Radiant, 2 for Dire
-        """
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            # Update match winning_team
-            cursor.execute(
-                "UPDATE matches SET winning_team = ? WHERE match_id = ?",
-                (new_winning_team, match_id),
-            )
-            # Update participants: team 1 = radiant, team 2 = dire
-            cursor.execute(
-                """
-                UPDATE match_participants
-                SET won = CASE
-                    WHEN team_number = ? THEN 1
-                    ELSE 0
-                END
-                WHERE match_id = ?
-                """,
-                (new_winning_team, match_id),
-            )
-
-    def update_rating_history_for_correction(
-        self,
-        match_id: int,
-        discord_id: int,
-        new_rating: float,
-        new_rd: float,
-        new_volatility: float,
-        new_won: bool,
-        new_os_mu: float | None = None,
-        new_os_sigma: float | None = None,
-    ) -> None:
-        """
-        Update rating history entry for a match correction.
-
-        Updates the 'after' values while preserving 'before' snapshots.
-        """
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE rating_history
-                SET rating = ?,
-                    rd_after = ?,
-                    volatility_after = ?,
-                    won = ?,
-                    os_mu_after = COALESCE(?, os_mu_after),
-                    os_sigma_after = COALESCE(?, os_sigma_after)
-                WHERE match_id = ? AND discord_id = ?
-                """,
-                (
-                    new_rating,
-                    new_rd,
-                    new_volatility,
-                    new_won,
-                    new_os_mu,
-                    new_os_sigma,
-                    match_id,
-                    discord_id,
-                ),
-            )
-
-    def add_match_correction(
-        self,
-        match_id: int,
-        old_winning_team: int,
-        new_winning_team: int,
-        corrected_by: int,
-    ) -> int:
-        """
-        Log a match correction for audit purposes.
-
-        Returns:
-            The correction_id
-        """
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO match_corrections
-                (match_id, old_winning_team, new_winning_team, corrected_by)
-                VALUES (?, ?, ?, ?)
-                """,
-                (match_id, old_winning_team, new_winning_team, corrected_by),
-            )
-            return cursor.lastrowid
 
     def get_match_corrections(self, match_id: int) -> list[dict]:
         """

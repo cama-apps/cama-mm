@@ -121,7 +121,7 @@ async def test_closed_reminder_includes_house_bonus_text(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_closed_reminder_flips_embed_to_locked(monkeypatch):
-    cog, channel = _make_cog()
+    cog, _ = _make_cog()
     flip = AsyncMock()
     monkeypatch.setattr(bm, "update_shuffle_message_wagers", flip)
 

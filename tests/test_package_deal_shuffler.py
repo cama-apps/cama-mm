@@ -183,7 +183,7 @@ class TestPackageDealWithPoolShuffle:
         # Deal between player 0 and player 5
         deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(
+        team1, team2, _ = shuffler.shuffle_from_pool(
             sample_pool_players,
             deals=deals,
         )

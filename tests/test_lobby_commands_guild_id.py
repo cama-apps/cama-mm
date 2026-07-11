@@ -371,7 +371,7 @@ async def test_auto_join_lobby_uses_guild_id(monkeypatch_safe_defer):
     cog = LobbyCommands(bot, lobby_service, player_service)
 
     # This should not raise UnboundLocalError
-    joined, message = await cog._auto_join_lobby(interaction, lobby)
+    joined, _ = await cog._auto_join_lobby(interaction, lobby)
 
     # Should have attempted to join (may succeed or fail based on implementation)
     assert isinstance(joined, bool)
@@ -380,7 +380,7 @@ async def test_auto_join_lobby_uses_guild_id(monkeypatch_safe_defer):
 @pytest.mark.asyncio
 async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
     """Test _sync_lobby_displays helper properly uses guild_id."""
-    _, lobby_service, player_service, player_repo = make_services()
+    _, lobby_service, player_service, _ = make_services()
 
     # Create lobby and set message IDs
     lobby = lobby_service.get_or_create_lobby(creator_id=99)
@@ -398,7 +398,7 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
 @pytest.mark.asyncio
 async def test_update_thread_embed_uses_guild_id(monkeypatch_safe_defer):
     """Test _update_thread_embed helper properly uses guild_id."""
-    _, lobby_service, player_service, player_repo = make_services()
+    _, lobby_service, player_service, _ = make_services()
 
     # Create lobby (no thread set, so this should be a no-op)
     lobby = lobby_service.get_or_create_lobby(creator_id=99)

@@ -460,41 +460,7 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_sabotage_history(
-        self, actor_id: int, target_id: int, guild_id: int, since_ts: int,
-    ) -> list[dict]:
-        """Get sabotage actions from actor to target since timestamp."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM dig_actions
-                WHERE guild_id = ? AND actor_id = ? AND target_id = ?
-                  AND action_type LIKE 'sabotage%'
-                  AND created_at >= ?
-                ORDER BY created_at DESC
-                """,
-                (gid, actor_id, target_id, since_ts),
-            )
-            return [dict(row) for row in cursor.fetchall()]
 
-    def get_helper_actions(self, target_id: int, guild_id: int, since_ts: int) -> list[dict]:
-        """Get help actions targeting this player since timestamp."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM dig_actions
-                WHERE guild_id = ? AND target_id = ?
-                  AND action_type LIKE 'help%'
-                  AND created_at >= ?
-                ORDER BY created_at DESC
-                """,
-                (gid, target_id, since_ts),
-            )
-            return [dict(row) for row in cursor.fetchall()]
 
     # ── Inventory ────────────────────────────────────────────────────────
 
@@ -528,11 +494,6 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return cursor.lastrowid
 
-    def remove_item(self, item_id: int) -> None:
-        """Remove item by id."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM dig_inventory WHERE id = ?", (item_id,))
 
     def get_queued_items(self, discord_id: int, guild_id: int) -> list[dict]:
         """Get items where queued=1."""
@@ -558,26 +519,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 (item_id,),
             )
 
-    def unqueue_all(self, discord_id: int, guild_id: int) -> None:
-        """Set all queued=0 for a player."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE dig_inventory SET queued = 0 WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, gid),
-            )
 
-    def count_items(self, discord_id: int, guild_id: int) -> int:
-        """Total items count for a player."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM dig_inventory WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, gid),
-            )
-            return cursor.fetchone()[0]
 
     # ── Artifacts ────────────────────────────────────────────────────────
 
@@ -669,11 +611,6 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return cursor.fetchone()[0]
 
-    def remove_artifact(self, artifact_db_id: int) -> None:
-        """Remove an artifact (for gifting)."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM dig_artifacts WHERE id = ?", (artifact_db_id,))
 
     # ── Boss-combat Gear ─────────────────────────────────────────────────
 

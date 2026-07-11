@@ -420,21 +420,4 @@ class MatchStateService:
         self.set_last_shuffle(guild_id, state)
         return pending_match_id
 
-    def has_pending_match(self, guild_id: int | None = None) -> bool:
-        """Check if there's any pending match for the guild."""
-        with self._shuffle_state_lock:
-            normalized = normalize_guild_id(guild_id)
 
-            # Check in-memory first
-            if self._last_shuffle_by_guild.get(normalized):
-                return True
-
-            # Check database
-            pending = self.match_repo.get_pending_matches(guild_id)
-            return len(pending) > 0
-
-    def get_pending_match_count(self, guild_id: int | None = None) -> int:
-        """Get the number of pending matches for a guild."""
-        with self._shuffle_state_lock:
-            pending = self.match_repo.get_pending_matches(guild_id)
-            return len(pending)

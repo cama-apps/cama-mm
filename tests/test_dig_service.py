@@ -1281,6 +1281,14 @@ class TestHighPrestigeLayerPenalty:
 class TestDecay:
     """Tests for tunnel depth decay mechanics."""
 
+    def test_disabled_decay_returns_fresh_result(self, dig_service):
+        first = dig_service._apply_lazy_decay()
+        second = dig_service._apply_lazy_decay()
+
+        assert first == {"decayed": False, "amount": 0, "reason": None}
+        assert second == first
+        assert second is not first
+
     def test_no_decay_within_24h(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """No decay if last dig < 24h ago."""
         _register_player(player_repository)

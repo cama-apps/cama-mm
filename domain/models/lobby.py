@@ -62,9 +62,6 @@ class Lobby:
             return True
         return False
 
-    def is_player_conditional(self, discord_id: int) -> bool:
-        """Check if a player is in the conditional set."""
-        return discord_id in self.conditional_players
 
     def get_player_count(self) -> int:
         """Return count of regular players only."""

@@ -1194,7 +1194,7 @@ class MatchCommands(commands.Cog):
         is_admin = has_admin_permission(interaction)
         if result.value == "abort":
             if is_admin:
-                await self._finalize_abort(interaction, guild_id, admin_override=True, pending_match_id=pending_match_id)
+                await self._finalize_abort(interaction, guild_id, pending_match_id=pending_match_id)
                 return
             try:
                 submission = await asyncio.to_thread(
@@ -1213,7 +1213,7 @@ class MatchCommands(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            await self._finalize_abort(interaction, guild_id, admin_override=False, pending_match_id=pending_match_id)
+            await self._finalize_abort(interaction, guild_id, pending_match_id=pending_match_id)
             return
         try:
             submission = await asyncio.to_thread(
@@ -1812,7 +1812,7 @@ class MatchCommands(commands.Cog):
                     from config import MAX_DEBT as _MAX_DEBT
                     if new_bal <= -_MAX_DEBT or new_bal == 0:
                         sr = await neon.on_bet_settled(
-                            loser_id, guild_id, won=False, payout=0, new_balance=new_bal
+                            loser_id, guild_id, won=False, new_balance=new_bal
                         )
                         if sr:
                             await send_neon_result(interaction, sr)
@@ -2049,8 +2049,10 @@ class MatchCommands(commands.Cog):
             logger.warning(f"Failed to send enrichment result: {exc}")
 
     async def _finalize_abort(
-        self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool,
-        pending_match_id: int | None = None
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        pending_match_id: int | None = None,
     ):
         betting_service = getattr(self.bot, "betting_service", None)
         pending_state = await asyncio.to_thread(

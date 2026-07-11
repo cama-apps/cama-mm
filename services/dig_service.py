@@ -260,7 +260,7 @@ class DigService(
     # Lazy Decay
     # ------------------------------------------------------------------
 
-    def _apply_lazy_decay(self, tunnel: dict, guild_id) -> dict:
+    def _apply_lazy_decay(self) -> dict:
         """Decay is disabled. Returns a no-op result for all callers."""
         return {"decayed": False, "amount": 0, "reason": None}
 
@@ -409,7 +409,7 @@ class DigService(
         tunnel["discord_id"] = discord_id
 
         # 2. Apply lazy decay
-        decay_info = self._apply_lazy_decay(tunnel, guild_id)
+        decay_info = self._apply_lazy_decay()
 
         # 2a. Slow Drip relic: idle income since last dig (credited inline,
         # surfaces only via balance change + audit log).
@@ -917,7 +917,7 @@ class DigService(
 
         # 12. Check boss boundary
         boss_progress = self._get_boss_progress(tunnel)
-        next_boss = self._next_boss_boundary(depth_before, boss_progress)
+        next_boss = self._next_boss_boundary(boss_progress)
         boss_encounter = False
         boss_info = None
 
@@ -1288,7 +1288,7 @@ class DigService(
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
-        decay_info = self._apply_lazy_decay(tunnel, guild_id)
+        decay_info = self._apply_lazy_decay()
         depth_before = tunnel.get("depth", 0)
 
         # Parked-at-boss short-circuit: surface the encounter before the

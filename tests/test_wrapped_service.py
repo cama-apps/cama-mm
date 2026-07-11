@@ -64,7 +64,6 @@ class TestWrappedService:
 
         awards = service._generate_awards(
             match_stats=[],
-            hero_stats=[],
             player_heroes=[],
             rating_changes=[],
             betting_stats=[],
@@ -128,7 +127,6 @@ class TestWrappedService:
 
         awards = service._generate_awards(
             match_stats=match_stats,
-            hero_stats=[],
             player_heroes=[],
             rating_changes=rating_changes,
             betting_stats=[],

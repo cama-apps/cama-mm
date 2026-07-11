@@ -235,37 +235,6 @@ class NeonDegenService:
                 logger.debug("Failed to get degen score for %s: %s", discord_id, e)
         return None
 
-    async def _get_llm_terminal_commentary(
-        self,
-        event_description: str,
-        player_context: dict[str, Any],
-    ) -> str | None:
-        """Get LLM-generated terminal commentary. Returns None on failure."""
-        if not self.ai_service:
-            return None
-        if not self._roll(NEON_LLM_CHANCE):
-            return None
-
-        try:
-            context_str = "\n".join(f"  {k}: {v}" for k, v in player_context.items() if v is not None)
-            prompt = (
-                f"Event: {event_description}\n"
-                f"Player context:\n{context_str}\n\n"
-                f"Generate a 2-4 line terminal log response as JOPA-T/v3.7. "
-                f"Use timestamps like [HH:MM:SS.mmm] and status codes. "
-                f"Reference the player's specific stats. Be darkly funny and terse."
-            )
-
-            result = await self.ai_service.complete(
-                prompt=prompt,
-                system_prompt=JOPAT_SYSTEM_PROMPT,
-                temperature=0.9,
-                max_tokens=2000,
-            )
-            return result
-        except Exception as e:
-            logger.info(f"LLM terminal commentary failed: {e}")
-            return None
 
     async def _generate_text(
         self,
@@ -438,7 +407,7 @@ class NeonDegenService:
             if boundary >= 350:
                 if not self._roll(0.95):
                     return None
-                gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, layer_name, prestige=False)
+                gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, prestige=False)
                 event_key, desc = "pinnacle", "has reached the Pinnacle, the floor of the world"
             else:
                 chance = self._scaled_chance(boundary, floor=NEON_DIG_CHANCE, cap=0.30, full_at=350)
@@ -486,7 +455,7 @@ class NeonDegenService:
             if rarity_l == "legendary":
                 if not self._roll(0.95):
                     return None
-                gif = await asyncio.to_thread(dig_drawing.animate_legendary_relic, layer_name, relic_name)
+                gif = await asyncio.to_thread(dig_drawing.animate_legendary_relic, relic_name)
                 event_key, desc = "legendary_relic", f"has unearthed the legendary {relic_name}"
             elif rarity_l == "rare":
                 if not self._roll(NEON_DIG_CHANCE):
@@ -546,8 +515,6 @@ class NeonDegenService:
         self,
         discord_id: int,
         guild_id: int | None,
-        *,
-        layer_name: str = "The Hollow",
     ) -> NeonResult | None:
         """Depth-400 ascension / prestige reset — a rare endgame milestone."""
         try:
@@ -559,7 +526,7 @@ class NeonDegenService:
                 return None
 
             from utils import dig_drawing
-            gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, layer_name, prestige=True)
+            gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, prestige=True)
             text = await self._dig_caption("prestige", "has ascended, prestiging beyond the deepest dark")
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=3, text_block=text, gif_file=gif)
@@ -669,7 +636,6 @@ class NeonDegenService:
         discord_id: int,
         guild_id: int | None,
         won: bool,
-        payout: int,
         new_balance: int,
     ) -> NeonResult | None:
         """Trigger on bet settlement. Layer 2 for zero balance or max debt."""

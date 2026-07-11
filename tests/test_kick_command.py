@@ -96,7 +96,7 @@ def make_bot(channel=None):
 
 @pytest.mark.asyncio
 async def test_kick_removes_reaction_and_updates_message(monkeypatch):
-    lobby_manager, lobby_service = make_lobby_service()
+    _, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=9000)
     lobby.add_player(42)
     lobby_service.set_lobby_message_id(message_id=12345, channel_id=100, guild_id=9000)

@@ -95,7 +95,7 @@ async def test_predictions_tab_open_position(player_repo, prediction_service):
     )
     cog = ProfileCommands(MockBot(prediction_service))
 
-    embed, file = await cog._build_predictions_embed(
+    embed, _ = await cog._build_predictions_embed(
         MockUser(200), 200, guild_id=TEST_GUILD_ID
     )
 

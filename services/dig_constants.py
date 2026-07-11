@@ -37,7 +37,6 @@ from services.dig_data.bosses import *  # noqa: F401,F403
 from services.dig_data.event_art import EVENT_ASCII_ART  # noqa: F401
 from services.dig_data.event_definitions import (  # noqa: F401
     EVENT_CHAIN_CHANCE,
-    EVENT_CHAIN_JC_MULTIPLIER,
     RANDOM_EVENTS,
 )
 from services.dig_data.event_types import (  # noqa: F401

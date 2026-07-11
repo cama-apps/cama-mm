@@ -245,9 +245,6 @@ def _create_static_overlay(size: int, is_golden: bool = False) -> Image.Image:
     return img
 
 
-def _is_numbered_wedge(wedge: tuple) -> bool:
-    """Check if a wedge is a numbered (positive value) wedge."""
-    return isinstance(wedge[1], int) and wedge[1] > 0
 
 
 def _hue_sort_key(color_hex: str) -> tuple[int, float]:
@@ -778,7 +775,7 @@ GOLDEN_WHEEL_WEDGES = sorted(
 )
 
 
-def get_wheel_wedges(is_bankrupt: bool = False, is_golden: bool = False, mana_color: str | None = None) -> list[tuple[str, int | str, str]]:
+def get_wheel_wedges(is_bankrupt: bool = False, is_golden: bool = False) -> list[tuple[str, int | str, str]]:
     """Get the appropriate wheel wedges based on player status."""
     if is_golden:
         return GOLDEN_WHEEL_WEDGES
@@ -879,7 +876,7 @@ def apply_mana_wedge(
     result = list(wedges)
 
     # Replace the first mid-range positive wedge (15-25 range) with the mana wedge
-    for i, (label, value, color) in enumerate(result):
+    for i, (_, value, _) in enumerate(result):
         if isinstance(value, int) and 15 <= value <= 25:
             result[i] = mana_wedge
             break
@@ -960,7 +957,7 @@ def _create_wheel_face(
         )
 
     # Draw wedges
-    for i, (label, value, color) in enumerate(wedges):
+    for i, (_, _, color) in enumerate(wedges):
         start_angle = i * angle_per_wedge - 90
         end_angle = start_angle + angle_per_wedge
 

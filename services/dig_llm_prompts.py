@@ -47,7 +47,7 @@ _LAYER_RANGES: list[tuple[int, int | None, str]] = [
 
 def _get_layer_name(depth: int) -> str:
     """Return the layer name for *depth*."""
-    for low, high, name in reversed(_LAYER_RANGES):
+    for low, _, name in reversed(_LAYER_RANGES):
         if depth >= low:
             return name
     return "Dirt"

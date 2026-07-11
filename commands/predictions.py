@@ -663,7 +663,7 @@ class PersistentMarketView(discord.ui.View):
         )
 
         embed = self.cog._build_position_embed(prediction_id, position, book)
-        sell_view = PositionEphemeralView(self.cog, prediction_id, position, book)
+        sell_view = PositionEphemeralView(self.cog, prediction_id)
         await interaction.response.send_message(embed=embed, view=sell_view, ephemeral=True)
 
 
@@ -675,7 +675,7 @@ class PositionEphemeralView(discord.ui.View):
     card embed is what conveys the user's holdings.
     """
 
-    def __init__(self, cog: PredictionCommands, prediction_id: int, position: dict, book: dict):
+    def __init__(self, cog: PredictionCommands, prediction_id: int):
         super().__init__(timeout=120)
         self.cog = cog
         self.prediction_id = prediction_id

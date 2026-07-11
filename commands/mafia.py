@@ -778,7 +778,7 @@ class MafiaCommands(commands.Cog):
                 body.append(await self.flavor_service.lynch_narration(players_by_id[lynched]))
             else:
                 body.append(await self.flavor_service.no_lynch_narration())
-            body.append(self._format_vote_reveal(summary, players_by_id))
+            body.append(self._format_vote_reveal(summary))
             bounty = summary.get("bounty") or {}
             if bounty.get("reward"):
                 body.append(f"🎯 The town bounty paid out **{bounty['reward']}** {JOPACOIN_EMOTE}.")
@@ -789,7 +789,7 @@ class MafiaCommands(commands.Cog):
         embed.add_field(name="Phase ends", value=f"<t:{ends_at}:R>", inline=False)
         embed.set_footer(text=footer)
 
-        ping = await self._living_ping(guild, game)
+        ping = await self._living_ping(game)
         try:
             msg = await channel.send(content=ping or None, embed=embed)
             if is_dawn:
@@ -799,7 +799,7 @@ class MafiaCommands(commands.Cog):
 
         await self._sync_graveyard(guild, game)
 
-    def _format_vote_reveal(self, summary: dict, players_by_id: dict) -> str:
+    def _format_vote_reveal(self, summary: dict) -> str:
         """Anonymous-until-dusk: reveal who voted whom at resolution."""
         detail = summary.get("vote_detail") or []
         if not detail:
@@ -809,7 +809,7 @@ class MafiaCommands(commands.Cog):
         ]
         return "**🗳️ The votes are revealed:**\n" + "\n".join(lines)
 
-    async def _living_ping(self, guild: discord.Guild, game) -> str:
+    async def _living_ping(self, game) -> str:
         """@-mention living players for the phase-change ping."""
         players = await asyncio.to_thread(
             self.mafia_service.repo.get_players, game.game_id

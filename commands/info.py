@@ -1394,7 +1394,7 @@ class InfoCommands(commands.Cog):
                 inline=True,
             )
             # Custom formatter for calibration showing both RD and certainty
-            def format_calibration(players_list, most_calibrated: bool = True) -> str:
+            def format_calibration(players_list) -> str:
                 lines = []
                 for idx, player in enumerate(players_list[:3], 1):
                     rd = player.glicko_rd if player.glicko_rd is not None else 350
@@ -1506,7 +1506,6 @@ class InfoCommands(commands.Cog):
                     functools.partial(
                         draw_rating_distribution,
                         rating_values,
-                        avg_rating=stats["avg_rating"],
                         median_rating=stats["median_rating"],
                     )
                 )

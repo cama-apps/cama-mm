@@ -34,7 +34,7 @@ class TestGoldenWheelWedges:
         # Check by color (#4a3000) and negative int value.
         overextended = [w for w in GOLDEN_WHEEL_WEDGES if w[2] == "#4a3000"]
         assert len(overextended) == 2, f"Expected 2 OVEREXTENDED wedges, got: {overextended}"
-        for label, value, color in overextended:
+        for _, value, _ in overextended:
             assert isinstance(value, int)
             assert value < 0, f"OVEREXTENDED value should be negative, got {value}"
 
@@ -142,7 +142,7 @@ class TestGoldenWheelWedges:
 
         overextended = [w for w in wedges if w[2] == "#4a3000"]
         assert len(overextended) == 2, f"Expected 2 OVEREXTENDED wedges, got: {overextended}"
-        for label, value, color in overextended:
+        for label, value, _ in overextended:
             assert isinstance(value, int) and value < 0, f"value {value!r} should be a negative int"
             assert label != "OVEREXTENDED", "live wheel still shows the static placeholder label"
             assert label == str(value), f"label {label!r} should be the computed value {value}"

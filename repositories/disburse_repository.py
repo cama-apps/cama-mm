@@ -176,34 +176,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 counts[row["vote_method"]] = row["count"]
             return counts
 
-    def get_total_votes(self, guild_id: int | None) -> int:
-        """
-        Get total number of votes for the active proposal.
-        """
-        counts = self.get_vote_counts(guild_id)
-        return sum(counts.values())
 
-    def get_voter_ids(self, guild_id: int | None) -> list[int]:
-        """
-        Get list of discord_ids who have voted on the active proposal.
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT proposal_id FROM disburse_proposals WHERE guild_id = ? AND status = 'active'",
-                (normalized_guild,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                return []
-
-            proposal_id = row["proposal_id"]
-            cursor.execute(
-                "SELECT discord_id FROM disburse_votes WHERE guild_id = ? AND proposal_id = ?",
-                (normalized_guild, proposal_id),
-            )
-            return [row["discord_id"] for row in cursor.fetchall()]
 
     def get_individual_votes(self, guild_id: int | None) -> list[dict]:
         """

@@ -25,13 +25,6 @@ class ArtifactDef:
     min_prestige: int = 0           # gates the artifact behind a prestige threshold (0 = available from P0)
 
 
-RARITY_DROP_RATES: dict[str, float] = {
-    "Common": 0.05,
-    "Uncommon": 0.02,
-    "Rare": 0.005,
-    "Legendary": 0.001,
-}
-
 # Functional Relics (6) ─────────────────────────────────────────
 RELICS: list[ArtifactDef] = [
     ArtifactDef(

@@ -18,8 +18,6 @@ from typing import Any
 logger = logging.getLogger("cama_bot.services.dig_flame")
 
 CATASTROPHIC_PREFIX = "💥"
-SPLASH_PREFIX = "🩸"
-GUILD_PREFIX = "🔔"
 
 CATASTROPHIC_LINES: tuple[str, ...] = (
     "Far below, a tunnel folds shut. Stone settles for a long time.",

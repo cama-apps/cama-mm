@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from services.wrapped_service import Award
 
 
-def draw_wrapped_award(award: Award, hero_names: dict[int, str] | None = None) -> io.BytesIO:
+def draw_wrapped_award(award: Award) -> io.BytesIO:
     """Generate a single award card."""
     width, height = 400, 300
     img = Image.new("RGB", (width, height), BG_GRADIENT_START)

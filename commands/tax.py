@@ -177,7 +177,6 @@ class TaxPlayerLedgerView(discord.ui.View):
         return _build_player_embed(
             self.user,
             snapshot,
-            self.tax_service,
             ledger_page=self.current_page,
             total_ledger_entries=self.total_entries,
             ledger_limit=self.limit,
@@ -316,7 +315,6 @@ class TaxCommands(commands.Cog):
         embed = _build_player_embed(
             user,
             snapshot,
-            self.tax_service,
             ledger_page=1,
             total_ledger_entries=total_ledger_entries,
             ledger_limit=PLAYER_LEDGER_DEFAULT_LIMIT,
@@ -741,7 +739,6 @@ def _build_audit_embed(
 def _build_player_embed(
     user: discord.User,
     snapshot: dict,
-    tax_service: TaxService,
     *,
     ledger_page: int = 1,
     total_ledger_entries: int | None = None,

@@ -327,7 +327,7 @@ class RecordingMixin:
                 [p for p, _ in dire_glicko]
             )
             expected_radiant_win_prob = self.rating_system.expected_outcome(
-                radiant_rating, radiant_rd, dire_rating, dire_rd
+                radiant_rating, dire_rating, dire_rd
             )
             expected_team_win_prob = {
                 1: expected_radiant_win_prob,

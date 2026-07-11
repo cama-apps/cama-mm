@@ -102,7 +102,7 @@ class CamaRatingSystem:
 
     @classmethod
     def expected_outcome(
-        cls, rating: float, rd: float, opponent_rating: float, opponent_rd: float
+        cls, rating: float, opponent_rating: float, opponent_rd: float
     ) -> float:
         """
         Estimate win probability given two ratings and opponent RD.

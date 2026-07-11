@@ -11,16 +11,11 @@ REGION_NAMES = {"USE": "US East", "USW": "US West"}
 DEFAULT_REGION_CODE = "USW"
 DEFAULT_REGION_NAME = REGION_NAMES[DEFAULT_REGION_CODE]
 
-# OpenDota /players/{id}/counts "region" map keys -> our codes.
-# OpenDota region numbers: 1 = US West, 2 = US East.
-OPENDOTA_REGION_TO_CODE = {"1": "USW", "2": "USE"}
 
 # Stored in inferred_region to mean "we checked OpenDota and found no US play".
 # Distinct from NULL (= not yet checked) so the startup backfill converges to a no-op.
 SENTINEL_NONE = "NONE"
 
-# Kept for compatibility with older imports; all-unset lobbies now default to USW.
-NO_REGION_NUDGE = DEFAULT_REGION_NAME
 
 
 def infer_region_from_counts(counts: dict | None) -> str | None:

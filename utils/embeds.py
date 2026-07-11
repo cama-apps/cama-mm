@@ -142,7 +142,7 @@ def create_lobby_embed(
     )
 
     # Regular players section
-    player_list, unique_count = format_player_list(
+    player_list, _ = format_player_list(
         players,
         player_ids,
         bankruptcy_repo,
@@ -222,13 +222,6 @@ LANE_ROLE_NAMES = {
     4: "Jungle",
 }
 
-# Lane role emojis
-LANE_EMOJIS = {
-    1: "🛡️",  # Safe Lane
-    2: "⚔️",  # Mid
-    3: "🗡️",  # Off Lane
-    4: "🌲",  # Jungle
-}
 
 
 def _determine_lane_outcomes(
@@ -382,7 +375,7 @@ def create_enriched_match_embed(
     # Calculate lane outcomes for both teams
     lane_outcomes = _determine_lane_outcomes(radiant_participants, dire_participants)
 
-    def format_team_field(participants: list[dict], team: str, is_winner: bool) -> str:
+    def format_team_field(participants: list[dict], team: str) -> str:
         """Format a team's stats as embed field value."""
         if not participants:
             return "No data"
@@ -441,7 +434,7 @@ def create_enriched_match_embed(
     radiant_label = "🟢 RADIANT" + (" (Winner)" if winning_team == 1 else "")
     embed.add_field(
         name=radiant_label,
-        value=truncate_field(format_team_field(radiant_participants, "radiant", winning_team == 1)),
+        value=truncate_field(format_team_field(radiant_participants, "radiant")),
         inline=False,
     )
 
@@ -449,7 +442,7 @@ def create_enriched_match_embed(
     dire_label = "🔴 DIRE" + (" (Winner)" if winning_team == 2 else "")
     embed.add_field(
         name=dire_label,
-        value=truncate_field(format_team_field(dire_participants, "dire", winning_team == 2)),
+        value=truncate_field(format_team_field(dire_participants, "dire")),
         inline=False,
     )
 

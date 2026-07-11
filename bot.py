@@ -547,7 +547,7 @@ async def update_lobby_message(message, lobby, guild_id=None):
         logger.error(f"Error updating lobby message: {exc}", exc_info=True)
 
 
-async def notify_lobby_ready(channel, lobby, guild_id: int = 0):
+async def notify_lobby_ready(channel, guild_id: int = 0):
     """Notify that lobby is ready to shuffle."""
     async with _lobby_ready_lock:
         now = time.time()
@@ -1147,7 +1147,7 @@ async def on_raw_reaction_add(payload):
             guild_id = payload.guild_id or 0
             await notify_lobby_rally(channel, thread, lobby, guild_id)
         else:
-            await notify_lobby_ready(channel, lobby, guild_id=payload.guild_id or 0)
+            await notify_lobby_ready(channel, guild_id=payload.guild_id or 0)
     except Exception as exc:
         logger.error(f"Error handling reaction add: {exc}", exc_info=True)
 

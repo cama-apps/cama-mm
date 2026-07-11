@@ -284,8 +284,6 @@ def draw_records_slide(
     records: list[PersonalRecord],
     username: str,
     year_label: str,
-    slide_number: int,
-    total_slides: int,
     hero_names: dict[int, str],
 ) -> io.BytesIO:
     """Generate a single records slide image with hero thumbnails + stats."""

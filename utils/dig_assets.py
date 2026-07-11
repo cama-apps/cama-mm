@@ -178,10 +178,10 @@ def get_boss_art(
     try:
         if scene == "encounter":
             from utils.dig_drawing import draw_boss_scene
-            buf = draw_boss_scene(layer_name, slug)
+            buf = draw_boss_scene(layer_name)
         else:
             from utils.dig_drawing import draw_boss_result_scene
-            buf = draw_boss_result_scene(layer_name, slug, won=(scene == "victory"))
+            buf = draw_boss_result_scene(layer_name, won=(scene == "victory"))
         return _file_from_buf(buf, f"boss_{scene}.png")
     except Exception as e:
         logger.debug("PIL boss art fallback failed: %s", e)

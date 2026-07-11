@@ -266,7 +266,7 @@ class TestResolveSplashBurns:
 class TestActiveDiggersLookback:
     """Verify the ACTIVE_DIGGERS_LOOKBACK_DAYS constant is respected."""
 
-    def test_lookback_excludes_old_digs(self, dig_repo, player_repository, monkeypatch):
+    def test_lookback_excludes_old_digs(self, dig_repo, player_repository):
         _register(player_repository, 10001, balance=100)
         _register(player_repository, 10002, balance=100)
 

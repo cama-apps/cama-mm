@@ -499,10 +499,6 @@ class TestShuffler:
         assert len(team2.players) == 5
         assert len(excluded) == 2
 
-        # High exclusion player should be more likely to be included
-        # (but we can't guarantee it due to other factors)
-        # Just verify the penalty is being applied
-        [p.name for p in excluded]
 
         # At minimum, verify structure is correct
         assert high_exclusion_player.name in [
@@ -888,7 +884,7 @@ class TestShuffler14Players:
             exclusion_penalty_weight=75.0,
         )
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+        team1, team2, _ = shuffler.shuffle_from_pool(players, exclusion_counts)
 
         # Get names of included players
         included_names = {p.name for p in team1.players + team2.players}
@@ -992,7 +988,7 @@ class TestExclusionPenaltyWeightDefault:
             exclusion_penalty_weight=75.0,
         )
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+        *_, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
 
         high_exclusion_names = {players[i].name for i in range(4)}
         excluded_names = {p.name for p in excluded}

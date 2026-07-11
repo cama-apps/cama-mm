@@ -174,7 +174,7 @@ class TestGetPlayerRecordsBasic:
         assert kills_best[0].value == 20
 
     def test_below_min_games_returns_none(self):
-        svc, wrapped_repo, player_repo = _build_service()
+        svc, wrapped_repo, _ = _build_service()
         # Only 2 rows, below WRAPPED_MIN_GAMES (3)
         wrapped_repo.get_player_year_matches.return_value = _sample_rows(2)
 
@@ -240,7 +240,7 @@ class TestStreakComputation:
             {"won": True, "hero_id": 1}, {"won": False, "hero_id": 2},
             {"won": True, "hero_id": 3}, {"won": False, "hero_id": 4},
         ]
-        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
+        win, lose, _, _ = WrappedService._compute_streaks(matches)
         assert win == 1
         assert lose == 1
 
@@ -253,7 +253,7 @@ class TestStreakComputation:
 
     def test_none_won_resets_streaks(self):
         matches = [{"won": True}, {"won": None}, {"won": True}]
-        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
+        win, lose, _, _ = WrappedService._compute_streaks(matches)
         # None resets both counters — unknown result breaks streaks
         assert win == 1
         assert lose == 0
@@ -265,7 +265,7 @@ class TestStreakComputation:
             {"won": False, "hero_id": 99},  # this breaks the 2-win streak
             {"won": True, "hero_id": 12},
         ]
-        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
+        win, _, win_breaker, _ = WrappedService._compute_streaks(matches)
         assert win == 2
         assert win_breaker == 99
 
@@ -494,8 +494,6 @@ class TestDrawRecordsSlideBasic:
             records=records,
             username="TestPlayer",
             year_label="Cama Wrapped 2026",
-            slide_number=1,
-            total_slides=5,
             hero_names={1: "Anti-Mage", 2: "Axe", 3: "Bane", 4: "Bloodseeker", 5: "Crystal Maiden"},
         )
         img = Image.open(buf)
@@ -515,8 +513,6 @@ class TestDrawRecordsSlideBasic:
             records=records,
             username="TestPlayer",
             year_label="Cama Wrapped 2026",
-            slide_number=1,
-            total_slides=5,
             hero_names={4: "Bloodseeker", 5: "Crystal Maiden"},
         )
         img = Image.open(buf)
@@ -535,8 +531,6 @@ class TestDrawRecordsSlideBasic:
             records=records,
             username="TestPlayer",
             year_label="Cama Wrapped 2026",
-            slide_number=4,
-            total_slides=5,
             hero_names={},
         )
         img = Image.open(buf)

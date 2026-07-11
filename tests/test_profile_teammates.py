@@ -331,7 +331,7 @@ class TestTeammatesEmbedEdgeCases:
         register_players(player_repo, [1001])
         user = MockUser(1001)
 
-        embed, file = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Should return an error embed
         assert "unavailable" in embed.description.lower() or "error" in embed.title.lower()

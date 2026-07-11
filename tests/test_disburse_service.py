@@ -124,7 +124,7 @@ class TestEvenDistribution:
         # Each should get 5
         amounts = {d[0]: d[1] for d in distributions}
         assert sum(amounts.values()) == 50
-        for pid, amount in amounts.items():
+        for _, amount in amounts.items():
             assert amount == 5
 
 
@@ -447,7 +447,7 @@ class TestQuorumAndExecution:
         disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
 
         # Should be able to create a new proposal now
-        can, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
+        _, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
         # Note: might fail due to no more funds, but not due to active proposal
         assert reason != "active_proposal_exists"
 
@@ -466,7 +466,7 @@ class TestResetProposal:
         assert success
 
         # Should be able to create a new proposal
-        can, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
+        can, _ = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
         assert can
 
     def test_reset_no_proposal(self, disburse_service):
@@ -519,7 +519,7 @@ class TestStimulusDistribution:
         amounts = {d[0]: d[1] for d in distributions}
         # 100 / 4 = 25 each
         assert sum(amounts.values()) == 100
-        for pid, amount in amounts.items():
+        for _, amount in amounts.items():
             assert amount == 25
 
     def test_stimulus_distribution_with_remainder(self, disburse_service):

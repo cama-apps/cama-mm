@@ -321,7 +321,7 @@ def test_fix3_award_participation_without_garnishment_is_atomic(
     random.seed(0xC0DE)
 
     threads = []
-    for i in range(4):
+    for _ in range(4):
         threads.append(threading.Thread(target=award, args=(pids,)))
     threads.append(threading.Thread(target=concurrent_noise))
     threads.append(threading.Thread(target=concurrent_noise))

@@ -43,16 +43,16 @@ class TestDigGifGenerators:
         )
 
     def test_legendary_relic(self):
-        _assert_valid_gif(dig_drawing.animate_legendary_relic("Abyss", "Ethereal Crown"))
+        _assert_valid_gif(dig_drawing.animate_legendary_relic("Ethereal Crown"))
 
     def test_cave_in(self):
         _assert_valid_gif(dig_drawing.animate_cave_in("Stone", 112, 100))
 
     def test_pinnacle(self):
-        _assert_valid_gif(dig_drawing.animate_pinnacle("The Hollow", prestige=False))
+        _assert_valid_gif(dig_drawing.animate_pinnacle(prestige=False))
 
     def test_prestige(self):
-        _assert_valid_gif(dig_drawing.animate_pinnacle("The Hollow", prestige=True))
+        _assert_valid_gif(dig_drawing.animate_pinnacle(prestige=True))
 
     def test_unknown_layer_does_not_crash(self):
         # An unrecognised layer name must fall back to the Dirt palette, not raise.

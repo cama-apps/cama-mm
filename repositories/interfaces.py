@@ -64,8 +64,6 @@ class IPlayerRepository(ABC):
     @abstractmethod
     def get_glicko_rating(self, discord_id: int, guild_id: int) -> tuple[float, float, float] | None: ...
 
-    @abstractmethod
-    def update_mmr(self, discord_id: int, guild_id: int, new_mmr: float) -> None: ...
 
     @abstractmethod
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
@@ -103,8 +101,6 @@ class IPlayerRepository(ABC):
     @abstractmethod
     def increment_wins(self, discord_id: int, guild_id: int) -> None: ...
 
-    @abstractmethod
-    def increment_losses(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
     def get_exclusion_counts(self, discord_ids: list[int], guild_id: int) -> dict[int, int]: ...
@@ -121,8 +117,6 @@ class IPlayerRepository(ABC):
     @abstractmethod
     def delete(self, discord_id: int, guild_id: int) -> bool: ...
 
-    @abstractmethod
-    def delete_all(self, guild_id: int) -> int: ...
 
     @abstractmethod
     def delete_fake_users(self, guild_id: int) -> int: ...
@@ -261,10 +255,6 @@ class IPlayerRepository(ABC):
         """Get a player's lowest balance ever recorded."""
         ...
 
-    @abstractmethod
-    def update_lowest_balance_if_lower(self, discord_id: int, guild_id: int, new_balance: int) -> bool:
-        """Update lowest_balance_ever if new_balance is lower than current record."""
-        ...
 
     @abstractmethod
     def get_all_registered_players_for_lottery(self, guild_id: int, activity_days: int = 14) -> list[dict]:
@@ -295,21 +285,13 @@ class IBetRepository(ABC):
     @abstractmethod
     def get_bets_for_pending_match(self, guild_id: int | None, since_ts: int | None = None): ...
 
-    @abstractmethod
-    def delete_bets_for_guild(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
     def get_total_bets_by_guild(
         self, guild_id: int | None, since_ts: int | None = None
     ) -> dict[str, int]: ...
 
-    @abstractmethod
-    def assign_match_id(
-        self, guild_id: int | None, match_id: int, since_ts: int | None = None
-    ) -> None: ...
 
-    @abstractmethod
-    def delete_pending_bets(self, guild_id: int | None, since_ts: int | None = None) -> int: ...
 
     @abstractmethod
     def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
@@ -536,16 +518,6 @@ class IMatchRepository(ABC):
         """Get count of matches recorded since a given ISO timestamp."""
         ...
 
-    @abstractmethod
-    def add_match_prediction(
-        self,
-        match_id: int,
-        radiant_rating: float,
-        dire_rating: float,
-        radiant_rd: float,
-        dire_rd: float,
-        expected_radiant_win_prob: float,
-    ) -> None: ...
 
     @abstractmethod
     def get_recent_match_predictions(self, guild_id: int, limit: int = 200): ...
@@ -556,8 +528,6 @@ class IMatchRepository(ABC):
     @abstractmethod
     def get_player_performance_stats(self, guild_id: int): ...
 
-    @abstractmethod
-    def delete_all_matches(self, guild_id: int) -> int: ...
 
     @abstractmethod
     def save_pending_match(self, guild_id: int | None, payload: dict) -> int: ...
@@ -615,10 +585,6 @@ class IMatchRepository(ABC):
         """Update an existing pending match's payload, scoped to the given guild."""
         ...
 
-    @abstractmethod
-    def update_match_result(self, match_id: int, new_winning_team: int) -> None:
-        """Update the winning_team for a match."""
-        ...
 
 
 class ILobbyRepository(ABC):
@@ -742,16 +708,6 @@ class IPairingsRepository(ABC):
         """Get detailed stats between two specific players."""
         ...
 
-    @abstractmethod
-    def reverse_pairings_for_match(
-        self,
-        guild_id: int | None,
-        team1_ids: list[int],
-        team2_ids: list[int],
-        original_winning_team: int,
-    ) -> None:
-        """Reverse pairings applied during original match recording."""
-        ...
 
     @abstractmethod
     def rebuild_all_pairings(self, guild_id: int | None) -> int:
@@ -808,10 +764,6 @@ class IPredictionRepository(ABC):
         """Get a prediction by ID."""
         ...
 
-    @abstractmethod
-    def get_active_predictions(self, guild_id: int) -> list[dict]:
-        """Get all open/locked predictions for a guild."""
-        ...
 
     @abstractmethod
     def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
@@ -833,29 +785,9 @@ class IPredictionRepository(ABC):
         """Update Discord IDs for a prediction (thread, embed message)."""
         ...
 
-    @abstractmethod
-    def add_resolution_vote(
-        self, prediction_id: int, user_id: int, outcome: str, is_admin: bool
-    ) -> dict:
-        """Add a resolution vote. Returns vote counts."""
-        ...
 
-    @abstractmethod
-    def get_resolution_votes(self, prediction_id: int) -> dict:
-        """Get current resolution vote counts: {"yes": n, "no": m}."""
-        ...
 
-    @abstractmethod
-    def resolve_prediction(
-        self, prediction_id: int, outcome: str, resolved_by: int
-    ) -> None:
-        """Mark prediction as resolved with outcome."""
-        ...
 
-    @abstractmethod
-    def cancel_prediction(self, prediction_id: int) -> None:
-        """Cancel a prediction (status -> cancelled)."""
-        ...
 
     # --- Order-book mechanic (new in feat/predict-orderbook) ---
 
@@ -1312,8 +1244,6 @@ class ILoanRepository(ABC):
         outstanding_fee: int | None = None,
     ) -> None: ...
 
-    @abstractmethod
-    def clear_outstanding_loan(self, discord_id: int, guild_id: int | None = None) -> None: ...
 
     @abstractmethod
     def get_nonprofit_fund(self, guild_id: int | None) -> int: ...
@@ -1486,15 +1416,7 @@ class IDisburseRepository(ABC):
         """Get vote counts for each method for the active proposal."""
         ...
 
-    @abstractmethod
-    def get_total_votes(self, guild_id: int | None) -> int:
-        """Get total number of votes for the active proposal."""
-        ...
 
-    @abstractmethod
-    def get_voter_ids(self, guild_id: int | None) -> list[int]:
-        """Get list of discord_ids who have voted on the active proposal."""
-        ...
 
     @abstractmethod
     def get_individual_votes(self, guild_id: int | None) -> list[dict]:
@@ -1832,11 +1754,7 @@ class IDigRepository(ABC):
     @abstractmethod
     def get_recent_actions(self, discord_id: int, guild_id: int, limit: int = 5, *, action_type: str | None = None, hours: int | None = None) -> list[dict]: ...
 
-    @abstractmethod
-    def get_sabotage_history(self, actor_id: int, target_id: int, guild_id: int, since_ts: int) -> list[dict]: ...
 
-    @abstractmethod
-    def get_helper_actions(self, target_id: int, guild_id: int, since_ts: int) -> list[dict]: ...
 
     @abstractmethod
     def count_recent_boss_kills(self, guild_id: int, hours: int = 24) -> int:
@@ -1858,8 +1776,6 @@ class IDigRepository(ABC):
     @abstractmethod
     def add_item(self, discord_id: int, guild_id: int, item_type: str) -> int: ...
 
-    @abstractmethod
-    def remove_item(self, item_id: int) -> None: ...
 
     @abstractmethod
     def get_queued_items(self, discord_id: int, guild_id: int) -> list[dict]: ...
@@ -1867,11 +1783,7 @@ class IDigRepository(ABC):
     @abstractmethod
     def queue_item(self, item_id: int) -> None: ...
 
-    @abstractmethod
-    def unqueue_all(self, discord_id: int, guild_id: int) -> None: ...
 
-    @abstractmethod
-    def count_items(self, discord_id: int, guild_id: int) -> int: ...
 
     # Artifacts
     @abstractmethod
@@ -1897,8 +1809,6 @@ class IDigRepository(ABC):
     @abstractmethod
     def count_equipped_relics(self, discord_id: int, guild_id: int) -> int: ...
 
-    @abstractmethod
-    def remove_artifact(self, artifact_db_id: int) -> None: ...
 
     @abstractmethod
     def has_artifact(self, discord_id: int, guild_id: int, artifact_id: str) -> bool: ...

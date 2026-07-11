@@ -331,21 +331,6 @@ class OpenDotaAPI:
             estimated = 5500 + int((1000 / leaderboard_rank) * 500)
             return min(estimated, 6000)  # Cap at 6000 for lower ranks
 
-    def get_player_rank_tier(self, steam_id: int) -> int | None:
-        """
-        Get player's rank tier (medal).
-
-        Args:
-            steam_id: Steam ID (32-bit)
-
-        Returns:
-            Rank tier number or None
-        """
-        player_data = self.get_player_data(steam_id)
-        if not player_data:
-            return None
-
-        return player_data.get("rank_tier")
 
     def get_player_roles(self, steam_id: int) -> dict | None:
         """

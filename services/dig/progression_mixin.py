@@ -455,21 +455,6 @@ class ProgressionMixin:
             "stat_boss_awards": self._encode_stat_boss_awards(tunnel, awarded),
         }
 
-    def _award_boss_stat_point_if_first(
-        self, discord_id: int, guild_id, tunnel: dict, boundary: int
-    ) -> bool:
-        """Award one S-stat point the first time this boss is fully defeated."""
-        updates = self._boss_stat_point_award_updates(tunnel, boundary)
-        if updates is None:
-            return False
-        self.dig_repo.update_tunnel(
-            discord_id,
-            guild_id,
-            **updates,
-        )
-        tunnel.update(updates)
-        return True
-
     def get_miner_profile(self, discord_id: int, guild_id) -> dict:
         """Return the player's dig profile and S-stat effects."""
         if not self.player_repo.exists(discord_id, guild_id):
@@ -598,15 +583,11 @@ class ProgressionMixin:
     # ------------------------------------------------------------------
 
     def calculate_decay(self, discord_id: int, guild_id) -> int:
-        """Public wrapper: calculate how much decay would occur, return blocks lost.
-
-        Also applies the decay to the tunnel.
-        """
+        """Return the number of blocks lazy decay would remove."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return 0
-        tunnel = dict(tunnel)
-        result = self._apply_lazy_decay(tunnel, guild_id)
+        result = self._apply_lazy_decay()
         return result.get("amount", 0)
 
     def get_shop(self, discord_id: int, guild_id) -> dict:
@@ -660,43 +641,6 @@ class ProgressionMixin:
             pickaxe_upgrades=pickaxe_upgrades,
             gear_for_sale=gear_for_sale,
             inventory_count=inv_count,
-        )
-
-    def get_upgrade_info(self, discord_id: int, guild_id) -> dict:
-        """Return info about current and next pickaxe tier."""
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return self._ok(current_tier="Wooden", current_tier_index=0, next_tier=None, eligible=False)
-
-        tunnel = dict(tunnel)
-        current_idx = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
-        current_name = PICKAXE_TIERS[current_idx]["name"] if current_idx < len(PICKAXE_TIERS) else "Unknown"
-
-        if current_idx >= len(PICKAXE_TIERS) - 1:
-            return self._ok(current_tier=current_name, current_tier_index=current_idx, next_tier=None, eligible=False)
-
-        next_tier = PICKAXE_TIERS[current_idx + 1]
-        depth = tunnel.get("depth", 0)
-        prestige = tunnel.get("prestige_level", 0)
-        balance = self.player_repo.get_balance(discord_id, guild_id)
-
-        missing = []
-        if depth < next_tier["depth_required"]:
-            missing.append(f"Depth {next_tier['depth_required']} (have {depth})")
-        if prestige < next_tier.get("prestige_required", 0):
-            missing.append(f"Prestige {next_tier['prestige_required']} (have {prestige})")
-        if balance < next_tier["jc_cost"]:
-            missing.append(f"{next_tier['jc_cost']} JC (have {balance})")
-
-        return self._ok(
-            current_tier=current_name,
-            current_tier_index=current_idx,
-            next_tier=next_tier["name"],
-            cost=next_tier["jc_cost"],
-            depth_required=next_tier["depth_required"],
-            prestige_required=next_tier.get("prestige_required", 0),
-            eligible=len(missing) == 0,
-            missing_requirements=missing,
         )
 
     def preview_sabotage(self, actor_id: int, target_id: int, guild_id) -> dict:
@@ -838,7 +782,7 @@ class ProgressionMixin:
         target_tunnel["discord_id"] = target_id
 
         # Apply lazy decay
-        self._apply_lazy_decay(target_tunnel, guild_id)
+        self._apply_lazy_decay()
 
         target_depth = target_tunnel.get("depth", 0)
         layer = self._get_layer(target_depth)
@@ -853,7 +797,7 @@ class ProgressionMixin:
 
         # Cap at boss boundary
         boss_progress = self._get_boss_progress(target_tunnel)
-        next_boss = self._next_boss_boundary(target_depth, boss_progress)
+        next_boss = self._next_boss_boundary(boss_progress)
         if next_boss is not None and target_depth + advance >= next_boss:
             advance = max(0, next_boss - 1 - target_depth)
 
@@ -1406,7 +1350,7 @@ class ProgressionMixin:
         tunnel["discord_id"] = discord_id
 
         # Apply lazy decay
-        decay_info = self._apply_lazy_decay(tunnel, guild_id)
+        decay_info = self._apply_lazy_decay()
 
         # Gather data
         inventory = self.get_inventory(discord_id, guild_id)
@@ -1421,7 +1365,7 @@ class ProgressionMixin:
         depth = tunnel.get("depth", 0)
         layer = self._get_layer(depth)
         boss_progress = self._get_boss_progress(tunnel)
-        next_boss = self._next_boss_boundary(depth, boss_progress)
+        next_boss = self._next_boss_boundary(boss_progress)
         at_boss = self._at_boss_boundary(depth, boss_progress)
         queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
 

@@ -10,7 +10,6 @@ import logging
 
 from config import ENRICHMENT_MIN_PLAYER_MATCH
 from opendota_integration import OpenDotaAPI
-from utils.hero_lookup import get_hero_name
 
 logger = logging.getLogger("cama_bot.services.match_enrichment")
 
@@ -448,49 +447,3 @@ class MatchEnrichmentService:
 
         return {"players_updated": updated, "players_failed": failed}
 
-    def format_match_summary(
-        self, internal_match_id: int, guild_id: int | None = None
-    ) -> str | None:
-        """
-        Format a human-readable summary of an enriched match.
-
-        Args:
-            internal_match_id: Our database match_id
-            guild_id: Guild ID for multi-guild isolation
-
-        Returns:
-            Formatted string or None if match not found/not enriched
-        """
-        match = self.match_repo.get_match(internal_match_id, guild_id)
-        if not match:
-            return None
-
-        participants = self.match_repo.get_match_participants(internal_match_id, guild_id)
-        if not participants or not any(p.get("hero_id") for p in participants):
-            return None  # Not enriched
-
-        # Sort by team
-        radiant = [p for p in participants if p.get("side") == "radiant"]
-        dire = [p for p in participants if p.get("side") == "dire"]
-
-        def format_player(p: dict) -> str:
-            hero = get_hero_name(p.get("hero_id", 0))
-            kda = f"{p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)}"
-            return f"{hero} ({kda})"
-
-        lines = []
-        winner = "Radiant" if match.get("winning_team") == 1 else "Dire"
-        lines.append(f"**{winner} Victory**")
-
-        # Get duration if available - need to fetch from DB
-        # For now, skip duration in summary
-
-        lines.append("**Radiant:**")
-        for p in radiant:
-            lines.append(f"  {format_player(p)}")
-
-        lines.append("**Dire:**")
-        for p in dire:
-            lines.append(f"  {format_player(p)}")
-
-        return "\n".join(lines)

@@ -771,7 +771,7 @@ class TestDigFlavorServicePersonality:
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
         svc = self._make_service(dig_repo, player_repository)
-        svc.update_personality(uid, TEST_GUILD_ID, "dig", choice="safe")
+        svc.update_personality(uid, TEST_GUILD_ID, choice="safe")
 
         personality = dig_repo.get_personality(uid, TEST_GUILD_ID)
         assert personality is not None
@@ -783,7 +783,7 @@ class TestDigFlavorServicePersonality:
 
         svc = self._make_service(dig_repo, player_repository)
         svc.update_personality(
-            uid, TEST_GUILD_ID, "boss_fight", details={"first_boss_kill": True}
+            uid, TEST_GUILD_ID, details={"first_boss_kill": True}
         )
 
         moments = dig_repo.get_personality(uid, TEST_GUILD_ID).get("notable_moments", [])
@@ -795,7 +795,7 @@ class TestDigFlavorServicePersonality:
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
         svc = self._make_service(dig_repo, player_repository)
-        svc.update_personality(uid, TEST_GUILD_ID, "dig", choice="invalid_choice")
+        svc.update_personality(uid, TEST_GUILD_ID, choice="invalid_choice")
 
         histogram = dig_repo.get_personality(uid, TEST_GUILD_ID).get("choice_histogram", {})
         assert "invalid_choice" not in histogram
@@ -883,7 +883,7 @@ class TestDigWithPreconditions:
         assert preconditions is not None
 
     def test_unregistered_returns_terminal_failure(self, dig_service):
-        terminal, preconditions = dig_service.dig_with_preconditions(99999, TEST_GUILD_ID)
+        terminal, _ = dig_service.dig_with_preconditions(99999, TEST_GUILD_ID)
         assert terminal is not None
         assert terminal["success"] is False
 

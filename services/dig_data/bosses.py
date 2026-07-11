@@ -1437,8 +1437,6 @@ PHASE_TRANSITION_EVENTS: list[PhaseTransitionEvent] = [
 # Always 3 phases. Drops a relic with 2 random rolls on victory.
 
 PINNACLE_DEPTH: int = 350
-PINNACLE_RETREAT_FORESHADOW_DEPTH: int = 335  # /dig info hints from this depth
-PINNACLE_FORESHADOW_DEPTH: int = 326          # subtle hint after T275 cleared
 
 
 @dataclass(frozen=True)

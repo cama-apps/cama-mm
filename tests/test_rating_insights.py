@@ -85,7 +85,7 @@ def test_compute_calibration_stats_openskill_prediction_quality_from_history():
     rating_history_entries = []
     for match_id in range(2):
         team1_won = match_id == 0
-        for i in range(5):
+        for _ in range(5):
             rating_history_entries.append({
                 "match_id": match_id,
                 "team_number": 1,
