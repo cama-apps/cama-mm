@@ -774,9 +774,9 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
         for index in range(3)
     ]
     outcomes = [
-        SimpleNamespace(applied_loss=0, absorbed_amount=16),
-        SimpleNamespace(applied_loss=8, absorbed_amount=8),
-        SimpleNamespace(applied_loss=16, absorbed_amount=0),
+        SimpleNamespace(applied_loss=0, absorbed_amount=18),
+        SimpleNamespace(applied_loss=9, absorbed_amount=9),
+        SimpleNamespace(applied_loss=18, absorbed_amount=0),
     ]
 
     bot = MagicMock()
@@ -806,7 +806,7 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
     }
     assert len(prefixes) == 1
     for target, call in zip(targets, protection_calls, strict=True):
-        assert call.args[:3] == (target.discord_id, guild_id, 16)
+        assert call.args[:3] == (target.discord_id, guild_id, 18)
         assert call.kwargs["kind"] == "pyroclasm"
         assert call.kwargs["destination"] == "burn"
         assert call.kwargs["clamp_to_balance"] is True
@@ -814,12 +814,12 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
     balance_calls = [call.args for call in player_service.adjust_balance.call_args_list]
     assert balance_calls == [
         (buyer_id, guild_id, -25),
-        (buyer_id, guild_id, 12),
+        (buyer_id, guild_id, 13),
     ]
     message = interaction.followup.send.call_args.args[0]
-    assert "**24" in message
-    assert "You claim **12" in message
-    assert "Shields absorbed **24" in message
+    assert "**27" in message
+    assert "You claim **13" in message
+    assert "Shields absorbed **27" in message
 
 
 @pytest.mark.asyncio
@@ -976,7 +976,7 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     bot.protection_service = MagicMock()
     bot.protection_service.apply_hostile_loss.return_value = SimpleNamespace(
         applied_loss=4,
-        absorbed_amount=4,
+        absorbed_amount=5,
     )
 
     player_service = MagicMock()
@@ -991,10 +991,10 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     )
 
     call = bot.protection_service.apply_hostile_loss.call_args
-    assert call.args[:3] == (victim.discord_id, guild_id, 8)
+    assert call.args[:3] == (victim.discord_id, guild_id, 9)
     assert call.kwargs["kind"] == "wildfire"
     assert call.kwargs["destination"] == "burn"
-    # 45% of the 4 JC that landed floors to 1; the absorbed 4 pays nothing.
+    # 45% of the 4 JC that landed floors to 1; the absorbed 5 pays nothing.
     assert [entry.args for entry in player_service.adjust_balance.call_args_list] == [
         (buyer_id, guild_id, -150),
         (buyer_id, guild_id, 1),
@@ -1002,7 +1002,7 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     message = interaction.followup.send.call_args.args[0]
     assert "Drained **4" in message
     assert "claim **1" in message
-    assert "Shields absorbed **4" in message
+    assert "Shields absorbed **5" in message
 
 
 @pytest.mark.asyncio

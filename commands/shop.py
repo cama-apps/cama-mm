@@ -38,7 +38,10 @@ from config import (
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 from utils.formatting import JOPACOIN_EMOTE
 from utils.hero_lookup import get_all_heroes, get_hero_color, get_hero_image_url, get_hero_name
 from utils.interaction_safety import safe_defer, safe_followup
@@ -1908,7 +1911,9 @@ class ShopCommands(commands.Cog):
             total_absorbed = 0
             victim_lines = []
             for t in targets:
-                destroy_amt = scale_minigame_jc_delta(random.randint(12, 24))
+                destroy_amt = scale_deflationary_minigame_jc_delta(
+                    random.randint(12, 24)
+                )
                 destroy_amt = min(destroy_amt, t.jopacoin_balance)
                 if destroy_amt > 0:
                     outcome = await _apply_hostile_loss(
@@ -2237,7 +2242,7 @@ class ShopCommands(commands.Cog):
             total_drained = 0
             total_absorbed = 0
             for p in eligible:
-                drain = scale_minigame_jc_delta(random.randint(4, 12))
+                drain = scale_deflationary_minigame_jc_delta(random.randint(4, 12))
                 drain = min(drain, p.jopacoin_balance)
                 if drain > 0:
                     outcome = await _apply_hostile_loss(

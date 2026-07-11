@@ -49,7 +49,10 @@ from services.dig_data.bosses import (
     BOSS_TIER_BONUS,
 )
 from services.dig_service import DigService, _prestige_cave_in_multiplier
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 
 @pytest.fixture
@@ -3357,8 +3360,9 @@ class TestApplyDigOutcomeSecondaryPaths:
         balance_before = player_repository.get_balance(uid, guild_id)
         dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
         balance_after = player_repository.get_balance(uid, guild_id)
-        # 10 JC scales to 8; the 5 JC Helltide tax scales to 4.
-        assert balance_after == balance_before + 4, (
+        expected_payout = scale_minigame_jc_delta(10)
+        expected_tax = scale_deflationary_minigame_jc_delta(5)
+        assert balance_after == balance_before + expected_payout - expected_tax, (
             f"helltide tax not applied on DM path: got +{balance_after - balance_before}"
         )
 

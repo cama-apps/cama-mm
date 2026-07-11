@@ -219,7 +219,7 @@ WHEEL_BANKRUPT_PENALTY = _parse_int("WHEEL_BANKRUPT_PENALTY", 100)
 WHEEL_MAX_REWARD = _parse_int("WHEEL_MAX_REWARD", 100)
 WHEEL_ANIMATION_FRAMES = _parse_int("WHEEL_ANIMATION_FRAMES", 5)  # Number of spin frames
 WHEEL_FRAME_DELAY_MS = _parse_int("WHEEL_FRAME_DELAY_MS", 1000)  # Delay between frames (ms)
-WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -25.0)  # Target expected value per spin
+WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -27.5)  # Target expected value per spin
 # Bankrupt wheel target EV: positive so the wheel pays out on average — easier
 # escape. Trimmed from +25 to +12 once the Mario Kart deflation trio landed; the
 # natural floor of the 22 non-BANKRUPT wedges is around +13, so the old +25 was

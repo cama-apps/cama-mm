@@ -23,7 +23,10 @@ from commands.dig import EventEncounterView
 from repositories.dig_repository import DigRepository
 from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
 from services.dig_service import DigService
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 
 @pytest.fixture
@@ -643,7 +646,7 @@ class TestJcThreat:
         result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
         assert result["success"]
         # Negative-event tuning scales the authored loss, then economy scaling applies.
-        expected_loss = scale_minigame_jc_delta(-260)
+        expected_loss = scale_deflationary_minigame_jc_delta(-260)
         assert result["jc_delta"] == expected_loss
         # The balance went negative — into the debt system, no floor at 0.
         balance = player_repository.get_balance(10001, 12345)

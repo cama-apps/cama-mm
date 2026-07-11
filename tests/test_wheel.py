@@ -668,7 +668,7 @@ def test_wheel_expected_value_matches_config():
         f"Expected EV ~{scaled_target_ev}, got {expected_value}"
     )
     # Independent hardcoded sanity bound: the wheel is intentionally a coin sink
-    # (WHEEL_TARGET_EV ≈ -25). Guard against runaway misconfiguration: must
+    # (WHEEL_TARGET_EV ≈ -27.5). Guard against runaway misconfiguration: must
     # never be a net positive (infinite money) or absurdly worse than designed.
     assert -50 <= expected_value <= 5, (
         f"Wheel EV {expected_value:.2f} outside sane [-50, 5] range — "

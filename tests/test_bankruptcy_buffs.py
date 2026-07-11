@@ -58,7 +58,7 @@ class TestBankruptWheelEV:
         assert all(v <= -1 for v in bankrupt_values)
 
     def test_normal_wheel_target_ev_unchanged(self):
-        """The non-bankrupt wheel should still be at its normal -25 target."""
+        """The non-bankrupt wheel should still be at its normal -27.5 target."""
         from config import (
             WHEEL_BANANA_PEEL_EST_EV,
             WHEEL_BLUE_SHELL_EST_EV,

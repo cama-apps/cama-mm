@@ -28,7 +28,10 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_FORCE_RISKY,
     NEGATIVE_EVENT_JC_MULTIPLIER,
 )
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 
 class EventsMixin:
@@ -550,7 +553,9 @@ class EventsMixin:
             and jc > 0
         ):
             nominal_burn = int(splash_cfg.get("victim_count", 0)) * int(
-                scale_minigame_jc_delta(splash_cfg.get("penalty_jc", 0))
+                scale_deflationary_minigame_jc_delta(
+                    splash_cfg.get("penalty_jc", 0)
+                )
             )
             burn_ratio = (
                 min(1.0, splash_result.total_burned / nominal_burn)
@@ -564,7 +569,11 @@ class EventsMixin:
                 )
             jc = int(round(jc * burn_ratio))
 
-        jc = scale_minigame_jc_delta(jc)
+        jc = (
+            scale_deflationary_minigame_jc_delta(jc)
+            if jc < 0
+            else scale_minigame_jc_delta(jc)
+        )
 
         # Depth shift + JC credit/debit + optional buff + audit log commit
         # together, so the actor can't be paid without the depth/buff

@@ -15,6 +15,7 @@ from config import (
     REBELLION_ATTACKER_FLAT_REWARD,
     REBELLION_DEFENDER_STAKE,
     REBELLION_INCITER_FLAT_REWARD,
+    WHEEL_TARGET_EV,
 )
 from services.dig_data.layers import PAID_DIG_COST_CAP, PAID_DIG_COSTS_PER_DAY
 from services.prediction_service import PredictionService
@@ -23,6 +24,10 @@ from services.prediction_service import PredictionService
 def test_paid_dig_cost_ladder_pinned():
     assert PAID_DIG_COSTS_PER_DAY == [3, 5, 10, 20, 40]
     assert PAID_DIG_COST_CAP == 40
+
+
+def test_gamba_wheel_target_ev_pinned():
+    assert WHEEL_TARGET_EV == -27.5
 
 
 def test_bankruptcy_penalty_pinned():

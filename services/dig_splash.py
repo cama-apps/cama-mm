@@ -33,7 +33,10 @@ import uuid
 from dataclasses import dataclass
 
 from config import HOSTILE_LOSS_MIN_BALANCE
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 logger = logging.getLogger("cama_bot.services.dig_splash")
 
@@ -251,7 +254,11 @@ def resolve_splash(
             strategy=strategy, event_name=event_name, victims=[],
             total_burned=0, mode=mode,
         )
-    scaled_penalty_jc = scale_minigame_jc_delta(penalty_jc)
+    scaled_penalty_jc = (
+        scale_deflationary_minigame_jc_delta(penalty_jc)
+        if mode == "burn"
+        else scale_minigame_jc_delta(penalty_jc)
+    )
     if scaled_penalty_jc <= 0:
         return SplashResult(
             strategy=strategy, event_name=event_name, victims=[],

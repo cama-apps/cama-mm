@@ -167,7 +167,7 @@ class ManaEffects:
                 blue_gamba_scrying=True,
                 blue_gamba_reduction=0.25,
                 blue_cashback_rate=0.05,
-                blue_tax_rate=0.05,
+                blue_tax_rate=0.055,
                 # Dig: paid refund on cave-in (existing tax/cashback fields apply too)
                 dig_paid_refund_on_caveins=0.5,
                 # Boss combat: durability refund + reveal HP
