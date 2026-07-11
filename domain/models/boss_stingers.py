@@ -145,6 +145,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_HALVE_NEXT_WAGER,
         flavor_on_loss="You rip out of the web, leaving too much coin behind.",
     ),
+    "aegis_reversal": StingerEffect(
+        id="aegis_reversal",
+        extra_knockback=4,
+        extended_cooldown_s=900,
+        cursed_status=None,
+        flavor_on_loss="The aegis spends its return against you and throws you back up the shaft.",
+    ),
     "xalatath_unraveling": StingerEffect(
         id="xalatath_unraveling",
         extra_knockback=0,
@@ -174,6 +181,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The skitterwing pulled a thread from your timeline. Your next prize is thinner.",
     ),
+    "heartspire_doubt": StingerEffect(
+        id="heartspire_doubt",
+        extra_knockback=0,
+        extended_cooldown_s=0,
+        cursed_status=CURSE_HALVE_NEXT_WAGER,
+        flavor_on_loss="The Heartspire leaves a bad draw in your hands. You wager smaller next time.",
+    ),
     "lilith_hemorrhage": StingerEffect(
         id="lilith_hemorrhage",
         extra_knockback=0,
@@ -202,6 +216,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extended_cooldown_s=900,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The sundered prince swaps something of yours for something of his. You don't want to know what.",
+    ),
+    "emberwright_slag": StingerEffect(
+        id="emberwright_slag",
+        extra_knockback=0,
+        extended_cooldown_s=1800,
+        cursed_status=None,
+        flavor_on_loss="Molten slag hardens across your gear. The next descent waits for it to cool.",
     ),
     "underlord_atrophy": StingerEffect(
         id="underlord_atrophy",

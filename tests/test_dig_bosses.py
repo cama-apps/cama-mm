@@ -14,6 +14,8 @@ import time
 
 import pytest
 
+from domain.models.boss_mechanics import MECHANIC_REGISTRY
+from domain.models.boss_stingers import STINGER_REGISTRY
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_ARCHETYPES,
@@ -345,7 +347,7 @@ class TestPersistedBossHP:
 
 
 class TestDialogueV2:
-    def test_all_24_bosses_have_first_meet(self):
+    def test_all_bosses_have_first_meet(self):
         expected_bosses = [
             "grothak", "pudge", "ogre_magi",
             "crystalia", "crystal_maiden", "tusk",
@@ -354,6 +356,8 @@ class TestDialogueV2:
             "sporeling_sovereign", "treant_protector", "broodmother",
             "chronofrost", "faceless_void", "weaver",
             "nameless_depth", "oracle", "terrorblade",
+            # Prestige-2 additions
+            "aegis_warden", "heartspire", "emberwright",
             # Late-prestige additions (prestige>=3)
             "xalatath", "lilith", "underlord",
         ]
@@ -1139,25 +1143,36 @@ class TestPinnacleBuildInfo:
 
 
 class TestLatePrestigeBossPool:
-    """Bosses with prestige_required=3 should only appear in the pool for P3+ players."""
+    """Prestige-gated bosses should enter pools only at their unlock level."""
 
+    PRESTIGE2_IDS = {"aegis_warden", "heartspire", "emberwright"}
     LATE_PRESTIGE_IDS = {"xalatath", "lilith", "underlord"}
     AFFECTED_TIERS = (150, 200, 275)
+
+    def test_pool_unlocks_prestige2_bosses_at_p2(self):
+        for tier in self.AFFECTED_TIERS:
+            pool = get_boss_pool_for_tier(tier, prestige_level=2)
+            assert len(pool) == 4, f"tier {tier} should have 4 bosses at P2, got {len(pool)}"
+            ids = {b.boss_id for b in pool}
+            assert ids & self.PRESTIGE2_IDS, f"tier {tier} P2 pool missing P2 boss"
 
     def test_pool_full_at_p3(self):
         for tier in self.AFFECTED_TIERS:
             pool = get_boss_pool_for_tier(tier, prestige_level=3)
-            assert len(pool) == 4, f"tier {tier} should have 4 bosses at P3, got {len(pool)}"
+            assert len(pool) == 5, f"tier {tier} should have 5 bosses at P3, got {len(pool)}"
             ids = {b.boss_id for b in pool}
             assert ids & self.LATE_PRESTIGE_IDS, f"tier {tier} P3 pool missing late-prestige boss"
 
-    def test_pool_filtered_below_p3(self):
+    def test_pool_filtered_below_p2(self):
         for tier in self.AFFECTED_TIERS:
-            pool = get_boss_pool_for_tier(tier, prestige_level=2)
-            assert len(pool) == 3, f"tier {tier} should have 3 bosses below P3, got {len(pool)}"
+            pool = get_boss_pool_for_tier(tier, prestige_level=1)
+            assert len(pool) == 3, f"tier {tier} should have 3 bosses below P2, got {len(pool)}"
             ids = {b.boss_id for b in pool}
+            assert not (ids & self.PRESTIGE2_IDS), (
+                f"tier {tier} P1 pool leaked P2 boss: {ids & self.PRESTIGE2_IDS}"
+            )
             assert not (ids & self.LATE_PRESTIGE_IDS), (
-                f"tier {tier} P2 pool leaked late-prestige boss: {ids & self.LATE_PRESTIGE_IDS}"
+                f"tier {tier} P1 pool leaked late-prestige boss: {ids & self.LATE_PRESTIGE_IDS}"
             )
 
     def test_pool_default_returns_full_pool(self):
@@ -1166,14 +1181,19 @@ class TestLatePrestigeBossPool:
         # that surface boss names to a player must pass the player's real
         # prestige explicitly to avoid leaking gated names.
         for tier in self.AFFECTED_TIERS:
-            # 3 grandfathered/Dota + 1 P3 late-prestige + 1 P4 twisted-homage = 5
-            assert len(get_boss_pool_for_tier(tier)) == 5
+            # 3 grandfathered/Dota + 1 P2 + 1 P3 + 1 P4 twisted-homage = 6
+            assert len(get_boss_pool_for_tier(tier)) == 6
 
     def test_unaffected_tiers_unchanged(self):
         # Tiers without late-prestige additions should return 3 entries at any prestige.
         for tier in (25, 50, 75, 100):
             assert len(get_boss_pool_for_tier(tier, prestige_level=0)) == 3
             assert len(get_boss_pool_for_tier(tier, prestige_level=10)) == 3
+
+    def test_prestige2_field_correct(self):
+        for boss_id in self.PRESTIGE2_IDS:
+            boss = BOSSES_BY_ID[boss_id]
+            assert boss.prestige_required == 2, f"{boss_id} prestige_required should be 2"
 
     def test_late_prestige_field_correct(self):
         for boss_id in self.LATE_PRESTIGE_IDS:
@@ -1184,6 +1204,13 @@ class TestLatePrestigeBossPool:
         # Spot-check that existing bosses default to 0.
         for boss_id in ("grothak", "treant_protector", "oracle", "terrorblade"):
             assert BOSSES_BY_ID[boss_id].prestige_required == 0
+
+    def test_prestige2_boss_combat_content_registered(self):
+        for boss_id in self.PRESTIGE2_IDS:
+            boss = BOSSES_BY_ID[boss_id]
+            assert boss.mechanic_pool, f"{boss_id} should have a mechanic"
+            assert all(mechanic_id in MECHANIC_REGISTRY for mechanic_id in boss.mechanic_pool)
+            assert boss.stinger_id in STINGER_REGISTRY
 
 
 class TestLatePrestigeBossLocking:
@@ -1229,6 +1256,45 @@ class TestLatePrestigeBossLocking:
         # Over 50 rolls of a 4-boss pool, the late-prestige boss should appear at least once
         # with overwhelming probability (P(missing) = 0.75^50 ≈ 5.7e-7).
         assert "lilith" in seen, "P3 player should be able to lock the P3 boss"
+
+    def test_p1_player_never_locks_prestige2_boss(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=150, prestige_level=1, boss_progress="{}",
+        )
+        seen: set[str] = set()
+        for _ in range(50):
+            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
+            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
+            seen.add(boss.boss_id)
+        assert "aegis_warden" not in seen, "P1 player should never lock the P2 boss"
+        assert seen <= {"sporeling_sovereign", "treant_protector", "broodmother"}
+
+    def test_p2_player_can_lock_prestige2_boss(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=150, prestige_level=2, boss_progress="{}",
+        )
+        seen: set[str] = set()
+        for _ in range(50):
+            dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress="{}")
+            tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+            boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
+            seen.add(boss.boss_id)
+        assert "aegis_warden" in seen, "P2 player should be able to lock the P2 boss"
 
 
 # --- _DictObj nested-dict access (Bug: render crash on pinnacle relic) ----

@@ -64,6 +64,10 @@ BOSS_SLUGS: dict[str, str] = {
     "weaver": "weaver",
     "oracle": "oracle",
     "terrorblade": "terrorblade",
+    # Prestige-2 roster - slug == boss_id.
+    "aegis_warden": "aegis_warden",
+    "heartspire": "heartspire",
+    "emberwright": "emberwright",
     # Late-prestige roster (prestige_required=3) — slug == boss_id.
     "xalatath": "xalatath",
     "lilith": "lilith",

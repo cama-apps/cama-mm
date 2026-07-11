@@ -732,6 +732,122 @@ _DOTA_BOSSES: dict[str, BossDef] = {
 
 
 # ---------------------------------------------------------------------------
+# Prestige-2 crossover-inspired bosses. These unlock earlier than the current
+# late-prestige additions and seed one new candidate into each deep-tier pool.
+# ---------------------------------------------------------------------------
+_PRESTIGE2_BOSSES: dict[str, BossDef] = {
+    "aegis_warden": BossDef(
+        depth=150,
+        boss_id="aegis_warden",
+        name="The Aegis Warden",
+        title="Keeper of the Second Life",
+        ascii_art=(
+            "    .-A-.\n"
+            "   /  |  \\\n"
+            "  |  o o  |\n"
+            "  |  ===  |\n"
+            "   \\_|||_/\n"
+            "     / \\\n"
+        ),
+        dialogue=[
+            "You brought only one life? Bold accounting.",
+            "Round one is courtesy. Round two is the receipt.",
+            "The shield remembers every digger who thought death was final.",
+            "YOU AGAIN. Good. The second life was getting impatient.",
+            "Pass, then. The shield will find someone else to return.",
+        ],
+        mechanic_pool=("aegis_reclaim",),
+        stinger_id="aegis_reversal",
+        prestige_required=2,
+        victory_lines=(
+            "{boss} lowers the shield. The glow inside it goes out, once.",
+            "{boss} kneels, still guarding a life it cannot spend.",
+            "The aegis cracks. {boss} listens to it break and steps aside.",
+            "{boss} reaches for a return that does not arrive.",
+        ),
+        defeat_lines=(
+            "{boss} lets you fall, then watches the shield pull him upright.",
+            "The second heartbeat in the room is not yours. {boss} keeps it.",
+            "{boss} reverses the fight at the worst possible moment.",
+            "You leave with the sense that someone else got your comeback.",
+        ),
+    ),
+    "heartspire": BossDef(
+        depth=200,
+        boss_id="heartspire",
+        name="The Heartspire",
+        title="The Climb That Beats Back",
+        ascii_art=(
+            "     /\\\n"
+            "    /##\\\n"
+            "   /#oo#\\\n"
+            "  /##><##\\\n"
+            "    ||||\n"
+            "   pulse\n"
+        ),
+        dialogue=[
+            "Every floor had intent. I am where the intent went.",
+            "You climb downward. Inefficient, but thematically clear.",
+            "Show me your block. Show me your panic. I count both.",
+            "YOU AGAIN. The route is shorter when the heart dislikes you.",
+            "Go. The climb keeps score even when I do not.",
+        ],
+        mechanic_pool=("heartspire_intent",),
+        stinger_id="heartspire_doubt",
+        prestige_required=2,
+        victory_lines=(
+            "{boss} misses a beat. The whole shaft exhales.",
+            "The spire's pulse breaks rhythm. {boss} cannot make it start again.",
+            "{boss} folds inward, like a tower remembering it is only stone.",
+            "You pass while {boss} counts damage it can no longer prevent.",
+        ),
+        defeat_lines=(
+            "{boss} shows intent. You understand it exactly one swing too late.",
+            "The spire beats once. You wake up far above the echo.",
+            "{boss} blocks the path with the part of you that wanted to continue.",
+            "You retreat carrying a hand of bad options. {boss} drew better.",
+        ),
+    ),
+    "emberwright": BossDef(
+        depth=275,
+        boss_id="emberwright",
+        name="The Emberwright",
+        title="Who Forges Light Into Hunger",
+        ascii_art=(
+            "   [====]\n"
+            "  / o  o \\\n"
+            " |  ____  |\n"
+            " | /####\\ |\n"
+            "  \\_||||_/\n"
+            "    forge\n"
+        ),
+        dialogue=[
+            "Stand close. The forge improves what survives it.",
+            "Your lantern is crude. Give it here. I'll make it dangerous.",
+            "I hammer light until it remembers how to bite.",
+            "YOU AGAIN. Good. The ember engine was still hot.",
+            "Go. Leave the sparks. They'll grow teeth without you.",
+        ],
+        mechanic_pool=("emberwright_overclock",),
+        stinger_id="emberwright_slag",
+        prestige_required=2,
+        victory_lines=(
+            "{boss} cools from white to red to black. The forge keeps ticking.",
+            "The ember engine coughs once. {boss} cannot restart it.",
+            "{boss} drops the hammer. It lands softly, which is worse.",
+            "The light in {boss} goes hungry, then goes out.",
+        ),
+        defeat_lines=(
+            "{boss} stamps your shadow into slag and sends you after it.",
+            "The forge accepts your panic as fuel. {boss} approves the burn.",
+            "{boss} overclocks the room. You leave before your bones glow.",
+            "You wake up tasting iron and lantern smoke. {boss} is still working.",
+        ),
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Prestige-4 "twisted homage" bosses. Seed evenly into the existing deep-tier
 # pools (one per tier) and only appear once a tunnel has prestiged four times.
 # Each carve-drops a signature trophy relic (trophy_relic_id) on defeat.
@@ -861,9 +977,9 @@ BOSSES_BY_TIER: dict[int, list[BossDef]] = {
     50:  [BOSSES[50],  _DOTA_BOSSES["crystal_maiden"],   _DOTA_BOSSES["tusk"]],
     75:  [BOSSES[75],  _DOTA_BOSSES["lina"],             _DOTA_BOSSES["doom"]],
     100: [BOSSES[100], _DOTA_BOSSES["spectre"],          _DOTA_BOSSES["void_spirit"]],
-    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _DOTA_BOSSES["xalatath"],  _PRESTIGE4_BOSSES["blightcoil"]],
-    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _DOTA_BOSSES["lilith"],    _PRESTIGE4_BOSSES["rimebound_king"]],
-    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _DOTA_BOSSES["underlord"], _PRESTIGE4_BOSSES["spineback"]],
+    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _PRESTIGE2_BOSSES["aegis_warden"], _DOTA_BOSSES["xalatath"],  _PRESTIGE4_BOSSES["blightcoil"]],
+    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _PRESTIGE2_BOSSES["heartspire"],   _DOTA_BOSSES["lilith"],    _PRESTIGE4_BOSSES["rimebound_king"]],
+    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _PRESTIGE2_BOSSES["emberwright"],  _DOTA_BOSSES["underlord"], _PRESTIGE4_BOSSES["spineback"]],
 }
 
 
@@ -978,16 +1094,19 @@ BOSS_ARCHETYPE_BY_ID: dict[str, str] = {
     "sporeling_sovereign": "tank",
     "treant_protector":    "tank",
     "broodmother":         "glass_cannon",
+    "aegis_warden":        "tank",
     "xalatath":            "slippery",
     # Tier 200
     "chronofrost":         "slippery",
     "faceless_void":       "slippery",
     "weaver":              "slippery",
+    "heartspire":          "bruiser",
     "lilith":              "glass_cannon",
     # Tier 275
     "nameless_depth":      "tank",
     "oracle":              "glass_cannon",
     "terrorblade":         "glass_cannon",
+    "emberwright":         "bruiser",
     "underlord":           "tank",
     # Prestige-4 additions
     "blightcoil":          "bruiser",
@@ -2331,6 +2450,85 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         "after_scout": [
             "Watching? The illusions also watch. They are catty.",
             "Inspect closely. Royalty rewards attention.",
+        ],
+    },
+    # ---- Prestige-2 additions ------------------------------------------
+    "aegis_warden": {
+        "first_meet": [
+            "You brought one life. I brought the one after it.",
+            "The shield remembers your first mistake. It is eager for the second.",
+            "Come forward. The return is already paid for.",
+        ],
+        "after_defeat": [
+            "You broke the shield once. It will not forget the angle.",
+            "Streak {streak}. Good. The aegis likes repeat customers.",
+            "Round two. Appropriate.",
+        ],
+        "after_retreat": [
+            "Leaving before the return? Wasteful.",
+            "Climb if you like. The second heartbeat follows.",
+            "Go. The shield has time. It has always had time.",
+        ],
+        "after_close_win": [
+            "Close. I nearly got to spend the spare life.",
+            "You cracked the aegis. You did not empty it.",
+            "A narrow pass. The shield counted it twice.",
+        ],
+        "after_scout": [
+            "Inspect the shield. It is inspecting your pulse.",
+            "Look closely. It glows brighter when you doubt.",
+        ],
+    },
+    "heartspire": {
+        "first_meet": [
+            "I show intent. You show whether you learned anything.",
+            "The climb reaches down to meet you.",
+            "Count your options. Then count them again. One is lying.",
+        ],
+        "after_defeat": [
+            "You damaged the heart. The tower remembers damage.",
+            "Streak {streak}. The spire also has a streak. It is vertical.",
+            "Round two. I have drawn a cleaner pattern.",
+        ],
+        "after_retreat": [
+            "Retreat is a card. You played it face up.",
+            "Go. The climb reshuffles while you breathe.",
+            "You leave with one fewer good option.",
+        ],
+        "after_close_win": [
+            "Near lethal. I respect the line. I hate it.",
+            "You blocked just enough. Annoying.",
+            "Close. The intent was correct; the outcome disobeyed.",
+        ],
+        "after_scout": [
+            "Watching my intent? It is watching yours.",
+            "The spire shows you a plan. It does not show the cost.",
+        ],
+    },
+    "emberwright": {
+        "first_meet": [
+            "The forge is awake. Try to be useful fuel.",
+            "Your lantern is underbuilt. Your fear is not.",
+            "I make light hungry. Today it eats diggers.",
+        ],
+        "after_defeat": [
+            "You cooled the forge. Temporary, like most victories.",
+            "Streak {streak}. Good metal takes repeated heating.",
+            "Round two. The ember engine is already turning.",
+        ],
+        "after_retreat": [
+            "Climb. The sparks need time to grow teeth.",
+            "Go. You are not quenched, only removed.",
+            "Retreat leaves slag. I can work with slag.",
+        ],
+        "after_close_win": [
+            "Almost cracked the furnace. Almost is a useful temperature.",
+            "You struck true. The forge took notes.",
+            "Close. I will tune the next burn hotter.",
+        ],
+        "after_scout": [
+            "Inspect the engine. Mind the pieces that inspect back.",
+            "Look into the forge. It has opinions about your lantern.",
         ],
     },
     # ---- Late-prestige additions (only appear at prestige>=3) ----------
