@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,27 @@ if TYPE_CHECKING:
     from services.dig_service import DigService
 
 logger = logging.getLogger("cama_bot.commands.dig")
+
+BossResolvedCallback = Callable[[int, int | None], Awaitable[None]]
+
+
+async def _run_boss_resolved_callback(
+    callback: BossResolvedCallback | None,
+    user_id: int,
+    guild_id: int | None,
+) -> None:
+    """Run the post-commit callback without disturbing result rendering."""
+    if callback is None:
+        return
+    try:
+        await callback(user_id, guild_id)
+    except Exception:
+        logger.warning(
+            "Boss resolved callback failed for user %s in guild %s",
+            user_id,
+            guild_id,
+            exc_info=True,
+        )
 
 
 async def _send_boss_victory_neon(interaction, *, result, user_id, guild_id) -> None:
@@ -70,12 +92,20 @@ class BossWagerModal(discord.ui.Modal):
         required=True,
     )
 
-    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, dig_flavor_service=None):
+    def __init__(
+        self,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        dig_flavor_service=None,
+        on_boss_resolved: BossResolvedCallback | None = None,
+    ):
         super().__init__(title="Boss Fight Wager")
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
         self.dig_flavor_service = dig_flavor_service
+        self.on_boss_resolved = on_boss_resolved
         self.result = None
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -132,12 +162,17 @@ class BossWagerModal(discord.ui.Modal):
                     risk_tier=tier,
                     wager=amount,
                     dig_flavor_service=self.dig_flavor_service,
+                    on_boss_resolved=self.on_boss_resolved,
                 )
                 embed = _build_duel_prompt_embed(self.result)
                 msg = await interaction.followup.send(embed=embed, view=view, wait=True)
                 view.message = msg
                 self.stop()
                 return
+
+            await _run_boss_resolved_callback(
+                self.on_boss_resolved, self.user_id, self.guild_id,
+            )
 
             # Phase 2 incoming — survival flavor + auto-engage next phase.
             # The wager rides forward (carried on boss_progress), so the new
@@ -160,6 +195,7 @@ class BossWagerModal(discord.ui.Modal):
                         guild_id=self.guild_id,
                         result=self.result,
                         dig_flavor_service=self.dig_flavor_service,
+                        on_boss_resolved=self.on_boss_resolved,
                     )
                 return
 
@@ -272,12 +308,20 @@ class BossRiskModal(discord.ui.Modal):
         required=True,
     )
 
-    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, dig_flavor_service=None):
+    def __init__(
+        self,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        dig_flavor_service=None,
+        on_boss_resolved: BossResolvedCallback | None = None,
+    ):
         super().__init__(title="Boss Phase Risk")
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
         self.dig_flavor_service = dig_flavor_service
+        self.on_boss_resolved = on_boss_resolved
 
     async def on_submit(self, interaction: discord.Interaction):
         tier = self.risk_tier.value.strip().lower()
@@ -297,6 +341,7 @@ class BossRiskModal(discord.ui.Modal):
                 risk_tier=tier,
                 wager=0,
                 dig_flavor_service=self.dig_flavor_service,
+                on_boss_resolved=self.on_boss_resolved,
             )
         except Exception as e:
             logger.error("Boss phase risk fight error: %s", e, exc_info=True)
@@ -320,6 +365,7 @@ async def _post_phase_transition_followup(
     guild_id: int | None,
     result,
     dig_flavor_service=None,
+    on_boss_resolved: BossResolvedCallback | None = None,
 ) -> None:
     """Post the transformation flavor embed and auto-engage the next phase.
 
@@ -406,6 +452,7 @@ async def _post_phase_transition_followup(
         dig_service, user_id, guild_id, next_info,
         has_lantern,
         dig_flavor_service=dig_flavor_service,
+        on_boss_resolved=on_boss_resolved,
     )
     msg = await channel.send(embed=encounter_embed, view=view)
     if msg:
@@ -421,6 +468,7 @@ async def _resolve_phase_fight_without_modal(
     risk_tier: str,
     wager: int,
     dig_flavor_service=None,
+    on_boss_resolved: BossResolvedCallback | None = None,
 ) -> None:
     """Engage a multi-phase fight using the carried wager (no modal).
 
@@ -453,11 +501,14 @@ async def _resolve_phase_fight_without_modal(
             risk_tier=risk_tier,
             wager=wager,
             dig_flavor_service=dig_flavor_service,
+            on_boss_resolved=on_boss_resolved,
         )
         embed = _build_duel_prompt_embed(result)
         msg = await interaction.followup.send(embed=embed, view=view, wait=True)
         view.message = msg
         return
+
+    await _run_boss_resolved_callback(on_boss_resolved, user_id, guild_id)
 
     if getattr(result, "phase2_incoming", False) or getattr(result, "phase3_incoming", False):
         channel = interaction.channel
@@ -466,6 +517,7 @@ async def _resolve_phase_fight_without_modal(
                 channel,
                 dig_service=dig_service, user_id=user_id, guild_id=guild_id,
                 result=result, dig_flavor_service=dig_flavor_service,
+                on_boss_resolved=on_boss_resolved,
             )
         return
 
@@ -771,6 +823,7 @@ class BossDuelView(discord.ui.View):
         risk_tier: str,
         wager: int,
         dig_flavor_service=None,
+        on_boss_resolved: BossResolvedCallback | None = None,
     ):
         super().__init__(timeout=120)
         self.dig_service = dig_service
@@ -779,6 +832,7 @@ class BossDuelView(discord.ui.View):
         self.risk_tier = risk_tier
         self.wager = wager
         self.dig_flavor_service = dig_flavor_service
+        self.on_boss_resolved = on_boss_resolved
         self.message: discord.Message | None = None
         self._resolved = False
 
@@ -835,6 +889,10 @@ class BossDuelView(discord.ui.View):
             err = getattr(result, "error", "Duel resume failed.")
             await self._edit_message(content=err, embed=None, view=None)
             return
+        if not getattr(result, "pending_prompt", None):
+            await _run_boss_resolved_callback(
+                self.on_boss_resolved, self.user_id, self.guild_id,
+            )
         # Service-side state is already mutated by resume_boss_duel — if the
         # render path raises, the user otherwise sees frozen buttons with no
         # confirmation that their rewards/loss landed. Surface a fallback
@@ -870,6 +928,7 @@ class BossDuelView(discord.ui.View):
                 initial_result=result,
                 risk_tier=self.risk_tier, wager=self.wager,
                 dig_flavor_service=self.dig_flavor_service,
+                on_boss_resolved=self.on_boss_resolved,
             )
             embed = _build_duel_prompt_embed(result)
             await self._edit_message(embed=embed, view=new_view)
@@ -899,6 +958,7 @@ class BossDuelView(discord.ui.View):
                     user_id=self.user_id, guild_id=self.guild_id,
                     result=result,
                     dig_flavor_service=self.dig_flavor_service,
+                    on_boss_resolved=self.on_boss_resolved,
                 )
             self.stop()
             return
@@ -959,6 +1019,7 @@ class BossEncounterView(discord.ui.View):
         boss_info: object,
         has_lantern: bool = False,
         dig_flavor_service=None,
+        on_boss_resolved: BossResolvedCallback | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -967,6 +1028,7 @@ class BossEncounterView(discord.ui.View):
         self.boss_info = boss_info
         self.has_lantern = has_lantern
         self.dig_flavor_service = dig_flavor_service
+        self.on_boss_resolved = on_boss_resolved
         self.message: discord.Message | None = None
         # Guards against a fast double-click on Fight re-entering resolution
         # before the first click's await completes and stops the view.
@@ -1002,6 +1064,7 @@ class BossEncounterView(discord.ui.View):
                 self.user_id,
                 self.guild_id,
                 dig_flavor_service=self.dig_flavor_service,
+                on_boss_resolved=self.on_boss_resolved,
             )
             await interaction.response.send_modal(modal)
             self.stop()
@@ -1021,10 +1084,17 @@ class BossEncounterView(discord.ui.View):
                 risk_tier=carried["risk_tier"],
                 wager=int(carried["wager"]),
                 dig_flavor_service=self.dig_flavor_service,
+                on_boss_resolved=self.on_boss_resolved,
             )
             self.stop()
             return
-        modal = BossWagerModal(self.dig_service, self.user_id, self.guild_id, dig_flavor_service=self.dig_flavor_service)
+        modal = BossWagerModal(
+            self.dig_service,
+            self.user_id,
+            self.guild_id,
+            dig_flavor_service=self.dig_flavor_service,
+            on_boss_resolved=self.on_boss_resolved,
+        )
         await interaction.response.send_modal(modal)
         self.stop()
 

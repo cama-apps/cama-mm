@@ -341,20 +341,14 @@ class DigCommands(commands.Cog):
         return _wrap(raw)
 
     async def _schedule_dig_reminder(self, user_id: int, guild_id: int | None) -> None:
-        """Best-effort scheduling for the persisted, fully modified cooldown."""
+        """Best-effort reconciliation against the persisted dig cooldown."""
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is None:
             return
         try:
-            ready_at = await asyncio.to_thread(
-                self.dig_service.get_free_dig_ready_at, user_id, guild_id,
+            await reminder_svc.reconcile_dig_reminder(
+                self.bot, user_id, guild_id,
             )
-            if ready_at is not None:
-                reminder_svc.schedule_dig_reminder(
-                    self.bot, user_id, guild_id, ready_at,
-                )
-            else:
-                reminder_svc.cancel_dig_reminder(user_id, guild_id)
         except Exception:
             logger.warning(
                 "dig reminder scheduling failed for user %s in guild %s",
@@ -582,7 +576,15 @@ class DigCommands(commands.Cog):
         if lum_line:
             embed.add_field(name="\u200b", value=lum_line, inline=False)
 
-        view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_flavor_service=self.dig_flavor_service)
+        view = BossEncounterView(
+            self.dig_service,
+            interaction.user.id,
+            guild_id,
+            boss_info,
+            has_lantern,
+            dig_flavor_service=self.dig_flavor_service,
+            on_boss_resolved=self._schedule_dig_reminder,
+        )
         msg = await self._send_public_dig(interaction, embed=embed, view=view, file=boss_file)
         if msg:
             view.message = msg
