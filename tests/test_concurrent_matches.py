@@ -605,6 +605,110 @@ class TestRecordFinalizeThreadIsolation:
             pending_match_id=state_a.pending_match_id,
         )
 
+    async def test_record_chunks_long_final_message_before_thread_finalize(self, services):
+        """Large betting summaries must not make the final /record response fail.
+
+        Discord rejects messages over 2000 characters. If the final match-record
+        response raises after record_match succeeds, the pending match is already
+        cleared but the lobby thread never gets finalized.
+        """
+        match_service = services["match_service"]
+
+        players = list(range(43000, 43010))
+        _register_players(services["player_repo"], players)
+        match_service.shuffle_players(players, guild_id=TEST_GUILD_ID)
+        state = match_service.get_last_shuffle(TEST_GUILD_ID)
+        match_service.set_shuffle_message_info(
+            TEST_GUILD_ID,
+            message_id=None,
+            channel_id=None,
+            thread_id=555_222,
+            pending_match_id=state.pending_match_id,
+        )
+
+        cog, _mock_bot = self._make_record_cog(services)
+        result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
+        long_distribution = "\n" + "\n".join(
+            f"<@{90000 + i}> won {1000 - i} JC (bet {100 + i}, 1.25x)"
+            for i in range(80)
+        )
+        sent_messages = []
+
+        async def reject_oversized(content=None, **_kwargs):
+            content = content or ""
+            if len(content) > 2000:
+                raise AssertionError(f"oversized Discord message: {len(content)}")
+            sent_messages.append(content)
+
+        with (
+            patch.object(cog, "_format_bet_distribution", return_value=long_distribution),
+            patch.object(cog, "_finalize_lobby_thread", AsyncMock()) as finalize,
+            patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
+        ):
+            for voter in players[:3]:
+                interaction = self._make_interaction(voter)
+                interaction.followup.send.side_effect = reject_oversized
+                await cog.record.callback(cog, interaction, result_choice)
+
+        assert len(sent_messages) > 3
+        assert all(len(message) <= 2000 for message in sent_messages)
+        assert "Match recorded" in "\n".join(sent_messages)
+        finalize.assert_called_once_with(
+            TEST_GUILD_ID,
+            "radiant",
+            thread_id=555_222,
+            pending_match_id=state.pending_match_id,
+        )
+
+    async def test_record_finalizes_thread_even_if_final_followup_send_fails(self, services):
+        """Once record_match succeeds, finalizing the lobby thread is mandatory.
+
+        The match row and pending-state clear happen before the public followup
+        send. A Discord delivery failure at that point should not leave the
+        match thread stuck in awaiting-results state.
+        """
+        match_service = services["match_service"]
+
+        players = list(range(44000, 44010))
+        _register_players(services["player_repo"], players)
+        match_service.shuffle_players(players, guild_id=TEST_GUILD_ID)
+        state = match_service.get_last_shuffle(TEST_GUILD_ID)
+        match_service.set_shuffle_message_info(
+            TEST_GUILD_ID,
+            message_id=None,
+            channel_id=None,
+            thread_id=555_333,
+            pending_match_id=state.pending_match_id,
+        )
+
+        cog, _mock_bot = self._make_record_cog(services)
+        result_choice = app_commands.Choice(name="Radiant Won", value="radiant")
+
+        with (
+            patch.object(cog, "_finalize_lobby_thread", AsyncMock()) as finalize,
+            patch.object(cog, "_trigger_auto_discovery", AsyncMock()),
+        ):
+            for voter in players[:2]:
+                interaction = self._make_interaction(voter)
+                await cog.record.callback(cog, interaction, result_choice)
+
+            final_interaction = self._make_interaction(players[2])
+            final_interaction.followup.send.side_effect = RuntimeError(
+                "simulated followup failure"
+            )
+            with pytest.raises(RuntimeError, match="simulated followup failure"):
+                await cog.record.callback(cog, final_interaction, result_choice)
+
+        assert match_service.get_last_shuffle(
+            TEST_GUILD_ID, pending_match_id=state.pending_match_id
+        ) is None
+        finalize.assert_called_once_with(
+            TEST_GUILD_ID,
+            "radiant",
+            thread_id=555_333,
+            pending_match_id=state.pending_match_id,
+        )
+
     async def test_finalize_archives_recorded_matchs_thread(self, services):
         """With its own thread id, the finalizer posts the result and archives."""
         cog, mock_bot = self._make_record_cog(services)
