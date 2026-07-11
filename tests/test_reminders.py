@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -348,3 +350,454 @@ class TestDigReminder:
         )
         schedule_dig_reminder.assert_not_called()
         assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
+
+    @pytest.mark.asyncio
+    async def test_reconcile_schedules_exact_authoritative_timestamp(
+        self,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+    ):
+        now = 1_000_000
+        ready_at = now + 9_000
+        key = (1, TEST_GUILD_ID, "dig")
+        calls = []
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def fake_send(**kwargs):
+            calls.append(kwargs)
+            send_started.set()
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        dig_service_mock.get_free_dig_ready_at.return_value = ready_at
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            await reminder_service_with_dig.reconcile_dig_reminder(
+                mock_bot,
+                1,
+                TEST_GUILD_ID,
+                now=now,
+            )
+            await send_started.wait()
+            task = reminder_service_with_dig._tasks[key]
+            try:
+                dig_service_mock.get_free_dig_ready_at.assert_called_once_with(
+                    1,
+                    TEST_GUILD_ID,
+                    now=now,
+                )
+                assert len(calls) == 1
+                assert calls[0]["delay"] == ready_at - now
+                assert calls[0]["message"] == (
+                    "Your free dig cooldown has expired! "
+                    "You can `/dig go` again now."
+                )
+            finally:
+                reminder_service_with_dig.cancel_dig_reminder(1, TEST_GUILD_ID)
+                await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ready_offset", [None, 0, -1])
+    async def test_reconcile_cancels_stale_task_when_already_ready(
+        self,
+        ready_offset,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+    ):
+        now = 1_000_000
+        key = (1, TEST_GUILD_ID, "dig")
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def fake_send(**_kwargs):
+            send_started.set()
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            reminder_service_with_dig.schedule_dig_reminder(
+                mock_bot,
+                1,
+                TEST_GUILD_ID,
+                now + 100,
+            )
+            stale_task = reminder_service_with_dig._tasks[key]
+            await send_started.wait()
+            dig_service_mock.get_free_dig_ready_at.return_value = (
+                None if ready_offset is None else now + ready_offset
+            )
+
+            await reminder_service_with_dig.reconcile_dig_reminder(
+                mock_bot,
+                1,
+                TEST_GUILD_ID,
+                now=now,
+            )
+            await asyncio.gather(stale_task, return_exceptions=True)
+
+        assert key not in reminder_service_with_dig._tasks
+        assert stale_task.cancelled()
+
+    @pytest.mark.asyncio
+    async def test_repeated_reconcile_replaces_with_one_task(
+        self,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+    ):
+        now = 1_000_000
+        key = (1, TEST_GUILD_ID, "dig")
+        calls = []
+        second_send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def fake_send(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                second_send_started.set()
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        dig_service_mock.get_free_dig_ready_at.side_effect = [now + 100, now + 200]
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            await reminder_service_with_dig.reconcile_dig_reminder(
+                mock_bot,
+                1,
+                TEST_GUILD_ID,
+                now=now,
+            )
+            first_task = reminder_service_with_dig._tasks[key]
+            await asyncio.sleep(0)
+            await reminder_service_with_dig.reconcile_dig_reminder(
+                mock_bot,
+                1,
+                TEST_GUILD_ID,
+                now=now,
+            )
+            second_task = reminder_service_with_dig._tasks[key]
+            await second_send_started.wait()
+            try:
+                assert first_task is not second_task
+                assert first_task.cancelled()
+                assert list(reminder_service_with_dig._tasks) == [key]
+                assert [call["delay"] for call in calls] == [100, 200]
+            finally:
+                reminder_service_with_dig.cancel_dig_reminder(1, TEST_GUILD_ID)
+                await asyncio.gather(first_task, second_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_reconcile_keeps_same_user_guilds_independent(
+        self,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+    ):
+        now = 1_000_000
+        guild_ready_at = {
+            TEST_GUILD_ID: now + 100,
+            TEST_GUILD_ID_2: now + 200,
+        }
+        calls = []
+        both_sends_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        def get_ready_at(_discord_id, guild_id, *, now):
+            return guild_ready_at[guild_id]
+
+        async def fake_send(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                both_sends_started.set()
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        for guild_id in guild_ready_at:
+            reminder_service_with_dig.toggle_preference(1, guild_id, "dig")
+        dig_service_mock.get_free_dig_ready_at.side_effect = get_ready_at
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            for guild_id in guild_ready_at:
+                await reminder_service_with_dig.reconcile_dig_reminder(
+                    mock_bot,
+                    1,
+                    guild_id,
+                    now=now,
+                )
+            await both_sends_started.wait()
+            guild_one_key = (1, TEST_GUILD_ID, "dig")
+            guild_two_key = (1, TEST_GUILD_ID_2, "dig")
+            guild_one_task = reminder_service_with_dig._tasks[guild_one_key]
+            guild_two_task = reminder_service_with_dig._tasks[guild_two_key]
+            try:
+                assert set(reminder_service_with_dig._tasks) == {
+                    guild_one_key,
+                    guild_two_key,
+                }
+                assert sorted(call["delay"] for call in calls) == [100, 200]
+                reminder_service_with_dig.cancel_dig_reminder(1, TEST_GUILD_ID)
+                assert guild_one_key not in reminder_service_with_dig._tasks
+                assert reminder_service_with_dig._tasks[guild_two_key] is guild_two_task
+            finally:
+                reminder_service_with_dig.cancel_dig_reminder(1, TEST_GUILD_ID)
+                reminder_service_with_dig.cancel_dig_reminder(1, TEST_GUILD_ID_2)
+                await asyncio.gather(
+                    guild_one_task,
+                    guild_two_task,
+                    return_exceptions=True,
+                )
+
+    @pytest.mark.asyncio
+    async def test_stale_r0_reconcile_cannot_overwrite_live_r1(
+        self,
+        reminder_service_with_dig,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+    ):
+        r0 = 1_000_000
+        r1 = r0 + 100
+        old_ready_at = r0 + 7_200
+        # Simulates a boss loss whose persisted anchor includes a cooldown stinger.
+        loss_with_stinger_ready_at = r1 + 9_000
+        key = (1, TEST_GUILD_ID, "dig")
+        first_read_started = threading.Event()
+        release_first_read = threading.Event()
+        authoritative_reads = []
+        sends = []
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        def get_ready_at(_discord_id, _guild_id, *, now):
+            authoritative_reads.append(now)
+            if len(authoritative_reads) == 1:
+                first_read_started.set()
+                release_first_read.wait()
+                return old_ready_at
+            return loss_with_stinger_ready_at
+
+        async def fake_send(**kwargs):
+            sends.append(kwargs)
+            send_started.set()
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: r1)
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        dig_service_mock.get_free_dig_ready_at.side_effect = get_ready_at
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            stale_reconcile = asyncio.create_task(
+                reminder_service_with_dig.reconcile_dig_reminder(
+                    mock_bot,
+                    1,
+                    TEST_GUILD_ID,
+                    now=r0,
+                )
+            )
+            await asyncio.to_thread(first_read_started.wait)
+            live_reconcile = asyncio.create_task(
+                reminder_service_with_dig.reconcile_dig_reminder(
+                    mock_bot,
+                    1,
+                    TEST_GUILD_ID,
+                    now=r1,
+                )
+            )
+            await asyncio.sleep(0)
+            assert reminder_service_with_dig._dig_reconcile_versions[key] == 2
+            release_first_read.set()
+            await asyncio.gather(stale_reconcile, live_reconcile)
+            await send_started.wait()
+            reminder_task = reminder_service_with_dig._tasks[key]
+            try:
+                assert authoritative_reads == [r0, r1]
+                assert len(sends) == 1
+                assert sends[0]["delay"] == loss_with_stinger_ready_at - r1
+                assert sends[0]["delay"] != old_ready_at - r1
+                assert list(reminder_service_with_dig._tasks) == [key]
+            finally:
+                reminder_service_with_dig.cancel_dig_reminder(1, TEST_GUILD_ID)
+                await asyncio.gather(reminder_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_recovery_completely_reconciles_existing_dig_tasks(
+        self,
+        reminder_service_with_dig,
+        notification_repo,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+    ):
+        now = 1_000_000
+        release_send = asyncio.Event()
+
+        async def fake_send(**_kwargs):
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        for discord_id in (1, 2):
+            notification_repo.set_preference(discord_id, TEST_GUILD_ID, "dig", True)
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            for discord_id in (1, 2):
+                reminder_service_with_dig.schedule_dig_reminder(
+                    mock_bot,
+                    discord_id,
+                    TEST_GUILD_ID,
+                    now + 100,
+                )
+            old_tasks = list(reminder_service_with_dig._tasks.values())
+            notification_repo.set_preference(1, TEST_GUILD_ID, "dig", False)
+            dig_service_mock.get_free_dig_ready_at.return_value = None
+
+            await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+            await asyncio.gather(*old_tasks, return_exceptions=True)
+
+        assert not [
+            key
+            for key in reminder_service_with_dig._tasks
+            if key[1] == TEST_GUILD_ID and key[2] == "dig"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_recovery_continues_after_dig_subscriber_failure(
+        self,
+        reminder_service_with_dig,
+        notification_repo,
+        dig_service_mock,
+        mock_bot,
+        monkeypatch,
+        caplog,
+    ):
+        now = 1_000_000
+        observed = []
+        release_send = asyncio.Event()
+
+        def get_ready_at(discord_id, guild_id, *, now):
+            observed.append((discord_id, guild_id, now))
+            if (discord_id, guild_id) == (1, TEST_GUILD_ID):
+                raise RuntimeError("broken subscriber")
+            return now + 100
+
+        async def fake_send(**_kwargs):
+            await release_send.wait()
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        caplog.set_level(logging.ERROR, logger="cama_bot.reminder_service")
+        for discord_id, guild_id in (
+            (1, TEST_GUILD_ID),
+            (2, TEST_GUILD_ID),
+            (1, TEST_GUILD_ID_2),
+        ):
+            notification_repo.set_preference(discord_id, guild_id, "dig", True)
+        dig_service_mock.get_free_dig_ready_at.side_effect = get_ready_at
+
+        with patch.object(
+            reminder_service_with_dig,
+            "_send_dm_after_delay",
+            new=fake_send,
+        ):
+            await reminder_service_with_dig.reschedule_all(
+                mock_bot,
+                [TEST_GUILD_ID, TEST_GUILD_ID_2],
+            )
+            tasks = list(reminder_service_with_dig._tasks.values())
+            try:
+                assert set(observed) == {
+                    (1, TEST_GUILD_ID, now),
+                    (2, TEST_GUILD_ID, now),
+                    (1, TEST_GUILD_ID_2, now),
+                }
+                assert (2, TEST_GUILD_ID, "dig") in reminder_service_with_dig._tasks
+                assert (1, TEST_GUILD_ID_2, "dig") in reminder_service_with_dig._tasks
+                assert (
+                    "Failed to recover dig reminder for "
+                    f"discord_id=1 guild_id={TEST_GUILD_ID}"
+                ) in caplog.text
+            finally:
+                for discord_id, guild_id, _ in observed:
+                    reminder_service_with_dig.cancel_dig_reminder(discord_id, guild_id)
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_recovery_continues_after_type_query_failure(
+        self,
+        reminder_service,
+        notification_repo,
+        player_repo_mock,
+        mock_bot,
+        monkeypatch,
+        caplog,
+    ):
+        now = 1_000_000
+        original_get_subscribers = notification_repo.get_enabled_users_for_type
+
+        def get_subscribers(guild_id, reminder_type):
+            if (guild_id, reminder_type) == (TEST_GUILD_ID, "wheel"):
+                raise RuntimeError("broken reminder type")
+            return original_get_subscribers(guild_id, reminder_type)
+
+        monkeypatch.setattr(time, "time", lambda: now)
+        caplog.set_level(logging.ERROR, logger="cama_bot.reminder_service")
+        notification_repo.set_preference(1, TEST_GUILD_ID, "trivia", True)
+        notification_repo.set_preference(2, TEST_GUILD_ID_2, "wheel", True)
+        player_repo_mock.get_last_trivia_session.return_value = now
+        player_repo_mock.get_last_wheel_spin.return_value = now
+
+        with patch.object(
+            notification_repo,
+            "get_enabled_users_for_type",
+            side_effect=get_subscribers,
+        ):
+            await reminder_service.reschedule_all(
+                mock_bot,
+                [TEST_GUILD_ID, TEST_GUILD_ID_2],
+            )
+
+        tasks = list(reminder_service._tasks.values())
+        try:
+            assert (1, TEST_GUILD_ID, "trivia") in reminder_service._tasks
+            assert (2, TEST_GUILD_ID_2, "wheel") in reminder_service._tasks
+            assert (
+                "Failed to load wheel reminder subscribers for "
+                f"guild_id={TEST_GUILD_ID}"
+            ) in caplog.text
+        finally:
+            reminder_service._cancel_task(1, TEST_GUILD_ID, "trivia")
+            reminder_service._cancel_task(2, TEST_GUILD_ID_2, "wheel")
+            await asyncio.gather(*tasks, return_exceptions=True)

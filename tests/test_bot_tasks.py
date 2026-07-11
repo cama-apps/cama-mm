@@ -16,8 +16,21 @@ import pytest
 def bot_module():
     import bot as bot_module
 
+    bot_module._reminder_recovery_task = None
+    bot_module._rebellion_recovery_task = None
+    bot_module._rebellion_recovery_complete = False
     with patch.object(bot_module.bot, "is_closed", return_value=False):
         yield bot_module
+
+    for attr in ("_reminder_recovery_task", "_rebellion_recovery_task"):
+        task = getattr(bot_module, attr)
+        if task is not None:
+            if task.done() and not task.cancelled():
+                task.exception()
+            elif not task.done():
+                task.cancel()
+        setattr(bot_module, attr, None)
+    bot_module._rebellion_recovery_complete = False
 
 
 async def test_supervised_loop_returns_on_clean_exit(bot_module):
@@ -120,6 +133,179 @@ async def test_log_task_exit_silent_on_cancel(bot_module, caplog):
     with caplog.at_level(logging.ERROR, logger="cama_bot"):
         cb(task)
     assert not any("exited unexpectedly" in rec.message for rec in caplog.records)
+
+# --------------------------------------------------------------------------- #
+# reconnect recovery sweeps — retained single-flight lifecycle
+# --------------------------------------------------------------------------- #
+
+
+async def test_reminder_recovery_is_single_flight_and_runs_after_success(bot_module):
+    """Reconnects share a running sweep; a later reconnect gets a fresh sweep."""
+    loop = asyncio.get_running_loop()
+    starts = [asyncio.Event(), asyncio.Event()]
+    releases = [loop.create_future(), loop.create_future()]
+    calls: list[tuple[object, list[int]]] = []
+
+    class ReminderService:
+        async def reschedule_all(self, passed_bot, guild_ids):
+            call_index = len(calls)
+            calls.append((passed_bot, list(guild_ids)))
+            starts[call_index].set()
+            await releases[call_index]
+
+    service = ReminderService()
+    guild_ids = [11, 22]
+    first = bot_module._start_reminder_recovery(service, guild_ids)
+    guild_ids.append(33)
+    await starts[0].wait()
+
+    overlapping = bot_module._start_reminder_recovery(service, [99])
+    assert overlapping is first
+    assert calls == [(bot_module.bot, [11, 22])]
+
+    releases[0].set_result(None)
+    await first
+    await asyncio.sleep(0)
+    assert bot_module._reminder_recovery_task is None
+
+    second = bot_module._start_reminder_recovery(service, [44])
+    assert second is not first
+    await starts[1].wait()
+    assert calls == [
+        (bot_module.bot, [11, 22]),
+        (bot_module.bot, [44]),
+    ]
+
+    releases[1].set_result(None)
+    await second
+    await asyncio.sleep(0)
+    assert bot_module._reminder_recovery_task is None
+
+
+async def test_reminder_recovery_failure_is_logged_and_retryable(bot_module, caplog):
+    """A failed sweep clears only its own handle so the next ready can retry."""
+    loop = asyncio.get_running_loop()
+    starts = [asyncio.Event(), asyncio.Event()]
+    outcomes = [loop.create_future(), loop.create_future()]
+    calls = 0
+
+    class ReminderService:
+        async def reschedule_all(self, _bot, _guild_ids):
+            nonlocal calls
+            call_index = calls
+            calls += 1
+            starts[call_index].set()
+            await outcomes[call_index]
+
+    service = ReminderService()
+    with caplog.at_level(logging.WARNING, logger="cama_bot"):
+        failed = bot_module._start_reminder_recovery(service, [7])
+        await starts[0].wait()
+        outcomes[0].set_exception(RuntimeError("reminder unavailable"))
+        with pytest.raises(RuntimeError, match="reminder unavailable"):
+            await failed
+        await asyncio.sleep(0)
+
+    assert bot_module._reminder_recovery_task is None
+    assert any("Reminder recovery sweep failed" in record.message for record in caplog.records)
+
+    retried = bot_module._start_reminder_recovery(service, [7])
+    await starts[1].wait()
+    outcomes[1].set_result(None)
+    await retried
+    await asyncio.sleep(0)
+    assert calls == 2
+    assert bot_module._reminder_recovery_task is None
+
+
+async def test_rebellion_recovery_retries_failure_then_completes_once(
+    bot_module, caplog
+):
+    """Failure is retryable, but one successful all-guild sweep is permanent."""
+    loop = asyncio.get_running_loop()
+    starts = [asyncio.Event(), asyncio.Event()]
+    releases = [loop.create_future(), loop.create_future()]
+    thread_calls: list[tuple[object, tuple, dict]] = []
+    recovery_calls = 0
+
+    class RebellionService:
+        def recover_stale_wars(self):
+            nonlocal recovery_calls
+            recovery_calls += 1
+            if recovery_calls == 1:
+                raise RuntimeError("database unavailable")
+            return []
+
+    async def fake_to_thread(function, *args, **kwargs):
+        call_index = len(thread_calls)
+        thread_calls.append((function, args, kwargs))
+        starts[call_index].set()
+        await releases[call_index]
+        return function(*args, **kwargs)
+
+    service = RebellionService()
+    with patch.object(bot_module.asyncio, "to_thread", new=fake_to_thread):
+        with caplog.at_level(logging.WARNING, logger="cama_bot"):
+            failed = bot_module._start_rebellion_recovery(service)
+            await starts[0].wait()
+            overlapping = bot_module._start_rebellion_recovery(service)
+            assert overlapping is failed
+            assert len(thread_calls) == 1
+
+            releases[0].set_result(None)
+            with pytest.raises(RuntimeError, match="database unavailable"):
+                await failed
+            await asyncio.sleep(0)
+
+        assert bot_module._rebellion_recovery_task is None
+        assert bot_module._rebellion_recovery_complete is False
+        assert any(
+            "Wheel war recovery sweep failed" in record.message
+            for record in caplog.records
+        )
+
+        retried = bot_module._start_rebellion_recovery(service)
+        await starts[1].wait()
+        releases[1].set_result(None)
+        await retried
+        await asyncio.sleep(0)
+
+        assert bot_module._rebellion_recovery_task is None
+        assert bot_module._rebellion_recovery_complete is True
+        assert bot_module._start_rebellion_recovery(service) is None
+
+    assert recovery_calls == 2
+    assert len(thread_calls) == 2
+    assert all(args == () and kwargs == {} for _, args, kwargs in thread_calls)
+
+
+def test_stale_recovery_callbacks_do_not_clear_newer_handles(bot_module):
+    """A delayed callback cannot erase or complete a replacement sweep."""
+    loop = asyncio.new_event_loop()
+    try:
+        old_reminder = loop.create_future()
+        old_reminder.set_result(None)
+        newer_reminder = loop.create_future()
+        bot_module._reminder_recovery_task = newer_reminder
+
+        bot_module._reminder_recovery_done(old_reminder)
+
+        assert bot_module._reminder_recovery_task is newer_reminder
+
+        old_rebellion = loop.create_future()
+        old_rebellion.set_result([])
+        newer_rebellion = loop.create_future()
+        bot_module._rebellion_recovery_task = newer_rebellion
+
+        bot_module._rebellion_recovery_done(old_rebellion)
+
+        assert bot_module._rebellion_recovery_task is newer_rebellion
+        assert bot_module._rebellion_recovery_complete is False
+
+        newer_reminder.cancel()
+        newer_rebellion.cancel()
+    finally:
+        loop.close()
 
 
 # --------------------------------------------------------------------------- #

@@ -14,7 +14,11 @@ class ReminderService:
         self._notification_repo = notification_repo
         self._player_repo = player_repo
         self._dig_service = dig_service
-        self._tasks: dict[tuple, asyncio.Task] = {}
+        self._tasks: dict[tuple[int, int, str], asyncio.Task] = {}
+        self._dig_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
+        self._dig_reconcile_versions: dict[tuple[int, int, str], int] = {}
+        self._dig_reconcile_reference_times: dict[tuple[int, int, str], float] = {}
+        self._next_dig_reconcile_version = 0
 
     # ------------------------------------------------------------------
     # Preference management
@@ -74,8 +78,10 @@ class ReminderService:
     def schedule_dig_reminder(
         self, bot: "commands.Bot", discord_id: int, guild_id: int, next_dig_time: int
     ) -> None:
+        guild_id = 0 if guild_id is None else guild_id
         prefs = self._notification_repo.get_preferences(discord_id, guild_id)
         if not prefs.get("dig_enabled"):
+            self._cancel_task(discord_id, guild_id, "dig")
             return
         delay = max(0.0, next_dig_time - time.time())
         self._cancel_task(discord_id, guild_id, "dig")
@@ -90,7 +96,76 @@ class ReminderService:
         self._register_task((discord_id, guild_id, "dig"), task)
 
     def cancel_dig_reminder(self, discord_id: int, guild_id: int) -> None:
+        guild_id = 0 if guild_id is None else guild_id
         self._cancel_task(discord_id, guild_id, "dig")
+
+    async def reconcile_dig_reminder(
+        self,
+        bot: "commands.Bot",
+        discord_id: int,
+        guild_id: int,
+        *,
+        now: int | None = None,
+    ) -> None:
+        """Reconcile one dig reminder with the authoritative eligibility time."""
+        guild_id = 0 if guild_id is None else guild_id
+        key = (discord_id, guild_id, "dig")
+        reference_now = int(time.time()) if now is None else now
+
+        # A restart recovery carries an older reference time than a subsequent
+        # live reconciliation. Do not let that stale request run after the live
+        # result merely because its coroutine happened to be scheduled later.
+        latest_reference = self._dig_reconcile_reference_times.get(key)
+        if latest_reference is not None and reference_now < latest_reference:
+            return
+
+        self._next_dig_reconcile_version += 1
+        version = self._next_dig_reconcile_version
+        self._dig_reconcile_versions[key] = version
+        self._dig_reconcile_reference_times[key] = reference_now
+
+        lock = self._dig_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            ready_at = await asyncio.to_thread(
+                self._dig_service.get_free_dig_ready_at,
+                discord_id,
+                guild_id,
+                now=reference_now,
+            )
+
+            # Another reconcile may have arrived while the authoritative read
+            # was in flight. It owns the final task mutation.
+            if self._dig_reconcile_versions.get(key) != version:
+                return
+
+            if ready_at is None or ready_at <= reference_now:
+                self._cancel_task(discord_id, guild_id, "dig")
+                return
+
+            self.schedule_dig_reminder(bot, discord_id, guild_id, ready_at)
+
+    async def _cancel_stale_dig_reminder(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        now: int,
+    ) -> None:
+        """Cancel a recovery-only stale task without superseding newer live work."""
+        key = (discord_id, guild_id, "dig")
+        latest_reference = self._dig_reconcile_reference_times.get(key)
+        if latest_reference is not None and now < latest_reference:
+            return
+
+        self._next_dig_reconcile_version += 1
+        version = self._next_dig_reconcile_version
+        self._dig_reconcile_versions[key] = version
+        self._dig_reconcile_reference_times[key] = now
+
+        lock = self._dig_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if self._dig_reconcile_versions.get(key) == version:
+                self._cancel_task(discord_id, guild_id, "dig")
 
     async def notify_betting_subscribers(
         self, bot: "commands.Bot", guild_id: int, bet_lock_until: int
@@ -117,46 +192,108 @@ class ReminderService:
         from config import TRIVIA_COOLDOWN_SECONDS, WHEEL_COOLDOWN_SECONDS
 
         now = int(time.time())
+        standard_reminders = (
+            (
+                "wheel",
+                self._player_repo.get_last_wheel_spin,
+                WHEEL_COOLDOWN_SECONDS,
+                self.schedule_wheel_reminder,
+            ),
+            (
+                "trivia",
+                self._player_repo.get_last_trivia_session,
+                TRIVIA_COOLDOWN_SECONDS,
+                self.schedule_trivia_reminder,
+            ),
+        )
+
         for guild_id in guild_ids:
-            wheel_subscribers = await asyncio.to_thread(
-                self._notification_repo.get_enabled_users_for_type, guild_id, "wheel"
-            )
-            for discord_id in wheel_subscribers:
-                last_spin = await asyncio.to_thread(
-                    self._player_repo.get_last_wheel_spin, discord_id, guild_id
-                )
-                if last_spin is None:
+            guild_id = 0 if guild_id is None else guild_id
+            for reminder_type, get_last_at, cooldown, schedule in standard_reminders:
+                try:
+                    subscribers = await asyncio.to_thread(
+                        self._notification_repo.get_enabled_users_for_type,
+                        guild_id,
+                        reminder_type,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to load %s reminder subscribers for guild_id=%d",
+                        reminder_type,
+                        guild_id,
+                    )
                     continue
-                next_spin = last_spin + WHEEL_COOLDOWN_SECONDS
-                if next_spin > now:
-                    self.schedule_wheel_reminder(bot, discord_id, guild_id, next_spin)
 
-            trivia_subscribers = await asyncio.to_thread(
-                self._notification_repo.get_enabled_users_for_type, guild_id, "trivia"
-            )
-            for discord_id in trivia_subscribers:
-                last_trivia = await asyncio.to_thread(
-                    self._player_repo.get_last_trivia_session, discord_id, guild_id
-                )
-                if last_trivia is None:
-                    continue
-                next_trivia = last_trivia + TRIVIA_COOLDOWN_SECONDS
-                if next_trivia > now:
-                    self.schedule_trivia_reminder(bot, discord_id, guild_id, next_trivia)
+                for discord_id in subscribers:
+                    try:
+                        last_at = await asyncio.to_thread(
+                            get_last_at,
+                            discord_id,
+                            guild_id,
+                        )
+                        if last_at is None:
+                            continue
+                        ready_at = last_at + cooldown
+                        if ready_at > now:
+                            schedule(bot, discord_id, guild_id, ready_at)
+                    except Exception:
+                        logger.exception(
+                            "Failed to recover %s reminder for discord_id=%d guild_id=%d",
+                            reminder_type,
+                            discord_id,
+                            guild_id,
+                        )
 
-            if self._dig_service is not None:
+            if self._dig_service is None:
+                continue
+
+            try:
                 dig_subscribers = await asyncio.to_thread(
-                    self._notification_repo.get_enabled_users_for_type, guild_id, "dig"
+                    self._notification_repo.get_enabled_users_for_type,
+                    guild_id,
+                    "dig",
                 )
-                for discord_id in dig_subscribers:
-                    next_dig = await asyncio.to_thread(
-                        self._dig_service.get_free_dig_ready_at,
+            except Exception:
+                logger.exception(
+                    "Failed to load dig reminder subscribers for guild_id=%d",
+                    guild_id,
+                )
+                continue
+
+            subscriber_ids = set(dig_subscribers)
+            stale_dig_keys = [
+                key
+                for key in self._tasks
+                if key[1] == guild_id and key[2] == "dig" and key[0] not in subscriber_ids
+            ]
+            for discord_id, _, _ in stale_dig_keys:
+                try:
+                    await self._cancel_stale_dig_reminder(
                         discord_id,
                         guild_id,
                         now=now,
                     )
-                    if next_dig is not None:
-                        self.schedule_dig_reminder(bot, discord_id, guild_id, next_dig)
+                except Exception:
+                    logger.exception(
+                        "Failed to remove stale dig reminder for discord_id=%d guild_id=%d",
+                        discord_id,
+                        guild_id,
+                    )
+
+            for discord_id in dig_subscribers:
+                try:
+                    await self.reconcile_dig_reminder(
+                        bot,
+                        discord_id,
+                        guild_id,
+                        now=now,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to recover dig reminder for discord_id=%d guild_id=%d",
+                        discord_id,
+                        guild_id,
+                    )
 
         logger.info("Reminder service rescheduled %d tasks after restart", len(self._tasks))
 

@@ -87,6 +87,12 @@ _lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
 _lobby_ready_cooldowns: dict[int, float] = {}
 _lobby_ready_lock = asyncio.Lock()
 
+# Retained startup-recovery task handles.  These prevent overlapping sweeps
+# when Discord dispatches on_ready repeatedly during a reconnect.
+_reminder_recovery_task: asyncio.Task | None = None
+_rebellion_recovery_task: asyncio.Task | None = None
+_rebellion_recovery_complete = False
+
 # Prediction market background task handles
 _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
@@ -109,6 +115,73 @@ def _log_task_exit(name: str):
             logger.exception("background task %s exited unexpectedly", name)
 
     return _cb
+
+def _reminder_recovery_done(task: asyncio.Task) -> None:
+    """Observe a reminder sweep and release its retained handle."""
+    global _reminder_recovery_task
+
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Reminder recovery sweep failed: %s", exc, exc_info=True)
+    finally:
+        if _reminder_recovery_task is task:
+            _reminder_recovery_task = None
+
+
+def _start_reminder_recovery(reminder_svc, guild_ids: list[int]) -> asyncio.Task:
+    """Start one reminder sweep, or return the currently retained sweep."""
+    global _reminder_recovery_task
+
+    if _reminder_recovery_task is not None:
+        return _reminder_recovery_task
+
+    guild_snapshot = list(guild_ids)
+    task = asyncio.create_task(reminder_svc.reschedule_all(bot, guild_snapshot))
+    _reminder_recovery_task = task
+    task.add_done_callback(_reminder_recovery_done)
+    return task
+
+
+def _rebellion_recovery_done(task: asyncio.Task) -> None:
+    """Observe a rebellion sweep, retaining permanent completion on success."""
+    global _rebellion_recovery_complete, _rebellion_recovery_task
+
+    try:
+        recovered = task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wheel war recovery sweep failed: %s", exc, exc_info=True)
+    else:
+        if _rebellion_recovery_task is task:
+            _rebellion_recovery_complete = True
+        if recovered:
+            logger.info(
+                "Recovered %d abandoned wheel war(s): %s",
+                len(recovered),
+                [result["war_id"] for result in recovered],
+            )
+    finally:
+        if _rebellion_recovery_task is task:
+            _rebellion_recovery_task = None
+
+
+def _start_rebellion_recovery(rebellion_svc) -> asyncio.Task | None:
+    """Start the all-guild rebellion sweep unless running or already successful."""
+    global _rebellion_recovery_task
+
+    if _rebellion_recovery_complete:
+        return None
+    if _rebellion_recovery_task is not None:
+        return _rebellion_recovery_task
+
+    task = asyncio.create_task(asyncio.to_thread(rebellion_svc.recover_stale_wars))
+    _rebellion_recovery_task = task
+    task.add_done_callback(_rebellion_recovery_done)
+    return task
 
 
 async def _supervised_loop(name: str, body) -> None:
@@ -714,39 +787,22 @@ async def on_ready():
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:
-        guild_ids = [g.id for g in bot.guilds]
-        asyncio.ensure_future(reminder_svc.reschedule_all(bot, guild_ids))
+        guild_ids = [guild.id for guild in bot.guilds]
+        _start_reminder_recovery(reminder_svc, guild_ids)
 
     # Recover wheel wars abandoned by a crash/restart mid-window. The whole
     # /incite lifecycle runs in an in-memory task, so a restart would leave the
     # war active forever — burning defender + meta-bet stakes and blocking every
     # future /incite in that guild. This one-shot, idempotent sweep refunds the
-    # stakes and fizzles each stale war. Run off the event loop with a
-    # done-callback so a failure surfaces in logs instead of being swallowed.
+    # stakes and fizzles each stale war.
     #
-    # on_ready fires on every gateway reconnect, not just process startup, so
-    # gate the sweep behind a once-per-process flag. A reconnect does NOT kill
-    # the in-memory incite_action tasks, so re-running it would fizzle wars that
-    # are still legitimately live.
+    # on_ready fires on every gateway reconnect. Retain the running task so
+    # reconnects cannot overlap the all-guild sweep; only a successful sweep is
+    # permanent for this process, while a failed sweep is retried on a later
+    # ready event.
     rebellion_svc = getattr(bot, "rebellion_service", None)
-    if rebellion_svc and not getattr(bot, "_rebellion_recovery_started", False):
-        bot._rebellion_recovery_started = True
-        def _log_rebellion_recovery(t: asyncio.Task) -> None:
-            try:
-                recovered = t.result()
-                if recovered:
-                    logger.info(
-                        "Recovered %d abandoned wheel war(s): %s",
-                        len(recovered),
-                        [r["war_id"] for r in recovered],
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Wheel war recovery sweep failed: %s", exc, exc_info=True)
-
-        recovery_task = bot.loop.create_task(
-            asyncio.to_thread(rebellion_svc.recover_stale_wars)
-        )
-        recovery_task.add_done_callback(_log_rebellion_recovery)
+    if rebellion_svc:
+        _start_rebellion_recovery(rebellion_svc)
 
 
 @bot.tree.error
