@@ -406,8 +406,8 @@ class TestDraftService:
                 player_ratings=ratings,
             )
 
-    def test_select_captains_random_selection(self):
-        """When neither specified, randomly selects both."""
+    def test_select_captains_automatic_selection(self):
+        """When neither specified, selects two distinct captains."""
         service = DraftService()
         ratings = {100: 1500.0, 200: 1500.0, 300: 1500.0}
 
@@ -420,28 +420,38 @@ class TestDraftService:
         assert result.captain2_id in [100, 200, 300]
         assert result.captain1_id != result.captain2_id
 
-    def test_select_captains_weighted_random_prefers_similar(self):
-        """Weighted random prefers captains with similar ratings."""
-        service = DraftService(rating_weight_factor=100.0)
+    def test_select_captains_chooses_closest_glicko_pair_without_randomness(self, monkeypatch):
+        """When neither captain is specified, choose the closest Glicko pair deterministically."""
+        service = DraftService()
+        ratings = {100: 1500.0, 200: 1795.0, 300: 1800.0, 400: 2200.0}
+
+        def fail_random(*args, **kwargs):
+            raise AssertionError("captain selection should not use randomness")
+
+        monkeypatch.setattr("domain.services.draft_service.random.choices", fail_random)
+        monkeypatch.setattr("domain.services.draft_service.random.random", fail_random)
+
+        result = service.select_captains(
+            eligible_ids=[100, 200, 300, 400],
+            player_ratings=ratings,
+        )
+
+        assert {result.captain1_id, result.captain2_id} == {200, 300}
+        assert abs(result.captain1_rating - result.captain2_rating) == 5.0
+
+    def test_select_captains_with_specified_captain_chooses_closest_rating(self):
+        """When one captain is specified, selects the closest-rated eligible captain."""
+        service = DraftService()
         # Captain 100 at 1500, captain 200 at 1500, captain 300 at 2000
         ratings = {100: 1500.0, 200: 1500.0, 300: 2000.0}
 
-        # Run many times to check statistical preference
-        close_count = 0
-        far_count = 0
-        for _ in range(100):
-            result = service.select_captains(
-                eligible_ids=[100, 200, 300],
-                player_ratings=ratings,
-                specified_captain1=100,  # Force captain1 to be 100
-            )
-            if result.captain2_id == 200:  # Same rating
-                close_count += 1
-            else:
-                far_count += 1
+        result = service.select_captains(
+            eligible_ids=[100, 200, 300],
+            player_ratings=ratings,
+            specified_captain1=100,  # Force captain1 to be 100
+        )
 
-        # Should strongly prefer the closer-rated captain
-        assert close_count > far_count
+        assert result.captain2_id == 200
 
     def test_select_player_pool_exact_size(self):
         """When lobby equals pool size, all selected."""
@@ -640,22 +650,14 @@ class TestSnakeDraftPickOrder:
         assert not (set(state_a.radiant_player_ids) & set(state_b.radiant_player_ids))
 
 
-class TestForceRandomCaptains:
-    """Tests for force_random_captains functionality used in shuffle auto-redirect.
+class TestSpecifiedCaptains:
+    """Tests for specified captain handling."""
 
-    Note: force_random_captains skips the 60s wait but still respects captain eligibility.
-    Only players who did /setcaptain yes can be selected as captain.
-    """
-
-    def test_select_captains_force_random_all_eligible(self):
+    def test_select_captains_both_specified_from_eligible_pool(self):
         """DraftService.select_captains picks from the eligible_ids list provided."""
         service = DraftService()
-        # All players have the same rating - simulates random selection
         ratings = {1: 1500.0, 2: 1500.0, 3: 1500.0, 4: 1500.0, 5: 1500.0}
-
-        # With force_random_captains, we pass all players as eligible
-        # and let select_captains randomly pick two with specified captains
-        selected = [1, 2]  # Simulating random.sample result
+        selected = [1, 2]
 
         result = service.select_captains(
             eligible_ids=[1, 2, 3, 4, 5],
