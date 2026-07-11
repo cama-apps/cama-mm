@@ -32,7 +32,7 @@ class DraftService:
     Pure domain logic for Immortal Draft.
 
     Handles:
-    - Captain selection (random + weighted random)
+    - Captain selection (closest Glicko rating pair)
     - Player pool selection (using exclusion counts)
     - Coinflip logic
     """
@@ -42,8 +42,9 @@ class DraftService:
         Initialize draft service.
 
         Args:
-            rating_weight_factor: Lower = more weight to similar ratings.
-                                  At 50, a 50-point difference halves the weight.
+            rating_weight_factor: Retained for compatibility with existing callers.
+                                  Captain selection now ignores this value and
+                                  chooses the closest Glicko ratings deterministically.
         """
         self.rating_weight_factor = rating_weight_factor
 
@@ -59,10 +60,8 @@ class DraftService:
 
         Algorithm:
         - If both captains specified, use them
-        - If one specified, select the other using weighted random
-        - If neither specified:
-          1. Random select first captain
-          2. Weighted random select second (closer rating = higher chance)
+        - If one specified, select the eligible captain closest in Glicko rating
+        - If neither specified, select the eligible pair closest in Glicko rating
 
         Args:
             eligible_ids: List of captain-eligible player IDs
@@ -105,22 +104,13 @@ class DraftService:
                     f"Need at least 2 captain-eligible players, but only {len(available)} available."
                 )
 
-            # Weighted random select first captain (higher rating = higher chance)
-            # Squaring amplifies differences: 1900-rated is ~4.5x more likely than 900-rated
-            first_weights = [max(player_ratings.get(pid, 0.0), 1.0) ** 2 for pid in available]
-            captain1 = random.choices(available, weights=first_weights, k=1)[0]
-            available.remove(captain1)
-
-            # Weighted random select second captain
-            captain2 = self._weighted_random_captain(
-                captain1, available, player_ratings
-            )
+            captain1, captain2 = self._closest_rating_pair(available, player_ratings)
 
         elif captain1 is None:
             # captain2 is specified, need to select captain1
             if len(available) < 1:
                 raise ValueError("Need at least 1 captain-eligible player to be second captain.")
-            captain1 = self._weighted_random_captain(
+            captain1 = self._closest_rating_captain(
                 captain2, available, player_ratings
             )
 
@@ -128,7 +118,7 @@ class DraftService:
             # captain1 is specified, need to select captain2
             if len(available) < 1:
                 raise ValueError("Need at least 1 captain-eligible player to be second captain.")
-            captain2 = self._weighted_random_captain(
+            captain2 = self._closest_rating_captain(
                 captain1, available, player_ratings
             )
 
@@ -139,16 +129,38 @@ class DraftService:
             captain2_rating=player_ratings.get(captain2, 0.0),
         )
 
-    def _weighted_random_captain(
+    def _closest_rating_pair(
+        self,
+        candidates: list[int],
+        player_ratings: dict[int, float],
+    ) -> tuple[int, int]:
+        """
+        Select the pair of captains with the smallest absolute rating gap.
+        """
+        best_pair: tuple[int, int] | None = None
+        best_diff = float("inf")
+
+        for index, captain1_id in enumerate(candidates):
+            captain1_rating = player_ratings.get(captain1_id, 0.0)
+            for captain2_id in candidates[index + 1:]:
+                diff = abs(captain1_rating - player_ratings.get(captain2_id, 0.0))
+                if diff < best_diff:
+                    best_diff = diff
+                    best_pair = (captain1_id, captain2_id)
+
+        if best_pair is None:
+            raise ValueError("Need at least 2 captain-eligible players.")
+
+        return best_pair
+
+    def _closest_rating_captain(
         self,
         reference_captain_id: int,
         candidates: list[int],
         player_ratings: dict[int, float],
     ) -> int:
         """
-        Select a captain using weighted random based on rating proximity.
-
-        Closer rating to reference captain = higher weight.
+        Select the captain closest in rating to the reference captain.
 
         Args:
             reference_captain_id: The already-selected captain
@@ -162,33 +174,10 @@ class DraftService:
             return candidates[0]
 
         reference_rating = player_ratings.get(reference_captain_id, 0.0)
-
-        # Calculate weights based on rating difference
-        # Weight = 1 / (1 + |rating_diff| / factor)
-        # This gives higher weight to closer ratings
-        weights = []
-        for pid in candidates:
-            rating = player_ratings.get(pid, 0.0)
-            diff = abs(rating - reference_rating)
-            weight = 1.0 / (1.0 + diff / self.rating_weight_factor)
-            weights.append(weight)
-
-        # Normalize weights
-        total = sum(weights)
-        if total == 0:
-            # Fallback to uniform random
-            return random.choice(candidates)
-
-        # Weighted random selection
-        r = random.random() * total
-        cumulative = 0.0
-        for pid, weight in zip(candidates, weights):
-            cumulative += weight
-            if r <= cumulative:
-                return pid
-
-        # Fallback (shouldn't happen)
-        return candidates[-1]
+        return min(
+            candidates,
+            key=lambda pid: abs(player_ratings.get(pid, 0.0) - reference_rating),
+        )
 
     def select_player_pool(
         self,
