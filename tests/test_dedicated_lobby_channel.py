@@ -855,6 +855,105 @@ class TestNotifyLobbyRally:
         # Should only send once (not fetch origin since it's the same)
         reaction_channel.send.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_rally_mentions_only_eligible_clipboard_subscribers(self):
+        """Clipboard subscribers are pinged unless they are in the lobby or are bots."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        class AsyncUsers:
+            def __init__(self, users):
+                self._users = users
+
+            def __aiter__(self):
+                self._iterator = iter(self._users)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._iterator)
+                except StopIteration as exc:
+                    raise StopAsyncIteration from exc
+
+        eligible = MagicMock(id=10, bot=False, mention="<@10>")
+        regular = MagicMock(id=11, bot=False, mention="<@11>")
+        conditional = MagicMock(id=12, bot=False, mention="<@12>")
+        bot_user = MagicMock(id=13, bot=True, mention="<@13>")
+        clipboard = MagicMock()
+        clipboard.emoji = "📋"
+        clipboard.users.return_value = AsyncUsers([eligible, regular, conditional, bot_user])
+
+        lobby_message = MagicMock(reactions=[clipboard])
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.fetch_message = AsyncMock(return_value=lobby_message)
+        reaction_channel.send = AsyncMock()
+        thread = MagicMock(send=AsyncMock())
+        lobby = MagicMock(players={11}, conditional_players={12})
+        lobby.get_total_count.return_value = 8
+
+        mock_bot = MagicMock()
+        mock_bot.get_channel.return_value = reaction_channel
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 999
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 111
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", {}),
+            patch.object(bot_module, "LOBBY_RALLY_COOLDOWN_SECONDS", 120),
+        ):
+            result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+
+        assert result is True
+        send_kwargs = reaction_channel.send.await_args.kwargs
+        assert send_kwargs["content"] == "<@10>"
+        assert send_kwargs["allowed_mentions"].users is True
+        assert "<@11>" not in send_kwargs["content"]
+        assert "<@12>" not in send_kwargs["content"]
+        assert "<@13>" not in send_kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_rally_cooldown_prevents_repeat_clipboard_ping(self):
+        """Leaving and rejoining at the same threshold does not spam subscribers."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        subscriber = MagicMock(id=10, bot=False, mention="<@10>")
+
+        async def users():
+            yield subscriber
+
+        clipboard = MagicMock()
+        clipboard.emoji = "📋"
+        clipboard.users.side_effect = users
+        lobby_message = MagicMock(reactions=[clipboard])
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.fetch_message = AsyncMock(return_value=lobby_message)
+        reaction_channel.send = AsyncMock()
+        thread = MagicMock(send=AsyncMock())
+        lobby = MagicMock(players=set(), conditional_players=set())
+        lobby.get_total_count.return_value = 8
+
+        mock_bot = MagicMock()
+        mock_bot.get_channel.return_value = reaction_channel
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 999
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 111
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", {}),
+            patch.object(bot_module, "LOBBY_RALLY_COOLDOWN_SECONDS", 120),
+            patch.object(bot_module.time, "time", return_value=1_000),
+        ):
+            first = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+            second = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+
+        assert first is True
+        assert second is False
+        reaction_channel.send.assert_awaited_once()
+        thread.send.assert_awaited_once()
+
 
 class TestShuffleDedicatedChannel:
     """Test /shuffle command behavior with dedicated lobby channel."""

@@ -45,6 +45,7 @@ class FakeMessage:
 
     def __init__(self):
         self.edits = []
+        self.added_reactions = []
         self.jump_url = "https://discord.com/channels/123/456/789"
         self.id = 789
 
@@ -53,6 +54,9 @@ class FakeMessage:
 
     async def remove_reaction(self, emoji, user):
         pass
+
+    async def add_reaction(self, emoji):
+        self.added_reactions.append(str(emoji))
 
     async def pin(self, reason=None):
         pass
@@ -85,6 +89,7 @@ class FakeChannel:
 
     def __init__(self, message=None):
         self.message = message or FakeMessage()
+        self.sent_messages = []
         self.id = 456
 
     async def fetch_message(self, message_id):
@@ -95,6 +100,7 @@ class FakeChannel:
 
     async def send(self, content=None, embed=None, view=None):
         msg = FakeMessage()
+        self.sent_messages.append(msg)
         return msg
 
 
@@ -227,6 +233,7 @@ async def test_lobby_command_uses_guild_id(monkeypatch_safe_defer):
 
     # Should have sent some response
     assert interaction.followup.messages or lobby_service.get_lobby() is not None
+    assert "📋" in interaction.channel.sent_messages[0].added_reactions
 
 
 @pytest.mark.asyncio

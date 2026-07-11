@@ -441,7 +441,8 @@ class LobbyCommands(commands.Cog):
             await self._safe_pin(channel_msg)
 
             # Add reaction emojis for joining (sword for regular, frogling for conditional,
-            # jopacoin for gamba notifications, bell for /readycheck shortcut)
+            # jopacoin for gamba notifications, clipboard for near-full alerts,
+            # and bell for the /readycheck shortcut)
             try:
                 await channel_msg.add_reaction("⚔️")
                 # Add frogling emoji using PartialEmoji with ID
@@ -450,6 +451,9 @@ class LobbyCommands(commands.Cog):
                 # Add jopacoin emoji for subscribing to gamba notifications
                 jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
                 await channel_msg.add_reaction(jopacoin_emoji)
+                # Clipboard is a passive opt-in: subscribers are pinged when
+                # this lobby reaches the rally thresholds (8/10 and 9/10).
+                await channel_msg.add_reaction("📋")
                 # Bell triggers a ready check (equivalent to /readycheck)
                 await channel_msg.add_reaction("🔔")
             except Exception as e:

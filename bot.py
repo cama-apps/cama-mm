@@ -79,6 +79,7 @@ _container: ServiceContainer | None = None
 # Key: (guild_id, needed_count) -> timestamp
 # Allows independent cooldowns for +2 and +1 notifications
 _lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
+_lobby_rally_lock = asyncio.Lock()
 
 # Lobby ready notification cooldowns
 # Key: guild_id -> timestamp. Guarded by ``_lobby_ready_lock`` so that
@@ -614,19 +615,37 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
     If a dedicated lobby channel is configured, rally notifications go to the
     origin channel (where /lobby was run) instead of the reaction channel.
     """
-    total = lobby.get_total_count()
-    needed = LOBBY_READY_THRESHOLD - total
+    async with _lobby_rally_lock:
+        total = lobby.get_total_count()
+        needed = LOBBY_READY_THRESHOLD - total
 
-    if needed < 1 or needed > 2:
-        return False  # Only notify for +1 or +2
+        if needed < 1 or needed > 2:
+            return False  # Only notify for +1 or +2
 
-    now = time.time()
-    cooldown_key = (guild_id, needed)
-    last_sent = _lobby_rally_cooldowns.get(cooldown_key, 0)
+        now = time.time()
+        cooldown_key = (guild_id, needed)
+        last_sent = _lobby_rally_cooldowns.get(cooldown_key, 0)
 
-    if now - last_sent < LOBBY_RALLY_COOLDOWN_SECONDS:
-        return False  # Still in cooldown for this threshold
+        if now - last_sent < LOBBY_RALLY_COOLDOWN_SECONDS:
+            return False  # Still in cooldown for this threshold
 
+        # Claim before any Discord awaits so simultaneous joins cannot both
+        # send. A failed send releases the claim below.
+        _lobby_rally_cooldowns[cooldown_key] = now
+
+        try:
+            sent = await _send_lobby_rally(channel, thread, lobby, guild_id, total, needed)
+            if not sent:
+                _lobby_rally_cooldowns.pop(cooldown_key, None)
+            return sent
+        except Exception as exc:
+            _lobby_rally_cooldowns.pop(cooldown_key, None)
+            logger.error(f"Error sending rally notification: {exc}", exc_info=True)
+            return False
+
+
+async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, needed: int) -> bool:
+    """Send one claimed near-full notification and ping eligible 📋 subscribers."""
     try:
         embed = discord.Embed(
             title="📢 Almost Ready!",
@@ -642,9 +661,28 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
                 asyncio.to_thread(bot.lobby_service.get_lobby_message_id, guild_id=guild_id),
                 asyncio.to_thread(bot.lobby_service.get_lobby_channel_id, guild_id=guild_id),
             )
+        subscriber_mentions: list[str] = []
         if lobby_message_id and lobby_channel_id:
             jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
+
+            # The reaction roster is the subscription store, so opt-ins survive
+            # restarts and disappear naturally with the lobby message.
+            try:
+                lobby_channel = channel if channel.id == lobby_channel_id else bot.get_channel(lobby_channel_id)
+                if not lobby_channel:
+                    lobby_channel = await bot.fetch_channel(lobby_channel_id)
+                lobby_message = await lobby_channel.fetch_message(lobby_message_id)
+                excluded_ids = set(lobby.players) | set(lobby.conditional_players)
+                for reaction in lobby_message.reactions:
+                    if str(reaction.emoji) != "📋":
+                        continue
+                    async for subscriber in reaction.users():
+                        if not subscriber.bot and subscriber.id not in excluded_ids:
+                            subscriber_mentions.append(subscriber.mention)
+                    break
+            except Exception as exc:
+                logger.warning("Could not load clipboard lobby subscribers: %s", exc)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
         origin_channel_id = (
@@ -664,13 +702,19 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
                 target_channel = channel  # Fallback
 
         # Send to origin channel (or reaction channel as fallback)
-        await target_channel.send(embed=embed)
+        content = " ".join(subscriber_mentions) or None
+        await target_channel.send(
+            content=content,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True, replied_user=False
+            ),
+        )
 
         # Send to thread
         if thread:
             await thread.send(f"📢 **+{needed}** more player{'s' if needed > 1 else ''} needed!")
 
-        _lobby_rally_cooldowns[cooldown_key] = now
         return True
     except Exception as exc:
         logger.error(f"Error sending rally notification: {exc}", exc_info=True)
