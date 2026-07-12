@@ -51,6 +51,10 @@ class DraftState:
     # Excluded players (if lobby had >10)
     excluded_player_ids: list[int] = field(default_factory=list)
 
+    # Exclusion-factor bookkeeping carried into the pending match on completion.
+    full_exclusion_increment_ids: list[int] = field(default_factory=list)
+    half_exclusion_increment_ids: list[int] = field(default_factory=list)
+
     # Captains
     captain1_id: int | None = None  # First captain selected
     captain2_id: int | None = None  # Second captain selected
@@ -245,6 +249,8 @@ class DraftState:
             "player_pool_ids": self.player_pool_ids,
             "player_pool_data": self.player_pool_data,
             "excluded_player_ids": self.excluded_player_ids,
+            "full_exclusion_increment_ids": self.full_exclusion_increment_ids,
+            "half_exclusion_increment_ids": self.half_exclusion_increment_ids,
             "captain1_id": self.captain1_id,
             "captain2_id": self.captain2_id,
             "captain1_rating": self.captain1_rating,
@@ -275,6 +281,8 @@ class DraftState:
         state.player_pool_ids = data.get("player_pool_ids", [])
         state.player_pool_data = data.get("player_pool_data", {})
         state.excluded_player_ids = data.get("excluded_player_ids", [])
+        state.full_exclusion_increment_ids = data.get("full_exclusion_increment_ids", [])
+        state.half_exclusion_increment_ids = data.get("half_exclusion_increment_ids", [])
         state.captain1_id = data.get("captain1_id")
         state.captain2_id = data.get("captain2_id")
         state.captain1_rating = data.get("captain1_rating", 0.0)

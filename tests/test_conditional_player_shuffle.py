@@ -11,8 +11,14 @@ Tests the real production function from commands/match.py.
 """
 
 
-from commands.match import select_players_for_shuffle
+from types import SimpleNamespace
+from unittest.mock import ANY, AsyncMock, MagicMock
+
+import pytest
+
+from commands.match import MatchCommands, select_players_for_shuffle
 from domain.models.player import Player
+from tests.conftest import TEST_GUILD_ID
 
 
 def make_player(name: str, rating: float | None = 1500.0, rd: float | None = 350.0) -> Player:
@@ -259,3 +265,32 @@ class TestExactly10PlayersToShuffler:
         assert len(player_ids) == 10
         assert len(included) == 3
         assert len(excluded) == 3
+
+
+@pytest.mark.asyncio
+async def test_execute_shuffle_passes_conditional_exclusions_to_match_service(monkeypatch):
+    player_ids = list(range(100, 110))
+    excluded_conditional_ids = [200, 201]
+    lobby = SimpleNamespace(get_player_count=lambda: 10)
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = set()
+    match_service.shuffle_players.side_effect = RuntimeError("stop after service call")
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(MagicMock(), MagicMock(), match_service, MagicMock())
+    monkeypatch.setattr(cog, "_validate_shuffle_preconditions", AsyncMock(return_value=lobby))
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, [], [], excluded_conditional_ids)),
+    )
+
+    await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    match_service.shuffle_players.assert_called_once_with(
+        player_ids,
+        guild_id=TEST_GUILD_ID,
+        betting_mode="pool",
+        rating_system=ANY,
+        shuffle_mode="balanced",
+        excluded_conditional_ids=excluded_conditional_ids,
+    )

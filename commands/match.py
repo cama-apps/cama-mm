@@ -647,7 +647,8 @@ class MatchCommands(commands.Cog):
             result = await asyncio.to_thread(
                 functools.partial(self.match_service.shuffle_players,
                     player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs,
-                    shuffle_mode=team_mode)
+                    shuffle_mode=team_mode,
+                    excluded_conditional_ids=excluded_conditional_ids)
             )
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
@@ -886,25 +887,6 @@ class MatchCommands(commands.Cog):
                     all_excluded_names.append(f"{FROGLING_EMOTE} {display_name}")
                 else:
                     all_excluded_names.append(f"{FROGLING_EMOTE} Unknown({pid})")
-
-            # Give conditional players half the exclusion count bonus
-            # (jopacoin bonus is awarded at record time in match_service)
-            for pid in excluded_conditional_ids:
-                await asyncio.to_thread(
-                    self.player_service.increment_exclusion_count_half, pid, guild_id
-                )
-
-            # Store excluded conditional IDs in shuffle state for jopacoin bonus at record time
-            pending_state = await asyncio.to_thread(
-                self.match_service.get_last_shuffle,
-                guild_id,
-                pending_match_id=pending_match_id,
-            )
-            if pending_state:
-                pending_state.excluded_conditional_player_ids = excluded_conditional_ids
-                await asyncio.to_thread(
-                    self.match_service.set_last_shuffle, guild_id, pending_state
-                )
 
         if all_excluded_names:
             balance_info += f"\n**Excluded:** {', '.join(all_excluded_names)}"

@@ -68,6 +68,13 @@ class PendingMatchState:
     effective_avoid_ids: list[int] = field(default_factory=list)
     effective_deal_ids: list[int] = field(default_factory=list)
 
+    # Exclusion-factor changes for new matches are deferred until record.
+    # False preserves compatibility with pending matches created before this
+    # bookkeeping existed, whose factors were already changed at shuffle time.
+    exclusion_updates_deferred: bool = False
+    full_exclusion_increment_ids: list[int] = field(default_factory=list)
+    half_exclusion_increment_ids: list[int] = field(default_factory=list)
+
     # Discord message metadata for embed updates / reminders
     shuffle_channel_id: int | None = None
     shuffle_message_id: int | None = None

@@ -164,6 +164,7 @@ class ShufflePendingMixin:
         betting_mode: str = "pool",
         rating_system: str = "glicko",
         shuffle_mode: str = "balanced",
+        excluded_conditional_ids: list[int] | None = None,
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -174,6 +175,7 @@ class ShufflePendingMixin:
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
             rating_system: "glicko" or "openskill" - determines which rating system is used for balancing
             shuffle_mode: "balanced" or "region" - determines team-shape preference
+            excluded_conditional_ids: Conditional lobby players not selected for this match
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
@@ -183,6 +185,7 @@ class ShufflePendingMixin:
             raise ValueError("rating_system must be 'glicko', 'openskill', or 'jopacoin'")
         if shuffle_mode not in ("balanced", "region"):
             raise ValueError("shuffle_mode must be 'balanced' or 'region'")
+        excluded_conditional_ids = list(excluded_conditional_ids or [])
         players = self.player_repo.get_by_ids(player_ids, guild_id)
         if len(players) != len(player_ids):
             raise ValueError(
@@ -414,12 +417,7 @@ class ShufflePendingMixin:
             raw_openskill_radiant_win_prob
         )
 
-        # Update exclusion counts
         included_player_ids = set(radiant_team_ids + dire_team_ids)
-        for pid in excluded_ids:
-            self.player_repo.increment_exclusion_count(pid, guild_id)
-        for pid in included_player_ids:
-            self.player_repo.decay_exclusion_count(pid, guild_id)
 
         # Calculate effective soft avoids (opposite teams) - will be decremented on record_match
         effective_avoid_ids = []
@@ -463,6 +461,7 @@ class ShufflePendingMixin:
             radiant_team_ids=radiant_team_ids,
             dire_team_ids=dire_team_ids,
             excluded_player_ids=excluded_ids,
+            excluded_conditional_player_ids=excluded_conditional_ids,
             radiant_roles=radiant_roles,
             dire_roles=dire_roles,
             radiant_value=radiant_value,
@@ -480,6 +479,9 @@ class ShufflePendingMixin:
             balancing_rating_system=rating_system,
             effective_avoid_ids=effective_avoid_ids,  # Avoids to decrement on record
             effective_deal_ids=effective_deal_ids,  # Package deals to decrement on record
+            exclusion_updates_deferred=True,
+            full_exclusion_increment_ids=excluded_ids,
+            half_exclusion_increment_ids=excluded_conditional_ids,
         )
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
