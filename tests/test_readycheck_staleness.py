@@ -6,8 +6,8 @@ Covers `LobbyCommands._execute_readycheck`:
 - the trigger-er is auto-counted as ready,
 - a sub-30-min refresh edits the existing message in place and preserves ✅,
 - a 30+ min-old check is deleted and reposted fresh with confirmations reset,
-- the repost prunes players flagged AFK who never confirmed (regular and
-  conditional, keeping the trigger-er, the active, and anyone who reacted),
+- the repost prunes current AFK players (regular and conditional, keeping
+  the trigger-er and the active; stale confirmations do not carry forward),
 - pruning that drops the roster below 10 still posts, with the shortfall note.
 
 Time is injected (the stored post-time is overwritten), never frozen. Discord is
@@ -273,9 +273,29 @@ async def test_stale_repost_deletes_old_and_resets_confirmations(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stale_repost_prunes_afk_even_if_they_confirmed_old_check(monkeypatch):
+    """Old confirmations expire with the stale check; current AFK players are pruned."""
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: OFFLINE, 3: ONLINE})
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    env.lobby_service.add_readycheck_reaction(2, "<@2>", guild_id=env.guild_id)
+    _make_stale(env)
+
+    status, info = await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+
+    assert status == "ok"
+    assert info["pruned_count"] == 1
+    assert 2 not in env.lobby.players
+    assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {1: "<@1>"}
+    note = " ".join(_ping_texts(env))
+    assert "Removed (away during ready check)" in note
+    assert "<@2>" in note
+
+
+@pytest.mark.asyncio
 async def test_stale_repost_prunes_afk_no_shows(monkeypatch):
-    """Prune AFK-unconfirmed (regular + conditional + left-server); keep the
-    trigger-er, the active, and anyone who confirmed on the previous check."""
+    """Prune current AFK players (regular + conditional + left-server); keep
+    only the trigger-er and the active."""
     env = _setup(
         monkeypatch,
         regular={1: OFFLINE, 2: OFFLINE, 4: OFFLINE, 5: ONLINE, 6: OFFLINE},
@@ -283,7 +303,7 @@ async def test_stale_repost_prunes_afk_no_shows(monkeypatch):
         # Player 6 has left the server (not a guild member anymore).
         present={1, 2, 3, 4, 5},
     )
-    # First check; player 4 confirms (so they're kept despite being offline).
+    # First check; player 4 confirms, but that stale confirmation expires.
     await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
     env.lobby_service.add_readycheck_reaction(4, "<@4>", guild_id=env.guild_id)
     _make_stale(env)
@@ -291,19 +311,20 @@ async def test_stale_repost_prunes_afk_no_shows(monkeypatch):
     status, info = await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
 
     assert status == "ok"
-    # Pruned: 2 (offline, no ✅), 3 (conditional, offline, no ✅), 6 (left server).
-    assert info["pruned_count"] == 3
+    # Pruned: 2 (offline), 3 (conditional, offline), 4 (offline), 6 (left server).
+    assert info["pruned_count"] == 4
     assert 2 not in env.lobby.players
     assert 3 not in env.lobby.conditional_players
+    assert 4 not in env.lobby.players
     assert 6 not in env.lobby.players
-    # Kept: 1 (trigger-er), 4 (confirmed), 5 (active).
-    assert {1, 4, 5}.issubset(env.lobby.players)
-    # Confirmations reset to just the trigger-er; 4 must re-confirm.
+    # Kept: 1 (trigger-er), 5 (active).
+    assert {1, 5}.issubset(env.lobby.players)
+    # Confirmations reset to just the trigger-er.
     assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {1: "<@1>"}
     env.cog._sync_lobby_displays.assert_awaited()  # lobby display refreshed
     note = " ".join(_ping_texts(env))
     assert "Removed (away during ready check)" in note
-    assert "<@2>" in note and "<@3>" in note and "<@6>" in note
+    assert "<@2>" in note and "<@3>" in note and "<@4>" in note and "<@6>" in note
 
 
 @pytest.mark.asyncio
