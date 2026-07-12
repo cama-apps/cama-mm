@@ -921,19 +921,13 @@ class DraftCommands(commands.Cog):
                 await interaction.followup.send(f"❌ {e2}", ephemeral=True)
                 return False
 
-        # Update exclusion counts for excluded players
-        # Regular players get full bonus (+5), conditional players get half bonus (+2)
-        for excluded_id in pool_result.excluded_ids:
-            if excluded_id in promoted_conditional_set:
-                # Conditional player who was promoted but then excluded
-                await asyncio.to_thread(self.player_repo.increment_exclusion_count_half, excluded_id, guild_id)
-            else:
-                # Regular player excluded
-                await asyncio.to_thread(self.player_repo.increment_exclusion_count, excluded_id, guild_id)
-
-        # Conditional players who weren't even promoted get half bonus
-        for cid in unpromoted_conditional_ids:
-            await asyncio.to_thread(self.player_repo.increment_exclusion_count_half, cid, guild_id)
+        full_exclusion_increment_ids = [
+            pid for pid in pool_result.excluded_ids if pid not in promoted_conditional_set
+        ]
+        half_exclusion_increment_ids = [
+            pid for pid in pool_result.excluded_ids if pid in promoted_conditional_set
+        ]
+        half_exclusion_increment_ids.extend(unpromoted_conditional_ids)
 
         # Create draft state
         try:
@@ -952,6 +946,8 @@ class DraftCommands(commands.Cog):
             # Initialize state
             state.player_pool_ids = pool_result.selected_ids
             state.excluded_player_ids = pool_result.excluded_ids
+            state.full_exclusion_increment_ids = full_exclusion_increment_ids
+            state.half_exclusion_increment_ids = half_exclusion_increment_ids
             state.captain1_id = captain_pair.captain1_id
             state.captain2_id = captain_pair.captain2_id
             state.captain1_rating = captain_pair.captain1_rating
@@ -2015,11 +2011,6 @@ class DraftCommands(commands.Cog):
                 except Exception as exc:
                     logger.warning(f"Failed to create automatic bets for draft: {exc}")
 
-            # Decay exclusion counts for included players (same as shuffle mode)
-            included_player_ids = state.radiant_player_ids + state.dire_player_ids
-            for pid in included_player_ids:
-                await asyncio.to_thread(self.player_repo.decay_exclusion_count, pid, guild_id)
-
             # Reset lobby only after successful match creation
             await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
 
@@ -2197,6 +2188,9 @@ class DraftCommands(commands.Cog):
             betting_mode="pool",  # Default to pool mode for drafts
             is_draft=True,  # Mark as draft for any special handling
             is_bomb_pot=is_bomb_pot,  # Bomb pot mode for higher stakes
+            exclusion_updates_deferred=True,
+            full_exclusion_increment_ids=state.full_exclusion_increment_ids,
+            half_exclusion_increment_ids=state.half_exclusion_increment_ids,
         )
 
         # persist_state handles both DB persistence and in-memory cache update

@@ -51,6 +51,79 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     assert recorded["winning_team"] in (1, 2)
 
 
+def test_shuffle_and_abort_leave_exclusion_factors_unchanged(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 12)
+    before = player_repo.get_exclusion_counts(player_ids, TEST_GUILD_ID)
+
+    service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = service.get_last_shuffle(TEST_GUILD_ID)
+
+    assert pending is not None
+    assert pending.exclusion_updates_deferred is True
+    assert set(pending.full_exclusion_increment_ids) == set(pending.excluded_player_ids)
+    assert player_repo.get_exclusion_counts(player_ids, TEST_GUILD_ID) == before
+
+    service.clear_last_shuffle(TEST_GUILD_ID, pending.pending_match_id)
+
+    assert player_repo.get_exclusion_counts(player_ids, TEST_GUILD_ID) == before
+
+
+def test_record_applies_deferred_exclusion_factor_updates(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 12)
+    conditional_id = 2000
+    player_repo.add(
+        discord_id=conditional_id,
+        discord_username="Conditional",
+        guild_id=TEST_GUILD_ID,
+        preferred_roles=["1", "2", "3", "4", "5"],
+        initial_mmr=3000,
+        glicko_rating=1500.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    tracked_ids = [*player_ids, conditional_id]
+    before = player_repo.get_exclusion_counts(tracked_ids, TEST_GUILD_ID)
+
+    service.shuffle_players(
+        player_ids,
+        guild_id=TEST_GUILD_ID,
+        excluded_conditional_ids=[conditional_id],
+    )
+    pending = service.get_last_shuffle(TEST_GUILD_ID)
+    assert pending is not None
+    assert pending.excluded_conditional_player_ids == [conditional_id]
+    assert pending.half_exclusion_increment_ids == [conditional_id]
+
+    service.record_match(
+        "radiant",
+        guild_id=TEST_GUILD_ID,
+        pending_match_id=pending.pending_match_id,
+    )
+
+    after = player_repo.get_exclusion_counts(tracked_ids, TEST_GUILD_ID)
+    for pid in pending.radiant_team_ids + pending.dire_team_ids:
+        assert after[pid] == before[pid] // 2
+    for pid in pending.full_exclusion_increment_ids:
+        assert after[pid] == before[pid] + 6
+    assert after[conditional_id] == before[conditional_id] + 1
+
+
 def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     """Ensure goodness_score uses the weighted role delta (0.19 default)."""
     player_repo = PlayerRepository(repo_db_path)

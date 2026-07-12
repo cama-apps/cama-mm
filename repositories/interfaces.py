@@ -444,6 +444,9 @@ class IMatchRepository(ABC):
         effective_avoid_ids: list[int],
         effective_deal_ids: list[int],
         pending_match_id: int | None = None,
+        exclusion_decay_ids: list[int] | None = None,
+        full_exclusion_increment_ids: list[int] | None = None,
+        half_exclusion_increment_ids: list[int] | None = None,
     ) -> int: ...
 
     @abstractmethod

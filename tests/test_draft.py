@@ -14,6 +14,7 @@ from commands.draft import DraftCommands
 from commands.match import MatchCommands
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
 from domain.models.lobby import Lobby
+from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
@@ -226,6 +227,29 @@ class TestDraftState:
         assert restored.captain2_id == 200
         assert restored.phase == DraftPhase.DRAFTING
         assert restored.player_pool_ids == [1, 2, 3]
+
+    def test_exclusion_update_metadata_survives_round_trip(self):
+        state = DraftState(guild_id=123)
+        state.full_exclusion_increment_ids = [11, 12]
+        state.half_exclusion_increment_ids = [13]
+
+        restored = DraftState.from_dict(state.to_dict())
+
+        assert restored.full_exclusion_increment_ids == [11, 12]
+        assert restored.half_exclusion_increment_ids == [13]
+
+    def test_pending_exclusion_update_metadata_survives_round_trip(self):
+        state = PendingMatchState(
+            exclusion_updates_deferred=True,
+            full_exclusion_increment_ids=[11, 12],
+            half_exclusion_increment_ids=[13],
+        )
+
+        restored = PendingMatchState.from_dict(state.to_dict())
+
+        assert restored.exclusion_updates_deferred is True
+        assert restored.full_exclusion_increment_ids == [11, 12]
+        assert restored.half_exclusion_increment_ids == [13]
 
     def test_player_pool_data_serialization(self):
         """Player pool data is correctly serialized and deserialized."""
@@ -1662,6 +1686,7 @@ class TestExecuteDraft:
         player_ids = _register_draft_players(player_repository, guild_id, 16)
         for pid in player_ids:
             player_repository.set_captain_eligible(pid, guild_id, True)
+        exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
 
         cog = _make_draft_cog(player_repository)
         interaction = _FakeInteraction(guild_id)
@@ -1680,9 +1705,9 @@ class TestExecuteDraft:
         assert len(state.excluded_player_ids) == 6
         assert not (set(state.player_pool_ids) & set(state.excluded_player_ids))
         assert state.coinflip_winner_id in (state.captain1_id, state.captain2_id)
-        # excluded players get an exclusion bump so they are prioritised next draft
-        excl = player_repository.get_exclusion_counts(state.excluded_player_ids, guild_id)
-        assert all(excl.get(pid, 0) > 0 for pid in state.excluded_player_ids)
+        assert set(state.full_exclusion_increment_ids) == set(state.excluded_player_ids)
+        assert state.half_exclusion_increment_ids == []
+        assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
         # the progress message is converted in place into the draft embed
         assert len(interaction.followup.messages) == 1
         draft_msg = interaction.followup.messages[0]
@@ -1693,6 +1718,30 @@ class TestExecuteDraft:
         # both captains were pinged
         assert len(interaction.channel.sent) == 1
         assert "Draft starting!" in interaction.channel.sent[0].content
+
+    async def test_conditional_exclusions_are_deferred_and_classified(self, player_repository):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 16)
+        for pid in player_ids:
+            player_repository.set_captain_eligible(pid, guild_id, True)
+        regular_ids = player_ids[:14]
+        conditional_ids = player_ids[14:]
+        lobby = _make_lobby(regular_ids)
+        for pid in conditional_ids:
+            lobby.add_conditional_player(pid)
+        exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
+
+        cog = _make_draft_cog(player_repository)
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, lobby)
+
+        assert result is True
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+        assert set(state.full_exclusion_increment_ids) == set(state.excluded_player_ids)
+        assert set(state.half_exclusion_increment_ids) == set(conditional_ids)
+        assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
 
     async def test_fails_without_enough_captains(self, player_repository):
         """With fewer than 2 captain opt-ins, the draft is rejected cleanly."""

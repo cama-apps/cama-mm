@@ -423,6 +423,18 @@ class RecordingMixin:
                 if self.package_deal_repo:
                     effective_deal_ids = list(last_shuffle.effective_deal_ids)
 
+            exclusion_decay_ids: list[int] = []
+            full_exclusion_increment_ids: list[int] = []
+            half_exclusion_increment_ids: list[int] = []
+            if last_shuffle.exclusion_updates_deferred:
+                exclusion_decay_ids = radiant_team_ids + dire_team_ids
+                full_exclusion_increment_ids = list(
+                    last_shuffle.full_exclusion_increment_ids
+                )
+                half_exclusion_increment_ids = list(
+                    last_shuffle.half_exclusion_increment_ids
+                )
+
             # ---- ATOMIC WRITE: match + participants + wins/losses + glicko +
             # OpenSkill + last_match_date + first_calibrated_at + match_prediction
             # + rating_history + pairings + consumable decrements, all in one
@@ -459,6 +471,9 @@ class RecordingMixin:
                 effective_avoid_ids=effective_avoid_ids,
                 effective_deal_ids=effective_deal_ids,
                 pending_match_id=pending_match_id,
+                exclusion_decay_ids=exclusion_decay_ids,
+                full_exclusion_increment_ids=full_exclusion_increment_ids,
+                half_exclusion_increment_ids=half_exclusion_increment_ids,
             )
             updated_count = len(glicko_updates)
 

@@ -371,6 +371,57 @@ class TestMatchRecordAtomic:
         for pid in team2:
             assert player_repo.get_by_id(pid, TEST_GUILD_ID).losses == 1
 
+    def test_exclusion_updates_apply_once_per_pending_match(self, player_repo, match_repo):
+        team1, team2 = [1, 2, 3, 4, 5], [6, 7, 8, 9, 10]
+        full_increment_id = 11
+        half_increment_id = 12
+        all_ids = team1 + team2 + [full_increment_id, half_increment_id]
+        for did in all_ids:
+            register(player_repo, did, balance=50)
+            player_repo.update_glicko_rating(did, TEST_GUILD_ID, 1500.0, 350.0, 0.06)
+        before = player_repo.get_exclusion_counts(all_ids, TEST_GUILD_ID)
+        pending_match_id = match_repo.save_pending_match(
+            TEST_GUILD_ID,
+            {"radiant_team_ids": team1, "dire_team_ids": team2},
+        )
+        glicko, os_, history, prediction = _match_record_defaults(team1, team2)
+        kwargs = {
+            "team1_ids": team1,
+            "team2_ids": team2,
+            "winning_team": 1,
+            "guild_id": TEST_GUILD_ID,
+            "dotabuff_match_id": None,
+            "lobby_type": "shuffle",
+            "balancing_rating_system": "glicko",
+            "winning_ids": team1,
+            "losing_ids": team2,
+            "glicko_updates": glicko,
+            "openskill_updates": os_,
+            "rating_history_rows": history,
+            "match_prediction": prediction,
+            "last_match_date_iso": "2026-07-12T00:00:00",
+            "first_calibration_ids": [],
+            "first_calibration_unix": 0,
+            "effective_avoid_ids": [],
+            "effective_deal_ids": [],
+            "pending_match_id": pending_match_id,
+            "exclusion_decay_ids": team1 + team2,
+            "full_exclusion_increment_ids": [full_increment_id],
+            "half_exclusion_increment_ids": [half_increment_id],
+        }
+
+        first_match_id = match_repo.record_match_core_atomic(**kwargs)
+        after_first = player_repo.get_exclusion_counts(all_ids, TEST_GUILD_ID)
+        second_match_id = match_repo.record_match_core_atomic(**kwargs)
+        after_second = player_repo.get_exclusion_counts(all_ids, TEST_GUILD_ID)
+
+        assert second_match_id == first_match_id
+        for pid in team1 + team2:
+            assert after_first[pid] == before[pid] // 2
+        assert after_first[full_increment_id] == before[full_increment_id] + 6
+        assert after_first[half_increment_id] == before[half_increment_id] + 1
+        assert after_second == after_first
+
 
 # ---------------------------------------------------------------------------
 # Match correction: swap wins/losses + pairings delta + correction log atomic

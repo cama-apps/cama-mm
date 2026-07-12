@@ -129,6 +129,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
         effective_avoid_ids: list[int],
         effective_deal_ids: list[int],
         pending_match_id: int | None = None,
+        exclusion_decay_ids: list[int] | None = None,
+        full_exclusion_increment_ids: list[int] | None = None,
+        half_exclusion_increment_ids: list[int] | None = None,
     ) -> int:
         """Record a match and all dependent rating/pairings/consumable writes
         atomically.
@@ -272,6 +275,40 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     WHERE discord_id = ? AND guild_id = ?
                     """,
                     [(last_match_date_iso, pid, normalized_guild) for pid in all_ids],
+                )
+
+            # Exclusion factors only change for a successfully recorded match.
+            # These writes sit after the pending-match idempotency guard above,
+            # so a retry cannot apply them twice.
+            if exclusion_decay_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET exclusion_count = COALESCE(exclusion_count, 0) / 2,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in exclusion_decay_ids],
+                )
+            if full_exclusion_increment_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET exclusion_count = COALESCE(exclusion_count, 0) + 6,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in full_exclusion_increment_ids],
+                )
+            if half_exclusion_increment_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET exclusion_count = COALESCE(exclusion_count, 0) + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in half_exclusion_increment_ids],
                 )
 
             # 7. first_calibrated_at for players who just became calibrated
