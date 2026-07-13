@@ -88,6 +88,24 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else 0
 
+    def consume_next_match_pot(self, guild_id: int | None) -> int:
+        """Atomically claim and clear the reserve allocation queued for a match."""
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COALESCE(next_match_pot, 0) AS amount FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            )
+            row = cursor.fetchone()
+            amount = int(row["amount"]) if row else 0
+            if amount:
+                cursor.execute(
+                    "UPDATE nonprofit_fund SET next_match_pot = 0, updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?",
+                    (normalized_id,),
+                )
+            return amount
+
     def add_to_nonprofit_fund(
         self,
         guild_id: int | None,

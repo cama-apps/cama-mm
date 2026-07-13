@@ -127,26 +127,31 @@ class ShufflePendingMixin:
         self, guild_id: int | None, state: PendingMatchState
     ) -> PendingMatchState:
         """Reserve nonprofit funds as match betting seed and persist them on state."""
-        if state.bet_seed_reserved > 0 or DOTA_BET_SEED_AMOUNT <= 0:
+        if state.bet_seed_reserved > 0:
             return state
         loan_service = getattr(self, "loan_service", None)
         if loan_service is None:
             return state
 
-        reserved = loan_service.deduct_up_to_nonprofit_fund(
-            guild_id,
-            DOTA_BET_SEED_AMOUNT,
-            source="dota_bet_seed",
-            related_type="pending_match",
-            related_id=state.pending_match_id,
-            reason="reserve-backed Dota betting seed",
-            metadata={"betting_mode": state.betting_mode},
-        )
+        reserved = loan_service.consume_next_match_pot(guild_id)
+        queued_for_next_match = reserved > 0
+        if not queued_for_next_match and DOTA_BET_SEED_AMOUNT <= 0:
+            return state
+        if not queued_for_next_match:
+            reserved = loan_service.deduct_up_to_nonprofit_fund(
+                guild_id,
+                DOTA_BET_SEED_AMOUNT,
+                source="dota_bet_seed",
+                related_type="pending_match",
+                related_id=state.pending_match_id,
+                reason="reserve-backed Dota betting seed",
+                metadata={"betting_mode": state.betting_mode},
+            )
         if reserved <= 0:
             return state
 
         state.bet_seed_reserved = reserved
-        if state.betting_mode == "pool":
+        if state.betting_mode == "pool" or queued_for_next_match:
             state.bet_seed_radiant = (reserved + 1) // 2
             state.bet_seed_dire = reserved // 2
             state.bet_seed_bonus = 0

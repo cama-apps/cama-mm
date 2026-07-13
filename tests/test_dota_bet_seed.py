@@ -77,6 +77,29 @@ def test_pool_shuffle_reserves_split_seed_from_nonprofit_fund(services):
     assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
 
 
+def test_pool_shuffle_consumes_entire_queued_next_match_pot(services):
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    match_service = services["match_service"]
+    player_ids = list(range(30100, 30110))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 200)
+    with loan_repo.connection() as conn:
+        conn.execute(
+            "UPDATE nonprofit_fund SET total_collected = 25, next_match_pot = 175 WHERE guild_id = ?",
+            (TEST_GUILD_ID,),
+        )
+
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+
+    assert pending.bet_seed_reserved == 175
+    assert pending.bet_seed_radiant == 88
+    assert pending.bet_seed_dire == 87
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 25
+    assert loan_repo.consume_next_match_pot(TEST_GUILD_ID) == 0
+
+
 def test_house_shuffle_reserves_partial_seed_as_bonus_pool(services):
     player_repo = services["player_repo"]
     loan_repo = services["loan_repo"]

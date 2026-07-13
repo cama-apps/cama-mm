@@ -208,7 +208,7 @@ async def disburse_execute(
             color=0xFF6B6B,
         )
         await interaction.followup.send(embed=embed)
-    elif disbursement["total_disbursed"] == 0:
+    elif disbursement["total_disbursed"] == 0 or disbursement.get("message"):
         embed = discord.Embed(
             title="💝 Disbursement Complete (Tax Man)",
             description=disbursement.get("message", "No funds were distributed."),

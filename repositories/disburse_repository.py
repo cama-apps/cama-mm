@@ -117,7 +117,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             discord_id: Voter's Discord ID
             method: 'even', 'proportional', 'neediest', 'stimulus', 'lottery', 'social_security', 'richest', or 'cancel'
         """
-        if method not in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "cancel"):
+        if method not in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "burn", "next_match_pot", "cancel"):
             raise ValueError(f"Invalid vote method: {method}")
 
         normalized_guild = self.normalize_guild_id(guild_id)
@@ -153,7 +153,8 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             if not row:
                 return {
                     "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-                    "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
+                    "lottery": 0, "social_security": 0, "richest": 0, "burn": 0,
+                    "next_match_pot": 0, "cancel": 0
                 }
 
             proposal_id = row["proposal_id"]
@@ -170,11 +171,53 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
 
             counts = {
                 "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-                "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
+                "lottery": 0, "social_security": 0, "richest": 0, "burn": 0,
+                "next_match_pot": 0, "cancel": 0
             }
             for row in cursor.fetchall():
                 counts[row["vote_method"]] = row["count"]
             return counts
+
+    def complete_reserve_allocation_atomic(
+        self, guild_id: int | None, amount: int, method: str
+    ) -> bool:
+        """Complete a burn/next-pot allocation without returning locked funds."""
+        if method not in ("burn", "next_match_pot"):
+            raise ValueError(f"Invalid reserve allocation method: {method}")
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE disburse_proposals SET status = 'completed'
+                WHERE guild_id = ? AND status = 'active'
+                """,
+                (normalized_guild,),
+            )
+            if cursor.rowcount != 1:
+                return False
+            if method == "next_match_pot":
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund
+                        (guild_id, total_collected, next_match_pot, updated_at)
+                    VALUES (?, 0, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        next_match_pot = next_match_pot + excluded.next_match_pot,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_guild, amount),
+                )
+            cursor.execute(
+                """
+                INSERT INTO disburse_history
+                    (guild_id, disbursed_at, total_amount, method, recipient_count, recipients)
+                VALUES (?, ?, ?, ?, 0, '[]')
+                """,
+                (normalized_guild, now, amount, method),
+            )
+            return True
 
 
 
