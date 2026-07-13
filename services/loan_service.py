@@ -140,6 +140,10 @@ class LoanService:
         """Get the total collected in the nonprofit fund."""
         return self.loan_repo.get_nonprofit_fund(guild_id)
 
+    def consume_next_match_pot(self, guild_id: int | None) -> int:
+        """Claim a reserve allocation earmarked for the next betting match."""
+        return self.loan_repo.consume_next_match_pot(guild_id)
+
     def add_to_nonprofit_fund(
         self,
         guild_id: int | None,

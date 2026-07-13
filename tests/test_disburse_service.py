@@ -221,14 +221,14 @@ class TestProposalLifecycle:
     def test_can_propose_no_eligible_recipients(
         self, disburse_service, player_repo, setup_nonprofit_fund
     ):
-        """Test proposal blocked when no debtors and insufficient non-debtors for stimulus."""
+        """Burn and next-pot votes allow a proposal without player recipients."""
         # Create only 1 player with positive balance (not enough for stimulus)
         player_repo.add(discord_id=9999, discord_username="RichGuy", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.update_balance(9999, TEST_GUILD_ID, 1000)
 
         can, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
-        assert not can
-        assert reason == "no_eligible_recipients"
+        assert can
+        assert reason == ""
 
     def test_create_proposal(
         self, disburse_service, setup_players, setup_nonprofit_fund
@@ -354,6 +354,34 @@ class TestQuorumAndExecution:
         assert delta_sum == result["total_disbursed"]
         # And the reported per-recipient distribution must match the same total.
         assert sum(amount for _, amount in result["distributions"]) == result["total_disbursed"]
+
+    @pytest.mark.parametrize("method", ["burn", "next_match_pot"])
+    def test_reserve_allocation_methods_consume_locked_fund(
+        self,
+        method,
+        disburse_service,
+        loan_repo,
+        setup_players,
+        setup_nonprofit_fund,
+    ):
+        proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, method)
+        disburse_service.add_vote(TEST_GUILD_ID, 1004, method)
+
+        result = disburse_service.execute_disbursement(TEST_GUILD_ID)
+
+        assert result["method"] == method
+        assert result["total_disbursed"] == proposal.fund_amount
+        assert result["recipient_count"] == 0
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+        queued = loan_repo.consume_next_match_pot(TEST_GUILD_ID)
+        assert queued == (proposal.fund_amount if method == "next_match_pot" else 0)
+
+    def test_can_propose_without_player_recipients_for_burn_or_next_pot(
+        self, disburse_service, loan_repo
+    ):
+        loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 100)
+        assert disburse_service.can_propose(TEST_GUILD_ID) == (True, "")
 
     def test_execute_disbursement_aborts_on_missing_recipient(
         self, disburse_repo, loan_repo, player_repo
@@ -782,7 +810,7 @@ class TestCanProposeWithStimulus:
     def test_can_propose_no_eligible_recipients(
         self, disburse_service, player_repo, loan_repo
     ):
-        """Test proposal blocked when no debtors and no stimulus-eligible players."""
+        """Non-recipient allocations keep proposals available without recipients."""
         # Create only 3 players, all non-debtors (all in top 3)
         for i in range(1, 4):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
@@ -793,9 +821,8 @@ class TestCanProposeWithStimulus:
         loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=300)
 
         can, reason = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
-        # Should be blocked - only 3 non-debtors, all in top 3
-        assert not can
-        assert reason == "no_eligible_recipients"
+        assert can
+        assert reason == ""
 
 
 class TestStimulusExecution:

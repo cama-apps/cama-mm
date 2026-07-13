@@ -480,9 +480,15 @@ class SchemaManager:
                 "create_mana_protection_tables",
                 self._migration_create_mana_protection_tables,
             ),
+            ("add_next_match_pot_to_nonprofit_fund", self._migration_add_next_match_pot_to_nonprofit_fund),
         ]
 
     # --- Migrations ---
+
+    def _migration_add_next_match_pot_to_nonprofit_fund(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor, "nonprofit_fund", "next_match_pot", "INTEGER NOT NULL DEFAULT 0"
+        )
 
     def _migration_add_glicko_columns(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "glicko_rating", "REAL")

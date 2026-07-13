@@ -31,7 +31,8 @@ class DisburseProposal:
     status: str
     votes: dict[str, int] = field(default_factory=lambda: {
         "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-        "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
+        "lottery": 0, "social_security": 0, "richest": 0, "burn": 0,
+        "next_match_pot": 0, "cancel": 0
     })
 
     @property
@@ -59,7 +60,7 @@ class DisburseService:
     - neediest: All funds go to player with most debt (capped)
     """
 
-    METHODS = ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "cancel")
+    METHODS = ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "burn", "next_match_pot", "cancel")
     METHOD_LABELS = {
         "even": "Even Split",
         "proportional": "Proportional",
@@ -68,6 +69,8 @@ class DisburseService:
         "lottery": "Lottery",
         "social_security": "Social Security",
         "richest": "Richest",
+        "burn": "Burn",
+        "next_match_pot": "Next Match Pot",
         "cancel": "Cancel",
     }
 
@@ -122,12 +125,6 @@ class DisburseService:
         fund = self.loan_repo.get_nonprofit_fund(guild_id)
         if fund < self.min_fund:
             return False, f"insufficient_fund:{fund}:{self.min_fund}"
-
-        # Check for players with negative balance OR stimulus-eligible players
-        debtors = self.player_repo.get_players_with_negative_balance(guild_id)
-        stimulus_eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
-        if not debtors and not stimulus_eligible:
-            return False, "no_eligible_recipients"
 
         return True, ""
 
@@ -187,7 +184,8 @@ class DisburseService:
             status="active",
             votes={
                 "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-                "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
+                "lottery": 0, "social_security": 0, "richest": 0, "burn": 0,
+                "next_match_pot": 0, "cancel": 0
             },
         )
 
@@ -272,7 +270,7 @@ class DisburseService:
         max_votes = max(votes.values())
         winners = [m for m, v in votes.items() if v == max_votes]
 
-        for method in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "cancel"):
+        for method in self.METHODS:
             if method in winners:
                 return method
 
@@ -332,6 +330,29 @@ class DisburseService:
         balances so a concurrent caller will find no active proposal to act on.
         """
         fund_amount = proposal.fund_amount
+
+        if method in ("burn", "next_match_pot"):
+            was_active = self.disburse_repo.complete_reserve_allocation_atomic(
+                guild_id,
+                fund_amount,
+                method,
+            )
+            if not was_active:
+                raise ValueError("No active proposal")
+            destination = (
+                "removed from circulation"
+                if method == "burn"
+                else "queued for an even split into the next match's betting pot"
+            )
+            return {
+                "success": True,
+                "method": method,
+                "method_label": self.METHOD_LABELS[method],
+                "total_disbursed": fund_amount,
+                "distributions": [],
+                "recipient_count": 0,
+                "message": f"{fund_amount} Jopacoin {destination}.",
+            }
 
         # Handle cancel specially - reset proposal instead of distributing.
         # The reset + fund credit happen in a single BEGIN IMMEDIATE so a crash

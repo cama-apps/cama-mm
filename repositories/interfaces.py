@@ -1252,6 +1252,9 @@ class ILoanRepository(ABC):
     def get_nonprofit_fund(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
+    def consume_next_match_pot(self, guild_id: int | None) -> int: ...
+
+    @abstractmethod
     def add_to_nonprofit_fund(
         self,
         guild_id: int | None,

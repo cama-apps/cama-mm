@@ -65,6 +65,19 @@ def build_disburse_embed(proposal) -> discord.Embed:
         inline=True,
     )
     embed.add_field(
+        name="🔥 Burn",
+        value=f"Remove reserve funds\n**{votes.get('burn', 0)}** votes",
+        inline=True,
+    )
+    embed.add_field(
+        name="🎰 Next Match Pot",
+        value=(
+            "Split all funds evenly into the next betting pot\n"
+            f"**{votes.get('next_match_pot', 0)}** votes"
+        ),
+        inline=True,
+    )
+    embed.add_field(
         name="❌ Cancel",
         value=f"Keep budget in reserve\n**{votes.get('cancel', 0)}** votes",
         inline=True,

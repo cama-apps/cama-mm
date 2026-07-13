@@ -140,7 +140,7 @@ class DisburseVoteView(discord.ui.View):
                     )
                     await interaction.response.send_message(embed=embed)
                 # Build result message
-                elif disbursement["total_disbursed"] == 0:
+                elif disbursement["total_disbursed"] == 0 or disbursement.get("message"):
                     result_msg = disbursement.get(
                         "message", "No funds were distributed."
                     )
@@ -286,6 +286,28 @@ class DisburseVoteView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self._handle_vote(interaction, "richest", "Richest")
+
+    @discord.ui.button(
+        label="Burn",
+        emoji="🔥",
+        style=discord.ButtonStyle.danger,
+        custom_id="disburse:burn",
+    )
+    async def vote_burn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "burn", "Burn")
+
+    @discord.ui.button(
+        label="Next Match Pot",
+        emoji="🎰",
+        style=discord.ButtonStyle.success,
+        custom_id="disburse:next_match_pot",
+    )
+    async def vote_next_match_pot(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "next_match_pot", "Next Match Pot")
 
     @discord.ui.button(
         label="Cancel",

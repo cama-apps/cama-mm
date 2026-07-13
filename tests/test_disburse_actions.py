@@ -32,6 +32,8 @@ class _Proposal:
             "lottery": 0,
             "social_security": 0,
             "richest": 0,
+            "burn": 0,
+            "next_match_pot": 0,
             "cancel": 0,
         }
 
@@ -57,6 +59,8 @@ class _FakeDisburseService:
         "lottery",
         "social_security",
         "richest",
+        "burn",
+        "next_match_pot",
         "cancel",
     )
     METHOD_LABELS = {
@@ -67,6 +71,8 @@ class _FakeDisburseService:
         "lottery": "Lottery",
         "social_security": "Social Security",
         "richest": "Richest",
+        "burn": "Burn",
+        "next_match_pot": "Next Match Pot",
         "cancel": "Cancel",
     }
 
@@ -166,6 +172,9 @@ def test_disburse_embed_uses_jopacoin_reserve_language():
     assert "Jopacoin Reserve" in text
     assert "server operations budget" in text
     assert "Keep budget in reserve" in text
+    assert "Remove reserve funds" in text
+    assert "Remove reserve funds permanently" not in text
+    assert "Split all funds evenly into the next betting pot" in text
     assert "Nonprofit" not in text
 
 
