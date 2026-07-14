@@ -1425,7 +1425,10 @@ class BettingCommands(commands.Cog):
         elif result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 2-7% of balance from player ranked above
             player_above = await asyncio.to_thread(
-                self.player_service.get_player_above, user_id, guild_id
+                self.player_service.get_player_above,
+                user_id,
+                guild_id,
+                min_balance=HOSTILE_LOSS_MIN_BALANCE,
             )
 
             if (
@@ -1458,7 +1461,7 @@ class BettingCommands(commands.Cog):
                 if interaction.guild:
                     shell_victim = interaction.guild.get_member(player_above.discord_id)
             else:
-                # User is #1 - shell misses
+                # No eligible player is ahead - shell misses
                 shell_missed = True
                 shell_amount = 0
 

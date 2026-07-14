@@ -517,20 +517,26 @@ class PlayerService:
         """
         return self.player_repo.get_leaderboard(guild_id, limit, offset)
 
-    def get_player_above(self, discord_id: int, guild_id: int):
+    def get_player_above(
+        self,
+        discord_id: int,
+        guild_id: int,
+        min_balance: int | None = None,
+    ):
         """
-        Get the player ranked one position higher on the balance leaderboard.
+        Get the nearest eligible player above on the balance leaderboard.
 
         Used for Red Shell wheel mechanic - steals from the player ahead.
 
         Args:
             discord_id: The player's Discord ID
             guild_id: Guild ID
+            min_balance: Optional minimum balance for the target
 
         Returns:
-            Player object of the player ranked above, or None if user is #1
+            Player above the user meeting ``min_balance``, or None if no one is eligible
         """
-        return self.player_repo.get_player_above(discord_id, guild_id)
+        return self.player_repo.get_player_above(discord_id, guild_id, min_balance=min_balance)
 
     def get_player_below(self, discord_id: int, guild_id: int):
         """
