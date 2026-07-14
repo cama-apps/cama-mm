@@ -664,13 +664,13 @@ def compute_live_golden_wedges(
         target_ev: Target EV per spin. Defaults to config.WHEEL_GOLDEN_TARGET_EV.
     """
     from config import (
-        LIGHTNING_BOLT_PCT_MAX,
-        LIGHTNING_BOLT_PCT_MIN,
         WHEEL_BANANA_PEEL_EST_EV,
         WHEEL_BLUE_SHELL_EST_EV,
         WHEEL_BOMB_OMB_EST_EV,
         WHEEL_GOLDEN_RECESSION_TOP_PCT,
         WHEEL_GOLDEN_TARGET_EV,
+        WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX,
+        WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN,
         WHEEL_GREEN_SHELL_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
     )
@@ -678,7 +678,9 @@ def compute_live_golden_wedges(
     if target_ev is None:
         target_ev = WHEEL_GOLDEN_TARGET_EV
 
-    avg_trickle_pct = (LIGHTNING_BOLT_PCT_MIN + LIGHTNING_BOLT_PCT_MAX) / 2.0
+    avg_trickle_pct = (
+        WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN + WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX
+    ) / 2.0
 
     # HEIST: steal 5-12% (avg 8.5%, min 1) from each of the bottom 30 players
     heist_ev = float(sum(max(1, int(b * 0.085)) for b in bottom_player_balances))
@@ -692,7 +694,7 @@ def compute_live_golden_wedges(
     # COMPOUND_INTEREST: flat +100 JC reward.
     compound_ev = 100.0
 
-    # TRICKLE_DOWN: tax all others 1-3% (avg 2%); approximate from total
+    # TRICKLE_DOWN: tax all others 2-5% (avg 3.5%); approximate from total
     others_positive = max(0, total_positive_balance - max(0, spinner_balance))
     trickle_ev = float(int(others_positive * avg_trickle_pct))
 

@@ -761,7 +761,12 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
     monkeypatch.setattr(
         "commands.shop.random.sample", lambda population, count: population[:count]
     )
-    monkeypatch.setattr("commands.shop.random.randint", lambda *_args: 20)
+
+    def pyroclasm_roll(low, high):
+        assert (low, high) == (12, 28)
+        return 20
+
+    monkeypatch.setattr("commands.shop.random.randint", pyroclasm_roll)
 
     buyer_id = 4242
     guild_id = 9001
@@ -825,6 +830,8 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
 @pytest.mark.asyncio
 async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch):
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    bonus_roll = MagicMock(side_effect=[0.19, 0.20])
+    monkeypatch.setattr("commands.shop.random.random", bonus_roll)
 
     buyer_id = 4242
     guild_id = 9001
@@ -838,7 +845,7 @@ async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch
     bot.mana_repo.mark_item_used_atomic.return_value = True
     bot.protection_service = MagicMock()
     bot.protection_service.apply_hostile_loss.side_effect = [
-        SimpleNamespace(applied_loss=1, absorbed_amount=1),
+        SimpleNamespace(applied_loss=1, absorbed_amount=2),
         SimpleNamespace(applied_loss=1, absorbed_amount=1),
     ]
 
@@ -856,18 +863,25 @@ async def test_manashop_soul_harvest_gateway_moves_only_applied_loss(monkeypatch
     assert [call.args for call in player_service.adjust_balance.call_args_list] == [
         (buyer_id, guild_id, -25),
     ]
-    for call in bot.protection_service.apply_hostile_loss.call_args_list:
+    calls = bot.protection_service.apply_hostile_loss.call_args_list
+    assert [call.args[:3] for call in calls] == [
+        (targets[0].discord_id, guild_id, 3),
+        (targets[1].discord_id, guild_id, 2),
+    ]
+    assert bonus_roll.call_count == len(targets)
+    for call in calls:
         assert call.kwargs["kind"] == "soul_harvest"
         assert call.kwargs["destination"] == "player"
         assert call.kwargs["recipient_id"] == buyer_id
     message = interaction.followup.send.call_args.args[0]
     assert "Gained **2" in message
-    assert "Shields absorbed **2" in message
+    assert "Shields absorbed **3" in message
 
 
 @pytest.mark.asyncio
 async def test_manashop_soul_harvest_keeps_effect_but_claims_daily_slot(monkeypatch):
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.shop.random.random", lambda: 1.0)
 
     buyer_id = 4242
     guild_id = 9001
@@ -962,7 +976,12 @@ async def test_manashop_soul_harvest_refunds_and_releases_daily_slot_without_tar
 @pytest.mark.asyncio
 async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
-    monkeypatch.setattr("commands.shop.random.randint", lambda *_args: 10)
+
+    def wildfire_roll(low, high):
+        assert (low, high) == (4, 14)
+        return 10
+
+    monkeypatch.setattr("commands.shop.random.randint", wildfire_roll)
 
     buyer_id = 4242
     guild_id = 9001

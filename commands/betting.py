@@ -113,6 +113,8 @@ from config import (
     WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
     WHEEL_COOLDOWN_SECONDS,
     WHEEL_GOLDEN_TOP_N,
+    WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX,
+    WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN,
     WHEEL_GREEN_SHELL_STEAL_MAX,
     WHEEL_GREEN_SHELL_STEAL_MIN,
     WHEEL_LOSE_PENALTY_COOLDOWN,
@@ -1882,7 +1884,10 @@ class BettingCommands(commands.Cog):
             all_players_td = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
             )
-            trickle_pct = random.uniform(LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
+            trickle_pct = random.uniform(
+                WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN,
+                WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX,
+            )
             trickle_total = 0
             trickle_count = 0
             trickle_centralized = False

@@ -60,6 +60,7 @@ logger = logging.getLogger("cama_bot.commands.shop")
 
 SOUL_HARVEST_COST = 25
 SOUL_HARVEST_DRAIN_PER_TARGET = 2
+SOUL_HARVEST_BONUS_DRAIN_CHANCE = 0.20
 
 
 def _protection_result_int(result, field: str, default: int = 0) -> int:
@@ -1643,7 +1644,13 @@ class ShopCommands(commands.Cog):
         app_commands.Choice(name="White • Mid • Aegis (35 JC) — fully absorb 75 JC of hostile losses for 24h", value="aegis"),
         app_commands.Choice(name="White • Ult • Sanctuary (90 JC, taps mana) — shared 150 JC shield for you + an ally", value="sanctuary"),
         # Black
-        app_commands.Choice(name="Black • Cheap • Soul Harvest (25 JC) — drain 2 JC from every positive player", value="soul_harvest"),
+        app_commands.Choice(
+            name=(
+                "Black • Cheap • Soul Harvest (25 JC) — drain 2 JC (20% chance 3) from each "
+                f"{HOSTILE_LOSS_MIN_BALANCE}+ JC player"
+            ),
+            value="soul_harvest",
+        ),
         app_commands.Choice(name="Black • Mid • Blood Pact (75 JC) — skim 25% of target's earnings 24h", value="blood_pact"),
         app_commands.Choice(name="Black • Ult • Dark Bargain (150 JC, taps mana) — 800 JC now, 700 due later", value="dark_bargain"),
     ])
@@ -1912,7 +1919,7 @@ class ShopCommands(commands.Cog):
             victim_lines = []
             for t in targets:
                 destroy_amt = scale_deflationary_minigame_jc_delta(
-                    random.randint(12, 24)
+                    random.randint(12, 28)
                 )
                 destroy_amt = min(destroy_amt, t.jopacoin_balance)
                 if destroy_amt > 0:
@@ -2085,9 +2092,11 @@ class ShopCommands(commands.Cog):
             event_prefix = f"soul_harvest:{uuid.uuid4().hex}"
             total_drained = 0
             total_absorbed = 0
+            scaled_drain = scale_minigame_jc_delta(SOUL_HARVEST_DRAIN_PER_TARGET)
             for p in eligible:
+                bonus_drain = 1 if random.random() < SOUL_HARVEST_BONUS_DRAIN_CHANCE else 0
                 drain = min(
-                    scale_minigame_jc_delta(SOUL_HARVEST_DRAIN_PER_TARGET),
+                    scaled_drain + bonus_drain,
                     p.jopacoin_balance,
                 )
                 outcome = await _apply_hostile_loss(
@@ -2131,7 +2140,7 @@ class ShopCommands(commands.Cog):
             )
             await interaction.followup.send(
                 f"🌿💀 **SOUL HARVEST** — {interaction.user.mention} drains the living!\n"
-                f"Drained up to **2 {JOPACOIN_EMOTE}** from **{len(eligible)}** players. "
+                f"Drained up to **3 {JOPACOIN_EMOTE}** from **{len(eligible)}** players. "
                 f"Gained **{total_drained} {JOPACOIN_EMOTE}**.{shield_text}\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {balance - cost + total_drained})"
             )
@@ -2242,7 +2251,7 @@ class ShopCommands(commands.Cog):
             total_drained = 0
             total_absorbed = 0
             for p in eligible:
-                drain = scale_deflationary_minigame_jc_delta(random.randint(4, 12))
+                drain = scale_deflationary_minigame_jc_delta(random.randint(4, 14))
                 drain = min(drain, p.jopacoin_balance)
                 if drain > 0:
                     outcome = await _apply_hostile_loss(
