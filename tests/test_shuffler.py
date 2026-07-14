@@ -214,6 +214,13 @@ class TestTeam:
 class TestShuffler:
     """Test BalancedShuffler algorithm."""
 
+    def test_lobby_rating_bonus_uses_average_team_total(self):
+        shuffler = BalancedShuffler(use_glicko=False)
+
+        bonus = shuffler._calculate_lobby_rating_bonus([1500] * 10)
+
+        assert bonus == pytest.approx(75)
+
     def test_shuffle_exact_10_players(self):
         """Test shuffling with exactly 10 players."""
         players = [Player(name=f"Player{i}", mmr=1500 + i * 10) for i in range(10)]
@@ -813,6 +820,42 @@ def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 5
 
 class TestShuffler14Players:
     """Tests for 14-player pool shuffling (new max lobby size)."""
+
+    def test_branch_bound_does_not_prune_negative_rd_score(self, monkeypatch):
+        players = [
+            Player(
+                name=f"Player{i}",
+                mmr=1500,
+                glicko_rd=25,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(14)
+        ]
+        shuffler = BalancedShuffler(use_glicko=False)
+        greedy_result = (
+            Team(players[:5], role_assignments=["1", "2", "3", "4", "5"]),
+            Team(players[5:10], role_assignments=["1", "2", "3", "4", "5"]),
+            players[10:],
+            -100.0,
+        )
+        monkeypatch.setattr(shuffler, "_greedy_shuffle", lambda *args, **kwargs: greedy_result)
+
+        optimized_calls = 0
+
+        def optimize(team1_players, team2_players, **kwargs):
+            nonlocal optimized_calls
+            optimized_calls += 1
+            return (
+                Team(team1_players, role_assignments=["1", "2", "3", "4", "5"]),
+                Team(team2_players, role_assignments=["1", "2", "3", "4", "5"]),
+                -50.0,
+            )
+
+        monkeypatch.setattr(shuffler, "_optimize_role_assignments_for_matchup", optimize)
+
+        shuffler.shuffle_branch_bound(players)
+
+        assert optimized_calls > 0
 
     def test_14_player_pool_basic_shuffle(self):
         """
