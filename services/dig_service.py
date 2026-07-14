@@ -137,6 +137,7 @@ class DigService(
         quest_service=None,
         prediction_repo=None,
         protection_service=None,
+        curse_repo=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -149,6 +150,7 @@ class DigService(
         self.balance_history_service = balance_history_service
         self.prediction_repo = prediction_repo
         self.protection_service = protection_service
+        self.curse_repo = curse_repo
         # Sub-services for focused concerns. Defaults wire local instances so
         # existing callers (and tests that construct DigService directly) keep
         # working without having to pass anything new.
@@ -559,6 +561,9 @@ class DigService(
         curse_advance_bonus = curse_effects.get("advance_bonus", 0)
         curse_jc_bonus = curse_effects.get("jc_bonus", 0)
         curse_luminosity_drain = curse_effects.get("luminosity_drain", 0)
+        curse_cave_in_bonus = self._capped_curse_effect(
+            curse_effects, "cave_in_bonus",
+        )
         self._decrement_curse(discord_id, guild_id, tunnel)
 
         # 8. Prestige perks, relics, and ASCENSION
@@ -599,6 +604,10 @@ class DigService(
             lum_info["drained"] += curse_luminosity_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
+        luminosity = self._apply_lantern_stub_restore(
+            discord_id, guild_id, tunnel, lum_info, today,
+        )
+
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
@@ -635,6 +644,12 @@ class DigService(
         cave_in_chance = layer.get("cave_in_pct", 0.10)
         # Ascension cave-in bonus
         cave_in_chance += ascension.get("cave_in_bonus", 0)
+        cave_in_chance += curse_cave_in_bonus
+        shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
+        shop_curse_cave_in_bonus = self._shop_curse_cave_in_bonus(
+            shop_curse_stacks,
+        )
+        cave_in_chance += shop_curse_cave_in_bonus
         # Weather cave-in modifier (negated during Storm if Stormcaller equipped)
         weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
         if weather_cave_in_bonus and self._relic_storm_negates_hazard(
@@ -946,6 +961,7 @@ class DigService(
             discord_id, guild_id, weather_code=weather_code_now,
             luminosity=luminosity,
             is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), today),
+            is_paid_dig=paid_dig_cost > 0,
         )
         # Mana × weather combo: Sunny + White boosts yield.
         weather_combo_yield = 1.0
@@ -1398,6 +1414,9 @@ class DigService(
         curse_advance_bonus = curse_effects.get("advance_bonus", 0)
         curse_jc_bonus = curse_effects.get("jc_bonus", 0)
         curse_luminosity_drain = curse_effects.get("luminosity_drain", 0)
+        curse_cave_in_bonus = self._capped_curse_effect(
+            curse_effects, "cave_in_bonus",
+        )
         self._decrement_curse(discord_id, guild_id, tunnel)
 
         # Prestige, ascension, corruption, mutations, pickaxe
@@ -1430,6 +1449,10 @@ class DigService(
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] += curse_luminosity_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        luminosity = self._apply_lantern_stub_restore(
+            discord_id, guild_id, tunnel, lum_info, today,
+        )
 
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
@@ -1465,6 +1488,12 @@ class DigService(
         grappling_hook_charges = int(tunnel.get("grappling_hook_charges") or 0)
         cave_in_chance = layer.get("cave_in_pct", 0.10)
         cave_in_chance += ascension.get("cave_in_bonus", 0)
+        cave_in_chance += curse_cave_in_bonus
+        shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
+        shop_curse_cave_in_bonus = self._shop_curse_cave_in_bonus(
+            shop_curse_stacks,
+        )
+        cave_in_chance += shop_curse_cave_in_bonus
         weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
         if weather_cave_in_bonus and self._relic_storm_negates_hazard(
             discord_id, guild_id, self._get_weather_code(guild_id, layer_name)
@@ -1551,6 +1580,7 @@ class DigService(
             weather_code=self._get_weather_code(guild_id, layer_name),
             luminosity=luminosity,
             is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), today),
+            is_paid_dig=paid_dig_cost > 0,
             include_random=False,
         )
         if depth_before >= 276:
@@ -1700,6 +1730,8 @@ class DigService(
             "buff_cavein_reduction": buff_cavein_reduction,
             "curse_advance_bonus": curse_advance_bonus,
             "curse_jc_bonus": curse_jc_bonus,
+            "shop_curse_stacks": shop_curse_stacks,
+            "shop_curse_cave_in_bonus": shop_curse_cave_in_bonus,
             "perks": perks,
             "prestige_level": prestige_level,
             "ascension": ascension,

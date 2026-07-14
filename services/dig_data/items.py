@@ -58,7 +58,7 @@ PICKAXE_TIERS: list[dict] = [
 # boss fight; at zero the piece auto-unequips and must be repaired
 # before re-equipping.
 
-from domain.models.dig_gear import GearSlot, GearTierDef  # noqa: E402
+from domain.models.dig_gear import GearSlot, GearTierDef, UniqueGearDef  # noqa: E402
 
 GEAR_MAX_DURABILITY: int = 20
 GEAR_REPAIR_COST_PCT: float = 0.15
@@ -177,6 +177,45 @@ GEAR_TIER_TABLES: dict[GearSlot, list[GearTierDef]] = {
     GearSlot.ARMOR:  ARMOR_TIERS,
     GearSlot.BOOTS:  BOOTS_TIERS,
     GearSlot.AMULET: AMULET_TIERS,
+}
+
+
+# Event-only side-grades. Their reference tier is used only for inventory
+# ordering and compatibility with the existing gear row shape; their authored
+# modifiers and durability come from this registry.
+UNIQUE_GEAR: dict[str, UniqueGearDef] = {
+    "glassbreaker_pick": UniqueGearDef(
+        "glassbreaker_pick", "Glassbreaker Pick", GearSlot.WEAPON, 3, 200, 8,
+        player_dmg=2, player_hit=-0.08,
+    ),
+    "needle_pick": UniqueGearDef(
+        "needle_pick", "Needle Pick", GearSlot.WEAPON, 3, 200, 16,
+        player_hit=0.08, crit_chance=0.03,
+    ),
+    "briarplate": UniqueGearDef(
+        "briarplate", "Briarplate", GearSlot.ARMOR, 3, 200, 14,
+        player_hp_bonus=1, effect_id="reflect_first_hit",
+    ),
+    "nullweave_mantle": UniqueGearDef(
+        "nullweave_mantle", "Nullweave Mantle", GearSlot.ARMOR, 3, 200, 12,
+        effect_id="block_first_status",
+    ),
+    "springheel_boots": UniqueGearDef(
+        "springheel_boots", "Springheel Boots", GearSlot.BOOTS, 3, 200, 14,
+        boss_hit_reduction=0.04, effect_id="springheel_counter",
+    ),
+    "anchor_boots": UniqueGearDef(
+        "anchor_boots", "Anchor Boots", GearSlot.BOOTS, 3, 200, 16,
+        player_hp_bonus=1, effect_id="block_first_skip",
+    ),
+    "loaded_die": UniqueGearDef(
+        "loaded_die", "Loaded Die", GearSlot.AMULET, 3, 200, 12,
+        player_hit=-0.05, crit_chance=0.10, crit_bonus=1,
+    ),
+    "blood_locket": UniqueGearDef(
+        "blood_locket", "Blood Locket", GearSlot.AMULET, 3, 200, 14,
+        player_hp_bonus=-1, crit_chance=0.05, effect_id="heal_first_crit",
+    ),
 }
 
 

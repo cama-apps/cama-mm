@@ -15,7 +15,7 @@ from services.dig._common import (
     logger,
 )
 from services.dig_constants import (
-    ARTIFACT_POOL,
+    ARTIFACT_BY_ID,
     GEAR_BOSS_DROP_RATE,
     GEAR_DROP_DEPTH_TIER_MAP,
     GEAR_MAX_DURABILITY,
@@ -23,11 +23,16 @@ from services.dig_constants import (
     GEAR_TIER_TABLES,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
+    RELIC_RARITY_ORDER,
     RELIC_SLOTS_BASE,
     RELIC_SLOTS_MAX,
+    RELICS,
     TROPHY_CARVE_RATE,
     TROPHY_RELIC_IDS,
+    UNIQUE_GEAR,
     format_relic_label,
+    is_ordinary_relic,
+    relic_rarity_for_roll,
 )
 
 
@@ -45,6 +50,7 @@ class GearMixin:
         weather_code: str | None = None,
         luminosity: int | None = None,
         is_first_dig_today: bool = False,
+        is_paid_dig: bool = False,
         include_random: bool = True,
     ) -> float:
         """Combined JC-yield multiplier from yield-affecting relics.
@@ -89,6 +95,8 @@ class GearMixin:
             mult *= 10.0
         if is_first_dig_today and self._has_relic(discord_id, guild_id, "first_light"):
             mult *= 2.0
+        if is_paid_dig and self._has_relic(discord_id, guild_id, "bone_abacus"):
+            mult *= 0.90
         return mult
 
     def _is_first_dig_of_day(self, last_dig_at, today: str) -> bool:
@@ -106,6 +114,32 @@ class GearMixin:
             datetime.datetime.fromtimestamp(int(last_dig_at), tz=datetime.UTC)
         )
         return prev != today
+
+    def _apply_lantern_stub_restore(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        luminosity_info: dict,
+        today: str,
+    ) -> int:
+        """Restore five luminosity on the owner's first dig of the game day."""
+        luminosity = int(luminosity_info.get("luminosity_after", 0))
+        if (
+            not self._has_relic(discord_id, guild_id, "lantern_stub")
+            or not self._is_first_dig_of_day(tunnel.get("last_dig_at"), today)
+        ):
+            return luminosity
+
+        restored = min(5, max(0, 100 - luminosity))
+        if restored <= 0:
+            return luminosity
+        luminosity += restored
+        luminosity_info["luminosity_after"] = luminosity
+        luminosity_info["lantern_stub_restored"] = restored
+        self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+        tunnel["luminosity"] = luminosity
+        return luminosity
 
     def _relic_storm_negates_hazard(
         self, discord_id: int, guild_id, weather_code: str | None
@@ -239,10 +273,20 @@ class GearMixin:
             slot = GearSlot(row["slot"])
         except ValueError:
             return None
-        table = GEAR_TIER_TABLES.get(slot, [])
         tier_idx = int(row["tier"])
-        if tier_idx < 0 or tier_idx >= len(table):
-            return None
+        item_id = row.get("item_id")
+        if item_id:
+            tier_def = UNIQUE_GEAR.get(str(item_id))
+            if tier_def is None or tier_def.slot != slot:
+                logger.warning("Unknown or mismatched unique dig gear id %r", item_id)
+                return None
+            max_durability = tier_def.max_durability
+        else:
+            table = GEAR_TIER_TABLES.get(slot, [])
+            if tier_idx < 0 or tier_idx >= len(table):
+                return None
+            tier_def = table[tier_idx]
+            max_durability = GEAR_MAX_DURABILITY
         return GearPiece(
             id=int(row["id"]),
             slot=slot,
@@ -251,7 +295,9 @@ class GearMixin:
             equipped=bool(row["equipped"]),
             acquired_at=int(row["acquired_at"]),
             source=str(row.get("source") or "shop"),
-            tier_def=table[tier_idx],
+            tier_def=tier_def,
+            item_id=str(item_id) if item_id else None,
+            max_durability=max_durability,
         )
 
     def _get_loadout(self, discord_id: int, guild_id) -> GearLoadout:
@@ -313,9 +359,10 @@ class GearMixin:
                 "id": p.id,
                 "slot": p.slot.value,
                 "tier": p.tier,
+                "item_id": p.item_id,
                 "name": p.tier_def.name,
                 "durability": p.durability,
-                "max_durability": GEAR_MAX_DURABILITY,
+                "max_durability": p.max_durability,
                 "equipped": p.equipped,
             }
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
@@ -350,9 +397,10 @@ class GearMixin:
                 "id": piece.id,
                 "slot": piece.slot.value,
                 "tier": piece.tier,
+                "item_id": piece.item_id,
                 "name": piece.tier_def.name,
                 "durability": piece.durability,
-                "max_durability": GEAR_MAX_DURABILITY,
+                "max_durability": piece.max_durability,
                 "equipped": piece.equipped,
             })
         return out
@@ -383,8 +431,15 @@ class GearMixin:
         self.dig_repo.unequip_gear(gear_id)
         return self._ok(slot=row["slot"], gear_id=gear_id)
 
-    def _gear_repair_cost(self, slot: str, tier: int) -> int:
+    def _gear_repair_cost(
+        self, slot: str, tier: int, item_id: str | None = None,
+    ) -> int:
         """Repair price = ``GEAR_REPAIR_COST_PCT`` of the tier's shop_price."""
+        if item_id:
+            unique = UNIQUE_GEAR.get(item_id)
+            if unique is None:
+                return 0
+            return int(round(unique.repair_value * GEAR_REPAIR_COST_PCT))
         try:
             slot_enum = GearSlot(slot)
         except ValueError:
@@ -394,19 +449,24 @@ class GearMixin:
             return 0
         return int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
 
-    def compute_repair_cost(self, slot: str, tier: int) -> int:
+    def compute_repair_cost(
+        self, slot: str, tier: int, item_id: str | None = None,
+    ) -> int:
         """Public read of the repair price for a (slot, tier). Mirrors the
         cost ``repair_gear`` would charge for a damaged piece, without
         touching balance or durability."""
-        return self._gear_repair_cost(slot, tier)
+        return self._gear_repair_cost(slot, tier, item_id)
 
     def compute_repair_all_cost(self, discord_id: int, guild_id) -> int:
         """Sum repair cost across every damaged piece the player owns."""
         rows = self.dig_repo.get_gear(discord_id, guild_id)
         return sum(
-            self._gear_repair_cost(r["slot"], int(r["tier"]))
+            self._gear_repair_cost(r["slot"], int(r["tier"]), r.get("item_id"))
             for r in rows
-            if int(r["durability"]) < GEAR_MAX_DURABILITY
+            if (
+                (piece := self._hydrate_gear_piece(r)) is not None
+                and int(r["durability"]) < piece.max_durability
+            )
         )
 
     def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
@@ -422,9 +482,14 @@ class GearMixin:
         gid = self.dig_repo.normalize_guild_id(guild_id)
         if int(row["discord_id"]) != int(discord_id) or int(row["guild_id"]) != gid:
             return self._error("That gear piece doesn't belong to you.")
-        if int(row["durability"]) >= GEAR_MAX_DURABILITY:
+        piece = self._hydrate_gear_piece(row)
+        if piece is None:
+            return self._error("That gear piece has an unknown definition.")
+        if int(row["durability"]) >= piece.max_durability:
             return self._error("That piece is already at full durability.")
-        cost = self._gear_repair_cost(row["slot"], int(row["tier"]))
+        cost = self._gear_repair_cost(
+            row["slot"], int(row["tier"]), row.get("item_id"),
+        )
         if cost > 0 and not self.player_repo.try_debit(
             discord_id,
             guild_id,
@@ -437,7 +502,7 @@ class GearMixin:
         ):
             balance = self.player_repo.get_balance(discord_id, guild_id)
             return self._error(f"Repair costs {cost} JC; you only have {balance}.")
-        self.dig_repo.repair_gear(gear_id, GEAR_MAX_DURABILITY)
+        self.dig_repo.repair_gear(gear_id, piece.max_durability)
         return self._ok(gear_id=gear_id, cost=cost)
 
     def repair_all_gear(self, discord_id: int, guild_id) -> dict:
@@ -447,13 +512,19 @@ class GearMixin:
         balance no repair runs and no JC is deducted.
         """
         rows = self.dig_repo.get_gear(discord_id, guild_id)
-        damaged = [
-            r for r in rows
-            if int(r["durability"]) < GEAR_MAX_DURABILITY
+        pieces = [
+            (r, piece)
+            for r in rows
+            if (piece := self._hydrate_gear_piece(r)) is not None
+            and int(r["durability"]) < piece.max_durability
         ]
+        damaged = [r for r, _piece in pieces]
         if not damaged:
             return self._error("Nothing to repair.")
-        total_cost = sum(self._gear_repair_cost(r["slot"], int(r["tier"])) for r in damaged)
+        total_cost = sum(
+            self._gear_repair_cost(r["slot"], int(r["tier"]), r.get("item_id"))
+            for r in damaged
+        )
         if total_cost > 0 and not self.player_repo.try_debit(
             discord_id,
             guild_id,
@@ -467,8 +538,9 @@ class GearMixin:
             return self._error(
                 f"Total repair costs {total_cost} JC; you only have {balance}.",
             )
+        max_by_id = {int(r["id"]): piece.max_durability for r, piece in pieces}
         for r in damaged:
-            self.dig_repo.repair_gear(int(r["id"]), GEAR_MAX_DURABILITY)
+            self.dig_repo.repair_gear(int(r["id"]), max_by_id[int(r["id"])])
         return self._ok(repaired=len(damaged), cost=total_cost)
 
     def buy_gear(self, discord_id: int, guild_id, slot: str, tier: int) -> dict:
@@ -598,8 +670,6 @@ class GearMixin:
         Uses the working ``add_artifact(... is_relic=True)`` signature
         — never goes through the broken ``roll_artifact`` path.
         """
-        from services.dig_constants import RELICS
-
         # Relics are unique — don't drop one the player already owns.
         owned = {
             dict(a).get("artifact_id")
@@ -638,7 +708,6 @@ class GearMixin:
         if random.random() >= TROPHY_CARVE_RATE:
             return None
         self.dig_repo.add_artifact(discord_id, guild_id, trophy_id, is_relic=True)
-        from services.dig_constants import ARTIFACT_BY_ID
         defn = ARTIFACT_BY_ID.get(trophy_id)
         return {
             "id": trophy_id,
@@ -664,13 +733,77 @@ class GearMixin:
             a = dict(a)
             if a.get("is_relic"):
                 artifact_id = a.get("artifact_id", "")
+                definition = ARTIFACT_BY_ID.get(artifact_id)
                 relics.append({
                     "id": artifact_id,
                     "db_id": a.get("id"),
                     "name": format_relic_label(artifact_id),
                     "equipped": a.get("equipped", 0),
+                    "rarity": definition.rarity if definition else "Unknown",
+                    "recyclable": bool(
+                        definition and is_ordinary_relic(definition)
+                    ),
                 })
         return relics
+
+    def recycle_relics(
+        self,
+        discord_id: int,
+        guild_id,
+        artifact_row_ids: list[int],
+    ) -> dict:
+        """Recycle three ordinary relic rows into one random next-tier relic."""
+        row_ids = [int(row_id) for row_id in artifact_row_ids]
+        if len(row_ids) != 3 or len(set(row_ids)) != 3:
+            return self._error("Select exactly three different relics to recycle.")
+
+        owned_by_row = {
+            int(row["id"]): dict(row)
+            for row in (self.dig_repo.get_artifacts(discord_id, guild_id) or [])
+        }
+        selected = [owned_by_row.get(row_id) for row_id in row_ids]
+        if any(row is None or not row.get("is_relic") for row in selected):
+            return self._error("All selected relics must be in your inventory.")
+        if any(row.get("equipped") for row in selected):
+            return self._error("Only unequipped relics can be recycled.")
+
+        definitions = [ARTIFACT_BY_ID.get(row["artifact_id"]) for row in selected]
+        if any(definition is None or not is_ordinary_relic(definition) for definition in definitions):
+            return self._error("Progression and boss-exclusive relics cannot be recycled.")
+
+        rarities = {definition.rarity for definition in definitions}
+        if len(rarities) != 1:
+            return self._error("All three relics must have the same rarity.")
+        source_rarity = rarities.pop()
+        if source_rarity == RELIC_RARITY_ORDER[-1]:
+            return self._error("Legendary relics cannot be recycled further.")
+
+        output_rarity = RELIC_RARITY_ORDER[
+            RELIC_RARITY_ORDER.index(source_rarity) + 1
+        ]
+        output_pool = [
+            relic for relic in RELICS
+            if is_ordinary_relic(relic) and relic.rarity == output_rarity
+        ]
+        output = random.choice(output_pool)
+        try:
+            artifact_db_id = self.dig_repo.atomic_recycle_relics(
+                discord_id,
+                guild_id,
+                row_ids,
+                output.id,
+            )
+        except ValueError as exc:
+            return self._error(str(exc))
+
+        self._invalidate_relic_cache(discord_id, guild_id)
+        return self._ok(
+            source_rarity=source_rarity,
+            output_rarity=output_rarity,
+            relic_id=output.id,
+            relic_name=output.name,
+            artifact_db_id=artifact_db_id,
+        )
 
     def use_item(self, discord_id: int, guild_id, item_type: str) -> dict:
         """Queue an item for next dig."""
@@ -707,11 +840,10 @@ class GearMixin:
     def roll_artifact(self, discord_id: int, guild_id, depth: int, *, extra_rate_mod: float = 1.0) -> dict | None:
         """Roll for a raw-dig relic find. Returns relic info or None.
 
-        Only **entry-level basic relics** (min-prestige 0, Rare) are findable
-        from digging, and only ones the player doesn't already own (relics are
-        unique). Everything else — legendaries, prestige-gated relics, trophies
-        — comes from bosses or prestige grants. Find chance is the Rare rate
-        (0.5%) scaled by the same find modifiers as before.
+        Ordinary relics are findable at a 60/30/9/1 rarity split, excluding
+        ones the player already owns. Prestige and boss-exclusive relics remain
+        in their dedicated reward pools. The overall find chance remains 0.5%
+        before the existing modifiers.
         """
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
@@ -736,28 +868,28 @@ class GearMixin:
         # Post-pinnacle decay applies to artifact rate
         rate_mod *= self._post_pinnacle_decay_factor(depth, discord_id, guild_id)
 
-        # Single find roll at the Rare rate (scaled by the modifiers above).
+        # Single find roll at the base relic rate (scaled by modifiers above).
         if random.random() >= 0.005 * rate_mod:
             return None
 
-        # Findable pool: entry-level basic relics only (min-prestige 0, Rare),
-        # excluding any the player already owns (relics are unique). Prefer the
-        # current layer, fall back to any layer.
+        target_rarity = relic_rarity_for_roll(random.random())
+
+        # Prefer the current layer, then fall back to the full ordinary pool
+        # for the rolled rarity. Raw finds remain unique.
         owned = {
             dict(a).get("artifact_id")
             for a in (self.dig_repo.get_artifacts(discord_id, guild_id) or [])
         }
 
-        def _pool(require_layer: bool) -> list[dict]:
+        def _pool(require_layer: bool):
             return [
-                a for a in ARTIFACT_POOL
-                if a.get("is_relic")
-                and int(a.get("min_prestige", 0) or 0) == 0
-                and (a.get("rarity") or "").lower() == "rare"
-                and a.get("id") not in owned
+                relic for relic in RELICS
+                if is_ordinary_relic(relic)
+                and relic.rarity == target_rarity
+                and relic.id not in owned
                 and (
                     not require_layer
-                    or (a.get("layer") or "").lower() == layer_name.lower()
+                    or relic.layer.lower() == layer_name.lower()
                 )
             ]
 
@@ -766,14 +898,14 @@ class GearMixin:
             return None
 
         artifact = random.choice(eligible)
-        self.dig_repo.add_artifact(discord_id, guild_id, artifact["id"], is_relic=True)
+        self.dig_repo.add_artifact(discord_id, guild_id, artifact.id, is_relic=True)
         return {
-            "id": artifact["id"],
-            "name": artifact["name"],
-            "rarity": "rare",
+            "id": artifact.id,
+            "name": artifact.name,
+            "rarity": artifact.rarity.lower(),
             "type": "relic",
             "is_relic": True,
-            "description": artifact.get("lore_text", ""),
+            "description": artifact.lore_text,
         }
 
     def gift_relic(self, giver_id: int, receiver_id: int, guild_id, artifact_id: str) -> dict:

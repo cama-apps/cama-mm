@@ -21,6 +21,7 @@ from services.dig_constants import (
     get_phase2_for,
     get_phase3_for,
 )
+from services.dig_data.artifacts import is_ordinary_relic
 from services.dig_service import DigService
 
 NEW_BOSSES = {
@@ -155,8 +156,8 @@ def test_new_relics_in_catalog_with_lore_and_effect():
 
 
 def test_total_artifact_count():
-    # 30 originals + 7 "buff fun" relics; ALL_ARTIFACTS is relics-only.
-    assert len(ALL_ARTIFACTS) == 37
+    # 37 existing relics plus the 8 ordinary relics added with rarity progression.
+    assert len(ALL_ARTIFACTS) == 45
     assert all(a.is_relic for a in ALL_ARTIFACTS)
 
 
@@ -281,9 +282,9 @@ def test_trophies_excluded_from_prestige_relic_pool(svc, monkeypatch):
     assert dropped & set(GENERAL_RELICS)
 
 
-def test_roll_artifact_finds_only_basic_relics(svc, monkeypatch):
-    # Only entry-level basic relics (min-prestige 0, Rare) are findable from
-    # raw digs; legendaries, prestige-gated relics, and trophies never are.
+def test_roll_artifact_finds_only_ordinary_relics(svc, monkeypatch):
+    # Raw digs use the ordinary rarity progression; prestige-gated and trophy
+    # relics remain exclusive to their original sources.
     monkeypatch.setattr(random, "random", lambda: 0.0)  # always pass the find roll
     random.seed(7)
     found = set()
@@ -291,11 +292,11 @@ def test_roll_artifact_finds_only_basic_relics(svc, monkeypatch):
         r = svc.roll_artifact(111, 0, 160)  # Fungal Depths
         if r:
             found.add(r["id"])
-    assert found, "roll_artifact should find basic relics"
-    basics = {a.id for a in ALL_ARTIFACTS if a.min_prestige == 0 and a.rarity == "Rare"}
-    assert found <= basics, f"non-basic leaked into dig finds: {found - basics}"
-    for excluded in ("deepveined_coal", "aching_spine", "hollow_fang", "echo_stone"):
-        assert excluded not in found  # general / trophy / boss-only P5 / legendary
+    assert found, "roll_artifact should find ordinary relics"
+    ordinary = {a.id for a in ALL_ARTIFACTS if is_ordinary_relic(a)}
+    assert found <= ordinary, f"exclusive relic leaked into dig finds: {found - ordinary}"
+    for excluded in ("deepveined_coal", "aching_spine", "hollow_fang"):
+        assert excluded not in found  # general / trophy / boss-only P5
 
 
 def test_roll_artifact_relics_are_unique(svc, monkeypatch):

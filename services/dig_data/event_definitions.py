@@ -4348,6 +4348,211 @@ RANDOM_EVENTS: list[RandomEvent] = [
         social=True,
         splash=SplashConfig(strategy="deepest_n", victim_count=2, penalty_jc=12, trigger="success", mode="burn"),
     ),
+    # --- Roguelike event pass ----------------------------------------------
+    RandomEvent(
+        id="collapsed_armory",
+        name="Collapsed Armory",
+        description=(
+            "A buried armory rattles under a cracked slab. Every weapon inside has outlived its owner and seems pleased about it.",
+            "Rusty blades poke through a collapsed weapons rack. The ceiling is losing an argument with gravity.",
+        ),
+        min_depth=76, max_depth=150,
+        safe_option=EventChoice(
+            "Brace the roof and leave",
+            success=EventOutcome(
+                "You spend good coin on braces and leave the weapons to their retirement.",
+                0, -6, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pull the loudest weapon free",
+            success=EventOutcome(
+                "The roof holds. The weapon objects, but your pack has seniority.",
+                0, 4, False,
+                gear_reward_pool=("glassbreaker_pick", "needle_pick"),
+            ),
+            failure=EventOutcome(
+                "The roof files a grievance directly against your purse.",
+                0, -18, False,
+            ),
+            success_chance=0.35,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="dead_prospectors_pack",
+        name="Dead Prospector's Pack",
+        description=(
+            "A dead prospector still hugs a travel pack. The straps look newer than the prospector.",
+            "You find a miner who finally stopped digging. Their pack has not accepted the decision.",
+        ),
+        min_depth=76, max_depth=200,
+        safe_option=EventChoice(
+            "Pay respects and move on",
+            success=EventOutcome(
+                "You leave a small burial tithe. The pack stops following you with its buckles.",
+                0, -5, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Unbuckle the pack",
+            success=EventOutcome(
+                "The prospector lets go. The armor inside has only minor opinions about inheritance.",
+                0, 3, False,
+                gear_reward_pool=("briarplate", "nullweave_mantle"),
+            ),
+            failure=EventOutcome(
+                "The corpse keeps the pack. The floor takes two blocks and an administrative fee.",
+                -2, -16, False,
+            ),
+            success_chance=0.40,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="spore_debt",
+        name="Spore Debt",
+        description=(
+            "Mushrooms bloom into a ledger with your name already damply signed at the bottom.",
+            "A fungal clerk unfolds from the wall and presents an invoice for breathing nearby.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Settle the small account",
+            success=EventOutcome(
+                "You pay the mushrooms. They stamp PAID across a lung-shaped page.",
+                0, -4, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Dispute the charges",
+            success=EventOutcome(
+                "The clerk loses your file in a puff of spores. Its boots are now evidence.",
+                0, 8, False,
+                gear_reward_pool=("springheel_boots", "anchor_boots"),
+            ),
+            failure=EventOutcome(
+                "Collections arrive from the ceiling. They compound aggressively.",
+                0, -12, False,
+                curse=TempCurse(
+                    "spore_debt_curse", "Compound Spores", 3,
+                    {"cave_in_bonus": 0.08},
+                ),
+            ),
+            success_chance=0.55,
+        ),
+        layer="Fungal Depths",
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="clockwork_toll",
+        name="Clockwork Toll",
+        description=(
+            "A frozen turnstile counts down from a number it refuses to explain.",
+            "Brass hands reach from the ice, each holding the same tiny bill for time already spent.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Pay for your minutes",
+            success=EventOutcome(
+                "The clock accepts your coin and returns none of your time.",
+                0, -5, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Jam the toll mechanism",
+            success=EventOutcome(
+                "The gears cough up a trinket and several seconds that probably belonged to someone else.",
+                0, 6, False,
+                gear_reward_pool=("loaded_die", "blood_locket"),
+            ),
+            failure=EventOutcome(
+                "The mechanism bills your purse and puts the rest of your afternoon in escrow.",
+                0, -18, False,
+                curse=TempCurse(
+                    "clockwork_toll_curse", "Borrowed Time", 3,
+                    {"cooldown_penalty": 0.20},
+                ),
+            ),
+            success_chance=0.50,
+        ),
+        layer="Frozen Core",
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="collectors_roots",
+        name="Collector's Roots",
+        description=(
+            "Roots knot around a coin press labeled COLLECTIONS. It has already found two other accounts.",
+            "A root-fed ledger lists every active digger in sap. Your name is underlined twice.",
+        ),
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Pay your own line item",
+            success=EventOutcome(
+                "You settle your line. The roots add a tasteful little checkmark.",
+                0, -4, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Redirect the collection",
+            success=EventOutcome(
+                "The roots amend the ledger. Two other tunnels receive the invoice with no appeal form.",
+                0, 6, False,
+            ),
+            failure=EventOutcome(
+                "The roots recognize your handwriting and collect the forgery fee immediately.",
+                0, -12, False,
+            ),
+            success_chance=0.60,
+        ),
+        rarity="uncommon",
+        social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=2, penalty_jc=8,
+            trigger="success", mode="burn",
+        ),
+    ),
+    RandomEvent(
+        id="hungry_beacon",
+        name="Hungry Beacon",
+        description=(
+            "A black beacon flashes whenever an active digger finds coin. It looks underfed and entrepreneurial.",
+            "A signal lamp made of teeth sweeps three distant tunnels, then turns its appetite toward you.",
+        ),
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Feed it quietly",
+            success=EventOutcome(
+                "You pay the beacon. It dims to the warm glow of temporary satisfaction.",
+                0, -6, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Aim it at the other tunnels",
+            success=EventOutcome(
+                "The beacon feeds across three tunnels and leaves you the crumbs. The crumbs are excellent.",
+                0, 10, False,
+            ),
+            failure=EventOutcome(
+                "It remembers who touched the controls. You are, unfortunately, very local.",
+                0, -20, False,
+            ),
+            success_chance=0.50,
+        ),
+        rarity="rare",
+        social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=3, penalty_jc=6,
+            trigger="success", mode="burn",
+        ),
+    ),
     # --- Themed -EV events (subtle GW1 / MTG flavor) -----------------------
     # Two "digger taxes": the low-variance branch is a guaranteed *toll*, not a
     # free gain, so the event is negative-EV no matter which branch is chosen

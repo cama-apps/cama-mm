@@ -23,7 +23,10 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from services.dig_data.aliases import EVENT_POOL
-from services.dig_data.balance import NEGATIVE_EVENT_JC_MULTIPLIER
+from services.dig_data.balance import (
+    NEGATIVE_EVENT_JC_MULTIPLIER,
+    strengthen_dig_event_penalty,
+)
 from services.dig_service import DigService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -196,7 +199,9 @@ def test_underworld_reclaims_burns_the_richest(
 
     after = {v: player_repository.get_balance(v, 12345) for v in victims}
     burned = sum(before[v] - after[v] for v in victims)
-    expected_burn = scale_deflationary_minigame_jc_delta(22)
+    expected_burn = scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(22)
+    )
     for v in victims:
         assert before[v] - after[v] == expected_burn, f"victim {v} should lose {expected_burn} JC"
 

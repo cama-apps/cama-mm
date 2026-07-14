@@ -8,6 +8,7 @@ carries no state of its own and is composed into ``DigService``.
 
 import json
 import random
+import time
 import uuid
 
 import services.dig_service as dig_service
@@ -27,11 +28,20 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_FORCE_RISKY,
     NEGATIVE_EVENT_JC_MULTIPLIER,
+    UNIQUE_GEAR,
+    strengthen_dig_event_penalty,
 )
+from services.dig_data.event_types import scale_curse_effects
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
 )
+
+SHOP_CURSE_EVENT_RISK_WEIGHT_PER_STACK = 0.50
+SHOP_CURSE_RISKY_PENALTY_PER_STACK = 0.05
+SHOP_CURSE_RISKY_PENALTY_CAP = 0.15
+SHOP_CURSE_CAVE_IN_BONUS_PER_STACK = 0.02
+SHOP_CURSE_CAVE_IN_BONUS_CAP = 0.06
 
 
 class EventsMixin:
@@ -42,29 +52,58 @@ class EventsMixin:
     """
     @staticmethod
     def _event_has_risk(event: dict) -> bool:
-        """True if any outcome in the event can pay negative JC.
+        """True if any outcome can harm the digger.
 
         Used by the ``veteran_miner`` perk to decide whether a successful
         resolution earns the risky-success bonus. Covers both the new-style
         safe/risky/desperate option dicts and the legacy ``outcomes`` map.
         """
-        def _has_negative_jc(payload: dict | None) -> bool:
+        def _has_negative_value(value) -> bool:
+            if isinstance(value, list):
+                return any(
+                    isinstance(item, (int, float)) and item < 0
+                    for item in value
+                )
+            return isinstance(value, (int, float)) and value < 0
+
+        def _is_negative(payload: dict | None) -> bool:
             if not payload:
                 return False
-            jc = payload.get("jc")
-            if isinstance(jc, list) and jc:
-                return any(v < 0 for v in jc)
-            if isinstance(jc, (int, float)):
-                return jc < 0
-            return False
+            return (
+                _has_negative_value(payload.get("jc"))
+                or _has_negative_value(payload.get("advance"))
+                or bool(payload.get("cave_in"))
+                or int(payload.get("streak_loss", 0) or 0) > 0
+                or bool(payload.get("curse"))
+            )
 
         for opt_key in ("safe_option", "risky_option", "desperate_option"):
             opt = event.get(opt_key)
             if not opt:
                 continue
-            if _has_negative_jc(opt.get("success")) or _has_negative_jc(opt.get("failure")):
+            if _is_negative(opt.get("success")) or _is_negative(opt.get("failure")):
                 return True
-        return any(_has_negative_jc(outcome) for outcome in (event.get("outcomes") or {}).values())
+        return any(_is_negative(outcome) for outcome in (event.get("outcomes") or {}).values())
+
+    def _shop_curse_stacks(self, discord_id: int, guild_id) -> int:
+        """Return the number of active shop-bought curses on a digger."""
+        curse_repo = getattr(self, "curse_repo", None)
+        if curse_repo is None:
+            return 0
+        try:
+            return max(0, int(curse_repo.count_active_curses_for_target(
+                discord_id, guild_id, int(time.time()),
+            )))
+        except Exception:
+            logger.debug("shop curse lookup failed during dig", exc_info=True)
+            return 0
+
+    @staticmethod
+    def _shop_curse_cave_in_bonus(stack_count: int) -> float:
+        return min(
+            SHOP_CURSE_CAVE_IN_BONUS_CAP,
+            max(0, stack_count) * SHOP_CURSE_CAVE_IN_BONUS_PER_STACK,
+        )
 
     def _chain_event(self, depth: int, prestige_level: int,
                      trigger_rarity: str,
@@ -221,7 +260,18 @@ class EventsMixin:
         adjusted_weights["rare"] = int(RARITY_WEIGHTS["rare"] * rare_mult)
         adjusted_weights["legendary"] = int(RARITY_WEIGHTS["legendary"] * legendary_mult)
 
-        weighted = [(e, adjusted_weights.get(e.get("rarity", "common"), 70)) for e in eligible]
+        shop_curse_stacks = (
+            self._shop_curse_stacks(discord_id, guild_id)
+            if discord_id is not None else 0
+        )
+        weighted = []
+        for event in eligible:
+            weight = adjusted_weights.get(event.get("rarity", "common"), 70)
+            if shop_curse_stacks and self._event_has_risk(event):
+                weight = int(weight * (
+                    1.0 + SHOP_CURSE_EVENT_RISK_WEIGHT_PER_STACK * shop_curse_stacks
+                ))
+            weighted.append((event, weight))
         events, w = zip(*weighted)
         event = random.choices(events, weights=w, k=1)[0]
 
@@ -250,6 +300,7 @@ class EventsMixin:
             return self._error("You don't have a tunnel.")
 
         tunnel = dict(tunnel)
+        active_temp_curse = self._get_active_curse(tunnel)
         depth = tunnel.get("depth", 0)
         luminosity = tunnel.get("luminosity", LUMINOSITY_MAX)
         prestige_level = tunnel.get("prestige_level", 0) or 0
@@ -358,9 +409,24 @@ class EventsMixin:
         if choice == "risky" and self._has_relic(discord_id, guild_id, "diviners_knot"):
             success_chance = min(1.0, success_chance + 0.10)
 
+        if (
+            choice == "risky"
+            and active_temp_curse is not None
+            and self._has_relic(discord_id, guild_id, "black_wax_seal")
+        ):
+            success_chance = min(1.0, success_chance + 0.05)
+
         # Dark luminosity: risky/desperate options are harder
         if choice in ("risky", "desperate") and luminosity < LUMINOSITY_DIM:
             success_chance = max(0.05, success_chance - LUMINOSITY_DARK_RISKY_PENALTY)
+
+        shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
+        if choice in ("risky", "desperate") and shop_curse_stacks:
+            shop_curse_penalty = min(
+                SHOP_CURSE_RISKY_PENALTY_CAP,
+                shop_curse_stacks * SHOP_CURSE_RISKY_PENALTY_PER_STACK,
+            )
+            success_chance = max(0.05, success_chance - shop_curse_penalty)
 
         # P9 Cruel Echoes: safe options now have 10% failure chance
         cruel_fail = ascension.get("cruel_safe_fail", 0)
@@ -389,6 +455,16 @@ class EventsMixin:
         if result is None:
             result = option.get("success")  # fallback if no failure defined
 
+        gear_definition = None
+        gear_reward_pool = result.get("gear_reward_pool") or ()
+        eligible_gear = [
+            UNIQUE_GEAR[item_id]
+            for item_id in gear_reward_pool
+            if item_id in UNIQUE_GEAR
+        ]
+        if eligible_gear:
+            gear_definition = random.choice(eligible_gear)
+
         advance = result.get("advance", 0)
         jc = result.get("jc", 0)
         # Negative-event tuning: flat JC losses on a failure bite a bit harder.
@@ -407,9 +483,24 @@ class EventsMixin:
         # spread itself stays hidden behind the embed.
         if jc != 0:
             jc = int(round(jc * random.uniform(0.5, 1.5)))
+        if jc < 0:
+            jc = strengthen_dig_event_penalty(jc)
         if advance != 0:
             jittered = advance + random.randint(-2, 2)
             advance = max(1, jittered) if advance > 0 else min(-1, jittered)
+
+        if (
+            succeeded
+            and choice == "safe"
+            and self._has_relic(discord_id, guild_id, "chipped_compass")
+        ):
+            advance += 1
+
+        if self._has_relic(discord_id, guild_id, "burning_ledger"):
+            if jc > 0:
+                jc = int(round(jc * 1.15))
+            elif jc < 0:
+                jc = int(round(jc * 1.25))
 
         # P7 chain JC multiplier: chained events get 1.5x JC
         if chained and jc > 0:
@@ -448,6 +539,22 @@ class EventsMixin:
         if advance != 0:
             tunnel_updates["depth"] = new_depth
 
+        black_wax_seal_spent = False
+        if (
+            succeeded
+            and choice == "risky"
+            and active_temp_curse is not None
+            and self._has_relic(discord_id, guild_id, "black_wax_seal")
+        ):
+            remaining_curse = dict(active_temp_curse)
+            remaining = int(remaining_curse.get("digs_remaining", 0)) - 1
+            if remaining > 0:
+                remaining_curse["digs_remaining"] = remaining
+                tunnel_updates["temp_curses"] = json.dumps(remaining_curse)
+            else:
+                tunnel_updates["temp_curses"] = None
+            black_wax_seal_spent = True
+
         buff_applied = None
         if succeeded and choice in ("risky", "desperate") and event.get("buff_on_success"):
             buff_data = event["buff_on_success"]
@@ -482,10 +589,10 @@ class EventsMixin:
             # the duration. Build a fresh effect dict so the shared event
             # definition isn't mutated across fires.
             base_effect = curse.get("effect", {})
-            scaled_effect = {
-                k: (int(round(v * CURSE_STRENGTH_MULT)) if isinstance(v, (int, float)) else v)
-                for k, v in base_effect.items()
-            }
+            scaled_effect = scale_curse_effects(
+                base_effect,
+                multiplier=CURSE_STRENGTH_MULT,
+            )
             curse_payload = {
                 "id": curse.get("id", "unknown"),
                 "name": curse.get("name", "Unknown Curse"),
@@ -554,7 +661,9 @@ class EventsMixin:
         ):
             nominal_burn = int(splash_cfg.get("victim_count", 0)) * int(
                 scale_deflationary_minigame_jc_delta(
-                    splash_cfg.get("penalty_jc", 0)
+                    strengthen_dig_event_penalty(
+                        splash_cfg.get("penalty_jc", 0)
+                    )
                 )
             )
             burn_ratio = (
@@ -578,13 +687,24 @@ class EventsMixin:
         # Depth shift + JC credit/debit + optional buff + audit log commit
         # together, so the actor can't be paid without the depth/buff
         # applied (or vice versa).
-        self.dig_repo.atomic_tunnel_balance_update(
+        gear_id = self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc,
             tunnel_updates=tunnel_updates or None,
+            add_gear=(
+                {
+                    "slot": gear_definition.slot.value,
+                    "tier": gear_definition.reference_tier,
+                    "durability": gear_definition.max_durability,
+                    "source": f"event:{event_id}",
+                    "item_id": gear_definition.item_id,
+                }
+                if gear_definition else None
+            ),
             log_detail={
                 "event_id": event_id, "choice": choice, "succeeded": succeeded,
                 "advance": advance, "jc": jc, "cave_in": cave_in,
+                "gear": gear_definition.item_id if gear_definition else None,
                 "streak_days_lost": streak_days_lost or None,
                 "curse": curse_applied.get("name") if curse_applied else None,
                 "splash_victims": (
@@ -647,6 +767,18 @@ class EventsMixin:
             splash=_splash_to_dict(splash_result),
             guild_modifier_set=guild_modifier_set,
             quest_finale=quest_finale,
+            black_wax_seal_spent=black_wax_seal_spent,
+            gear_drop=(
+                {
+                    "gear_id": gear_id,
+                    "item_id": gear_definition.item_id,
+                    "name": gear_definition.name,
+                    "slot": gear_definition.slot.value,
+                    "durability": gear_definition.max_durability,
+                    "max_durability": gear_definition.max_durability,
+                }
+                if gear_definition else None
+            ),
         )
 
     # ------------------------------------------------------------------

@@ -50,8 +50,8 @@ def test_new_relics_have_lore_and_effects():
 
 
 def test_total_artifact_count_matches_expected():
-    # Relics-only catalog: 30 originals + the 7-relic "buff fun" batch.
-    assert len(ALL_ARTIFACTS) == 37
+    # Relics-only catalog: 37 existing relics plus 8 rarity-progression relics.
+    assert len(ALL_ARTIFACTS) == 45
 
 
 def test_post_pinnacle_decay_factor_root_network_slows_decay():

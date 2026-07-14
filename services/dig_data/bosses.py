@@ -74,7 +74,7 @@ BOSSES: dict[int, BossDef] = {
             "Fine. Hit me. I can't feel anything below the waist anyway.",
         ],
         boss_id="grothak",
-        mechanic_pool=("grothak_earthquake", "grothak_crumble_wall"),
+        mechanic_pool=("grothak_earthquake", "grothak_crumble_wall", "grothak_bedrock_bellow"),
         stinger_id="grothak_crumble",
         victory_lines=(
             "{boss} sinks down with a long, tired sigh. Finally a nap.",
@@ -108,7 +108,7 @@ BOSSES: dict[int, BossDef] = {
             "I give up. Nothing is symmetrical anymore. Not even my will to fight.",
         ],
         boss_id="crystalia",
-        mechanic_pool=("crystalia_prism", "crystalia_shatter"),
+        mechanic_pool=("crystalia_prism", "crystalia_shatter", "crystalia_mirror_maze"),
         stinger_id="crystalia_shard",
         victory_lines=(
             "{boss} shatters along a perfect axis. She would have appreciated the angle.",
@@ -142,7 +142,7 @@ BOSSES: dict[int, BossDef] = {
             "I'm just gonna lie here. Lava is basically a hot tub, right? ...right?",
         ],
         boss_id="magmus_rex",
-        mechanic_pool=("magmus_eruption", "magmus_meteor"),
+        mechanic_pool=("magmus_eruption", "magmus_meteor", "magmus_lava_tide"),
         stinger_id="magmus_burn",
         victory_lines=(
             "{boss} cools to a slow red and stops complaining.",
@@ -176,7 +176,7 @@ BOSSES: dict[int, BossDef] = {
             "You know what? Take the void. I'm going to go find myself.",
         ],
         boss_id="void_warden",
-        mechanic_pool=("voidwarden_collapse", "voidwarden_silence"),
+        mechanic_pool=("voidwarden_collapse", "voidwarden_silence", "voidwarden_gravity_well"),
         stinger_id="void_collapse",
         victory_lines=(
             "{boss} blinks out. The dark stays. The point is debatable.",
@@ -210,7 +210,7 @@ BOSSES: dict[int, BossDef] = {
             "Fine. We yield. Would you like a mushroom recipe? We have thousands.",
         ],
         boss_id="sporeling_sovereign",
-        mechanic_pool=("sporeling_cloud", "sporeling_roots"),
+        mechanic_pool=("sporeling_cloud", "sporeling_roots", "sporeling_bloom"),
         stinger_id="sporeling_rot",
         victory_lines=(
             "{boss} releases a final breath of pollen, then settles into mulch.",
@@ -244,7 +244,7 @@ BOSSES: dict[int, BossDef] = {
             "Go. I've seen every possible outcome and in most of them you win anyway.",
         ],
         boss_id="chronofrost",
-        mechanic_pool=("chronofrost_still", "chronofrost_rewind"),
+        mechanic_pool=("chronofrost_still", "chronofrost_rewind", "chronofrost_time_shard"),
         stinger_id="chronofrost_stillness",
         victory_lines=(
             "{boss} smiles the smile of someone who saw this coming.",
@@ -278,7 +278,7 @@ BOSSES: dict[int, BossDef] = {
             "Take the hollow. It was always yours. I was just keeping it warm.",
         ],
         boss_id="nameless_depth",
-        mechanic_pool=("nameless_whisper", "nameless_silence"),
+        mechanic_pool=("nameless_whisper", "nameless_silence", "nameless_false_floor"),
         stinger_id="nameless_erase",
         trophy_relic_id="deaths_door",
         victory_lines=(
@@ -324,7 +324,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! My hook is blunt from you alone.",
             "Fine. Walk past. I'm too tired to even taunt.",
         ],
-        mechanic_pool=("pudge_hook", "pudge_rot"),
+        mechanic_pool=("pudge_hook", "pudge_rot", "pudge_dismember"),
         stinger_id="pudge_drag",
     ),
     "ogre_magi": BossDef(
@@ -347,7 +347,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN! ...who? Oh right. YOU.",
             "Both heads tired. Both heads say: yield.",
         ],
-        mechanic_pool=("ogre_multicast", "ogre_fireblast"),
+        mechanic_pool=("ogre_multicast", "ogre_fireblast", "ogre_bloodlust"),
         stinger_id="ogre_blast",
     ),
     "crystal_maiden": BossDef(
@@ -369,7 +369,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I was literally mid-ult.",
             "Okay fine, I'll come quietly. But stop ganking me.",
         ],
-        mechanic_pool=("cm_frostbite", "cm_freezing_field"),
+        mechanic_pool=("cm_frostbite", "cm_freezing_field", "cm_crystal_nova"),
         stinger_id="cm_freeze",
     ),
     "tusk": BossDef(
@@ -391,7 +391,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I'm out of snow. Give me a minute.",
             "Fine. Go. Tell your friends a walrus sent you.",
         ],
-        mechanic_pool=("tusk_snowball", "tusk_walrus_punch"),
+        mechanic_pool=("tusk_snowball", "tusk_walrus_punch", "tusk_ice_shards"),
         stinger_id="tusk_kick",
     ),
     "lina": BossDef(
@@ -413,7 +413,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! My mana bar has trust issues.",
             "Ugh. Fine. Take the depth. My hair's frizzed anyway.",
         ],
-        mechanic_pool=("lina_laguna", "lina_dragon_slave"),
+        mechanic_pool=("lina_laguna", "lina_dragon_slave", "lina_light_strike"),
         stinger_id="lina_scorch",
     ),
     "doom": BossDef(
@@ -435,7 +435,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. Even the damned get tired.",
             "Go. I need a holiday from you.",
         ],
-        mechanic_pool=("doom_mark", "doom_scorched_earth"),
+        mechanic_pool=("doom_mark", "doom_scorched_earth", "doom_infernal_blade"),
         stinger_id="doom_brand",
     ),
     "spectre": BossDef(
@@ -458,7 +458,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. I am, as ever.",
             "Go. My work is never done anyway.",
         ],
-        mechanic_pool=("spectre_haunt", "spectre_dagger"),
+        mechanic_pool=("spectre_haunt", "spectre_dagger", "spectre_dispersion"),
         stinger_id="spectre_haunting",
     ),
     "void_spirit": BossDef(
@@ -480,7 +480,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I am literally everywhere else.",
             "Fine. I'll take this dimension off.",
         ],
-        mechanic_pool=("void_spirit_step", "void_spirit_aether"),
+        mechanic_pool=("void_spirit_step", "void_spirit_aether", "void_spirit_resonant_pulse"),
         stinger_id="void_spirit_exile",
     ),
     "treant_protector": BossDef(
@@ -503,7 +503,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. I am older than your tunnel.",
             "Go. Even trees can grow tired.",
         ],
-        mechanic_pool=("treant_overgrowth", "treant_leech_seed"),
+        mechanic_pool=("treant_overgrowth", "treant_leech_seed", "treant_living_armor"),
         stinger_id="treant_entangle",
     ),
     "broodmother": BossDef(
@@ -525,7 +525,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I was in the middle of spinning.",
             "Fine. Go. Leave us to our weaving.",
         ],
-        mechanic_pool=("broodmother_spawn", "broodmother_web"),
+        mechanic_pool=("broodmother_spawn", "broodmother_web", "broodmother_silken_snare"),
         stinger_id="broodmother_webbing",
     ),
     "faceless_void": BossDef(
@@ -548,7 +548,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. My cooldown is up, regrettably.",
             "Go. You were going to win this one anyway.",
         ],
-        mechanic_pool=("faceless_void_chrono", "faceless_void_backtrack"),
+        mechanic_pool=("faceless_void_chrono", "faceless_void_backtrack", "faceless_void_time_dilation"),
         stinger_id="void_chrono",
     ),
     "weaver": BossDef(
@@ -570,7 +570,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I reset my own timeline to rest.",
             "Take the depth. I'll weave it back later.",
         ],
-        mechanic_pool=("weaver_timelapse", "weaver_shukuchi"),
+        mechanic_pool=("weaver_timelapse", "weaver_shukuchi", "weaver_geminate_strike"),
         stinger_id="weaver_unmake",
     ),
     "oracle": BossDef(
@@ -592,7 +592,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. I predicted this too.",
             "Go. The coin is tired.",
         ],
-        mechanic_pool=("oracle_fortune", "oracle_false_promise"),
+        mechanic_pool=("oracle_fortune", "oracle_false_promise", "oracle_purifying_flames"),
         stinger_id="oracle_fate",
     ),
     "terrorblade": BossDef(
@@ -614,7 +614,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! My mirror image is tired.",
             "Take the hollow. Cleave yourself out of it.",
         ],
-        mechanic_pool=("terrorblade_sunder", "terrorblade_metamorphosis"),
+        mechanic_pool=("terrorblade_sunder", "terrorblade_metamorphosis", "terrorblade_reflection"),
         stinger_id="terrorblade_sundering",
     ),
     # ----- Late-prestige additions (only appear at prestige>=3) -----
@@ -637,7 +637,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "STILL carrying me toward your own grave. How literary.",
             "Go. I'll be here, reading aloud to the next one.",
         ],
-        mechanic_pool=("xalatath_void_pull", "xalatath_whisper_madness"),
+        mechanic_pool=("xalatath_void_pull", "xalatath_whisper_madness", "xalatath_blackout"),
         stinger_id="xalatath_unraveling",
         prestige_required=3,
         trophy_relic_id="listening_shard",
@@ -674,7 +674,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU. AGAIN. My patience is long. My children are longer.",
             "Go, then. Hatred keeps. I'll warm your seat by the dark.",
         ],
-        mechanic_pool=("lilith_blood_nova", "lilith_wing_descent"),
+        mechanic_pool=("lilith_blood_nova", "lilith_wing_descent", "lilith_blood_tether"),
         stinger_id="lilith_hemorrhage",
         prestige_required=3,
         trophy_relic_id="hateborn_ember",
@@ -712,7 +712,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "AGAIN. I respect the persistence. Not much else.",
             "Just hit me. The pit gets bored.",
         ],
-        mechanic_pool=("underlord_pit_pull", "underlord_firestorm"),
+        mechanic_pool=("underlord_pit_pull", "underlord_firestorm", "underlord_dark_rift"),
         stinger_id="underlord_atrophy",
         prestige_required=3,
         victory_lines=(
@@ -756,7 +756,7 @@ _PRESTIGE2_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. Good. The second life was getting impatient.",
             "Pass, then. The shield will find someone else to return.",
         ],
-        mechanic_pool=("aegis_reclaim",),
+        mechanic_pool=("aegis_reclaim", "aegis_bulwark", "aegis_last_stand"),
         stinger_id="aegis_reversal",
         prestige_required=2,
         victory_lines=(
@@ -792,7 +792,7 @@ _PRESTIGE2_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. The route is shorter when the heart dislikes you.",
             "Go. The climb keeps score even when I do not.",
         ],
-        mechanic_pool=("heartspire_intent",),
+        mechanic_pool=("heartspire_intent", "heartspire_blood_tithe", "heartspire_crimson_pulse"),
         stinger_id="heartspire_doubt",
         prestige_required=2,
         victory_lines=(
@@ -828,7 +828,7 @@ _PRESTIGE2_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. Good. The ember engine was still hot.",
             "Go. Leave the sparks. They'll grow teeth without you.",
         ],
-        mechanic_pool=("emberwright_overclock",),
+        mechanic_pool=("emberwright_overclock", "emberwright_molten_anvil", "emberwright_scrap_volley"),
         stinger_id="emberwright_slag",
         prestige_required=2,
         victory_lines=(
@@ -873,7 +873,7 @@ _PRESTIGE4_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. Do you know how long it takes to re-seed a tunnel?",
             "Fine. Go. You'll be coughing up little green ideas for weeks.",
         ],
-        mechanic_pool=("blightcoil_wards", "blightcoil_nova"),
+        mechanic_pool=("blightcoil_wards", "blightcoil_nova", "blightcoil_soul_lattice"),
         stinger_id="blightcoil_venom",
         prestige_required=4,
         trophy_relic_id="weeping_fang",
@@ -910,7 +910,7 @@ _PRESTIGE4_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. The crown is cold. My patience is colder.",
             "Take the hall. The throne was always too big — and the heating, the heating—",
         ],
-        mechanic_pool=("rimebound_harvest", "rimebound_raise"),
+        mechanic_pool=("rimebound_harvest", "rimebound_raise", "rimebound_frozen_throne"),
         stinger_id="rimebound_soulchill",
         prestige_required=4,
         trophy_relic_id="runebitten_shard",
@@ -947,7 +947,7 @@ _PRESTIGE4_BOSSES: dict[str, BossDef] = {
             "It has noticed you now. The marks on the walls were only practice.",
             "The spines it sheds are already growing back. It is not worried about the fight.",
         ],
-        mechanic_pool=("spineback_regrowth", "spineback_divebomb"),
+        mechanic_pool=("spineback_regrowth", "spineback_divebomb", "spineback_quill_barrage"),
         stinger_id="spineback_rend",
         prestige_required=4,
         trophy_relic_id="aching_spine",
@@ -1598,7 +1598,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                 archetype="tank",
                 title="The Forgotten King",
                 transition_dialogue=[],
-                mechanic_pool=("king_decree",),
+                mechanic_pool=("king_decree", "king_crownfall"),
             ),
             PinnaclePhaseDef(
                 archetype="glass_cannon",
@@ -1607,7 +1607,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "The crown burns. I am hungry now. Forgive me.",
                     "Decorum slips. Hunger speaks.",
                 ],
-                mechanic_pool=("king_feast",),
+                mechanic_pool=("king_feast", "king_royal_hunt"),
             ),
             PinnaclePhaseDef(
                 archetype="slippery",
@@ -1616,7 +1616,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "Last breath. Last lesson. Pay attention.",
                     "I die slowly. You will witness.",
                 ],
-                mechanic_pool=("king_deathbed",),
+                mechanic_pool=("king_deathbed", "king_final_judgment"),
             ),
         ),
     ),
@@ -1640,7 +1640,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                 archetype="bruiser",
                 title="Hollowforged",
                 transition_dialogue=[],
-                mechanic_pool=("hollow_walls_close",),
+                mechanic_pool=("hollow_walls_close", "hollow_empty_gaze"),
             ),
             PinnaclePhaseDef(
                 archetype="tank",
@@ -1649,7 +1649,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "Reform. The mine has new walls now.",
                     "The walls speak in a different dialect.",
                 ],
-                mechanic_pool=("hollow_shape_shift",),
+                mechanic_pool=("hollow_shape_shift", "hollow_stolen_face"),
             ),
             PinnaclePhaseDef(
                 archetype="slippery",
@@ -1658,7 +1658,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "Plural. The depth is many things at once.",
                     "We are the chamber and the wall and the air.",
                 ],
-                mechanic_pool=("hollow_many_voices",),
+                mechanic_pool=("hollow_many_voices", "hollow_silence_between"),
             ),
         ),
     ),
@@ -1683,7 +1683,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                 archetype="glass_cannon",
                 title="The First Digger",
                 transition_dialogue=[],
-                mechanic_pool=("digger_pickaxe_duel",),
+                mechanic_pool=("digger_pickaxe_duel", "digger_mirror_swing"),
             ),
             PinnaclePhaseDef(
                 archetype="slippery",
@@ -1692,7 +1692,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "Unbound. The pickaxe is no longer needed.",
                     "I dig with my hands now. Cleaner.",
                 ],
-                mechanic_pool=("digger_phasing",),
+                mechanic_pool=("digger_phasing", "digger_faultline_step"),
             ),
             PinnaclePhaseDef(
                 archetype="glass_cannon",
@@ -1701,7 +1701,7 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "Eternal. The tunnel is me. I am the tunnel.",
                     "Last shift. Last dig. Last.",
                 ],
-                mechanic_pool=("digger_tunnel_collapse",),
+                mechanic_pool=("digger_tunnel_collapse", "digger_last_excavation"),
             ),
         ),
     ),

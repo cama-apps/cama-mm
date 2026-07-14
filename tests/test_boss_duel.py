@@ -115,6 +115,71 @@ class TestDuelDeterministicOutcomes:
         assert "boss_hit" not in result["round_log"][-1]  # killing blow, boss never swings back
 
 
+class TestMechanicSelectionPerAttempt:
+    """Mechanics reroll per attempt while paused duels keep their selected id."""
+
+    EXPECTED_POOL = (
+        "grothak_earthquake",
+        "grothak_crumble_wall",
+        "grothak_bedrock_bellow",
+    )
+
+    def test_pause_resume_uses_persisted_selected_mechanic(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        selected_id = "grothak_bedrock_bellow"
+
+        def select_new_mechanic(_rng, pool):
+            assert tuple(pool) == self.EXPECTED_POOL
+            return selected_id
+
+        monkeypatch.setattr(random.Random, "choice", select_new_mechanic)
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+        started = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+        assert started["mechanic_id"] == selected_id
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID)["mechanic_id"] == selected_id
+
+        def unexpected_reroll(_rng, _pool):
+            raise AssertionError("resume must use the persisted mechanic id")
+
+        monkeypatch.setattr(random.Random, "choice", unexpected_reroll)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        resumed = dig_service.resume_boss_duel(
+            10001, TEST_GUILD_ID, option_idx=0,
+        )
+        assert resumed["success"]
+        assert any(
+            entry.get("mechanic_id") == selected_id
+            for entry in resumed["round_log"]
+        )
+
+    def test_later_attempt_rerolls_from_full_pool_and_may_repeat(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        sampled_pools: list[tuple[str, ...]] = []
+
+        def repeat_same_mechanic(_rng, pool):
+            sampled_pools.append(tuple(pool))
+            return "grothak_earthquake"
+
+        monkeypatch.setattr(random.Random, "choice", repeat_same_mechanic)
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+
+        first = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+        second = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert first["mechanic_id"] == second["mechanic_id"] == "grothak_earthquake"
+        assert sampled_pools == [self.EXPECTED_POOL, self.EXPECTED_POOL]
+
+
 class TestDuelScaling:
     """Depth and prestige both add boss HP to make duels harder."""
 

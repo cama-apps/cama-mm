@@ -178,7 +178,7 @@ class TestResolveSplashBurns:
             victim_count=2,
             penalty_jc=20,
         )
-        expected_burn = 2 * scale_deflationary_minigame_jc_delta(20)
+        expected_burn = 2 * scale_deflationary_minigame_jc_delta(22)
         assert result.total_burned == expected_burn
         total_after = (
             player_repository.get_balance(10001, TEST_GUILD_ID)
@@ -259,7 +259,7 @@ class TestResolveSplashBurns:
         assert result.absorbed_total == 10
         assert result.shielded_count == 1
         call = protection.apply_hostile_loss.call_args
-        assert call.args[:4] == (10002, TEST_GUILD_ID, 18, "dig_splash_burn")
+        assert call.args[:4] == (10002, TEST_GUILD_ID, 19, "dig_splash_burn")
         assert call.kwargs["destination"] == "burn"
         assert call.kwargs["event_key"] == "dig:test:10002"
         # The fake gateway owns settlement, so the legacy debit is not repeated.
@@ -346,6 +346,34 @@ class TestSplashGrantMode:
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == -17
 
 
+class TestSplashStealMode:
+    """Steals transfer the normal scaled amount without event deflation."""
+
+    def test_steal_does_not_strengthen_authored_amount(
+        self, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository, 10001, balance=100)
+        _register(player_repository, 10002, balance=100)
+        monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+
+        result = resolve_splash(
+            player_repo=player_repository,
+            dig_repo=dig_repo,
+            guild_id=TEST_GUILD_ID,
+            digger_id=10001,
+            event_name="Steal Test",
+            strategy="random_active",
+            victim_count=1,
+            penalty_jc=10,
+            mode="steal",
+        )
+
+        expected = scale_minigame_jc_delta(10)
+        assert result.victims == [(10002, expected)]
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100 + expected
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 100 - expected
+
+
 class TestResolveSplashDeepest:
     """The deepest_n strategy targets the deepest tunnels and never the digger."""
 
@@ -379,9 +407,9 @@ class TestResolveSplashDeepest:
         assert victim_ids == [10002, 10003]
         assert 10001 not in victim_ids
         # Each victim burned the deflation-strengthened penalty; shallower 10004 untouched.
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 91
-        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 91
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 90
+        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 90
         assert player_repository.get_balance(10004, TEST_GUILD_ID) == 100
         # Digger's own balance is not touched by the splash.
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100
-        assert result.total_burned == 18
+        assert result.total_burned == 20

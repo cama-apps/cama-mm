@@ -441,6 +441,7 @@ class ServiceContainer:
             inventory_service=c["dig_inventory_service"],
             quest_service=c["dig_quest_service"],
             prediction_repo=c.get("prediction_repo"),
+            curse_repo=c.get("curse_repo"),
         )
         # Hostile dig splashes and sabotage are wired after both services exist.
         c["dig_service"].protection_service = c["protection_service"]

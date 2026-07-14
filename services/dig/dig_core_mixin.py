@@ -65,6 +65,12 @@ class DigCoreMixin:
         if injury and injury.get("type") == "slower_cooldown":
             cooldown = INJURY_SLOW_COOLDOWN
         cooldown = self._apply_stamina_to_cooldown(cooldown, tunnel)
+        curse = self._get_active_curse(tunnel)
+        curse_effects = self._apply_curse_effects(curse)
+        cooldown_penalty = self._capped_curse_effect(
+            curse_effects, "cooldown_penalty",
+        )
+        cooldown = int(cooldown * (1.0 + cooldown_penalty))
         if self._is_bankrupt(tunnel.get("discord_id"), tunnel.get("guild_id")):
             cooldown //= 2
         return self._apply_mana_cooldown_reduction(
@@ -746,6 +752,7 @@ class DigCoreMixin:
             weather_code=weather_code_now,
             luminosity=luminosity,
             is_first_dig_today=self._is_first_dig_of_day(tunnel.get("last_dig_at"), p["today"]),
+            is_paid_dig=p.get("paid_dig_cost", 0) > 0,
         )
         # Mana × weather combo: Sunny + White boosts yield.
         weather_combo_yield = 1.0
