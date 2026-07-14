@@ -33,6 +33,7 @@ from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
 from utils.drawing.predictions import draw_market_fair_history
 from utils.formatting import JOPACOIN_EMOTE, format_duration_short
+from utils.guild import normalize_guild_id
 from utils.interaction_safety import friendly_error, safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.thread_safety import THREAD_AUTO_ARCHIVE_MINUTES, ensure_thread_writable
@@ -1083,6 +1084,31 @@ class PredictionCommands(commands.Cog):
         except Exception as e:
             logger.exception(f"Failed to set up market thread: {e}")
 
+    async def _guild_owns_market(
+        self, interaction: discord.Interaction, prediction_id: int
+    ) -> bool:
+        """Confirm a market belongs to the interaction's guild.
+
+        ``prediction_id`` is a global auto-increment PK, so an admin action keyed
+        only on it would let an admin in guild B resolve/cancel/inspect guild A's
+        market. Fetch the market and compare guilds; on mismatch, send an
+        ephemeral error and return False. Assumes the interaction was already
+        deferred.
+        """
+        guild_id = interaction.guild.id if interaction.guild else None
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
+        if pred is None or normalize_guild_id(pred.get("guild_id")) != normalize_guild_id(
+            guild_id
+        ):
+            await safe_followup(
+                interaction,
+                content=f"❌ Market #{prediction_id} not found in this server.",
+            )
+            return False
+        return True
+
     # -- /predict resolve ---
 
     @predict.command(name="resolve", description="Resolve a market YES or NO (admin)")
@@ -1107,6 +1133,8 @@ class PredictionCommands(commands.Cog):
             )
             return
         if not await safe_defer(interaction):
+            return
+        if not await self._guild_owns_market(interaction, prediction_id):
             return
 
         try:
@@ -1265,6 +1293,8 @@ class PredictionCommands(commands.Cog):
             return
         if not await safe_defer(interaction):
             return
+        if not await self._guild_owns_market(interaction, prediction_id):
+            return
 
         try:
             result = await asyncio.to_thread(
@@ -1308,6 +1338,8 @@ class PredictionCommands(commands.Cog):
             )
             return
         if not await safe_defer(interaction):
+            return
+        if not await self._guild_owns_market(interaction, prediction_id):
             return
 
         try:
@@ -1473,6 +1505,8 @@ class PredictionCommands(commands.Cog):
         if not await require_gamba_channel(interaction):
             return
         if not await safe_defer(interaction):
+            return
+        if not await self._guild_owns_market(interaction, prediction_id):
             return
 
         view_data = await asyncio.to_thread(

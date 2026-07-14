@@ -168,6 +168,34 @@ class LoanService:
             metadata=metadata,
         )
 
+    def transfer_balance_to_nonprofit(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
+        """Atomically move ``amount`` JC from a player to the nonprofit fund.
+
+        Returns the new nonprofit total. Debit and credit are one transaction, so
+        the transfer cannot destroy or mint coins if it fails partway.
+        """
+        return self.loan_repo.transfer_balance_to_nonprofit_atomic(
+            discord_id,
+            guild_id,
+            amount,
+            source=source,
+            related_type=related_type,
+            related_id=related_id,
+            reason=reason,
+            metadata=metadata,
+        )
+
     def subtract_from_nonprofit_fund(
         self,
         guild_id: int | None,

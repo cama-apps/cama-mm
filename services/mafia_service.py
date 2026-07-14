@@ -564,8 +564,12 @@ class MafiaService:
         deltas, payout_per_winner, nonprofit_overflow = self._compute_payout_deltas(
             pot_total, winning_ids, mvp_id, bookie_id
         )
-        # finalize_day_resolution only fires from the DAY phase.
-        self.repo.set_phase(game.game_id, MafiaPhase.DAY)
+        # finalize_day_resolution only fires from the DAY phase. Reopen to DAY
+        # only if the game is not already RESOLVED — otherwise a racing
+        # auto-resolver that already paid out would be re-finalized here, minting
+        # the pot a second time.
+        if not self.repo.try_reopen_for_finalize(game.game_id):
+            return {"resolved": False, "reason": "already_resolved"}
         finalize = self.repo.finalize_day_resolution(
             game_id=game.game_id,
             winner=winner,

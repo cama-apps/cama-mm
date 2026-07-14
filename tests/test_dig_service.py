@@ -475,22 +475,22 @@ class TestCooldown:
     """Tests for dig cooldown mechanics."""
 
     def test_dig_cooldown_blocks_free_dig(self, dig_service, player_repository, guild_id, monkeypatch):
-        """Can't free dig within 3h."""
+        """Can't free dig within the 1h cooldown."""
         _register_player(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         result = dig_service.dig(10001, guild_id)
         assert result["success"]
 
-        # Try again 1h later
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 3600)
+        # Try again 30 min later — still inside the 1h cooldown.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 1800)
         result = dig_service.dig(10001, guild_id)
         assert not result["success"] or result.get("paid_dig_required")
 
     @pytest.mark.parametrize(
         ("mutations", "expected_remaining"),
         [
-            (None, 3600),
-            (json.dumps([{"id": "restless"}]), 5400),
+            (None, 1800),
+            (json.dumps([{"id": "restless"}]), 3600),
         ],
         ids=["plain", "restless"],
     )
@@ -523,10 +523,11 @@ class TestCooldown:
         assert result["success"] is False
         assert result["cooldown_remaining"] == expected_remaining
 
-    def test_forest_cooldown_is_ready_at_7170_seconds(
+    def test_forest_cooldown_is_ready_at_3570_seconds(
         self, dig_service, dig_repo, guild_id, monkeypatch,
     ):
-        """Forest's 30-second reduction reaches zero at the exact boundary."""
+        """Forest's 30-second reduction reaches zero at the exact boundary
+        (1h base − 30s = 3570s)."""
         last_dig_at = 1_000_000
         forest_effects = SimpleNamespace(
             color="Green",
@@ -547,13 +548,13 @@ class TestCooldown:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
 
         assert dig_service._get_cooldown_remaining(
-            tunnel, now=last_dig_at + 7169,
+            tunnel, now=last_dig_at + 3569,
         ) == 1
         assert dig_service._get_cooldown_remaining(
-            tunnel, now=last_dig_at + 7170,
+            tunnel, now=last_dig_at + 3570,
         ) == 0
         assert dig_service.get_free_dig_ready_at(
-            10001, guild_id, now=last_dig_at + 7170,
+            10001, guild_id, now=last_dig_at + 3570,
         ) is None
 
     def test_dig_cooldown_allows_paid_dig(self, dig_service, player_repository, guild_id, monkeypatch):
@@ -886,6 +887,47 @@ class TestMinerProfile:
         assert result["success"] is False
         assert result["paid_dig_available"] is True
         assert result["cooldown_remaining"] > 0
+
+    def test_dig_applies_blood_pact_skim_to_payout(
+        self, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A live dig by a player with an active Blood Pact on them skims the payout.
+
+        Regression: the live dig paths never called apply_blood_pact_skim, so the
+        shop's advertised "skim 25% of the target's earnings" silently missed dig
+        income — the primary earnings source. Only the dormant DM-mode paths
+        applied it. The same skim block now sits on both live paths
+        (dig_service.dig() and _execute_first_dig); this exercises the first-dig
+        path, which reliably earns JC.
+        """
+        from repositories.buff_repository import BuffRepository
+        from services.buff_service import BuffService
+
+        buff_service = BuffService(BuffRepository(dig_repo.db_path))
+        service = DigService(dig_repo, player_repository, buff_service=buff_service)
+        monkeypatch.setattr(service, "_get_weather_effects", lambda guild_id, layer_name: {})
+
+        skim_calls: list[tuple[int, int]] = []
+
+        def fake_skim(target_id, gid, earning, player_repo):
+            skim_calls.append((target_id, earning))
+            return min(earning, 3)  # skim a fixed, deterministic amount
+
+        monkeypatch.setattr(buff_service, "apply_blood_pact_skim", fake_skim)
+
+        _register_player(player_repository, discord_id=10001, guild_id=guild_id, balance=100)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+
+        result = service.dig(10001, guild_id)
+        assert result["success"]
+
+        # The skim ran on the live dig payout, keyed on the digger and their JC.
+        assert skim_calls, "dig() must apply the Blood Pact skim to the payout"
+        target_id, earned = skim_calls[0]
+        assert target_id == 10001
+        assert earned > 0
+        # The reported payout is net of the skim.
+        assert result["jc_earned"] == earned - min(earned, 3)
 
     def test_boss_first_clear_awards_stat_point_once(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,

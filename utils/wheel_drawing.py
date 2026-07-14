@@ -784,68 +784,6 @@ def get_wheel_wedges(is_bankrupt: bool = False, is_golden: bool = False) -> list
     return BANKRUPT_WHEEL_WEDGES if is_bankrupt else WHEEL_WEDGES
 
 
-def apply_war_effects(
-    wedges: list[tuple[str, int | str, str]],
-    war_state: dict,
-) -> list[tuple[str, int | str, str]]:
-    """
-    Apply active wheel war effects to a wedge list.
-
-    For 'attackers_win' wars:
-      - The wedge matching war_scar_wedge_label is replaced with a "WAR SCAR 💀" (value=0)
-      - BANKRUPT value is reduced by REBELLION_BANKRUPT_WEAKEN_RATE
-
-    For 'defenders_win' wars:
-      - A "WAR TROPHY 🏆" wedge with a scaled configured reward is injected
-      - A "RETRIBUTION ⚔️" wedge (special string) is injected
-      - BANKRUPT value is increased by REBELLION_BANKRUPT_STRENGTHEN_RATE
-
-    Returns a modified copy of the wedge list.
-    """
-    from config import (
-        REBELLION_BANKRUPT_STRENGTHEN_RATE,
-        REBELLION_BANKRUPT_WEAKEN_RATE,
-        REBELLION_WAR_TROPHY_VALUE,
-    )
-
-    outcome = war_state.get("outcome")
-    if not outcome:
-        return wedges
-
-    result = list(wedges)
-
-    if outcome == "attackers_win":
-        scar_label = war_state.get("war_scar_wedge_label")
-        modified = []
-        for label, value, color in result:
-            if scar_label and str(value) == str(scar_label) and isinstance(value, int) and value > 0:
-                # Replace first matching positive wedge with WAR SCAR
-                modified.append(("WAR SCAR 💀", 0, "#4a0000"))
-                scar_label = None  # Only scar first matching wedge
-            elif label == "BANKRUPT" and isinstance(value, int):
-                new_val = max(-1, int(value * (1.0 - REBELLION_BANKRUPT_WEAKEN_RATE)))
-                modified.append((label, new_val, color))
-            else:
-                modified.append((label, value, color))
-        return modified
-
-    elif outcome == "defenders_win":
-        modified = []
-        for label, value, color in result:
-            if label == "BANKRUPT" and isinstance(value, int):
-                new_val = int(value * (1.0 + REBELLION_BANKRUPT_STRENGTHEN_RATE))
-                modified.append((label, new_val, color))
-            else:
-                modified.append((label, value, color))
-        # Inject WAR TROPHY and RETRIBUTION wedges
-        trophy_value = scale_minigame_jc_delta(REBELLION_WAR_TROPHY_VALUE)
-        modified.append(("WAR TROPHY 🏆", trophy_value, "#ffd700"))
-        modified.append(("RETRIBUTION ⚔️", "RETRIBUTION", "#8b0000"))
-        return modified
-
-    return result
-
-
 def apply_mana_wedge(
     wedges: list[tuple[str, int | str, str]],
     mana_color: str | None,

@@ -31,14 +31,14 @@ class PairingsService:
         """
         return self.pairings_repo.get_head_to_head(player1_id, player2_id, normalize_guild_id(guild_id))
 
-    def rebuild_all_pairings(self) -> int:
+    def rebuild_all_pairings(self, guild_id: int | None = None) -> int:
         """
-        Rebuild all pairwise statistics from match history.
+        Rebuild all pairwise statistics from match history for a guild.
 
         Returns:
             Number of pairings calculated
         """
-        return self.pairings_repo.rebuild_all_pairings()
+        return self.pairings_repo.rebuild_all_pairings(normalize_guild_id(guild_id))
 
     def get_best_teammates(
         self, discord_id: int, guild_id: int | None = None, min_games: int = 3, limit: int = 5

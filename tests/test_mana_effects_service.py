@@ -13,8 +13,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from domain.models.mana_effects import ManaEffects
+from repositories.loan_repository import LoanRepository
 from repositories.mana_repository import ManaRepository
 from repositories.player_repository import PlayerRepository
+from services.loan_service import LoanService
 from services.mana_effects_service import ManaEffectsService
 from services.mana_service import ManaService, get_today_pst
 from tests.conftest import TEST_GUILD_ID
@@ -239,8 +241,10 @@ class TestManaEffectsService:
         player_repo = PlayerRepository(repo_db_path)
         mana_service = _make_mana_service(mana_repo, player_repo)
 
-        loan_service = MagicMock()
-        loan_service.add_to_nonprofit_fund = MagicMock(return_value=0)
+        # Real loan service on the same DB so the atomic tithe transfer
+        # (player debit + nonprofit credit in one transaction) is exercised
+        # end-to-end rather than mocked away.
+        loan_service = LoanService(LoanRepository(repo_db_path), player_repo)
 
         effects_service = ManaEffectsService(
             mana_service=mana_service,
@@ -514,12 +518,8 @@ class TestManaEffectsService:
         assert tithe == 5  # 5% of 100
         bal = service["player_repo"].get_balance(50001, GID)
         assert bal == 195  # 200 - 5
-        service["loan_service"].add_to_nonprofit_fund.assert_called_once()
-        assert service["loan_service"].add_to_nonprofit_fund.call_args.args == (GID, 5)
-        assert (
-            service["loan_service"].add_to_nonprofit_fund.call_args.kwargs["source"]
-            == "mana"
-        )
+        # The tithe is transferred (not destroyed): the nonprofit fund holds it.
+        assert service["loan_service"].get_nonprofit_fund(GID) == 5
 
     def test_apply_plains_tithe_zero_gain(self, service):
         """Plains tithe returns 0 for zero gain and does not transfer."""
@@ -531,7 +531,7 @@ class TestManaEffectsService:
         assert tithe == 0
         bal = service["player_repo"].get_balance(50002, GID)
         assert bal == 200
-        service["loan_service"].add_to_nonprofit_fund.assert_not_called()
+        assert service["loan_service"].get_nonprofit_fund(GID) == 0
 
     def test_apply_plains_tithe_no_plains(self, service):
         """Non-plains player has no tithe and does not trigger fund transfer."""
@@ -543,7 +543,7 @@ class TestManaEffectsService:
         assert tithe == 0
         bal = service["player_repo"].get_balance(50003, GID)
         assert bal == 200
-        service["loan_service"].add_to_nonprofit_fund.assert_not_called()
+        assert service["loan_service"].get_nonprofit_fund(GID) == 0
 
     # -------------------------------------------------------------------------
     # apply_shop_discount

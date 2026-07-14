@@ -299,22 +299,17 @@ class ManaEffectsService:
         if effects.plains_tithe_rate <= 0 or gain <= 0:
             return 0
         tithe = max(1, int(gain * effects.plains_tithe_rate))
-        self.player_repo.add_balance(
+        # Debit the player and credit the nonprofit fund in one atomic transfer so
+        # a failure between the two steps cannot destroy (debit-only) or mint
+        # (credit-only) the tithed coins.
+        self.loan_service.transfer_balance_to_nonprofit(
             discord_id,
-            guild_id,
-            -tithe,
-            source="mana",
-            related_type="plains_tithe",
-            reason="plains mana tithe",
-            metadata={"gain": gain, "tithe": tithe},
-        )
-        self.loan_service.add_to_nonprofit_fund(
             guild_id,
             tithe,
             source="mana",
             related_type="plains_tithe",
             related_id=discord_id,
-            reason="plains mana tithe reserve credit",
+            reason="plains mana tithe",
             metadata={"gain": gain, "tithe": tithe},
         )
         return tithe

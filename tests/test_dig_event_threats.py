@@ -319,7 +319,6 @@ class TestCurseThreat:
         self, dig_service, monkeypatch,
     ):
         monkeypatch.setattr(dig_service, "_apply_stamina_to_cooldown", lambda cooldown, tunnel: 4_000)
-        monkeypatch.setattr(dig_service, "_is_bankrupt", lambda discord_id, guild_id: False)
         monkeypatch.setattr(
             dig_service,
             "_apply_mana_cooldown_reduction",

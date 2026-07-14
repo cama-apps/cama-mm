@@ -41,6 +41,11 @@ class EventEncounterView(discord.ui.View):
         self.event_data = event_data
         self.target_channel = target_channel
         self.dig_flavor_service = dig_flavor_service
+        # Guards against a second resolution: resolve_event applies the outcome
+        # (crediting JC) with no consumed-state of its own, so without this a user
+        # could click a guaranteed-success option repeatedly within the 60s window
+        # and bank the reward N times.
+        self._resolved = False
         safe_label = "Play it safe"
         risky_label = "Take the risk"
         if isinstance(event_data, dict):
@@ -89,34 +94,40 @@ class EventEncounterView(discord.ui.View):
                 logger.warning("Choice-event result send to dig channel failed: %s", exc)
         await interaction.followup.send(embed=embed)
 
-    async def _desperate_callback(self, interaction: discord.Interaction):
+    async def _handle_choice(self, interaction: discord.Interaction, choice: str) -> None:
+        """Resolve one event choice, guarding against re-entry.
+
+        The ownership check and the ``_resolved`` check-and-set run with no
+        ``await`` between them, so under asyncio's single-threaded loop a burst of
+        rapid clicks can never each reach ``_resolve`` \u2014 only the first does.
+        """
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your event.", ephemeral=True)
             return
+        if self._resolved:
+            await interaction.response.send_message(
+                "You've already resolved this event.", ephemeral=True
+            )
+            return
+        self._resolved = True
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
         await safe_defer(interaction)
-        result = await self._resolve("desperate")
+        result = await self._resolve(choice)
         await self._send_result(interaction, result)
         self.stop()
+
+    async def _desperate_callback(self, interaction: discord.Interaction):
+        await self._handle_choice(interaction, "desperate")
 
     @discord.ui.button(label="Safe", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
     async def safe_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your event.", ephemeral=True)
-            return
-        await safe_defer(interaction)
-        result = await self._resolve("safe")
-        await self._send_result(interaction, result)
-        self.stop()
+        await self._handle_choice(interaction, "safe")
 
     @discord.ui.button(label="Risky", style=discord.ButtonStyle.danger, emoji="\u2694\ufe0f")
     async def risky_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your event.", ephemeral=True)
-            return
-        await safe_defer(interaction)
-        result = await self._resolve("risky")
-        await self._send_result(interaction, result)
-        self.stop()
+        await self._handle_choice(interaction, "risky")
 
     async def _resolve(self, choice: str) -> discord.Embed:
         """Resolve event choice via service layer (handles chaining, cruel echoes, logging)."""

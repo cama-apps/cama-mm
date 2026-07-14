@@ -169,6 +169,63 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else amount
 
+    def transfer_balance_to_nonprofit_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        *,
+        source: str | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> int:
+        """Atomically move ``amount`` JC from a player's balance to the nonprofit
+        fund. Debit and credit share one BEGIN IMMEDIATE, so a crash between them
+        cannot destroy the coins (debited but never banked) or mint them (banked
+        but never debited). Returns the new nonprofit total.
+        """
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            self._set_economy_ledger_context(
+                cursor,
+                source=source,
+                related_type=related_type,
+                related_id=related_id,
+                reason=reason,
+                metadata=metadata,
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (amount, discord_id, normalized_id),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_id, amount),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            )
+            row = cursor.fetchone()
+            return row["total_collected"] if row else amount
+
     def deduct_from_nonprofit_fund(
         self,
         guild_id: int | None,

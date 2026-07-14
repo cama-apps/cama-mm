@@ -17,12 +17,10 @@ def bot_module():
     import bot as bot_module
 
     bot_module._reminder_recovery_task = None
-    bot_module._rebellion_recovery_task = None
-    bot_module._rebellion_recovery_complete = False
     with patch.object(bot_module.bot, "is_closed", return_value=False):
         yield bot_module
 
-    for attr in ("_reminder_recovery_task", "_rebellion_recovery_task"):
+    for attr in ("_reminder_recovery_task",):
         task = getattr(bot_module, attr)
         if task is not None:
             if task.done() and not task.cancelled():
@@ -30,7 +28,6 @@ def bot_module():
             elif not task.done():
                 task.cancel()
         setattr(bot_module, attr, None)
-    bot_module._rebellion_recovery_complete = False
 
 
 async def test_supervised_loop_returns_on_clean_exit(bot_module):
@@ -218,67 +215,6 @@ async def test_reminder_recovery_failure_is_logged_and_retryable(bot_module, cap
     assert bot_module._reminder_recovery_task is None
 
 
-async def test_rebellion_recovery_retries_failure_then_completes_once(
-    bot_module, caplog
-):
-    """Failure is retryable, but one successful all-guild sweep is permanent."""
-    loop = asyncio.get_running_loop()
-    starts = [asyncio.Event(), asyncio.Event()]
-    releases = [loop.create_future(), loop.create_future()]
-    thread_calls: list[tuple[object, tuple, dict]] = []
-    recovery_calls = 0
-
-    class RebellionService:
-        def recover_stale_wars(self):
-            nonlocal recovery_calls
-            recovery_calls += 1
-            if recovery_calls == 1:
-                raise RuntimeError("database unavailable")
-            return []
-
-    async def fake_to_thread(function, *args, **kwargs):
-        call_index = len(thread_calls)
-        thread_calls.append((function, args, kwargs))
-        starts[call_index].set()
-        await releases[call_index]
-        return function(*args, **kwargs)
-
-    service = RebellionService()
-    with patch.object(bot_module.asyncio, "to_thread", new=fake_to_thread):
-        with caplog.at_level(logging.WARNING, logger="cama_bot"):
-            failed = bot_module._start_rebellion_recovery(service)
-            await starts[0].wait()
-            overlapping = bot_module._start_rebellion_recovery(service)
-            assert overlapping is failed
-            assert len(thread_calls) == 1
-
-            releases[0].set_result(None)
-            with pytest.raises(RuntimeError, match="database unavailable"):
-                await failed
-            await asyncio.sleep(0)
-
-        assert bot_module._rebellion_recovery_task is None
-        assert bot_module._rebellion_recovery_complete is False
-        assert any(
-            "Wheel war recovery sweep failed" in record.message
-            for record in caplog.records
-        )
-
-        retried = bot_module._start_rebellion_recovery(service)
-        await starts[1].wait()
-        releases[1].set_result(None)
-        await retried
-        await asyncio.sleep(0)
-
-        assert bot_module._rebellion_recovery_task is None
-        assert bot_module._rebellion_recovery_complete is True
-        assert bot_module._start_rebellion_recovery(service) is None
-
-    assert recovery_calls == 2
-    assert len(thread_calls) == 2
-    assert all(args == () and kwargs == {} for _, args, kwargs in thread_calls)
-
-
 def test_stale_recovery_callbacks_do_not_clear_newer_handles(bot_module):
     """A delayed callback cannot erase or complete a replacement sweep."""
     loop = asyncio.new_event_loop()
@@ -292,18 +228,7 @@ def test_stale_recovery_callbacks_do_not_clear_newer_handles(bot_module):
 
         assert bot_module._reminder_recovery_task is newer_reminder
 
-        old_rebellion = loop.create_future()
-        old_rebellion.set_result([])
-        newer_rebellion = loop.create_future()
-        bot_module._rebellion_recovery_task = newer_rebellion
-
-        bot_module._rebellion_recovery_done(old_rebellion)
-
-        assert bot_module._rebellion_recovery_task is newer_rebellion
-        assert bot_module._rebellion_recovery_complete is False
-
         newer_reminder.cancel()
-        newer_rebellion.cancel()
     finally:
         loop.close()
 

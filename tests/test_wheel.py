@@ -1722,7 +1722,6 @@ def _attach_wheel_protection(bot, protection_service) -> None:
     bot.curse_service = None
     bot.gambling_stats_service = None
     bot.player_repo = None
-    bot.rebellion_service = None
     bot.reminder_service = None
 
 

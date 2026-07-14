@@ -268,6 +268,25 @@ class MafiaRepository(BaseRepository):
                 params,
             )
 
+    def try_reopen_for_finalize(self, game_id: int) -> bool:
+        """Force a game into DAY phase so ``finalize_day_resolution`` can run,
+        but only if it is not already RESOLVED.
+
+        ``force_finalize`` used to set the phase to DAY unconditionally, which
+        re-opened an already-resolved game and defeated
+        ``finalize_day_resolution``'s ``WHERE phase='DAY'`` idempotency guard — a
+        racing auto-resolver could then pay the pot a second time. Returns True if
+        the game is now in DAY (safe to finalize), False if it was already
+        resolved and must not be finalized again.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE mafia_games SET phase = ? WHERE game_id = ? AND phase != ?",
+                (MafiaPhase.DAY.value, game_id, MafiaPhase.RESOLVED.value),
+            )
+            return cursor.rowcount == 1
+
     def set_twist_event(self, game_id: int, twist: MafiaTwist | None) -> None:
         with self.connection() as conn:
             conn.cursor().execute(

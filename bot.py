@@ -91,8 +91,6 @@ _lobby_ready_lock = asyncio.Lock()
 # Retained startup-recovery task handles.  These prevent overlapping sweeps
 # when Discord dispatches on_ready repeatedly during a reconnect.
 _reminder_recovery_task: asyncio.Task | None = None
-_rebellion_recovery_task: asyncio.Task | None = None
-_rebellion_recovery_complete = False
 
 # Prediction market background task handles
 _prediction_refresh_task: asyncio.Task | None = None
@@ -143,45 +141,6 @@ def _start_reminder_recovery(reminder_svc, guild_ids: list[int]) -> asyncio.Task
     task = asyncio.create_task(reminder_svc.reschedule_all(bot, guild_snapshot))
     _reminder_recovery_task = task
     task.add_done_callback(_reminder_recovery_done)
-    return task
-
-
-def _rebellion_recovery_done(task: asyncio.Task) -> None:
-    """Observe a rebellion sweep, retaining permanent completion on success."""
-    global _rebellion_recovery_complete, _rebellion_recovery_task
-
-    try:
-        recovered = task.result()
-    except asyncio.CancelledError:
-        pass
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Wheel war recovery sweep failed: %s", exc, exc_info=True)
-    else:
-        if _rebellion_recovery_task is task:
-            _rebellion_recovery_complete = True
-        if recovered:
-            logger.info(
-                "Recovered %d abandoned wheel war(s): %s",
-                len(recovered),
-                [result["war_id"] for result in recovered],
-            )
-    finally:
-        if _rebellion_recovery_task is task:
-            _rebellion_recovery_task = None
-
-
-def _start_rebellion_recovery(rebellion_svc) -> asyncio.Task | None:
-    """Start the all-guild rebellion sweep unless running or already successful."""
-    global _rebellion_recovery_task
-
-    if _rebellion_recovery_complete:
-        return None
-    if _rebellion_recovery_task is not None:
-        return _rebellion_recovery_task
-
-    task = asyncio.create_task(asyncio.to_thread(rebellion_svc.recover_stale_wars))
-    _rebellion_recovery_task = task
-    task.add_done_callback(_rebellion_recovery_done)
     return task
 
 
@@ -833,20 +792,6 @@ async def on_ready():
     if reminder_svc:
         guild_ids = [guild.id for guild in bot.guilds]
         _start_reminder_recovery(reminder_svc, guild_ids)
-
-    # Recover wheel wars abandoned by a crash/restart mid-window. The whole
-    # /incite lifecycle runs in an in-memory task, so a restart would leave the
-    # war active forever — burning defender + meta-bet stakes and blocking every
-    # future /incite in that guild. This one-shot, idempotent sweep refunds the
-    # stakes and fizzles each stale war.
-    #
-    # on_ready fires on every gateway reconnect. Retain the running task so
-    # reconnects cannot overlap the all-guild sweep; only a successful sweep is
-    # permanent for this process, while a failed sweep is retried on a later
-    # ready event.
-    rebellion_svc = getattr(bot, "rebellion_service", None)
-    if rebellion_svc:
-        _start_rebellion_recovery(rebellion_svc)
 
 
 @bot.tree.error

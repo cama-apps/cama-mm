@@ -7,7 +7,8 @@ import pytest
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
-from tests.conftest import TEST_GUILD_ID
+from services.pairings_service import PairingsService
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
 @pytest.fixture
@@ -319,6 +320,34 @@ class TestPairingsRepository:
         h2h = pairings_repo.get_head_to_head(1, 2, TEST_GUILD_ID)
         assert h2h is not None
         assert h2h["games_together"] == 3
+
+    def test_service_rebuild_all_pairings_threads_guild_id(
+        self, pairings_repo, player_repo, match_repo
+    ):
+        """The service passes guild_id through to the repo.
+
+        Regression for the arg-mismatch where PairingsService.rebuild_all_pairings()
+        called the repo with no guild_id, raising TypeError and making
+        /rebuildpairings 100% non-functional. Only a repo-level test existed, so
+        the broken service path shipped.
+        """
+        register_players(player_repo, list(range(1, 11)))
+        team1, team2 = [1, 2, 3, 4, 5], [6, 7, 8, 9, 10]
+        for i in range(3):
+            match_repo.record_match(
+                team1_ids=team1,
+                team2_ids=team2,
+                winning_team=1 if i % 2 == 0 else 2,
+                guild_id=TEST_GUILD_ID,
+            )
+
+        service = PairingsService(pairings_repo)
+        count = service.rebuild_all_pairings(TEST_GUILD_ID)
+        assert count > 0
+        assert pairings_repo.get_head_to_head(1, 2, TEST_GUILD_ID)["games_together"] == 3
+
+        # A guild with no matches rebuilds to zero pairings without raising.
+        assert service.rebuild_all_pairings(TEST_GUILD_ID_SECONDARY) == 0
 
     def test_get_pairings_for_player(self, pairings_repo, player_repo):
         """Test getting all pairings for a player."""

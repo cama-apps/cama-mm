@@ -27,7 +27,7 @@ from config import (
 from repositories.player_repository import PlayerRepository
 from repositories.prediction_repository import PredictionRepository, _quote_total
 from services.prediction_service import PredictionService
-from tests.conftest import TEST_GUILD_ID
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -1193,8 +1193,10 @@ async def test_resolve_announces_all_winners_and_losers(
     loser_202_loss = prediction_repo.get_position(pid, 202)["no_cost_basis_total"]
 
     cog = _make_cog(prediction_service)
+    cog.announce_to_gamba = AsyncMock()
     interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
-    interaction.guild = None
+    # Admin must resolve from within the market's own guild (ownership guard).
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID)
 
     await cog.resolve.callback(
         cog, interaction, pid, SimpleNamespace(value="yes")
@@ -1298,7 +1300,10 @@ async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):
         "winners": winners,
         "losers": losers,
     }
-    prediction_service.get_prediction.return_value = None
+    prediction_service.get_prediction.return_value = {
+        "guild_id": TEST_GUILD_ID,
+        "thread_id": None,
+    }
 
     cog = _make_cog(prediction_service)
     gamba = _FakeGambaChannel()
@@ -1320,6 +1325,38 @@ async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):
     assert "<@10079> +921 JC (1 contracts)" in full_followup
     assert "<@20000> -900 JC (1 contracts)" in full_followup
     assert "<@20079> -821 JC (1 contracts)" in full_followup
+
+
+async def test_resolve_rejects_cross_guild_market(
+    prediction_service, player_repository, patched_cog_helpers
+):
+    """An admin in guild B cannot resolve a market that belongs to guild A.
+
+    prediction_id is a global auto-increment PK, so without the guild-ownership
+    guard a guild-B admin could settle guild-A's market (paying/clawing real
+    jopacoin from guild-A holders).
+    """
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    # Market lives in guild A.
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Cross-guild reach?", initial_fair=50,
+    )["prediction_id"]
+
+    cog = _make_cog(prediction_service)
+    cog.announce_to_gamba = AsyncMock()
+    # Admin acts from guild B.
+    interaction = _FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID_SECONDARY)
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID_SECONDARY)
+
+    await cog.resolve.callback(cog, interaction, pid, SimpleNamespace(value="yes"))
+
+    messages = [m.get("content") or "" for m in interaction.followup.messages]
+    assert any("not found in this server" in m for m in messages)
+    # The market must remain unresolved.
+    assert prediction_service.get_prediction(pid)["status"] != "resolved"
 
 
 async def test_refresh_status_admin_only(
