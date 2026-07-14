@@ -31,4 +31,4 @@ jobs:
           enable-cache: true
 
       - name: Run tests
-        run: uv run --locked pytest -n auto
+        run: uv run --locked pytest
