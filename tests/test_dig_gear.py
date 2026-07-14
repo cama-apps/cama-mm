@@ -576,6 +576,29 @@ class TestDigRelicCapEmbed:
         assert "8/6" in field.name
         assert "Over cap" in field.value and "unequip 2" in field.value
 
+    def test_unique_gear_effect_renders(self):
+        from commands.dig_helpers.gear_views import _build_gear_embed
+
+        loadout = {
+            "weapon": {
+                "name": "Glassbreaker Pick",
+                "durability": 8,
+                "max_durability": 8,
+                "effect": "Diamond dig bonuses; +2 boss damage; -8% hit chance.",
+            },
+            "armor": None,
+            "boots": None,
+            "amulet": None,
+            "relics": [],
+            "relic_cap": 3,
+        }
+
+        embed = _build_gear_embed(loadout, [], [])
+        weapon = next(field for field in embed.fields if field.name == "Weapon")
+
+        assert "+2 boss damage" in weapon.value
+        assert "-8% hit chance" in weapon.value
+
 
 class TestDigGearServiceApplyGearToCombat:
     def test_empty_loadout_returns_unchanged_stats(self, svc):

@@ -171,12 +171,14 @@ class EventEncounterView(discord.ui.View):
                 durability = str(gear_d.get("durability", 0))
                 if gear_d.get("max_durability") is not None:
                     durability += f"/{gear_d['max_durability']}"
+                effect = gear_d.get("effect")
+                effect_line = f"\n{effect}" if effect else ""
                 embed.add_field(
                     name="Gear Drop",
                     value=(
                         f"**{gear_d.get('name', 'Gear')}**\n"
                         f"Slot: {slot}\n"
-                        f"Durability: {durability}"
+                        f"Durability: {durability}{effect_line}"
                     ),
                     inline=False,
                 )

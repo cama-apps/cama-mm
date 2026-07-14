@@ -776,6 +776,7 @@ class EventsMixin:
                     "slot": gear_definition.slot.value,
                     "durability": gear_definition.max_durability,
                     "max_durability": gear_definition.max_durability,
+                    "effect": gear_definition.effect_summary,
                 }
                 if gear_definition else None
             ),

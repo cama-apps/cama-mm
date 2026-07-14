@@ -677,52 +677,22 @@ class PinnacleMixin:
         # Continue remaining auto-rounds if option didn't decide it.
         if won is None:
             for r in range(round_num + 1, BOSS_ROUND_CAP + 1):
-                entry: dict = {"round": r}
-                crit_this_round = False
-                if random.random() < player_hit:
-                    dmg_this_round = player_dmg
-                    if status_effects.get("relic_bottled_quake"):
-                        dmg_this_round += 1
-                        status_effects["relic_bottled_quake"] = False
-                        entry["bottled_quake"] = True
-                    if crit_chance > 0 and random.random() < crit_chance:
-                        dmg_this_round += crit_bonus
-                        crit_this_round = True
-                        if status_effects.get("gear_heal_first_crit"):
-                            player_hp = min(
-                                int(status_effects.get("trophy_start_hp", player_hp + 1)),
-                                player_hp + 1,
-                            )
-                            status_effects["gear_heal_first_crit"] = False
-                            entry["blood_locket_heal"] = True
-                    boss_hp -= dmg_this_round
-                entry["crit"] = crit_this_round
-                entry["boss_hp"] = max(0, boss_hp)
-                if boss_hp <= 0:
-                    won = True
-                    round_log.append(entry)
-                    break
-                boss_roll = random.random() < boss_hit_chance
-                if boss_roll:
-                    player_hp -= boss_dmg
-                    if status_effects.get("gear_reflect_first_hit"):
-                        boss_hp -= 1
-                        status_effects["gear_reflect_first_hit"] = False
-                        entry["briarplate_reflect"] = True
-                elif status_effects.get("gear_springheel_counter"):
-                    boss_hp -= 1
-                    status_effects["gear_springheel_counter"] = False
-                    entry["springheel_counter"] = True
-                entry["boss_hp"] = max(0, boss_hp)
-                entry["player_hp"] = max(0, player_hp)
+                entry, player_hp, boss_hp, terminal = self._run_one_round(
+                    round_num=r,
+                    player_hp=player_hp, boss_hp=boss_hp,
+                    player_hit=player_hit, player_dmg=player_dmg,
+                    boss_hit=boss_hit_chance, boss_dmg=boss_dmg,
+                    status_effects=status_effects,
+                    crit_chance=crit_chance, crit_bonus=crit_bonus,
+                )
                 round_log.append(entry)
-                if boss_hp <= 0:
+                if terminal is True:
                     won = True
                     break
-                if player_hp <= 0:
+                if terminal is False:
                     won = False
                     break
-            else:
+            if won is None:
                 won = False
 
         # Pinnacle state restored from status_effects; falls back to tunnel

@@ -37,6 +37,8 @@ def _build_gear_embed(
         if piece is None:
             return "_— Empty —_"
         line = f"**{piece['name']}** ({piece['durability']}/{piece['max_durability']})"
+        if piece.get("effect"):
+            line += f"\n{piece['effect']}"
         if (
             dig_service is not None
             and piece["durability"] < piece["max_durability"]
@@ -377,6 +379,7 @@ class GearSelectView(discord.ui.View):
             options.append(discord.SelectOption(
                 label=label[:100],
                 value=f"gear:{g['id']}",
+                description=(g.get("effect") or "")[:100] or None,
             ))
         for r in relics[:25 - len(options)]:
             db_id = r.get("db_id")

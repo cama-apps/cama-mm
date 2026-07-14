@@ -82,6 +82,7 @@ class UniqueGearDef:
     cave_in_reduction: float = 0.0
     loot_bonus: int = 0
     effect_id: str | None = None
+    effect_summary: str | None = None
 
 
 @dataclass

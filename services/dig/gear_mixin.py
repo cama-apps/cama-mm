@@ -21,6 +21,7 @@ from services.dig_constants import (
     GEAR_MAX_DURABILITY,
     GEAR_REPAIR_COST_PCT,
     GEAR_TIER_TABLES,
+    PICKAXE_TIERS,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     RELIC_RARITY_ORDER,
@@ -349,6 +350,29 @@ class GearMixin:
             return int(wpn["tier"])
         return int(tunnel.get("pickaxe_tier", 0) or 0)
 
+    def _get_active_pickaxe_data(
+        self, discord_id: int, guild_id, tunnel: dict,
+    ) -> dict:
+        """Dig-flow modifiers authored by the equipped weapon definition."""
+        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        wpn = equipped.get("weapon")
+        if wpn is not None:
+            item_id = wpn.get("item_id")
+            if item_id:
+                unique = UNIQUE_GEAR.get(str(item_id))
+                if unique is None:
+                    return {}
+                return {
+                    "name": unique.name,
+                    "advance_bonus": unique.advance_bonus,
+                    "cave_in_reduction": unique.cave_in_reduction,
+                    "loot_bonus": unique.loot_bonus,
+                }
+            tier = int(wpn["tier"])
+        else:
+            tier = int(tunnel.get("pickaxe_tier", 0) or 0)
+        return PICKAXE_TIERS[tier] if 0 <= tier < len(PICKAXE_TIERS) else {}
+
     def get_loadout(self, discord_id: int, guild_id) -> dict:
         """Public serialization of the equipped loadout for the /dig gear panel."""
         loadout = self._get_loadout(discord_id, guild_id)
@@ -364,6 +388,7 @@ class GearMixin:
                 "durability": p.durability,
                 "max_durability": p.max_durability,
                 "equipped": p.equipped,
+                "effect": getattr(p.tier_def, "effect_summary", None),
             }
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         prestige = int(tunnel.get("prestige_level", 0) or 0) if tunnel else 0
@@ -402,6 +427,7 @@ class GearMixin:
                 "durability": piece.durability,
                 "max_durability": piece.max_durability,
                 "equipped": piece.equipped,
+                "effect": getattr(piece.tier_def, "effect_summary", None),
             })
         return out
 

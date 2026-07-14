@@ -187,34 +187,46 @@ UNIQUE_GEAR: dict[str, UniqueGearDef] = {
     "glassbreaker_pick": UniqueGearDef(
         "glassbreaker_pick", "Glassbreaker Pick", GearSlot.WEAPON, 3, 200, 8,
         player_dmg=2, player_hit=-0.08,
+        advance_bonus=2, cave_in_reduction=0.05, loot_bonus=2,
+        effect_summary="Diamond dig bonuses; +2 boss damage; -8% hit chance.",
     ),
     "needle_pick": UniqueGearDef(
         "needle_pick", "Needle Pick", GearSlot.WEAPON, 3, 200, 16,
         player_hit=0.08, crit_chance=0.03,
+        advance_bonus=2, cave_in_reduction=0.05, loot_bonus=2,
+        effect_summary="Diamond dig bonuses; +8% hit chance; +3% crit chance.",
     ),
     "briarplate": UniqueGearDef(
         "briarplate", "Briarplate", GearSlot.ARMOR, 3, 200, 14,
         player_hp_bonus=1, effect_id="reflect_first_hit",
+        effect_summary="+1 HP; reflect 1 damage on the first boss hit.",
     ),
     "nullweave_mantle": UniqueGearDef(
         "nullweave_mantle", "Nullweave Mantle", GearSlot.ARMOR, 3, 200, 12,
         effect_id="block_first_status",
+        effect_summary="Block the first boss status effect.",
     ),
     "springheel_boots": UniqueGearDef(
         "springheel_boots", "Springheel Boots", GearSlot.BOOTS, 3, 200, 14,
         boss_hit_reduction=0.04, effect_id="springheel_counter",
+        effect_summary=(
+            "-4% boss hit chance; counter the first boss miss for 1 damage."
+        ),
     ),
     "anchor_boots": UniqueGearDef(
         "anchor_boots", "Anchor Boots", GearSlot.BOOTS, 3, 200, 16,
         player_hp_bonus=1, effect_id="block_first_skip",
+        effect_summary="+1 HP; block the first skipped player round.",
     ),
     "loaded_die": UniqueGearDef(
         "loaded_die", "Loaded Die", GearSlot.AMULET, 3, 200, 12,
         player_hit=-0.05, crit_chance=0.10, crit_bonus=1,
+        effect_summary="-5% hit chance; +10% crit chance; +1 crit damage.",
     ),
     "blood_locket": UniqueGearDef(
         "blood_locket", "Blood Locket", GearSlot.AMULET, 3, 200, 14,
         player_hp_bonus=-1, crit_chance=0.05, effect_id="heal_first_crit",
+        effect_summary="-1 HP; +5% crit chance; first crit heals 1 HP.",
     ),
 }
 
