@@ -909,9 +909,18 @@ class TestE2ESoftAvoid:
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create avoids (multiple to increase chance of penalty)
-        soft_avoid_repo.create_or_extend_avoid(guild_id=guild_id, avoider_id=discord_ids[0], avoided_id=discord_ids[1], games=10)
-        soft_avoid_repo.create_or_extend_avoid(guild_id=guild_id, avoider_id=discord_ids[2], avoided_id=discord_ids[3], games=10)
-        soft_avoid_repo.create_or_extend_avoid(guild_id=guild_id, avoider_id=discord_ids[4], avoided_id=discord_ids[5], games=10)
+        avoid_pairs = [
+            (discord_ids[0], discord_ids[1]),
+            (discord_ids[2], discord_ids[3]),
+            (discord_ids[4], discord_ids[5]),
+        ]
+        for avoider_id, avoided_id in avoid_pairs:
+            soft_avoid_repo.create_or_extend_avoid(
+                guild_id=guild_id,
+                avoider_id=avoider_id,
+                avoided_id=avoided_id,
+                games=10,
+            )
 
         # Shuffle
         result = match_service.shuffle_players(
@@ -919,9 +928,28 @@ class TestE2ESoftAvoid:
             guild_id=guild_id,
         )
 
-        # The goodness_score should be a float
-        assert isinstance(result["goodness_score"], (int, float))
-        assert result["goodness_score"] >= 0
+        radiant_ids = {p.discord_id for p in result["radiant_team"].players}
+        dire_ids = {p.discord_id for p in result["dire_team"].players}
+        same_team_avoids = sum(
+            (avoider in radiant_ids and avoided in radiant_ids)
+            or (avoider in dire_ids and avoided in dire_ids)
+            for avoider, avoided in avoid_pairs
+        )
+        shuffler = match_service.shuffler
+        selected_values = [
+            p.get_value(
+                shuffler.use_glicko,
+                use_openskill=shuffler.use_openskill,
+                use_jopacoin=shuffler.use_jopacoin,
+            )
+            for p in result["radiant_team"].players + result["dire_team"].players
+        ]
+        expected_score = (
+            same_team_avoids * shuffler.soft_avoid_penalty
+            - shuffler._calculate_lobby_rating_bonus(selected_values)
+        )
+
+        assert result["goodness_score"] == pytest.approx(expected_score)
 
     def test_effective_avoid_ids_stored_in_shuffle_state(self, match_service, soft_avoid_repo, player_repo):
         """Test that effective_avoid_ids are stored in shuffle state for deferred decrement."""
