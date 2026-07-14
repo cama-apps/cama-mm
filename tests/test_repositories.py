@@ -186,6 +186,37 @@ class TestPlayerRepository:
         above = player_repository.get_player_above(1003, TEST_GUILD_ID)
         assert above is None
 
+    def test_get_player_above_skips_players_below_minimum_balance(self, player_repository):
+        """The next eligible player can be above an ineligible adjacent player."""
+        player_repository.add(
+            discord_id=1101,
+            discord_username="Spinner",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repository.add(
+            discord_id=1102,
+            discord_username="Protected",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repository.add(
+            discord_id=1103,
+            discord_username="Eligible",
+            guild_id=TEST_GUILD_ID,
+        )
+
+        player_repository.update_balance(1101, TEST_GUILD_ID, 2)
+        player_repository.update_balance(1102, TEST_GUILD_ID, 10)
+        player_repository.update_balance(1103, TEST_GUILD_ID, 100)
+
+        above = player_repository.get_player_above(
+            1101,
+            TEST_GUILD_ID,
+            min_balance=50,
+        )
+
+        assert above is not None
+        assert above.discord_id == 1103
+
     def test_get_player_above_handles_ties(self, player_repository):
         """Test get_player_above handles tied balances correctly."""
         # Add players with tied balances

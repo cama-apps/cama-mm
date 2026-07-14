@@ -6,6 +6,7 @@ import pytest
 
 from commands.betting import BettingCommands
 from config import (
+    HOSTILE_LOSS_MIN_BALANCE,
     LIGHTNING_BOLT_PCT_MAX,
     LIGHTNING_BOLT_PCT_MIN,
     WHEEL_BANANA_PEEL_EST_EV,
@@ -944,7 +945,11 @@ async def test_wheel_red_shell_steals_from_player_above():
                         await commands.gamba.callback(commands, interaction)
 
     # Should call get_player_above
-    player_service.get_player_above.assert_called_once_with(1010, 123)
+    player_service.get_player_above.assert_called_once_with(
+        1010,
+        123,
+        min_balance=HOSTILE_LOSS_MIN_BALANCE,
+    )
 
     # Should call steal_atomic: max(pct=3, flat=2) scales to 2 JC
     _assert_gamba_steal_call(
@@ -1002,6 +1007,10 @@ async def test_wheel_red_shell_misses_when_first_place():
 
     # Should NOT call steal_atomic (shell missed)
     player_service.steal_atomic.assert_not_called()
+
+    embed = message.edit.call_args.kwargs["embed"]
+    assert "eligible player ahead" in embed.description.lower()
+    assert "already in 1st place" not in embed.description.lower()
 
 
 @pytest.mark.asyncio

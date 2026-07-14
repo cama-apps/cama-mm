@@ -173,8 +173,8 @@ def build_wheel_result_embed(
             color = discord.Color.dark_gray()
             description = (
                 f"**{label}**\n\n"
-                f"The Red Shell circles the track but finds no target!\n\n"
-                f"*You're already in 1st place... there's no one ahead to hit.*"
+                f"The Red Shell circles the track but finds no eligible target!\n\n"
+                f"*There's no eligible player ahead to hit.*"
             )
         else:
             title = "🔴 RED SHELL HIT! 🔴"

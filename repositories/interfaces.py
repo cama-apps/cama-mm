@@ -174,13 +174,18 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
-    def get_player_above(self, discord_id: int, guild_id: int):
-        """Get the player ranked one position higher on the balance leaderboard.
+    def get_player_above(
+        self,
+        discord_id: int,
+        guild_id: int,
+        min_balance: int | None = None,
+    ):
+        """Get the nearest eligible player above on the balance leaderboard.
 
         Used for Red Shell wheel mechanic.
 
         Returns:
-            Player object of the player ranked above, or None if user is #1 or not found
+            Player above the user meeting ``min_balance``, or None if no one is eligible
         """
         ...
 

@@ -2982,18 +2982,24 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
-    def get_player_above(self, discord_id: int, guild_id: int) -> Player | None:
+    def get_player_above(
+        self,
+        discord_id: int,
+        guild_id: int,
+        min_balance: int | None = None,
+    ) -> Player | None:
         """
-        Get the player ranked one position higher on the balance leaderboard.
+        Get the nearest eligible player above on the balance leaderboard.
 
         Used for Red Shell wheel mechanic - steals from the player ahead of you.
 
         Args:
             discord_id: The player's Discord ID
             guild_id: Guild ID
+            min_balance: Optional minimum balance for the target
 
         Returns:
-            Player object of the player ranked above, or None if user is #1 or not found
+            Player above the user meeting ``min_balance``, or None if no one is eligible
         """
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -3009,13 +3015,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
 
             user_balance = int(user_row["balance"])
+            eligible_min_balance = user_balance if min_balance is None else min_balance
 
-            # Find player with the smallest balance that is greater than user's balance
-            # If there's a tie at user's balance, get the one with lower discord_id (tiebreaker)
+            # Find the nearest eligible player above the user. If there's a tie at
+            # the user's balance, get the one with lower discord_id (tiebreaker).
             cursor.execute(
                 """
                 SELECT * FROM players
-                WHERE guild_id = ? AND (
+                WHERE guild_id = ?
+                  AND COALESCE(jopacoin_balance, 0) >= ?
+                  AND (
                     COALESCE(jopacoin_balance, 0) > ?
                     OR (COALESCE(jopacoin_balance, 0) = ? AND discord_id < ?)
                 )
@@ -3023,7 +3032,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                          discord_id DESC
                 LIMIT 1
                 """,
-                (guild_id, user_balance, user_balance, discord_id),
+                (
+                    guild_id,
+                    eligible_min_balance,
+                    user_balance,
+                    user_balance,
+                    discord_id,
+                ),
             )
             row = cursor.fetchone()
 
