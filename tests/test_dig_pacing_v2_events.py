@@ -147,7 +147,9 @@ class TestWealthWeightedTargeting:
         # Player 1 wealthiest but excluded; player 2 picked.
         assert target == 2
 
-    def test_pick_splash_target_random_recent_biases_rich(self, dig_repo, player_repository, guild_id):
+    def test_pick_splash_target_random_recent_weights_by_balance(
+        self, dig_repo, player_repository, guild_id, monkeypatch
+    ):
         _register(player_repository, discord_id=1, balance=10000)
         _register(player_repository, discord_id=2, balance=100)
         _register(player_repository, discord_id=3, balance=100)
@@ -156,18 +158,25 @@ class TestWealthWeightedTargeting:
                 discord_id=did, guild_id=guild_id, action_type="dig",
                 jc_delta=0, details=json.dumps({}),
             )
-        random.seed(7)
-        picks = [
-            pick_splash_target(
-                player_repo=player_repository, dig_repo=dig_repo,
-                guild_id=guild_id, exclude_id=None, mode="random_recent",
-            )
-            for _ in range(2000)
-        ]
-        rich_count = sum(1 for p in picks if p == 1)
-        # Uniform = ~666 / 2000. Wealth-weighted with 10000 vs 100 vs 100
-        # should land far above uniform.
-        assert rich_count > 1500, f"rich picked {rich_count}/2000"
+        captured = {}
+
+        def choose(ids, *, weights, k):
+            captured["weighted_players"] = dict(zip(ids, weights))
+            captured["k"] = k
+            return [1]
+
+        monkeypatch.setattr("services.dig_splash.random.choices", choose)
+
+        target = pick_splash_target(
+            player_repo=player_repository, dig_repo=dig_repo,
+            guild_id=guild_id, exclude_id=None, mode="random_recent",
+        )
+
+        assert target == 1
+        assert captured == {
+            "weighted_players": {1: 10000, 2: 100, 3: 100},
+            "k": 1,
+        }
 
     def test_select_deepest_n_orders_by_depth(self, dig_repo, player_repository, guild_id):
         _register(player_repository, discord_id=1, balance=100)

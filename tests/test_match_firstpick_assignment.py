@@ -2,6 +2,8 @@
 Tests for firstpick team assignment in match shuffling.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from database import Database
@@ -47,48 +49,32 @@ class TestFirstpickAssignment:
         match_repo = MatchRepository(test_db.db_path)
         return MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=True)
 
-    def test_firstpick_is_radiant_or_dire(self, match_service, test_db, test_players):
-        """Test that firstpick team is always either 'Radiant' or 'Dire'."""
+    @pytest.mark.parametrize(
+        ("choice_index", "expected"),
+        [(0, "Radiant"), (1, "Dire")],
+    )
+    def test_firstpick_choice_is_returned_and_persisted(
+        self, match_service, test_db, test_players, monkeypatch, choice_index, expected
+    ):
+        """Both random choices are returned and persisted in match state."""
+        captured = {}
+
+        def choose(options):
+            captured["options"] = list(options)
+            return options[choice_index]
+
+        monkeypatch.setattr(
+            "services.match.shuffle_pending_mixin.random",
+            SimpleNamespace(random=lambda: 0.25, choice=choose),
+        )
+
         result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-
-        assert "first_pick_team" in result
-        assert result["first_pick_team"] in ("Radiant", "Dire")
-
-    def test_firstpick_is_in_shuffle_result(self, match_service, test_db, test_players):
-        """Test that firstpick team is included in shuffle result."""
-        result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-
-        assert "first_pick_team" in result
-        first_pick = result["first_pick_team"]
-        assert first_pick == "Radiant" or first_pick == "Dire"
-
-    def test_firstpick_is_persisted_in_state(self, match_service, test_db, test_players):
-        """Test that firstpick team is persisted in match state."""
-        result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-
-        # Get the persisted state
         state = match_service.get_last_shuffle(TEST_GUILD_ID)
+
+        assert captured["options"] == ["Radiant", "Dire"]
+        assert result["first_pick_team"] == expected
         assert state is not None
-        assert state.first_pick_team in ("Radiant", "Dire")
-        assert state.first_pick_team == result["first_pick_team"]
-
-    def test_firstpick_randomization_statistical(self, match_service, test_db, test_players):
-        """
-        Test that firstpick assignment is random by running multiple shuffles.
-
-        This test performs multiple shuffles and verifies that both Radiant and Dire
-        appear as firstpick at least once, indicating proper randomization.
-        """
-        firstpick_counts = {"Radiant": 0, "Dire": 0}
-        num_runs = 20
-
-        for _ in range(num_runs):
-            result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-            firstpick_counts[result["first_pick_team"]] += 1
-
-        # With 20 fair flips, P(<3 on either side) is ~2e-4 — robust against RNG noise.
-        assert firstpick_counts["Radiant"] >= 3
-        assert firstpick_counts["Dire"] >= 3
+        assert state.first_pick_team == expected
 
     def test_firstpick_assignment_multiple_guilds(self, match_service, test_db, player_repo, test_players):
         """Test that firstpick assignment works correctly for different guilds."""
@@ -194,34 +180,4 @@ class TestFirstpickEndToEnd:
 
         # Verify state is cleared
         assert match_service.get_last_shuffle(TEST_GUILD_ID) is None
-
-    def test_firstpick_independent_of_radiant_dire_assignment(self, match_service, test_db, test_players):
-        """
-        Test that firstpick assignment is independent of which team is Radiant/Dire.
-
-        This ensures that firstpick can be either Radiant or Dire regardless of
-        which players are assigned to which team.
-        """
-        firstpick_with_radiant_wins = 0
-        firstpick_with_dire_wins = 0
-        num_runs = 15
-
-        for _ in range(num_runs):
-            result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-
-            first_pick = result["first_pick_team"]
-            assert first_pick in ("Radiant", "Dire")
-
-            # Record the match to clear state for next iteration
-            # Use firstpick to determine winner (just for testing)
-            if first_pick == "Radiant":
-                firstpick_with_radiant_wins += 1
-                match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
-            else:
-                firstpick_with_dire_wins += 1
-                match_service.record_match("dire", guild_id=TEST_GUILD_ID)
-
-        # Verify both firstpick options appeared
-        assert firstpick_with_radiant_wins > 0
-        assert firstpick_with_dire_wins > 0
 

@@ -8,6 +8,7 @@ from datetime import datetime
 from unittest.mock import MagicMock
 
 import discord
+import pytest
 
 from domain.models.lobby import Lobby
 from services.lobby_manager_service import LobbyManagerService
@@ -19,23 +20,20 @@ from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 class TestLobbyJoinTimestamps:
-    def test_add_player_sets_join_time(self):
+    @pytest.mark.parametrize(
+        ("method_name", "discord_id"),
+        [("add_player", 100), ("add_conditional_player", 200)],
+    )
+    def test_add_player_sets_join_time(self, monkeypatch, method_name, discord_id):
+        fixed_now = datetime(2026, 7, 14, 12, 34, 56, 123456)
+        fake_datetime = MagicMock()
+        fake_datetime.now.return_value = fixed_now
+        monkeypatch.setattr("domain.models.lobby.datetime", fake_datetime)
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
-        before = time.time()
-        lobby.add_player(100)
-        after = time.time()
 
-        assert 100 in lobby.player_join_times
-        assert before <= lobby.player_join_times[100] <= after
+        getattr(lobby, method_name)(discord_id)
 
-    def test_add_conditional_player_sets_join_time(self):
-        lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
-        before = time.time()
-        lobby.add_conditional_player(200)
-        after = time.time()
-
-        assert 200 in lobby.player_join_times
-        assert before <= lobby.player_join_times[200] <= after
+        assert lobby.player_join_times[discord_id] == fixed_now.timestamp()
 
     def test_switch_queue_preserves_original_join_time(self):
         """Switching from conditional to regular should keep the original timestamp."""

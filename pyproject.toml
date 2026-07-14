@@ -37,9 +37,9 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-# Group tests by module/class to share session-scoped fixtures efficiently
+# Steal individual tests between workers to avoid long tails from slow modules
 # Limit workers to 8 to avoid Python 3.14.2 interpreter crashes under heavy parallel load
-addopts = "--dist=loadscope -n 8"
+addopts = "--dist=worksteal -n auto --maxprocesses 8"
 markers = [
     "timeout: mark test with a timeout",
     "real_weather: opt out of the default _disable_dig_weather autouse fixture",
