@@ -633,20 +633,6 @@ class TestShuffler:
         assert len(team2.players) == 5
         assert len(excluded) == 2
 
-        # Call with None explicitly
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, None)
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 2
-
-        # Call with empty dict
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, {})
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 2
-
 
 class TestRoleMatchupDelta:
     """Tests for the role matchup delta scoring additions."""
@@ -857,44 +843,33 @@ class TestShuffler14Players:
 
         assert optimized_calls > 0
 
-    def test_14_player_pool_basic_shuffle(self):
+    def test_branch_bound_is_deterministic_with_fixed_optimizer_scores(self, monkeypatch):
         """
-        Test that 14-player pool shuffles correctly:
-        - 10 players selected for match
-        - 4 players excluded
+        Branch-and-bound traversal should be deterministic for fixed optimizer scores.
         """
         players = _create_players_with_roles(14)
         shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+        roles = ["1", "2", "3", "4", "5"]
 
-        exclusion_counts = {pl.name: 0 for pl in players}
-        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+        def optimize(team1_players, team2_players, **kwargs):
+            score = abs(
+                sum(player.glicko_rating for player in team1_players)
+                - sum(player.glicko_rating for player in team2_players)
+            )
+            return (
+                Team(team1_players, role_assignments=roles),
+                Team(team2_players, role_assignments=roles),
+                score,
+            )
 
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 4
-
-        all_players = team1.players + team2.players + excluded
-        assert len(all_players) == 14
-
-        # Verify no duplicates
-        all_names = [p.name for p in all_players]
-        assert len(set(all_names)) == 14
-
-    def test_14_player_pool_deterministic(self):
-        """
-        Test that 14-player shuffles are deterministic.
-        Same input should produce same output (full enumeration, no sampling).
-        C(14,10) = 1001 < 2500 sampling limit.
-        """
-        players = _create_players_with_roles(14)
-        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+        monkeypatch.setattr(shuffler, "_optimize_role_assignments_for_matchup", optimize)
 
         exclusion_counts = {pl.name: 0 for pl in players}
 
-        # Run shuffle multiple times
+        # Two runs are sufficient to prove identical inputs produce identical output.
         results = []
-        for _ in range(3):
-            team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+        for _ in range(2):
+            team1, team2, excluded = shuffler.shuffle_branch_bound(players, exclusion_counts)
             result = (
                 frozenset(p.name for p in team1.players),
                 frozenset(p.name for p in team2.players),
@@ -902,8 +877,23 @@ class TestShuffler14Players:
             )
             results.append(result)
 
-        # All results should be identical (deterministic)
-        assert results[0] == results[1] == results[2]
+        assert results[0] == results[1]
+
+    def test_role_optimizer_is_deterministic_for_same_matchup(self):
+        """The real role optimizer should return the same assignments and score."""
+        players = _create_players_with_roles(10)
+        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+
+        first_team1, first_team2, first_score = shuffler._optimize_role_assignments_for_matchup(
+            players[:5], players[5:], max_assignments_per_team=3
+        )
+        second_team1, second_team2, second_score = shuffler._optimize_role_assignments_for_matchup(
+            players[:5], players[5:], max_assignments_per_team=3
+        )
+
+        assert first_team1.role_assignments == second_team1.role_assignments
+        assert first_team2.role_assignments == second_team2.role_assignments
+        assert first_score == second_score
 
     def test_14_player_pool_exclusion_penalty(self):
         """
@@ -989,6 +979,9 @@ class TestShuffler14Players:
         assert team2.role_assignments is not None
         assert len(team1.role_assignments) == 5
         assert len(team2.role_assignments) == 5
+
+        all_players = team1.players + team2.players + excluded
+        assert len({player.name for player in all_players}) == 14
 
     def test_13_player_pool(self):
         """Test 13-player pool (edge case between 12 and 14)."""

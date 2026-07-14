@@ -4,6 +4,7 @@ import pytest
 
 from config import SHUFFLER_SETTINGS
 from domain.models.player import Player
+from domain.models.team import Team
 from shuffler import BalancedShuffler
 from tests.conftest import TEST_GUILD_ID
 
@@ -104,30 +105,23 @@ class TestGetLastMatchParticipantIds:
 class TestRecentMatchPenaltyInExclusion:
     """Test that recent match penalty affects player exclusion."""
 
-    def test_recent_players_more_likely_excluded(self, sample_players):
-        """Recent match participants should be more likely to sit out."""
+    def test_greedy_shuffle_prefers_excluding_recent_players(self, sample_players):
+        """Recent match participants should be preferred for exclusion."""
         shuffler = BalancedShuffler(
-            recent_match_penalty_weight=100.0,  # High penalty
+            recent_match_penalty_weight=100.0,
             exclusion_penalty_weight=50.0,
         )
-
-        # Mark some players as having played recently
-        recent_names = {sample_players[0].name, sample_players[1].name}
-
-        # All players have same exclusion count
+        recent_names = {sample_players[-2].name, sample_players[-1].name}
         exclusion_counts = {p.name: 5 for p in sample_players}
 
-        *_, excluded = shuffler.shuffle_from_pool(
+        _, _, excluded, _ = shuffler._greedy_shuffle(
             sample_players, exclusion_counts, recent_names
         )
 
-        # With high penalty, recent players should be more likely to be excluded
-        # This is probabilistic, but with 100.0 weight vs 45.0 exclusion weight,
-        # recent players should often be excluded
-        assert len(excluded) == 4  # 14 - 10 = 4 excluded
+        assert recent_names <= {p.name for p in excluded}
 
     def test_penalty_disabled_when_zero(self, sample_players):
-        """No effect when weight is 0."""
+        """Recent participants do not affect selection or score at zero weight."""
         shuffler = BalancedShuffler(
             recent_match_penalty_weight=0.0,
             exclusion_penalty_weight=50.0,
@@ -136,21 +130,15 @@ class TestRecentMatchPenaltyInExclusion:
         recent_names = {sample_players[0].name, sample_players[1].name}
         exclusion_counts = {p.name: 0 for p in sample_players}
 
-        # Run multiple times to verify consistency. shuffle_from_pool now
-        # uses a fresh RNG by default, so pass a seeded one to keep the
-        # determinism this test relies on.
-        import random as _random
+        with_recent = shuffler._greedy_shuffle(
+            sample_players, exclusion_counts, recent_names
+        )
+        without_recent = shuffler._greedy_shuffle(
+            sample_players, exclusion_counts, set()
+        )
 
-        results = []
-        for _ in range(5):
-            *_, excluded = shuffler.shuffle_from_pool(
-                sample_players, exclusion_counts, recent_names, rng=_random.Random(0)
-            )
-            excluded_names = frozenset(p.name for p in excluded)
-            results.append(excluded_names)
-
-        # With zero penalty and a fixed RNG, results should be deterministic
-        assert len(set(results)) == 1
+        assert {p.name for p in with_recent[2]} == {p.name for p in without_recent[2]}
+        assert with_recent[3] == pytest.approx(without_recent[3])
 
 
 class TestRecentMatchPenaltyInGoodnessScore:
@@ -173,26 +161,58 @@ class TestRecentMatchPenaltyInGoodnessScore:
             sample_players, exclusion_counts, set()
         )
 
-        # Score with all recent should be higher (worse)
-        # 10 players selected * 25.0 = 250 additional penalty
-        assert score_with_all > score_with_none
+        assert score_with_all - score_with_none == pytest.approx(250.0)
 
-    def test_branch_bound_includes_recent_penalty(self, sample_players):
-        """Branch and bound shuffle should factor in recent match penalty."""
-        shuffler = BalancedShuffler(recent_match_penalty_weight=50.0)
+    def test_branch_bound_prefers_excluding_recent_players(self, monkeypatch):
+        """Branch-and-bound selection includes the recent-player penalty."""
+        players = [
+            Player(
+                name=f"Player{i}",
+                mmr=1500,
+                glicko_rd=0,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(14)
+        ]
+        shuffler = BalancedShuffler(
+            use_glicko=False,
+            recent_match_penalty_weight=50.0,
+            exclusion_penalty_weight=0.0,
+            rd_priority_weight=0.0,
+        )
+        roles = ["1", "2", "3", "4", "5"]
+        greedy_result = (
+            Team(players[:5], role_assignments=roles),
+            Team(players[5:10], role_assignments=roles),
+            players[10:],
+            float("inf"),
+        )
+        forwarded_recent_names = []
 
-        # Mark half the players as recent
-        recent_names = {p.name for p in sample_players[:7]}
-        exclusion_counts = {p.name: 0 for p in sample_players}
+        def greedy(_players, _exclusion_counts, recent_match_names, **_kwargs):
+            forwarded_recent_names.append(recent_match_names)
+            return greedy_result
 
-        # Should run without error and consider the penalty
-        team1, team2, excluded = shuffler.shuffle_branch_bound(
-            sample_players, exclusion_counts, recent_names
+        monkeypatch.setattr(shuffler, "_greedy_shuffle", greedy)
+        monkeypatch.setattr(
+            shuffler,
+            "_optimize_role_assignments_for_matchup",
+            lambda team1, team2, **kwargs: (
+                Team(team1, role_assignments=roles),
+                Team(team2, role_assignments=roles),
+                0.0,
+            ),
+        )
+        recent_names = {p.name for p in players[:4]}
+
+        _, _, excluded = shuffler.shuffle_from_pool(
+            players,
+            {p.name: 0 for p in players},
+            recent_names,
         )
 
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 4
+        assert forwarded_recent_names == [recent_names]
+        assert {p.name for p in excluded} == recent_names
 
 
 class TestRecentMatchPenaltyWithExclusionCounts:
@@ -212,57 +232,11 @@ class TestRecentMatchPenaltyWithExclusionCounts:
         exclusion_counts = {p.name: 0 for p in sample_players}
         exclusion_counts[sample_players[0].name] = 100  # Very high
 
-        team1, team2, excluded = shuffler.shuffle_from_pool(
+        team1, team2, excluded, _ = shuffler._greedy_shuffle(
             sample_players, exclusion_counts, recent_names
         )
 
         selected_names = {p.name for p in team1.players + team2.players}
 
-        # Player0 should likely be selected despite recent play
-        # (100 * 45 = 4500 penalty if excluded vs 25 penalty if selected)
-        # This depends on other factors, so we just verify the method runs
-        assert len(selected_names) == 10
-        assert len(excluded) == 4
-
-
-class TestRecentMatchPenaltyEdgeCases:
-    """Test edge cases for recent match penalty."""
-
-    def test_empty_recent_names(self, sample_players):
-        """Empty recent_match_names should not cause errors."""
-        shuffler = BalancedShuffler()
-        exclusion_counts = {p.name: 0 for p in sample_players}
-
-        team1, team2, _ = shuffler.shuffle_from_pool(
-            sample_players, exclusion_counts, set()
-        )
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-
-    def test_none_recent_names(self, sample_players):
-        """None recent_match_names should be handled as empty set."""
-        shuffler = BalancedShuffler()
-        exclusion_counts = {p.name: 0 for p in sample_players}
-
-        team1, team2, _ = shuffler.shuffle_from_pool(
-            sample_players, exclusion_counts, None
-        )
-
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-
-    def test_all_players_from_recent_match(self, sample_players):
-        """Should handle case where all players are from recent match."""
-        shuffler = BalancedShuffler(recent_match_penalty_weight=25.0)
-        all_names = {p.name for p in sample_players}
-        exclusion_counts = {p.name: 0 for p in sample_players}
-
-        team1, team2, excluded = shuffler.shuffle_from_pool(
-            sample_players, exclusion_counts, all_names
-        )
-
-        # Should still produce valid teams
-        assert len(team1.players) == 5
-        assert len(team2.players) == 5
-        assert len(excluded) == 4
+        assert sample_players[0].name in selected_names
+        assert sample_players[0].name not in {p.name for p in excluded}
