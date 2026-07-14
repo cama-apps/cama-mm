@@ -44,7 +44,6 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_EVENT_MULTIPLIER,
     MILESTONES,
-    PICKAXE_TIERS,
     PRESTIGE_HARD_CAP,
     STREAKS,
     WEATHER_BY_ID,
@@ -609,7 +608,7 @@ class DigService(
         )
 
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
-        pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
+        pickaxe_data = self._get_active_pickaxe_data(discord_id, guild_id, tunnel)
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
 
@@ -1455,7 +1454,7 @@ class DigService(
         )
 
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
-        pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
+        pickaxe_data = self._get_active_pickaxe_data(discord_id, guild_id, tunnel)
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
 

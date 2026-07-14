@@ -53,6 +53,7 @@ async def test_event_result_embed_surfaces_gear_drop_details():
                     "name": "Glassbreaker Pick",
                     "slot": "weapon",
                     "durability": 8,
+                    "effect": "Diamond dig bonuses; +2 boss damage; -8% hit chance.",
                 },
             }
 
@@ -69,4 +70,7 @@ async def test_event_result_embed_surfaces_gear_drop_details():
     assert gear_field is not None
     assert "Glassbreaker Pick" in gear_field.value
     assert "Weapon" in gear_field.value
-    assert gear_field.value.endswith("Durability: 8")
+    assert "Durability: 8" in gear_field.value
+    assert gear_field.value.endswith(
+        "Diamond dig bonuses; +2 boss damage; -8% hit chance."
+    )

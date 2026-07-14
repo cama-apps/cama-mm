@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -44,6 +45,7 @@ def test_unique_gear_registry_contains_the_approved_sidegrades():
         assert definition.reference_tier == 3
         assert definition.repair_value == 200
         assert definition.max_durability == durability
+        assert definition.effect_summary
 
     assert registry["glassbreaker_pick"].player_dmg == 2
     assert registry["glassbreaker_pick"].player_hit == pytest.approx(-0.08)
@@ -113,6 +115,44 @@ def test_service_hydrates_and_serializes_unique_gear(repo_db_path):
     assert unique["name"] == "Briarplate"
     assert unique["max_durability"] == 14
     assert unique["durability"] == 14
+    assert unique["effect"] == (
+        "+1 HP; reflect 1 damage on the first boss hit."
+    )
+
+    service.dig_repo.equip_gear(gear_id, 101, 7, "armor")
+    equipped = service.get_loadout(101, 7)["armor"]
+    assert equipped["effect"] == unique["effect"]
+
+
+def test_unique_weapon_uses_authored_dig_modifiers(repo_db_path, monkeypatch):
+    service = _service(repo_db_path)
+    gear_id = service.dig_repo.add_gear(
+        101,
+        7,
+        "weapon",
+        3,
+        source="event:collapsed_armory",
+        durability=8,
+        item_id="glassbreaker_pick",
+    )
+    service.dig_repo.equip_gear(gear_id, 101, 7, "weapon")
+    monkeypatch.setitem(
+        items.UNIQUE_GEAR,
+        "glassbreaker_pick",
+        replace(
+            items.UNIQUE_GEAR["glassbreaker_pick"],
+            advance_bonus=7,
+            cave_in_reduction=0.12,
+            loot_bonus=9,
+        ),
+    )
+
+    tunnel = dict(service.dig_repo.get_tunnel(101, 7))
+    modifiers = service._get_active_pickaxe_data(101, 7, tunnel)
+
+    assert modifiers["advance_bonus"] == 7
+    assert modifiers["cave_in_reduction"] == pytest.approx(0.12)
+    assert modifiers["loot_bonus"] == 9
 
 
 def test_unknown_unique_item_id_fails_closed_during_hydration(repo_db_path):
@@ -218,6 +258,9 @@ def test_resolve_event_grants_and_returns_unique_gear_atomically(
     assert result["gear_drop"]["item_id"] == "glassbreaker_pick"
     assert result["gear_drop"]["name"] == "Glassbreaker Pick"
     assert result["gear_drop"]["max_durability"] == 8
+    assert result["gear_drop"]["effect"] == (
+        "Diamond dig bonuses; +2 boss damage; -8% hit chance."
+    )
     assert service.dig_repo.get_gear_by_id(result["gear_drop"]["gear_id"])[
         "item_id"
     ] == "glassbreaker_pick"

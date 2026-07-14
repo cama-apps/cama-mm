@@ -940,6 +940,41 @@ class TestPinnacleFight:
         # Active duel row was cleared.
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
 
+    def test_pinnacle_resume_processes_mechanic_status_effects(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        _at_pinnacle(dig_repo)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID, pinnacle_boss_id="forgotten_king",
+        )
+
+        monkeypatch.setattr(random.Random, "choice", lambda _rng, pool: pool[1])
+        roll_seq = iter([0.0, 0.99] * 50)
+        monkeypatch.setattr(random, "random", lambda: next(roll_seq))
+        result = dig_service.fight_boss(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+        assert result["mechanic_id"] == "king_crownfall"
+
+        observed_bleed = []
+        original_run_one_round = dig_service._run_one_round
+
+        def record_status_effects(**kwargs):
+            observed_bleed.append(
+                kwargs["status_effects"].get("bleed_rounds_remaining", 0)
+            )
+            return original_run_one_round(**kwargs)
+
+        monkeypatch.setattr(dig_service, "_run_one_round", record_status_effects)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=2)
+
+        assert observed_bleed == [3, 2]
+
     def test_loss_persists_phase_hp(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
