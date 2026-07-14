@@ -6,9 +6,16 @@ import pytest
 
 from commands.betting import BettingCommands
 from config import (
+    LIGHTNING_BOLT_PCT_MAX,
+    LIGHTNING_BOLT_PCT_MIN,
     WHEEL_BANANA_PEEL_EST_EV,
+    WHEEL_BANANA_PEEL_LOSS_MAX,
+    WHEEL_BANANA_PEEL_LOSS_MIN,
     WHEEL_BLUE_SHELL_EST_EV,
     WHEEL_BOMB_OMB_EST_EV,
+    WHEEL_BOMB_OMB_VICTIM_COUNT,
+    WHEEL_BOMB_OMB_VICTIM_LOSS_MAX,
+    WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
     WHEEL_COOLDOWN_SECONDS,
     WHEEL_GREEN_SHELL_EST_EV,
     WHEEL_LIGHTNING_BOLT_EST_EV,
@@ -635,6 +642,24 @@ def test_wheel_wedges_distribution():
     assert positive_values == [4, 8, 8, 12, 16, 20, 24, 32, 40, 40, 48, 56, 64, 80, 80]
     assert jackpot_count == 2, f"Expected 2 scaled Jackpot wedges, got {jackpot_count}"
     assert special_count == 6, f"Expected 6 special wedges, got {special_count}"
+
+
+def test_wheel_hazard_ranges_are_wider_and_ten_percent_stronger():
+    """Hazard floors stay stable while wider ranges raise average impact by 10%."""
+    assert (WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX) == (15, 29)
+    assert (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) == (10, 23)
+    assert pytest.approx((0.02, 0.057)) == (LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
+
+    banana_mean = (WHEEL_BANANA_PEEL_LOSS_MIN + WHEEL_BANANA_PEEL_LOSS_MAX) / 2
+    bomb_mean = (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN + WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) / 2
+    bolt_mean = (LIGHTNING_BOLT_PCT_MIN + LIGHTNING_BOLT_PCT_MAX) / 2
+
+    assert banana_mean == pytest.approx(20 * 1.10)
+    assert bomb_mean == pytest.approx(15 * 1.10)
+    assert bolt_mean == pytest.approx(0.035 * 1.10)
+    assert pytest.approx(-banana_mean) == WHEEL_BANANA_PEEL_EST_EV
+    assert pytest.approx(-bomb_mean * WHEEL_BOMB_OMB_VICTIM_COUNT) == WHEEL_BOMB_OMB_EST_EV
+    assert pytest.approx(-55 * 1.10) == WHEEL_LIGHTNING_BOLT_EST_EV
 
 
 def test_wheel_expected_value_matches_config():
@@ -1915,12 +1940,16 @@ async def test_trickle_down_mixed_absorption_does_not_double_credit_spinner():
     interaction.channel.send = AsyncMock()
     cmds = BettingCommands(bot, betting_service, match_service, player_service)
 
+    def trickle_uniform(lower, upper):
+        assert (lower, upper) == (0.02, 0.05)
+        return 0.02
+
     with patch(
         "commands.betting.compute_live_golden_wedges",
         return_value=[("TRICKLE_DOWN", "TRICKLE_DOWN", "#ffd700")],
     ):
         with patch("commands.betting.random.randint", return_value=0):
-            with patch("commands.betting.random.uniform", return_value=0.02):
+            with patch("commands.betting.random.uniform", side_effect=trickle_uniform):
                 with patch("commands.betting.random.random", return_value=1.0):
                     with patch("commands.betting.asyncio.to_thread", new=_inline_to_thread):
                         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
@@ -2077,7 +2106,7 @@ async def test_banana_peel_burns_player_below():
     )
 
     banana_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BANANA_PEEL")
-    # side_effect: [wedge_idx, loss_roll] — pinning loss to 20 (within 15-25)
+    # side_effect: [wedge_idx, loss_roll] — pinning loss to 20 (within 15-29)
     with patch("commands.betting.random.randint", side_effect=[banana_idx, 20]):
         with patch("commands.betting.random.random", return_value=1.0):
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):

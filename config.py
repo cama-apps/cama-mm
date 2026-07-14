@@ -232,9 +232,9 @@ WHEEL_BANKRUPT_TARGET_EV = _parse_float("WHEEL_BANKRUPT_TARGET_EV", 12.0)
 WHEEL_RED_SHELL_EST_EV = _parse_float("WHEEL_RED_SHELL_EST_EV", 0.0)
 # BLUE_SHELL: mostly zero-sum transfer, self-hit (~1/N chance) sends to nonprofit
 WHEEL_BLUE_SHELL_EST_EV = _parse_float("WHEEL_BLUE_SHELL_EST_EV", -4.0)
-# LIGHTNING_BOLT: taxes ALL positive-balance players 2-5%, all to nonprofit sink
-# estimate ~15 active players * ~100 avg balance * ~3.5% avg tax = ~55 JC destroyed
-WHEEL_LIGHTNING_BOLT_EST_EV = _parse_float("WHEEL_LIGHTNING_BOLT_EST_EV", -55.0)
+# LIGHTNING_BOLT: taxes ALL positive-balance players 2-5.7%, all to nonprofit sink
+# Wider range raises the average tax from 3.5% to 3.85%; estimated impact scales by 10%.
+WHEEL_LIGHTNING_BOLT_EST_EV = _parse_float("WHEEL_LIGHTNING_BOLT_EST_EV", -60.5)
 # COMMUNE: all positive-balance players donate 1 JC to spinner; positive for spinner
 # estimate ~8 active players with positive balance → spinner receives ~8 JC
 WHEEL_COMMUNE_EST_EV = _parse_float("WHEEL_COMMUNE_EST_EV", 8.0)
@@ -257,7 +257,7 @@ WHEEL_DISCOVER_EST_EV = _parse_float("WHEEL_DISCOVER_EST_EV", 5.0)
 
 # Lightning Bolt (wheel wedge: server-wide tax to nonprofit)
 LIGHTNING_BOLT_PCT_MIN = _parse_float("LIGHTNING_BOLT_PCT_MIN", 0.02)
-LIGHTNING_BOLT_PCT_MAX = _parse_float("LIGHTNING_BOLT_PCT_MAX", 0.05)
+LIGHTNING_BOLT_PCT_MAX = _parse_float("LIGHTNING_BOLT_PCT_MAX", 0.057)
 LIGHTNING_BOLT_MIN_TAX = _parse_int("LIGHTNING_BOLT_MIN_TAX", 1)
 
 # Golden Wheel (exclusive to top N jopacoin balance holders)
@@ -269,6 +269,8 @@ WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 33.0)     
 WHEEL_GOLDEN_MARKET_CRASH_EST_EV = _parse_float("WHEEL_GOLDEN_MARKET_CRASH_EST_EV", 35.0)
 WHEEL_GOLDEN_COMPOUND_EST_EV = _parse_float("WHEEL_GOLDEN_COMPOUND_EST_EV", 100.0)  # flat +100 reward
 WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV", 65.0)
+WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN", 0.02)
+WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX", 0.05)
 WHEEL_GOLDEN_DIVIDEND_EST_EV = _parse_float("WHEEL_GOLDEN_DIVIDEND_EST_EV", 10.0)
 WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV = _parse_float("WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV", 35.0)
 # RECESSION: server-wide deflation. Every positive-balance player loses a % of
@@ -285,11 +287,11 @@ WHEEL_GOLDEN_RECESSION_MID_RANK_END = _parse_int("WHEEL_GOLDEN_RECESSION_MID_RAN
 # EV values represent TOTAL economic impact (JC created or destroyed per spin),
 # matching the convention used by RED_SHELL/LIGHTNING_BOLT/RECESSION above.
 
-# BANANA_PEEL: player ranked directly below spinner takes a flat 15-25 JC burn.
-# Spinner unchanged. One player burned per spin → total economic impact ≈ -20.
-WHEEL_BANANA_PEEL_EST_EV = _parse_float("WHEEL_BANANA_PEEL_EST_EV", -20.0)
+# BANANA_PEEL: player ranked directly below spinner takes a flat 15-29 JC burn.
+# Spinner unchanged. One player burned per spin → total economic impact ≈ -22.
+WHEEL_BANANA_PEEL_EST_EV = _parse_float("WHEEL_BANANA_PEEL_EST_EV", -22.0)
 WHEEL_BANANA_PEEL_LOSS_MIN = _parse_int("WHEEL_BANANA_PEEL_LOSS_MIN", 15)
-WHEEL_BANANA_PEEL_LOSS_MAX = _parse_int("WHEEL_BANANA_PEEL_LOSS_MAX", 25)
+WHEEL_BANANA_PEEL_LOSS_MAX = _parse_int("WHEEL_BANANA_PEEL_LOSS_MAX", 29)
 
 # GREEN_SHELL: spinner atomically steals 15-25 JC from a random other positive-balance
 # player. Zero-sum transfer → total economic impact = 0.
@@ -297,11 +299,11 @@ WHEEL_GREEN_SHELL_EST_EV = _parse_float("WHEEL_GREEN_SHELL_EST_EV", 0.0)
 WHEEL_GREEN_SHELL_STEAL_MIN = _parse_int("WHEEL_GREEN_SHELL_STEAL_MIN", 15)
 WHEEL_GREEN_SHELL_STEAL_MAX = _parse_int("WHEEL_GREEN_SHELL_STEAL_MAX", 25)
 
-# BOMB_OMB: 3 random other positive-balance players each take a 10-20 JC burn.
-# Spinner unchanged. Heavy global deflation per spin → total economic impact ≈ -45.
-WHEEL_BOMB_OMB_EST_EV = _parse_float("WHEEL_BOMB_OMB_EST_EV", -45.0)
+# BOMB_OMB: 3 random other positive-balance players each take a 10-23 JC burn.
+# Spinner unchanged. Heavy global deflation per spin → total economic impact ≈ -49.5.
+WHEEL_BOMB_OMB_EST_EV = _parse_float("WHEEL_BOMB_OMB_EST_EV", -49.5)
 WHEEL_BOMB_OMB_VICTIM_LOSS_MIN = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MIN", 10)
-WHEEL_BOMB_OMB_VICTIM_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MAX", 20)
+WHEEL_BOMB_OMB_VICTIM_LOSS_MAX = _parse_int("WHEEL_BOMB_OMB_VICTIM_LOSS_MAX", 23)
 WHEEL_BOMB_OMB_VICTIM_COUNT = _parse_int("WHEEL_BOMB_OMB_VICTIM_COUNT", 3)
 
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)

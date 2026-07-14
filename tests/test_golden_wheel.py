@@ -86,7 +86,10 @@ class TestGoldenWheelWedges:
         )
 
         # Recompute estimated EVs for special wedges (same logic as inside the function)
-        avg_trickle = (config.LIGHTNING_BOLT_PCT_MIN + config.LIGHTNING_BOLT_PCT_MAX) / 2.0
+        avg_trickle = (
+            config.WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MIN
+            + config.WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX
+        ) / 2.0
         live_evs = {
             "RED_SHELL": scale_minigame_jc_delta(config.WHEEL_RED_SHELL_EST_EV),
             "BLUE_SHELL": scale_minigame_jc_delta(config.WHEEL_BLUE_SHELL_EST_EV),
