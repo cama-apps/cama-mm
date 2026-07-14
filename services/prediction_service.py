@@ -414,7 +414,10 @@ class PredictionService:
         )
 
     def rollback_orderbook(
-        self, prediction_id: int, rolled_back_by: int | None = None
+        self,
+        prediction_id: int,
+        guild_id: int | None,
+        rolled_back_by: int | None = None,
     ) -> dict:
         """Reverse a settlement and reopen the market with a fresh ladder."""
         pred = self.prediction_repo.get_prediction(prediction_id)
@@ -425,6 +428,7 @@ class PredictionService:
         levels = self._build_initial_levels(int(pred["current_price"]))
         return self.prediction_repo.rollback_prediction_orderbook(
             prediction_id,
+            guild_id,
             levels,
             rolled_back_by=rolled_back_by,
         )

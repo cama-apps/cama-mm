@@ -905,7 +905,9 @@ class PredictionCommands(commands.Cog):
 
     # -- embed update helpers ---
 
-    async def refresh_market_embed(self, prediction_id: int):
+    async def refresh_market_embed(
+        self, prediction_id: int, *, restore_view: bool = False
+    ):
         """Re-render the market embed in its thread after a state change."""
         try:
             view = await asyncio.to_thread(
@@ -939,7 +941,10 @@ class PredictionCommands(commands.Cog):
                 chart_filename = chart_file.filename if chart_file else None
                 embed = self._build_market_embed(view, chart_filename=chart_filename)
                 attachments = [chart_file] if chart_file else []
-                await msg.edit(embed=embed, attachments=attachments)
+                edit_kwargs = (
+                    {"view": PersistentMarketView(self)} if restore_view else {}
+                )
+                await msg.edit(embed=embed, attachments=attachments, **edit_kwargs)
         except discord.NotFound:
             logger.debug("Market embed message vanished for %s", prediction_id)
         except Exception as e:
@@ -1191,10 +1196,12 @@ class PredictionCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
         try:
             result = await asyncio.to_thread(
                 self.prediction_service.rollback_orderbook,
                 prediction_id,
+                guild_id,
                 interaction.user.id,
             )
         except ValueError as e:
@@ -1225,7 +1232,7 @@ class PredictionCommands(commands.Cog):
                     archived=False,
                     auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
                 )
-                await self.refresh_market_embed(prediction_id)
+                await self.refresh_market_embed(prediction_id, restore_view=True)
                 try:
                     await thread.send(announce)
                 except Exception as e:

@@ -1329,6 +1329,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
     def rollback_prediction_orderbook(
         self,
         prediction_id: int,
+        guild_id: int | None,
         levels: list[tuple[str, int, int]],
         rolled_back_by: int | None = None,
     ) -> dict:
@@ -1339,13 +1340,14 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             if side not in self.VALID_BOOK_SIDES:
                 raise ValueError(f"Invalid book side: {side}")
 
+        normalized_guild = self.normalize_guild_id(guild_id)
         now = int(time.time())
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT status, guild_id, outcome, current_price "
-                "FROM predictions WHERE prediction_id = ?",
-                (prediction_id,),
+                "FROM predictions WHERE prediction_id = ? AND guild_id = ?",
+                (prediction_id, normalized_guild),
             )
             pred = cursor.fetchone()
             if not pred:
@@ -1358,7 +1360,6 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             outcome = str(pred["outcome"] or "")
             if outcome not in self.VALID_POSITIONS:
                 raise ValueError("Resolved prediction has no valid outcome.")
-            guild_id = int(pred["guild_id"])
             current_price = int(pred["current_price"])
 
             cursor.execute(
@@ -1373,8 +1374,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             positions = cursor.fetchall()
 
             total_gross_payout = 0
-            total_reversed = 0
-            affected_players = 0
+            reversals: list[tuple[int, int, int]] = []
+            expected_credits: dict[int, int] = {}
             for position in positions:
                 winning_contracts = int(position[f"{outcome}_contracts"])
                 gross_payout = winning_contracts * PREDICTION_CONTRACT_VALUE
@@ -1384,6 +1385,83 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 if credited <= 0:
                     continue
 
+                discord_id = int(position["discord_id"])
+                expected_credits[discord_id] = credited
+                reversals.append((discord_id, gross_payout, penalty))
+
+            cursor.execute(
+                """
+                SELECT ledger_id, account_type, account_id, delta
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND source = 'prediction_resolution'
+                  AND related_type = 'prediction'
+                  AND related_id = ?
+                  AND ledger_id > COALESCE((
+                      SELECT MAX(rollback.ledger_id)
+                      FROM economy_ledger_entries AS rollback
+                      WHERE rollback.guild_id = ?
+                        AND rollback.source = 'prediction_resolution_rollback'
+                        AND rollback.related_type = 'prediction'
+                        AND rollback.related_id = ?
+                  ), 0)
+                ORDER BY ledger_id
+                """,
+                (
+                    normalized_guild,
+                    str(prediction_id),
+                    normalized_guild,
+                    str(prediction_id),
+                ),
+            )
+            settlement_rows = cursor.fetchall()
+            settlements_by_account = {}
+            for row in settlement_rows:
+                account_id = row["account_id"]
+                if row["account_type"] != "player" or account_id is None:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                account_id = int(account_id)
+                if account_id in settlements_by_account:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                expected_credit = expected_credits.get(account_id)
+                delta = int(row["delta"])
+                if expected_credit is None or delta <= 0 or delta != expected_credit:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                settlements_by_account[account_id] = row
+
+            if set(settlements_by_account) != set(expected_credits):
+                raise ValueError("Settlement ledger is inconsistent.")
+
+            for discord_id, _, _ in reversals:
+                settlement = settlements_by_account[discord_id]
+                cursor.execute(
+                    "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+                    (discord_id, normalized_guild),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError(f"Winning player {discord_id} no longer exists.")
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM economy_ledger_entries
+                    WHERE guild_id = ?
+                      AND account_type = 'player'
+                      AND account_id = ?
+                      AND source = 'player_insert'
+                      AND ledger_id > ?
+                    LIMIT 1
+                    """,
+                    (normalized_guild, discord_id, int(settlement["ledger_id"])),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError(
+                        f"Winning player {discord_id} account was re-created after settlement."
+                    )
+
+            total_reversed = 0
+            affected_players = 0
+            for discord_id, gross_payout, penalty in reversals:
+                credited = int(settlements_by_account[discord_id]["delta"])
                 self._set_economy_ledger_context(
                     cursor,
                     source="prediction_resolution_rollback",
@@ -1405,8 +1483,10 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                             updated_at = CURRENT_TIMESTAMP
                         WHERE discord_id = ? AND guild_id = ?
                         """,
-                        (credited, position["discord_id"], guild_id),
+                        (credited, discord_id, normalized_guild),
                     )
+                    if cursor.rowcount != 1:
+                        raise ValueError("Winning player account changed during rollback.")
                 finally:
                     self._clear_economy_ledger_context(cursor)
                 total_reversed += credited
@@ -1448,7 +1528,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     (market_id, guild_id, snapshot_at, fair_pct, reason)
                 VALUES (?, ?, ?, ?, 'rollback')
                 """,
-                (prediction_id, guild_id, now, current_price),
+                (prediction_id, normalized_guild, now, current_price),
             )
             cursor.execute(
                 "SELECT lp_pnl FROM predictions WHERE prediction_id = ?",
@@ -1458,7 +1538,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             return {
                 "prediction_id": prediction_id,
-                "guild_id": guild_id,
+                "guild_id": normalized_guild,
                 "previous_outcome": outcome,
                 "total_reversed": total_reversed,
                 "affected_players": affected_players,

@@ -930,6 +930,7 @@ class IPredictionRepository(ABC):
     def rollback_prediction_orderbook(
         self,
         prediction_id: int,
+        guild_id: int | None,
         levels: list[tuple[str, int, int]],
         rolled_back_by: int | None = None,
     ) -> dict:
