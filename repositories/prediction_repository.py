@@ -1033,6 +1033,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         levels: list[tuple[str, int, int]],
         now_ts: int,
         reason: str = "refresh",
+        min_quote_offset: int = 0,
     ) -> None:
         """Layer fresh size onto the ladder and stamp the new fair / refresh time.
 
@@ -1041,6 +1042,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         markets accumulate depth at unchanged price levels). If no match, insert
         a fresh level. Old levels at orphan positions (positions not in the new
         ladder) are left untouched, so the book widens over time as fair drifts.
+        Correctly sided quotes strictly inside ``min_quote_offset`` are removed
+        so legacy books adopt a wider minimum spread without deleting crossing
+        arbitrage levels.
 
         Re-checks status inside the write lock so a concurrent /predict resolve
         or /predict cancel can't be clobbered by a stale refresh.
@@ -1058,6 +1062,23 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             # Crossing levels from earlier flow are left in place on purpose:
             # they're the arb pockets that drive engagement.
+            if min_quote_offset > 0:
+                cursor.execute(
+                    """
+                    DELETE FROM prediction_levels
+                    WHERE prediction_id = ? AND (
+                        (side = 'yes_ask' AND price > ? AND price < ?)
+                        OR (side = 'yes_bid' AND price < ? AND price > ?)
+                    )
+                    """,
+                    (
+                        prediction_id,
+                        new_price,
+                        new_price + min_quote_offset,
+                        new_price,
+                        new_price - min_quote_offset,
+                    ),
+                )
 
             for side, price, size in levels:
                 if side not in self.VALID_BOOK_SIDES:

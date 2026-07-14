@@ -898,11 +898,13 @@ class IPredictionRepository(ABC):
         levels: list[tuple[str, int, int]],
         now_ts: int,
         reason: str = "refresh",
+        min_quote_offset: int = 0,
     ) -> None:
         """Layer fresh size + new fair onto the ladder; record a fair snapshot.
 
         ``reason`` is one of 'refresh' / 'set_fair' / 'create' and is stored on
         the snapshot row so the chart can label admin overrides separately.
+        Non-crossing quotes inside ``min_quote_offset`` are pruned atomically.
         """
         ...
 

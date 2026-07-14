@@ -362,8 +362,8 @@ class PredictionService:
         new_price = self.clamp_price(round(observed_mid) + drift)
 
         # Daily refresh layers thinner / wider than the initial seed: fewer
-        # levels, smaller per-level size, larger spread offset. Initial book
-        # stays untouched at top of book; the layered refresh sits behind it.
+        # levels, smaller per-level size, larger spread offset. Legacy quotes
+        # inside the current minimum spread are pruned while crossing arb stays.
         levels = self._build_initial_levels(
             new_price,
             levels_per_side=PREDICTION_REFRESH_LEVELS_PER_SIDE,
@@ -371,7 +371,13 @@ class PredictionService:
             spread_ticks=PREDICTION_REFRESH_SPREAD_TICKS,
         )
         now = int(time.time())
-        self.prediction_repo.apply_refresh(prediction_id, new_price, levels, now)
+        self.prediction_repo.apply_refresh(
+            prediction_id,
+            new_price,
+            levels,
+            now,
+            min_quote_offset=PREDICTION_SPREAD_TICKS * PREDICTION_TICK_SIZE,
+        )
 
         summary = self.prediction_repo.get_trade_summary_since(
             prediction_id, prev_refresh
@@ -460,7 +466,12 @@ class PredictionService:
         levels = self._build_initial_levels(new_price)
         now = int(time.time())
         self.prediction_repo.apply_refresh(
-            prediction_id, new_price, levels, now, reason="set_fair"
+            prediction_id,
+            new_price,
+            levels,
+            now,
+            reason="set_fair",
+            min_quote_offset=PREDICTION_SPREAD_TICKS * PREDICTION_TICK_SIZE,
         )
         return {
             "prediction_id": prediction_id,
