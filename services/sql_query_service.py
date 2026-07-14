@@ -42,6 +42,16 @@ BLOCKED_TABLES: set[str] = {
     # Sensitive social information
     "soft_avoids",
     "package_deals",
+    # Tables with no guild_id column: the per-guild TEMP VIEW isolation cannot
+    # shadow them, so an AI query would read every guild's rows. Blocked outright
+    # since they carry user- or guild-attributable data with no cross-guild use.
+    "player_steam_ids",
+    "prediction_positions",
+    "prediction_trades",
+    "prediction_levels",
+    "match_predictions",
+    "match_corrections",
+    "economy_ledger_context",
 }
 
 # Columns that should never appear in SELECT results (PII/internal)
@@ -475,33 +485,62 @@ class SQLQueryService:
 
     @staticmethod
     def _mask_string_literals(sql: str) -> str:
-        """Replace the contents of single/double quoted string literals with a
-        neutral placeholder, keeping the surrounding quotes.
+        """Normalise a query for structural validation.
 
-        Lets structural validation treat string data as opaque, so a value like
-        'a;b' or 'DROP' can neither trigger a false rejection nor hide a second
-        statement. Handles SQL doubled-quote escaping (e.g. 'it''s').
+        Two quote kinds are handled differently, matching SQLite semantics:
+
+        * Single-quoted ``'...'`` is *string data* — its contents are masked to a
+          neutral placeholder so a value like ``'a;b'`` or ``'DROP'`` can neither
+          trigger a false rejection nor hide a second statement.
+        * Double-quoted ``"..."``, bracketed ``[...]`` and backtick ``` `...` ```
+          are *identifiers* (column/table names). SQLite resolves ``"discord_id"``
+          to the real column, so these must stay visible to the column/table
+          blocklist. The delimiters are replaced with spaces and the identifier
+          text is kept, turning ``"discord_id"`` into a bare word the structural
+          scans can see. (Previously their contents were masked like a literal,
+          which let a quoted identifier smuggle a blocked column/table past every
+          check while SQLite still read the real data.)
+
+        Handles doubled-delimiter escaping for both kinds (e.g. ``'it''s'``).
         """
         out: list[str] = []
         i = 0
         n = len(sql)
+        # opening delimiter -> closing delimiter for identifier quoting
+        ident_close = {'"': '"', "`": "`", "[": "]"}
         while i < n:
             ch = sql[i]
-            if ch == "'" or ch == '"':
-                quote = ch
-                out.append(quote)
+            if ch == "'":
+                out.append("'")
                 i += 1
                 while i < n:
-                    if sql[i] == quote:
+                    if sql[i] == "'":
                         # Doubled quote = an escaped quote inside the literal.
-                        if i + 1 < n and sql[i + 1] == quote:
+                        if i + 1 < n and sql[i + 1] == "'":
                             out.append("xx")
                             i += 2
                             continue
-                        out.append(quote)
+                        out.append("'")
                         i += 1
                         break
                     out.append("x")
+                    i += 1
+            elif ch in ident_close:
+                close = ident_close[ch]
+                out.append(" ")
+                i += 1
+                while i < n:
+                    if sql[i] == close:
+                        # Doubled delimiter = an escaped delimiter in the name
+                        # (only for "" and ``, not []). Keep it as a plain char.
+                        if close != "]" and i + 1 < n and sql[i + 1] == close:
+                            out.append(sql[i])
+                            i += 2
+                            continue
+                        out.append(" ")
+                        i += 1
+                        break
+                    out.append(sql[i])
                     i += 1
             else:
                 out.append(ch)

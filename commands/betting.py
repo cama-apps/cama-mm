@@ -83,9 +83,6 @@ from commands.betting_helpers.messages import (
     WHEEL_EXPLOSION_CHANCE,
     WHEEL_EXPLOSION_REWARD,
 )
-from commands.betting_helpers.rebellion_actions import (
-    incite_action as _incite_action,
-)
 from commands.betting_helpers.wheel_embeds import (
     build_wheel_explosion_embed,
     build_wheel_result_embed,
@@ -105,7 +102,6 @@ from config import (
     LIGHTNING_BOLT_MIN_TAX,
     LIGHTNING_BOLT_PCT_MAX,
     LIGHTNING_BOLT_PCT_MIN,
-    REBELLION_RETRIBUTION_STEAL,
     WHEEL_BANANA_PEEL_LOSS_MAX,
     WHEEL_BANANA_PEEL_LOSS_MIN,
     WHEEL_BOMB_OMB_VICTIM_COUNT,
@@ -133,7 +129,6 @@ from utils.formatting import JOPACOIN_EMOTE
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.wheel_drawing import (
     apply_mana_wedge,
-    apply_war_effects,
     compute_live_golden_wedges,
     create_explosion_gif,
     create_wheel_gif,
@@ -167,7 +162,6 @@ class BettingCommands(commands.Cog):
         disburse_service: DisburseService | None = None,
         flavor_text_service: FlavorTextService | None = None,
         tip_service: TipService | None = None,
-        rebellion_service=None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -179,7 +173,6 @@ class BettingCommands(commands.Cog):
         self.loan_service = loan_service
         self.disburse_service = disburse_service
         self.tip_service = tip_service
-        self.rebellion_service = rebellion_service
 
     def _get_neon_service(self):
         """Get the NeonDegenService from the bot, or None if unavailable."""
@@ -567,44 +560,29 @@ class BettingCommands(commands.Cog):
                 user_id, guild_id, int(now), WHEEL_COOLDOWN_SECONDS,
             )
             if not claimed:
-                # Check for free celebration spin (attackers_win war effect)
-                _rebellion_svc = self.rebellion_service or getattr(self.bot, "rebellion_service", None)
-                _celebration_granted = False
-                if _rebellion_svc:
-                    _active_war_cs = await asyncio.to_thread(
-                        _rebellion_svc.get_active_war_effect, guild_id
-                    )
-                    if _active_war_cs and _active_war_cs.get("outcome") == "attackers_win":
-                        _celebration_granted = await asyncio.to_thread(
-                            _rebellion_svc.check_and_use_celebration_spin,
-                            _active_war_cs["war_id"], user_id, guild_id,
-                        )
-
-                if not _celebration_granted:
-                    # Spin was not claimed - still on cooldown. Get remaining time.
-                    last_spin = await asyncio.to_thread(
-                        self.player_service.get_last_wheel_spin, user_id, guild_id
-                    )
-                    if last_spin:
-                        remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
-                        hours = int(remaining // 3600)
-                        minutes = int((remaining % 3600) // 60)
-                    else:
-                        hours, minutes = 24, 0  # Fallback
-                    await interaction.response.send_message(
-                        f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
-                        ephemeral=True,
-                    )
-                    # Neon Degen Terminal hook (cooldown hit)
-                    neon = self._get_neon_service()
-                    if neon:
-                        try:
-                            neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
-                            await send_neon_result(interaction, neon_result)
-                        except Exception as e:
-                            logger.debug("Failed to send gamba cooldown neon result: %s", e)
-                    return
-                # Celebration spin granted — bypass cooldown, continue with spin
+                # Spin was not claimed - still on cooldown. Get remaining time.
+                last_spin = await asyncio.to_thread(
+                    self.player_service.get_last_wheel_spin, user_id, guild_id
+                )
+                if last_spin:
+                    remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
+                    hours = int(remaining // 3600)
+                    minutes = int((remaining % 3600) // 60)
+                else:
+                    hours, minutes = 24, 0  # Fallback
+                await interaction.response.send_message(
+                    f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
+                    ephemeral=True,
+                )
+                # Neon Degen Terminal hook (cooldown hit)
+                neon = self._get_neon_service()
+                if neon:
+                    try:
+                        neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
+                        await send_neon_result(interaction, neon_result)
+                    except Exception as e:
+                        logger.debug("Failed to send gamba cooldown neon result: %s", e)
+                return
         else:
             # Admin bypass - still set the timestamp for consistency
             await asyncio.to_thread(
@@ -759,18 +737,6 @@ class BettingCommands(commands.Cog):
         else:
             wedges = get_wheel_wedges(is_eligible_for_bad_gamba, is_golden)
 
-        # Apply active war effects to normal (non-golden, non-bankrupt) wheel
-        _active_war_state = None
-        _active_war_id = None
-        _rebellion_svc_gamba = self.rebellion_service or getattr(self.bot, "rebellion_service", None)
-        if _rebellion_svc_gamba and not is_golden and not is_eligible_for_bad_gamba:
-            _active_war_state = await asyncio.to_thread(
-                _rebellion_svc_gamba.get_active_war_effect, guild_id
-            )
-            if _active_war_state:
-                _active_war_id = _active_war_state["war_id"]
-                wedges = apply_war_effects(wedges, _active_war_state)
-
         # Mana effects
         mana_effects_service = getattr(self.bot, "mana_effects_service", None)
         effects = None
@@ -897,12 +863,6 @@ class BettingCommands(commands.Cog):
                         _insurance_activated = True
                 except Exception:
                     logger.debug("Failed to claim Green insurance", exc_info=True)
-
-        # Consume war spin if active
-        if _active_war_id and _rebellion_svc_gamba:
-            await asyncio.to_thread(
-                _rebellion_svc_gamba.consume_war_spin, _active_war_id, guild_id, user_id
-            )
 
         # Defer first - GIF generation can take a few seconds
         if not _scrying_deferred:
@@ -1171,37 +1131,7 @@ class BettingCommands(commands.Cog):
             f"wheel:{guild_id}:{interaction_event_id}:{str(result_value).lower()}"
         )
 
-        if result_value == "RETRIBUTION":
-            # War effect: steal from attackers, LOSE for everyone else
-            _spinner_is_attacker = False
-            if _active_war_id and _rebellion_svc_gamba:
-                _spinner_is_attacker = await asyncio.to_thread(
-                    _rebellion_svc_gamba.is_attacker, _active_war_id, user_id
-                )
-            if _spinner_is_attacker:
-                await asyncio.to_thread(
-                    self._adjust_gamba_balance,
-                    user_id,
-                    user_id,
-                    guild_id,
-                    -REBELLION_RETRIBUTION_STEAL,
-                    "gamba retribution attacker cost",
-                    "RETRIBUTION",
-                )
-                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-            else:
-                result_value = "LOSE"  # Non-attackers just get LOSE
-                result_wedge = ("RETRIBUTION (miss)", 0, "#4a4a4a")
-
-        elif result_value == "WAR SCAR 💀":
-            # Broken wedge — value is already 0, nothing to pay out
-            pass
-
-        elif result_value == "WAR TROPHY 🏆":
-            # Positive JC win handled by normal numeric path below
-            pass
-
-        elif result_value == "JAILBREAK":
+        if result_value == "JAILBREAK":
             # Remove 1 penalty game (clamped at 0 inside add_penalty_games)
             if bankruptcy_service:
                 jailbreak_new_total = await asyncio.to_thread(
@@ -2527,12 +2457,7 @@ class BettingCommands(commands.Cog):
         """Update the disbursement proposal message with current vote counts."""
         await _update_disburse_message_helper(self, guild_id)
 
-    @app_commands.command(
-        name="incite",
-        description="Rise against the Wheel of Fortune! (Requires recent bankruptcy or penalty games)",
-    )
-    async def incite(self, interaction: discord.Interaction):
-        await _incite_action(self, interaction)
+
 async def setup(bot: commands.Bot):
     betting_service = getattr(bot, "betting_service", None)
     if betting_service is None:
@@ -2549,8 +2474,7 @@ async def setup(bot: commands.Bot):
     disburse_service = getattr(bot, "disburse_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     tip_service = getattr(bot, "tip_service", None)
-    rebellion_service = getattr(bot, "rebellion_service", None)
-    # optional services: bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_service, rebellion_service
+    # optional services: bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_service
 
     cog = BettingCommands(
         bot,
@@ -2563,7 +2487,6 @@ async def setup(bot: commands.Bot):
         disburse_service,
         flavor_text_service,
         tip_service,
-        rebellion_service=rebellion_service,
     )
     await bot.add_cog(cog)
 

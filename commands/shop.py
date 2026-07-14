@@ -1191,15 +1191,21 @@ class ShopCommands(commands.Cog):
         if won:
             # WIN: Double the remaining balance
             winnings = balance_after_cost
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, winnings)
-            final_balance = balance_after_cost * 2
+            final_balance = await asyncio.to_thread(
+                self.player_service.adjust_balance, user_id, guild_id, winnings
+            )
             result_title = "DOUBLE!"
             result_color = 0x00FF00  # Green
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_WIN
         else:
-            # LOSE: Zero out the balance
-            await asyncio.to_thread(self.player_service.set_balance, user_id, guild_id, 0)
-            final_balance = 0
+            # LOSE: forfeit the staked remainder. Debit relatively (not
+            # set_balance(0)) so a credit that landed after the balance read
+            # (e.g. a tip mid-flip) isn't clobbered — mirrors the additive win
+            # path. adjust_balance returns the true post-debit balance, so the
+            # display stays correct even if a concurrent credit landed.
+            final_balance = await asyncio.to_thread(
+                self.player_service.adjust_balance, user_id, guild_id, -balance_after_cost
+            )
             result_title = "NOTHING!"
             result_color = 0xFF0000  # Red
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_LOSE

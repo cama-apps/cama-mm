@@ -493,53 +493,53 @@ class TestGamblingLeaderboardIntegration:
         """Test that LeaderboardEntry has degen_emoji field."""
         self._seed_test_data(gambling_repos)
 
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, limit=5)
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
         # hall_of_degen entries should have degen_emoji
-        if leaderboard.hall_of_degen:
-            entry = leaderboard.hall_of_degen[0]
-            assert hasattr(entry, "degen_emoji"), "LeaderboardEntry missing degen_emoji field"
+        assert leaderboard.hall_of_degen, "seed data should populate hall_of_degen"
+        entry = leaderboard.hall_of_degen[0]
+        assert hasattr(entry, "degen_emoji"), "LeaderboardEntry missing degen_emoji field"
 
     def test_leaderboard_entry_has_total_wagered(self, gambling_stats_service, gambling_repos):
         """Test that LeaderboardEntry has total_wagered field."""
         self._seed_test_data(gambling_repos)
 
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, limit=5)
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
         # All entries should have total_wagered
-        if leaderboard.top_earners:
-            entry = leaderboard.top_earners[0]
-            assert hasattr(entry, "total_wagered"), "LeaderboardEntry missing total_wagered field"
-            assert isinstance(entry.total_wagered, int)
+        assert leaderboard.top_earners, "seed data should populate top_earners"
+        entry = leaderboard.top_earners[0]
+        assert hasattr(entry, "total_wagered"), "LeaderboardEntry missing total_wagered field"
+        assert isinstance(entry.total_wagered, int)
 
     def test_biggest_gamblers_sorted_by_total_wagered(self, gambling_stats_service, gambling_repos):
         """Test that biggest_gamblers is sorted by total_wagered descending."""
         self._seed_test_data(gambling_repos)
 
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, limit=5)
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
-        if len(leaderboard.biggest_gamblers) >= 2:
-            for i in range(len(leaderboard.biggest_gamblers) - 1):
-                assert leaderboard.biggest_gamblers[i].total_wagered >= leaderboard.biggest_gamblers[i + 1].total_wagered
+        assert len(leaderboard.biggest_gamblers) >= 2, "seed data should populate biggest_gamblers"
+        for i in range(len(leaderboard.biggest_gamblers) - 1):
+            assert leaderboard.biggest_gamblers[i].total_wagered >= leaderboard.biggest_gamblers[i + 1].total_wagered
 
     def test_leaderboard_entries_use_attribute_access(self, gambling_stats_service, gambling_repos):
         """Test that LeaderboardEntry fields can be accessed with attribute syntax."""
         self._seed_test_data(gambling_repos)
 
-        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, limit=5)
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
         # Verify attribute access works (not dict access)
-        if leaderboard.top_earners:
-            entry = leaderboard.top_earners[0]
-            # These should NOT raise AttributeError
-            _ = entry.discord_id
-            _ = entry.net_pnl
-            _ = entry.win_rate
-            _ = entry.total_bets
-            _ = entry.total_wagered
+        assert leaderboard.top_earners, "seed data should populate top_earners"
+        entry = leaderboard.top_earners[0]
+        # These should NOT raise AttributeError
+        _ = entry.discord_id
+        _ = entry.net_pnl
+        _ = entry.win_rate
+        _ = entry.total_bets
+        _ = entry.total_wagered
 
-        if leaderboard.hall_of_degen:
-            entry = leaderboard.hall_of_degen[0]
-            _ = entry.degen_score
-            _ = entry.degen_title
-            _ = entry.degen_emoji
+        assert leaderboard.hall_of_degen, "seed data should populate hall_of_degen"
+        entry = leaderboard.hall_of_degen[0]
+        _ = entry.degen_score
+        _ = entry.degen_title
+        _ = entry.degen_emoji

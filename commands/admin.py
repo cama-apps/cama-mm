@@ -1283,25 +1283,20 @@ class AdminCommands(commands.Cog):
                             seed_bonus=pending_state.bet_seed_bonus,
                         )
 
-                        # Find and replace the betting field (usually the last field or has "Wagers" in name)
-                        new_fields = []
+                        # Find and replace the betting field. Both modes name it
+                        # via format_betting_display ("💰 Pool Betting" /
+                        # "💰 House Betting (1:1)"), so match on "Betting"; keep
+                        # the legacy "Wagers" term for older embeds.
+                        new_fields: list[tuple[str, str, bool]] = []
                         for field in embed.fields:
-                            if (
-                                "Wagers" in field.name
-                                or "Current Wagers" in field.name
-                                or "Pool" in field.name
-                            ):
-                                new_fields.append(
-                                    discord.EmbedField(
-                                        name=new_field_name, value=new_field_value, inline=False
-                                    )
-                                )
+                            if "Betting" in field.name or "Wagers" in field.name:
+                                new_fields.append((new_field_name, new_field_value, False))
                             else:
-                                new_fields.append(field)
+                                new_fields.append((field.name, field.value, field.inline))
 
                         embed.clear_fields()
-                        for field in new_fields:
-                            embed.add_field(name=field.name, value=field.value, inline=field.inline)
+                        for name, value, inline in new_fields:
+                            embed.add_field(name=name, value=value, inline=inline)
 
                         await message.edit(embed=embed)
                         embed_updated = True

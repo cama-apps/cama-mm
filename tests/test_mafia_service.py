@@ -1093,6 +1093,46 @@ def test_resolve_day_does_not_double_pay(mafia_service, mafia_repo, player_repo)
     assert total_delta + first["nonprofit_overflow"] == 0
 
 
+def test_try_reopen_for_finalize_refuses_resolved_game(mafia_repo, player_repo):
+    """The finalize reopen guard must never re-open a RESOLVED game.
+
+    Regression for the force_finalize double-payout race: an unconditional
+    set_phase(DAY) reopened an already-resolved game, defeating
+    finalize_day_resolution's phase='DAY' idempotency guard and re-paying the pot.
+    """
+    players = [
+        (701, MafiaRole.MAFIA, True),
+        (702, MafiaRole.TOWNIE, False),
+        (703, MafiaRole.TOWNIE, False),
+    ]
+    for pid, _, _ in players:
+        _seed_player(player_repo, pid)
+    gid = _new_game(mafia_repo, players)  # created in NIGHT
+
+    # A live (non-resolved) game reopens to DAY so finalize can run.
+    assert mafia_repo.try_reopen_for_finalize(gid) is True
+    active = mafia_repo.get_active_game(TEST_GUILD_ID)
+    assert active is not None and active.phase == MafiaPhase.DAY
+
+    # Resolve it: DAY -> RESOLVED.
+    finalize = mafia_repo.finalize_day_resolution(
+        game_id=gid,
+        winner=MafiaWinner.TOWN,
+        payout_per_winner=0,
+        mvp_id=None,
+        lynched_id=None,
+        payout_deltas={},
+        entry_fee=ENTRY_FEE,
+    )
+    assert finalize["applied"] is True
+    assert mafia_repo.get_active_game(TEST_GUILD_ID) is None  # RESOLVED, not active
+
+    # The guard now refuses to reopen, and the game stays RESOLVED — so a racing
+    # force_finalize cannot re-run finalize_day_resolution and re-pay the pot.
+    assert mafia_repo.try_reopen_for_finalize(gid) is False
+    assert mafia_repo.get_active_game(TEST_GUILD_ID) is None
+
+
 class _ForceSwapRng(random.Random):
     """RNG whose random() always returns 0.0 so every probability gate fires."""
 

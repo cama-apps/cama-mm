@@ -18,7 +18,6 @@ service-level races.
 """
 from __future__ import annotations
 
-import json
 import random
 import sqlite3
 import threading
@@ -32,7 +31,6 @@ from repositories.loan_repository import LoanRepository
 from repositories.mana_repository import ManaRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
-from repositories.rebellion_repository import RebellionRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from tests.conftest import TEST_GUILD_ID
 
@@ -69,11 +67,6 @@ def mana_repo(repo_db_path):
 @pytest.fixture
 def dig_repo(repo_db_path):
     return DigRepository(repo_db_path)
-
-
-@pytest.fixture
-def rebellion_repo(repo_db_path):
-    return RebellionRepository(repo_db_path)
 
 
 @pytest.fixture
@@ -648,125 +641,6 @@ class TestDigSabotageAtomic:
                 "WHERE actor_id = 1 AND action_type = 'sabotage'"
             ).fetchone()["c"]
         assert log_count == 1
-
-
-# ---------------------------------------------------------------------------
-# Rebellion fizzle: refund + status flip + cooldown commit together
-# ---------------------------------------------------------------------------
-
-
-class TestRebellionFizzleAtomic:
-    def test_fizzle_refunds_defenders_once_and_marks_war(
-        self, player_repo, rebellion_repo
-    ):
-        for did in (100, 101, 102, 103):
-            register(player_repo, did, balance=50)
-
-        war_id = rebellion_repo.create_war(
-            guild_id=TEST_GUILD_ID,
-            inciter_id=100,
-            vote_closes_at=99_999_999_999,
-            created_at=0,
-        )
-        # Simulate stakes already debited from defenders.
-        for did in (101, 102, 103):
-            player_repo.add_balance(did, TEST_GUILD_ID, -10)
-        with sqlite3.connect(player_repo.db_path) as conn:
-            conn.execute(
-                "UPDATE wheel_wars SET defend_voter_ids = ?, effective_defend_count = 3.0 "
-                "WHERE war_id = ?",
-                (json.dumps([101, 102, 103]), war_id),
-            )
-
-        balances_before = {
-            did: player_repo.get_balance(did, TEST_GUILD_ID) for did in (101, 102, 103)
-        }
-
-        rebellion_repo.atomic_resolve_fizzle(
-            war_id=war_id,
-            guild_id=TEST_GUILD_ID,
-            defender_ids=[101, 102, 103],
-            defender_stake=10,
-            inciter_cooldown_until=1_000_000,
-            resolved_at=100_000,
-        )
-
-        for did in (101, 102, 103):
-            assert player_repo.get_balance(did, TEST_GUILD_ID) - balances_before[did] == 10
-
-        war = rebellion_repo.get_war(war_id)
-        assert war["status"] == "fizzled"
-        assert war["outcome"] == "fizzled"
-        assert war["inciter_cooldown_until"] == 1_000_000
-        assert war["resolved_at"] == 100_000
-
-
-# ---------------------------------------------------------------------------
-# Rebellion defend-vote: each voter debited exactly once, no phantom votes
-# ---------------------------------------------------------------------------
-
-
-class TestRebellionDefendVoteAtomic:
-    def test_concurrent_votes_debit_once_per_voter(self, player_repo, rebellion_repo):
-        for did in (100, 200, 201, 202, 203, 204):
-            register(player_repo, did, balance=50)
-        war_id = rebellion_repo.create_war(
-            guild_id=TEST_GUILD_ID,
-            inciter_id=100,
-            vote_closes_at=99_999_999_999,
-            created_at=0,
-        )
-
-        errors: list[str] = []
-        successes: list[dict] = []
-        lock = threading.Lock()
-
-        def vote(uid: int) -> None:
-            try:
-                r = rebellion_repo.defend_vote_with_stake_atomic(
-                    war_id=war_id,
-                    discord_id=uid,
-                    guild_id=TEST_GUILD_ID,
-                    stake=10,
-                )
-                with lock:
-                    successes.append({"uid": uid, **r})
-            except ValueError as exc:
-                with lock:
-                    errors.append(f"{uid}:{exc}")
-
-        threads: list[threading.Thread] = []
-        for uid in (200, 201, 202, 203, 204):
-            for _ in range(3):
-                threads.append(threading.Thread(target=vote, args=(uid,)))
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # Each voter debited exactly once.
-        for uid in (200, 201, 202, 203, 204):
-            assert player_repo.get_balance(uid, TEST_GUILD_ID) == 40
-
-        war = rebellion_repo.get_war(war_id)
-        voters = json.loads(war["defend_voter_ids"])
-        assert sorted(voters) == [200, 201, 202, 203, 204]
-        assert war["effective_defend_count"] == 5.0
-
-    def test_inciter_cannot_defend(self, player_repo, rebellion_repo):
-        register(player_repo, 100, balance=50)
-        war_id = rebellion_repo.create_war(
-            guild_id=TEST_GUILD_ID,
-            inciter_id=100,
-            vote_closes_at=99_999_999_999,
-            created_at=0,
-        )
-        with pytest.raises(ValueError, match="inciter cannot defend"):
-            rebellion_repo.defend_vote_with_stake_atomic(
-                war_id=war_id, discord_id=100, guild_id=TEST_GUILD_ID, stake=10
-            )
-        # Balance untouched.
-        assert player_repo.get_balance(100, TEST_GUILD_ID) == 50
 
 
 # ---------------------------------------------------------------------------

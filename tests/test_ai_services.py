@@ -357,13 +357,43 @@ class TestSQLQueryService:
         """
         service = SQLQueryService.__new__(SQLQueryService)
 
+        # A blocked column in a UNION branch (over a non-blocked table) must be
+        # caught by the projection scan of every branch.
+        is_valid, error = service._validate_sql(
+            "SELECT discord_username FROM players UNION SELECT discord_id FROM players"
+        )
+        assert not is_valid
+        assert "blocked column" in error.lower()
+
+        # steam_id only lives in player_steam_ids, which is now a blocked table
+        # (no guild_id column -> cannot be guild-scoped), so the UNION is rejected
+        # at the table layer before the column scan. Either way it must not pass.
+        is_valid, error = service._validate_sql(
+            "SELECT discord_username FROM players UNION ALL SELECT steam_id FROM player_steam_ids"
+        )
+        assert not is_valid, "UNION must not bypass the blocklist"
+
+    def test_validate_sql_rejects_quoted_identifier_bypass(self):
+        """Double-quoted / bracketed identifiers must not smuggle blocked
+        columns or tables past the validator.
+
+        Regression for the bypass where the literal-masker treated a quoted
+        identifier like ``"discord_id"`` as opaque string data and masked its
+        contents, so the column/table/`*` scans were blind to it while SQLite
+        still resolved it to the real column.
+        """
+        service = SQLQueryService.__new__(SQLQueryService)
+
         for query in [
-            "SELECT discord_username FROM players UNION SELECT discord_id FROM players",
-            "SELECT discord_username FROM players UNION ALL SELECT steam_id FROM player_steam_ids",
+            'SELECT "discord_id" FROM players',
+            'SELECT p."discord_id" FROM players p',
+            "SELECT [discord_id] FROM players",
+            'SELECT avoider_discord_id FROM "soft_avoids"',
+            'SELECT "t".* FROM players "t"',
+            'SELECT * FROM "players"',
         ]:
-            is_valid, error = service._validate_sql(query)
-            assert not is_valid, f"UNION must not bypass the blocklist: {query}"
-            assert "blocked column" in error.lower()
+            is_valid, _ = service._validate_sql(query)
+            assert not is_valid, f"Quoted identifier must not bypass validation: {query}"
 
     def test_validate_sql_rejects_blocked_columns_via_subquery(self):
         """A blocked column after a projected subquery's FROM must be rejected.

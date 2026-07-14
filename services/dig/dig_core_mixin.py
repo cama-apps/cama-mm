@@ -71,8 +71,6 @@ class DigCoreMixin:
             curse_effects, "cooldown_penalty",
         )
         cooldown = int(cooldown * (1.0 + cooldown_penalty))
-        if self._is_bankrupt(tunnel.get("discord_id"), tunnel.get("guild_id")):
-            cooldown //= 2
         return self._apply_mana_cooldown_reduction(
             tunnel.get("discord_id"), tunnel.get("guild_id"), cooldown,
         )
@@ -99,18 +97,27 @@ class DigCoreMixin:
         current_time = int(time.time()) if now is None else int(now)
         return ready_at if ready_at > current_time else None
 
-    def _is_bankrupt(self, discord_id, guild_id) -> bool:
-        """True if the player currently has bankruptcy penalty games remaining.
+    def _apply_blood_pact_skim_to_payout(
+        self, discord_id: int, guild_id, jc_earned: int
+    ) -> int:
+        """Skim an active Blood Pact's share off a dig payout.
 
-        Used to halve the dig cooldown so bankrupt players can grind back
-        faster. Falls back to False if the bankruptcy repo isn't wired.
+        Returns the JC the digger nets after the skim; the pact holder receives
+        the skimmed amount via an atomic, self-rolling-back transfer. No-op when
+        there is no buff service or nothing to skim. Shared by every live and
+        DM-mode dig payout path so the skim behaviour can't drift between them.
         """
-        if self.bankruptcy_repo is None or discord_id is None:
-            return False
+        if self.buff_service is None or jc_earned <= 0:
+            return jc_earned
         try:
-            return int(self.bankruptcy_repo.get_penalty_games(int(discord_id), guild_id)) > 0
+            skimmed = self.buff_service.apply_blood_pact_skim(
+                discord_id, guild_id, jc_earned, self.player_repo
+            )
+            if skimmed:
+                return max(0, jc_earned - skimmed)
         except Exception:
-            return False
+            logger.exception("Failed to apply Blood Pact skim to dig payout")
+        return jc_earned
 
     def _is_unstarted_tunnel(self, tunnel: dict) -> bool:
         """True for profile-created tunnels that have not had a first dig yet."""
@@ -191,6 +198,9 @@ class DigCoreMixin:
                 "streak_last_date": today,
             },
         )
+        # Blood Pact skims the first dig's payout too (tiny amount, but coverage
+        # must be uniform across every dig path).
+        jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="dig",
@@ -938,15 +948,7 @@ class DigCoreMixin:
             },
             consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
         )
-        if self.buff_service is not None and jc_earned > 0:
-            try:
-                skimmed = self.buff_service.apply_blood_pact_skim(
-                    discord_id, guild_id, jc_earned, self.player_repo
-                )
-                if skimmed:
-                    jc_earned = max(0, jc_earned - skimmed)
-            except Exception:
-                logger.exception("Failed to apply Blood Pact skim to dig payout")
+        jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({
@@ -1333,15 +1335,7 @@ class DigCoreMixin:
                 },
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
             )
-            if self.buff_service is not None and jc_earned > 0:
-                try:
-                    skimmed = self.buff_service.apply_blood_pact_skim(
-                        discord_id, guild_id, jc_earned, self.player_repo
-                    )
-                    if skimmed:
-                        jc_earned = max(0, jc_earned - skimmed)
-                except Exception:
-                    logger.exception("Failed to apply Blood Pact skim to dig payout")
+            jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
 
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",

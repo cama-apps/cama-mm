@@ -12,9 +12,6 @@ defaults, which is what CI runs against.
 from config import (
     BANKRUPTCY_PENALTY_GAMES,
     BANKRUPTCY_PENALTY_RATE,
-    REBELLION_ATTACKER_FLAT_REWARD,
-    REBELLION_DEFENDER_STAKE,
-    REBELLION_INCITER_FLAT_REWARD,
     WHEEL_TARGET_EV,
 )
 from services.dig_data.layers import PAID_DIG_COST_CAP, PAID_DIG_COSTS_PER_DAY
@@ -37,9 +34,3 @@ def test_bankruptcy_penalty_pinned():
 
 def test_prediction_resolution_threshold_pinned():
     assert PredictionService.MIN_RESOLUTION_VOTES == 3
-
-
-def test_rebellion_reward_constants_pinned():
-    assert REBELLION_INCITER_FLAT_REWARD == 30
-    assert REBELLION_ATTACKER_FLAT_REWARD == 15
-    assert REBELLION_DEFENDER_STAKE == 10

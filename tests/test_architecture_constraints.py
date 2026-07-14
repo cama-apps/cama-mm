@@ -318,7 +318,6 @@ class TestCommandLayerConstraints:
             "player_service",
             "prediction_service",
             "recalibration_service",
-            "rebellion_service",
             "reminder_service",
             "soft_avoid_service",
             "sql_query_service",

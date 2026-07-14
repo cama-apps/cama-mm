@@ -1221,6 +1221,11 @@ class DigService(
             },
             log_action_type="dig",
         )
+        # Blood Pact: an active pact on this digger skims a share of the dig
+        # payout to the pact holder. Dig is the primary earnings source, so this
+        # is where the shop's advertised "skim of the target's earnings" mostly
+        # applies.
+        jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
         if overgrowth_active:
             try:
                 self.buff_service.consume_overgrowth_charge(discord_id, guild_id)

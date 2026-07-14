@@ -78,7 +78,6 @@ class ServiceContainer:
         self._init_advanced_services()
         self._init_ai_services()
         self._init_curse_service()
-        self._init_rebellion_service()
         self._init_mana_service()
         self._init_dig_service()
         self._init_mafia_service()
@@ -120,7 +119,6 @@ class ServiceContainer:
         from repositories.player_repository import PlayerRepository
         from repositories.prediction_repository import PredictionRepository
         from repositories.protection_repository import ProtectionRepository
-        from repositories.rebellion_repository import RebellionRepository
         from repositories.recalibration_repository import RecalibrationRepository
         from repositories.slow_drip_repository import SlowDripRepository
         from repositories.soft_avoid_repository import SoftAvoidRepository
@@ -149,7 +147,6 @@ class ServiceContainer:
             "tip_repo": TipRepository(p),
             "neon_event_repo": NeonEventRepository(p),
             "wrapped_repo": WrappedRepository(p),
-            "rebellion_repo": RebellionRepository(p),
             "mana_repo": ManaRepository(p),
             "buff_repo": BuffRepository(p),
             "slow_drip_repo": SlowDripRepository(p),
@@ -355,17 +352,6 @@ class ServiceContainer:
         c["curse_service"] = CurseService(
             curse_repo=c["curse_repo"],
             flavor_text_service=c.get("flavor_text_service"),
-        )
-
-    def _init_rebellion_service(self) -> None:
-        """Rebellion (Wheel War) service."""
-        from services.rebellion_service import RebellionService
-
-        c = self._components
-        c["rebellion_service"] = RebellionService(
-            rebellion_repo=c["rebellion_repo"],
-            bankruptcy_repo=c["bankruptcy_repo"],
-            player_repo=c["player_repo"],
         )
 
     def _init_mana_service(self) -> None:
@@ -577,7 +563,6 @@ class ServiceContainer:
         bot.rating_comparison_service = c["rating_comparison_service"]
         bot.neon_degen_service = c["neon_degen_service"]
         bot.wrapped_service = c["wrapped_service"]
-        bot.rebellion_service = c["rebellion_service"]
         bot.mana_service = c["mana_service"]
         bot.mana_repo = c["mana_repo"]
         bot.mana_effects_service = c["mana_effects_service"]

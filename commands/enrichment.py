@@ -979,8 +979,9 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
         try:
-            count = await asyncio.to_thread(self.pairings_service.rebuild_all_pairings)
+            count = await asyncio.to_thread(self.pairings_service.rebuild_all_pairings, guild_id)
             await safe_followup(
                 interaction,
                 content=f"Rebuilt pairwise statistics. {count} pairings calculated from match history.",
