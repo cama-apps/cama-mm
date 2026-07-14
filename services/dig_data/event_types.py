@@ -17,7 +17,26 @@ from typing import Any
 # Effect keys a TempCurse is allowed to carry. A curse with any other key
 # is a typo — validated at import time so the catalog fails loud rather than
 # silently no-op'ing an unrecognized drain.
-CURSE_EFFECT_KEYS = frozenset({"advance_bonus", "jc_bonus", "luminosity_drain"})
+FRACTIONAL_CURSE_EFFECT_KEYS = frozenset({"cave_in_bonus", "cooldown_penalty"})
+CURSE_EFFECT_KEYS = frozenset({
+    "advance_bonus",
+    "cave_in_bonus",
+    "cooldown_penalty",
+    "jc_bonus",
+    "luminosity_drain",
+})
+
+
+def scale_curse_effects(effects: dict, *, multiplier: float) -> dict:
+    """Strengthen curse effects without rounding fractional modifiers."""
+    return {
+        key: (
+            value * multiplier
+            if key in FRACTIONAL_CURSE_EFFECT_KEYS
+            else int(round(value * multiplier))
+        ) if isinstance(value, (int, float)) else value
+        for key, value in effects.items()
+    }
 
 
 @dataclass(frozen=True)
@@ -29,6 +48,7 @@ class EventOutcome:
     cave_in: bool                   # does this trigger a cave-in?
     streak_loss: int = 0             # daily-streak days lost (the "streak" threat)
     curse: TempCurse | None = None   # lingering hex applied (the "curse" threat)
+    gear_reward_pool: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.streak_loss < 0:
@@ -203,6 +223,7 @@ def _outcome_to_dict(o: EventOutcome | None) -> dict | None:
             "duration_digs": o.curse.duration_digs,
             "effect": dict(o.curse.effect),
         } if o.curse else None,
+        "gear_reward_pool": list(o.gear_reward_pool) if o.gear_reward_pool else None,
     }
 
 

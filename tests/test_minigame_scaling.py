@@ -2,6 +2,7 @@ import config
 from commands.betting import _eruption_reward
 from commands.betting_helpers.messages import WHEEL_EXPLOSION_REWARD
 from commands.betting_helpers.wheel_embeds import build_wheel_result_embed
+from services.dig_data.balance import strengthen_dig_event_penalty
 from services.dig_splash import resolve_splash
 from utils.economy_scaling import (
     DEFLATIONARY_MINIGAME_JC_DELTA_MULTIPLIER,
@@ -134,6 +135,9 @@ def test_dig_splash_burn_skips_players_below_auto_blind_threshold():
         mode="burn",
     )
 
-    assert result.victims == [(3, 9)]
-    assert player_repo.balances == {2: 49, 3: 41}
-    assert player_repo.deltas == [(3, -9)]
+    expected_penalty = scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(10)
+    )
+    assert result.victims == [(3, expected_penalty)]
+    assert player_repo.balances == {2: 49, 3: 50 - expected_penalty}
+    assert player_repo.deltas == [(3, -expected_penalty)]

@@ -163,6 +163,26 @@ class EventEncounterView(discord.ui.View):
         if parts:
             embed.add_field(name="Outcome", value=" | ".join(parts), inline=False)
 
+        gear_drop = getattr(result, "gear_drop", None)
+        if gear_drop:
+            gear_d = getattr(gear_drop, "_d", gear_drop)
+            if isinstance(gear_d, dict):
+                slot = str(gear_d.get("slot", "gear")).replace("_", " ").title()
+                durability = str(gear_d.get("durability", 0))
+                if gear_d.get("max_durability") is not None:
+                    durability += f"/{gear_d['max_durability']}"
+                effect = gear_d.get("effect")
+                effect_line = f"\n{effect}" if effect else ""
+                embed.add_field(
+                    name="Gear Drop",
+                    value=(
+                        f"**{gear_d.get('name', 'Gear')}**\n"
+                        f"Slot: {slot}\n"
+                        f"Durability: {durability}{effect_line}"
+                    ),
+                    inline=False,
+                )
+
         # Fail loud — the player must see what a failed risky pick cost.
         # Curse: surface the hex name + how many digs it lingers.
         if curse_applied:

@@ -411,6 +411,20 @@ class PinnacleMixin:
         # Bold/Reckless crit carries through to the pinnacle fight.
         crit_chance = float(stats.get("crit_chance", 0) or 0)
         crit_bonus = int(stats.get("crit_bonus", 0) or 0)
+        player_hp, player_hit, crit_chance, shifting_idol_bonus = (
+            self._apply_shifting_idol_stats(
+                discord_id,
+                guild_id,
+                player_hp,
+                player_hit,
+                crit_chance,
+            )
+        )
+        relic_status = self._trophy_status_seed(
+            discord_id, guild_id, player_start_hp=player_hp,
+        )
+        if shifting_idol_bonus:
+            relic_status["shifting_idol_bonus"] = shifting_idol_bonus
 
         win_chance = dig_service._approx_duel_win_prob(
             player_hp=player_hp,
@@ -462,6 +476,7 @@ class PinnacleMixin:
                     ),
                     "rng_state": "",
                     "status_effects": json.dumps({
+                        **relic_status,
                         "attempts_this_fight": attempts,
                         "initial_win_chance": win_chance,
                         "pinnacle_state": {
@@ -508,9 +523,20 @@ class PinnacleMixin:
             crit_this_round = False
             if random.random() < player_hit:
                 dmg_this_round = player_dmg
+                if relic_status.get("relic_bottled_quake"):
+                    dmg_this_round += 1
+                    relic_status["relic_bottled_quake"] = False
+                    entry["bottled_quake"] = True
                 if crit_chance > 0 and random.random() < crit_chance:
                     dmg_this_round += crit_bonus
                     crit_this_round = True
+                    if relic_status.get("gear_heal_first_crit"):
+                        player_hp = min(
+                            int(relic_status.get("trophy_start_hp", player_hp + 1)),
+                            player_hp + 1,
+                        )
+                        relic_status["gear_heal_first_crit"] = False
+                        entry["blood_locket_heal"] = True
                 boss_hp -= dmg_this_round
             entry["crit"] = crit_this_round
             entry["boss_hp"] = max(0, boss_hp)
@@ -518,10 +544,23 @@ class PinnacleMixin:
                 won = True
                 round_log.append(entry)
                 break
-            if random.random() < boss_hit_chance:
+            boss_roll = random.random() < boss_hit_chance
+            if boss_roll:
                 player_hp -= boss_dmg
+                if relic_status.get("gear_reflect_first_hit"):
+                    boss_hp -= 1
+                    relic_status["gear_reflect_first_hit"] = False
+                    entry["briarplate_reflect"] = True
+            elif relic_status.get("gear_springheel_counter"):
+                boss_hp -= 1
+                relic_status["gear_springheel_counter"] = False
+                entry["springheel_counter"] = True
+            entry["boss_hp"] = max(0, boss_hp)
             entry["player_hp"] = max(0, player_hp)
             round_log.append(entry)
+            if boss_hp <= 0:
+                won = True
+                break
             if player_hp <= 0:
                 won = False
                 break
@@ -638,28 +677,22 @@ class PinnacleMixin:
         # Continue remaining auto-rounds if option didn't decide it.
         if won is None:
             for r in range(round_num + 1, BOSS_ROUND_CAP + 1):
-                entry: dict = {"round": r}
-                crit_this_round = False
-                if random.random() < player_hit:
-                    dmg_this_round = player_dmg
-                    if crit_chance > 0 and random.random() < crit_chance:
-                        dmg_this_round += crit_bonus
-                        crit_this_round = True
-                    boss_hp -= dmg_this_round
-                entry["crit"] = crit_this_round
-                entry["boss_hp"] = max(0, boss_hp)
-                if boss_hp <= 0:
-                    won = True
-                    round_log.append(entry)
-                    break
-                if random.random() < boss_hit_chance:
-                    player_hp -= boss_dmg
-                entry["player_hp"] = max(0, player_hp)
+                entry, player_hp, boss_hp, terminal = self._run_one_round(
+                    round_num=r,
+                    player_hp=player_hp, boss_hp=boss_hp,
+                    player_hit=player_hit, player_dmg=player_dmg,
+                    boss_hit=boss_hit_chance, boss_dmg=boss_dmg,
+                    status_effects=status_effects,
+                    crit_chance=crit_chance, crit_bonus=crit_bonus,
+                )
                 round_log.append(entry)
-                if player_hp <= 0:
+                if terminal is True:
+                    won = True
+                    break
+                if terminal is False:
                     won = False
                     break
-            else:
+            if won is None:
                 won = False
 
         # Pinnacle state restored from status_effects; falls back to tunnel

@@ -37,6 +37,8 @@ def _build_gear_embed(
         if piece is None:
             return "_— Empty —_"
         line = f"**{piece['name']}** ({piece['durability']}/{piece['max_durability']})"
+        if piece.get("effect"):
+            line += f"\n{piece['effect']}"
         if (
             dig_service is not None
             and piece["durability"] < piece["max_durability"]
@@ -230,6 +232,120 @@ class GearPanelView(discord.ui.View):
             )
         await self._refresh(interaction)
 
+    @discord.ui.button(label="Recycle Relics", style=discord.ButtonStyle.secondary, row=0)
+    async def recycle_relics_btn(
+        self, interaction: discord.Interaction, _btn: discord.ui.Button,
+    ):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message(
+                "This isn't your gear panel.", ephemeral=True,
+            )
+            return
+        await safe_defer(interaction)
+        relics = await asyncio.to_thread(
+            self.dig_service.get_owned_relics, self.user_id, self.guild_id,
+        )
+        candidates = [
+            relic for relic in relics
+            if not relic.get("equipped")
+            and relic.get("recyclable")
+            and relic.get("rarity") != "Legendary"
+        ]
+        viable_rarities = {
+            rarity for rarity in {relic.get("rarity") for relic in candidates}
+            if sum(relic.get("rarity") == rarity for relic in candidates) >= 3
+        }
+        candidates = [
+            relic for relic in candidates
+            if relic.get("rarity") in viable_rarities
+        ]
+        if not candidates:
+            await interaction.followup.send(
+                "You need three unequipped ordinary relics of the same rarity.",
+                ephemeral=True,
+            )
+            return
+        view = RecycleRelicView(
+            dig_service=self.dig_service,
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            relics=candidates,
+            parent=self,
+        )
+        await interaction.edit_original_response(view=view)
+
+
+class RecycleRelicView(discord.ui.View):
+    """Select exactly three same-rarity relics for atomic recycling."""
+
+    def __init__(
+        self,
+        *,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        relics: list[dict],
+        parent: GearPanelView,
+    ):
+        super().__init__(timeout=180)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.parent = parent
+        options = [
+            discord.SelectOption(
+                label=(
+                    f"[{relic.get('rarity', 'Unknown')}] "
+                    f"{relic.get('name', relic.get('id', '?'))}"
+                )[:100],
+                value=str(relic["db_id"]),
+            )
+            for relic in relics[:25]
+            if relic.get("db_id") is not None
+        ]
+        self.select = discord.ui.Select(
+            placeholder="Choose 3 relics of the same rarity",
+            options=options,
+            min_values=3,
+            max_values=3,
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your panel.", ephemeral=True)
+            return
+        await safe_defer(interaction)
+        row_ids = [int(value) for value in self.select.values]
+        result = _wrap(await asyncio.to_thread(
+            self.dig_service.recycle_relics,
+            self.user_id,
+            self.guild_id,
+            row_ids,
+        ))
+        if not getattr(result, "success", True):
+            await interaction.followup.send(
+                getattr(result, "error", "Recycling failed."), ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                "Recycled **3 "
+                f"{getattr(result, 'source_rarity', '')}** relics into "
+                f"**{getattr(result, 'relic_name', 'a relic')}** "
+                f"({getattr(result, 'output_rarity', '')}).",
+                ephemeral=True,
+            )
+        await self.parent._refresh(interaction)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your panel.", ephemeral=True)
+            return
+        await safe_defer(interaction)
+        await self.parent._refresh(interaction)
+
 
 class GearSelectView(discord.ui.View):
     """Sub-view: dropdown of gear / relic items + Back button."""
@@ -263,6 +379,7 @@ class GearSelectView(discord.ui.View):
             options.append(discord.SelectOption(
                 label=label[:100],
                 value=f"gear:{g['id']}",
+                description=(g.get("effect") or "")[:100] or None,
             ))
         for r in relics[:25 - len(options)]:
             db_id = r.get("db_id")

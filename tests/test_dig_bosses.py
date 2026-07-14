@@ -23,6 +23,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE_V2,
     BOSS_HP_REGEN_PER_3_HOURS,
     BOSS_PRESTIGE_BONUS,
+    BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
     BOSSES_BY_ID,
     LUMINOSITY_BRIGHT,
@@ -44,6 +45,49 @@ from services.dig_service import (
     _luminosity_combat_penalty,
 )
 from tests.conftest import TEST_GUILD_ID
+
+
+class TestBossMechanicCatalogVariety:
+    """Every encounter offers the minimum compatible mechanic variety."""
+
+    def test_regular_bosses_have_exactly_three_registered_mechanics(self):
+        for boss_id, boss in BOSSES_BY_ID.items():
+            assert len(boss.mechanic_pool) == 3, (
+                f"{boss_id} has {len(boss.mechanic_pool)} mechanics"
+            )
+            assert all(mid in MECHANIC_REGISTRY for mid in boss.mechanic_pool)
+
+    def test_pinnacle_phases_have_exactly_two_registered_mechanics(self):
+        for boss_id, boss in PINNACLE_BOSSES.items():
+            for phase_number, phase in enumerate(boss.phases, start=1):
+                assert len(phase.mechanic_pool) == 2, (
+                    f"{boss_id} phase {phase_number} has "
+                    f"{len(phase.mechanic_pool)} mechanics"
+                )
+                assert all(mid in MECHANIC_REGISTRY for mid in phase.mechanic_pool)
+
+    def test_assigned_mechanics_are_structurally_valid(self):
+        assigned_ids = {
+            mid
+            for boss in BOSSES_BY_ID.values()
+            for mid in boss.mechanic_pool
+        }
+        assigned_ids.update(
+            mid
+            for boss in PINNACLE_BOSSES.values()
+            for phase in boss.phases
+            for mid in phase.mechanic_pool
+        )
+
+        for mechanic_id in assigned_ids:
+            mechanic = MECHANIC_REGISTRY[mechanic_id]
+            assert 1 <= mechanic.trigger_round <= BOSS_ROUND_CAP
+            assert len(mechanic.options) == 3
+            assert 0 <= mechanic.safe_option_idx < len(mechanic.options)
+            for option in mechanic.options:
+                assert sum(
+                    roll.probability for roll in option.outcome_rolls
+                ) == pytest.approx(1.0)
 
 # =============================================================================
 # Shared fixtures and helpers
@@ -870,9 +914,9 @@ class TestPinnacleFight:
         _at_pinnacle(dig_repo)
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, pinnacle_boss_id="forgotten_king")
 
-        # All rounds should reach the mechanic before either side dies.
-        # Phase 1 of forgotten_king has mechanic king_decree (trigger_round=3).
-        # We just need the duel loop to survive to round 3.
+        # Pin the first compatible phase mechanic, then let all rounds reach it
+        # before either side dies.
+        monkeypatch.setattr(random.Random, "choice", lambda _rng, pool: pool[0])
         roll_seq = iter([0.0, 0.99] * 50)
         monkeypatch.setattr(random, "random", lambda: next(roll_seq))
 
@@ -895,6 +939,41 @@ class TestPinnacleFight:
         assert "pending_prompt" not in resumed
         # Active duel row was cleared.
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
+
+    def test_pinnacle_resume_processes_mechanic_status_effects(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        _at_pinnacle(dig_repo)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID, pinnacle_boss_id="forgotten_king",
+        )
+
+        monkeypatch.setattr(random.Random, "choice", lambda _rng, pool: pool[1])
+        roll_seq = iter([0.0, 0.99] * 50)
+        monkeypatch.setattr(random, "random", lambda: next(roll_seq))
+        result = dig_service.fight_boss(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+        assert result["mechanic_id"] == "king_crownfall"
+
+        observed_bleed = []
+        original_run_one_round = dig_service._run_one_round
+
+        def record_status_effects(**kwargs):
+            observed_bleed.append(
+                kwargs["status_effects"].get("bleed_rounds_remaining", 0)
+            )
+            return original_run_one_round(**kwargs)
+
+        monkeypatch.setattr(dig_service, "_run_one_round", record_status_effects)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=2)
+
+        assert observed_bleed == [3, 2]
 
     def test_loss_persists_phase_hp(
         self, dig_service, dig_repo, player_repository, monkeypatch,

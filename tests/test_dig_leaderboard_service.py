@@ -160,8 +160,8 @@ class TestGetCollection:
         result = lb_service.get_collection(1, guild_id)
 
         assert result["total"] == 2
-        # Both relics are "Rare" in the pool — resolved as such, not "common".
-        assert set(result["artifacts"]) == {"Rare"}
+        # Reclassified relics resolve through their current catalog rarity.
+        assert set(result["artifacts"]) == {"Common", "Uncommon"}
         for rarity, arts in result["artifacts"].items():
             for art in arts:
                 assert rarity_by_id[art["artifact_id"]] == rarity

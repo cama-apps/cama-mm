@@ -33,6 +33,7 @@ import uuid
 from dataclasses import dataclass
 
 from config import HOSTILE_LOSS_MIN_BALANCE
+from services.dig_data.balance import strengthen_dig_event_penalty
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
@@ -255,7 +256,9 @@ def resolve_splash(
             total_burned=0, mode=mode,
         )
     scaled_penalty_jc = (
-        scale_deflationary_minigame_jc_delta(penalty_jc)
+        scale_deflationary_minigame_jc_delta(
+            strengthen_dig_event_penalty(penalty_jc)
+        )
         if mode == "burn"
         else scale_minigame_jc_delta(penalty_jc)
     )

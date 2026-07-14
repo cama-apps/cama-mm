@@ -478,8 +478,8 @@ class TestNewItemsAndArtifacts:
 
     def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
-        # 30 originals + 7 "buff fun" relics; relics-only catalog.
-        assert len(ALL_ARTIFACTS) == 37
+        # 37 existing relics plus 8 rarity-progression relics.
+        assert len(ALL_ARTIFACTS) == 45
 
     def test_fungal_artifacts_exist(self):
         from services.dig_constants import ALL_ARTIFACTS

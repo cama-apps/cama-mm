@@ -26,6 +26,15 @@ NEW_EVENT_IDS = (
     "wilderness_stalker",
 )
 
+ROGUELIKE_EVENT_IDS = (
+    "collapsed_armory",
+    "dead_prospectors_pack",
+    "spore_debt",
+    "clockwork_toll",
+    "collectors_roots",
+    "hungry_beacon",
+)
+
 
 @pytest.fixture
 def dig_repo(repo_db_path):
@@ -70,6 +79,104 @@ class TestNewEventsRegistered:
             assert len(event.description) >= 2, (
                 f"{new_id} should have ≥2 description variants for flavor variety"
             )
+
+
+class TestRoguelikeEventsRegistered:
+    """The six roguelike events retain their authored, pre-scaling values."""
+
+    def _by_id(self, event_id: str):
+        return next(event for event in RANDOM_EVENTS if event.id == event_id)
+
+    def test_all_six_events_are_registered_once_and_serialized(self):
+        catalog_ids = [event.id for event in RANDOM_EVENTS]
+        pool_ids = [event["id"] for event in EVENT_POOL]
+
+        for event_id in ROGUELIKE_EVENT_IDS:
+            assert catalog_ids.count(event_id) == 1
+            assert pool_ids.count(event_id) == 1
+
+    @pytest.mark.parametrize(
+        (
+            "event_id", "rarity", "min_depth", "max_depth", "layer",
+            "safe_jc", "risky_chance", "success_jc", "failure_advance", "failure_jc",
+        ),
+        (
+            ("collapsed_armory", "uncommon", 76, 150, None, -6, 0.35, 4, 0, -18),
+            ("dead_prospectors_pack", "uncommon", 76, 200, None, -5, 0.40, 3, -2, -16),
+            ("spore_debt", "uncommon", None, None, "Fungal Depths", -4, 0.55, 8, 0, -12),
+            ("clockwork_toll", "rare", None, None, "Frozen Core", -5, 0.50, 6, 0, -18),
+            ("collectors_roots", "uncommon", 51, None, None, -4, 0.60, 6, 0, -12),
+            ("hungry_beacon", "rare", 101, None, None, -6, 0.50, 10, 0, -20),
+        ),
+    )
+    def test_authored_catalog_values(
+        self,
+        event_id,
+        rarity,
+        min_depth,
+        max_depth,
+        layer,
+        safe_jc,
+        risky_chance,
+        success_jc,
+        failure_advance,
+        failure_jc,
+    ):
+        event = self._by_id(event_id)
+
+        assert event.rarity == rarity
+        assert event.min_depth == min_depth
+        assert event.max_depth == max_depth
+        assert event.layer == layer
+        assert event.safe_option.success.jc == safe_jc
+        assert event.safe_option.failure is None
+        assert event.safe_option.success_chance == 1.0
+        assert event.risky_option.success_chance == risky_chance
+        assert event.risky_option.success.jc == success_jc
+        assert event.risky_option.failure.advance == failure_advance
+        assert event.risky_option.failure.jc == failure_jc
+
+    def test_gear_reward_pools_are_slot_specific(self):
+        assert self._by_id("collapsed_armory").risky_option.success.gear_reward_pool == (
+            "glassbreaker_pick", "needle_pick",
+        )
+        assert self._by_id("dead_prospectors_pack").risky_option.success.gear_reward_pool == (
+            "briarplate", "nullweave_mantle",
+        )
+        assert self._by_id("spore_debt").risky_option.success.gear_reward_pool == (
+            "springheel_boots", "anchor_boots",
+        )
+        assert self._by_id("clockwork_toll").risky_option.success.gear_reward_pool == (
+            "loaded_die", "blood_locket",
+        )
+
+    def test_fractional_curses_keep_authored_values(self):
+        spore_curse = self._by_id("spore_debt").risky_option.failure.curse
+        clock_curse = self._by_id("clockwork_toll").risky_option.failure.curse
+
+        assert spore_curse is not None
+        assert spore_curse.duration_digs == 3
+        assert spore_curse.effect == {"cave_in_bonus": 0.08}
+        assert clock_curse is not None
+        assert clock_curse.duration_digs == 3
+        assert clock_curse.effect == {"cooldown_penalty": 0.20}
+
+    @pytest.mark.parametrize(
+        ("event_id", "victim_count", "penalty_jc"),
+        (("collectors_roots", 2, 8), ("hungry_beacon", 3, 6)),
+    )
+    def test_success_burn_splashes_target_active_diggers(
+        self, event_id, victim_count, penalty_jc,
+    ):
+        event = self._by_id(event_id)
+
+        assert event.social is True
+        assert event.splash is not None
+        assert event.splash.strategy == "active_diggers"
+        assert event.splash.victim_count == victim_count
+        assert event.splash.penalty_jc == penalty_jc
+        assert event.splash.trigger == "success"
+        assert event.splash.mode == "burn"
 
 
 class TestStealMode:

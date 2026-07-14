@@ -31,7 +31,7 @@ RELICS: list[ArtifactDef] = [
         id="mole_claws",
         name="Mole Claws",
         layer="Dirt",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="Fashioned from the claws of the Great Undermole, these gloves let you tear through earth like butter.",
         is_relic=True,
         effect="+1 advance permanently",
@@ -40,7 +40,7 @@ RELICS: list[ArtifactDef] = [
         id="crystal_compass",
         name="Crystal Compass",
         layer="Crystal",
-        rarity="Rare",
+        rarity="Common",
         lore_text="A shard of living crystal that hums near danger. It always points away from collapse.",
         is_relic=True,
         effect="-3% cave-in permanently",
@@ -49,7 +49,7 @@ RELICS: list[ArtifactDef] = [
         id="magma_heart",
         name="Magma Heart",
         layer="Magma",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="Still beating after a thousand years in the lava, this heart radiates warmth and fortune.",
         is_relic=True,
         effect="+1 JC loot permanently",
@@ -58,7 +58,7 @@ RELICS: list[ArtifactDef] = [
         id="obsidian_shield",
         name="Obsidian Shield",
         layer="Magma",
-        rarity="Rare",
+        rarity="Common",
         lore_text="Forged in volcanic fury, this shield absorbs ill intent from rival diggers.",
         is_relic=True,
         effect="-15% sabotage damage permanently",
@@ -67,7 +67,7 @@ RELICS: list[ArtifactDef] = [
         id="root_network",
         name="Root Network",
         layer="Stone",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="Ancient roots lace through the stone, binding your tunnel walls against the passage of time.",
         is_relic=True,
         effect="-25% decay rate permanently",
@@ -76,7 +76,7 @@ RELICS: list[ArtifactDef] = [
         id="echo_stone",
         name="Echo Stone",
         layer="Crystal",
-        rarity="Legendary",
+        rarity="Rare",
         lore_text="This stone whispers the locations of hidden things. Collectors would kill for it—some have.",
         is_relic=True,
         effect="+10% artifact find chance permanently",
@@ -112,7 +112,7 @@ RELICS: list[ArtifactDef] = [
         id="mycelium_link",
         name="Mycelium Link",
         layer="Fungal Depths",
-        rarity="Rare",
+        rarity="Common",
         lore_text="A living thread connecting you to the fungal network. When you help someone, the network amplifies it.",
         is_relic=True,
         effect="+5% help bonus when helping others",
@@ -163,7 +163,7 @@ RELICS: list[ArtifactDef] = [
         id="mana_conduit",
         name="Mana Conduit",
         layer="Crystal",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="A filament of half-fused crystal. When you spend deeply, a thread of it returns to your pocket.",
         is_relic=True,
         effect="Refund 25% of any tap-mana shop cost",
@@ -199,7 +199,7 @@ RELICS: list[ArtifactDef] = [
         id="mentors_lantern",
         name="Mentor's Lantern",
         layer="Dirt",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="Old miners say a lantern shared lights two paths. It pays the truth of that out, in coin.",
         is_relic=True,
         effect="Helping another digger: both gain +10 JC",
@@ -229,7 +229,7 @@ RELICS: list[ArtifactDef] = [
         id="weeping_fang",
         name="Weeping Fang",
         layer="Fungal Depths",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="A fang that never stops weeping. Whatever it bit is still out there, somewhere, getting slower.",
         is_relic=True,
         effect="Venom: bosses lose 1 HP per round (4 rounds)",
@@ -323,7 +323,7 @@ RELICS: list[ArtifactDef] = [
         id="midas_splinter",
         name="Midas Splinter",
         layer="Dirt",
-        rarity="Rare",
+        rarity="Common",
         lore_text="A fleck of something that was never quite ore. It warms when the digging is good.",
         is_relic=True,
         effect="Sometimes the rock just *gives* (chance to double a dig's coin)",
@@ -332,7 +332,7 @@ RELICS: list[ArtifactDef] = [
         id="lucky_seam",
         name="Lucky Seam",
         layer="Stone",
-        rarity="Rare",
+        rarity="Common",
         lore_text="Old hands swear the mountain keeps one good secret for every thousand it buries.",
         is_relic=True,
         effect="Most veins are ore; one in a great many is a fortune (rare jackpot strike)",
@@ -341,10 +341,82 @@ RELICS: list[ArtifactDef] = [
         id="prospectors_streak",
         name="Prospector's Streak",
         layer="Stone",
-        rarity="Rare",
+        rarity="Uncommon",
         lore_text="A tally-stone worn smooth by a thumb that counted every safe step — until it didn't.",
         is_relic=True,
         effect="Confidence compounds down here (more coin the longer you avoid a collapse; lose it all if one hits)",
+    ),
+    ArtifactDef(
+        id="chipped_compass",
+        name="Chipped Compass",
+        layer="Dirt",
+        rarity="Common",
+        lore_text="Its needle avoids treasure, but it still twitches before the ceiling does.",
+        is_relic=True,
+        effect="Safe event choices grant +1 block",
+    ),
+    ArtifactDef(
+        id="lantern_stub",
+        name="Lantern Stub",
+        layer="Dirt",
+        rarity="Common",
+        lore_text="Barely a candle, stubbornly refusing to become darkness.",
+        is_relic=True,
+        effect="First dig each day restores 5 luminosity",
+    ),
+    ArtifactDef(
+        id="paper_crane",
+        name="Paper Crane",
+        layer="Crystal",
+        rarity="Uncommon",
+        lore_text="Folded from a warning notice no one lived long enough to post.",
+        is_relic=True,
+        effect="Ignore the first boss-applied status each fight",
+    ),
+    ArtifactDef(
+        id="bone_abacus",
+        name="Bone Abacus",
+        layer="Stone",
+        rarity="Uncommon",
+        lore_text="Every bead is a bargain. None of them add up in your favor.",
+        is_relic=True,
+        effect="Stronger Stamina discount, but paid digs yield 10% less JC",
+    ),
+    ArtifactDef(
+        id="bottled_quake",
+        name="Bottled Quake",
+        layer="Magma",
+        rarity="Rare",
+        lore_text="The cork jumps whenever something nearby believes it is immovable.",
+        is_relic=True,
+        effect="First landed hit each boss fight deals +1 damage",
+    ),
+    ArtifactDef(
+        id="black_wax_seal",
+        name="Black Wax Seal",
+        layer="The Hollow",
+        rarity="Rare",
+        lore_text="It promises luck in a language that sounds uncomfortably binding.",
+        is_relic=True,
+        effect="While cursed, risky event success +5%; success consumes an extra curse dig",
+    ),
+    ArtifactDef(
+        id="burning_ledger",
+        name="Burning Ledger",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="Profits glow gold. Debts burn hot enough to read through closed eyes.",
+        is_relic=True,
+        effect="Positive event JC +15%; negative event JC losses +25%",
+    ),
+    ArtifactDef(
+        id="shifting_idol",
+        name="Shifting Idol",
+        layer="Crystal",
+        rarity="Legendary",
+        lore_text="It chooses a new face each time you approach something stronger than you.",
+        is_relic=True,
+        effect="Each boss attempt grants a random +1 HP, +5% hit, or +5% crit",
     ),
     ArtifactDef(
         id="first_light",
@@ -395,6 +467,36 @@ TROPHY_RELIC_IDS: frozenset[str] = frozenset({
     "weeping_fang", "runebitten_shard", "aching_spine",
     "listening_shard", "hateborn_ember", "deaths_door",
 })
+
+RELIC_RARITY_ORDER: tuple[str, ...] = (
+    "Common", "Uncommon", "Rare", "Legendary",
+)
+
+BOSS_EXCLUSIVE_RELIC_IDS: frozenset[str] = TROPHY_RELIC_IDS | frozenset({
+    "aegis_fragment",
+})
+
+
+def relic_rarity_for_roll(roll: float) -> str:
+    """Map a normalized roll to the ordinary relic rarity distribution."""
+    if not 0.0 <= roll < 1.0:
+        raise ValueError("Relic rarity roll must be between 0 (inclusive) and 1 (exclusive).")
+    if roll < 0.60:
+        return "Common"
+    if roll < 0.90:
+        return "Uncommon"
+    if roll < 0.99:
+        return "Rare"
+    return "Legendary"
+
+
+def is_ordinary_relic(relic: ArtifactDef) -> bool:
+    """Return whether a relic belongs to the find-and-recycle progression pool."""
+    return (
+        relic.is_relic
+        and relic.min_prestige == 0
+        and relic.id not in BOSS_EXCLUSIVE_RELIC_IDS
+    )
 
 # Per-kill chance a boss's signature trophy carves, rolled until the player owns it.
 TROPHY_CARVE_RATE: float = 0.25

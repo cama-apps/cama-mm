@@ -62,6 +62,29 @@ class GearTierDef:
     prestige_required: int = 0
 
 
+@dataclass(frozen=True)
+class UniqueGearDef:
+    """Static definition for an event-only horizontal gear side-grade."""
+
+    item_id: str
+    name: str
+    slot: GearSlot
+    reference_tier: int
+    repair_value: int
+    max_durability: int
+    player_dmg: int = 0
+    player_hit: float = 0.0
+    player_hp_bonus: int = 0
+    boss_hit_reduction: float = 0.0
+    crit_chance: float = 0.0
+    crit_bonus: int = 0
+    advance_bonus: int = 0
+    cave_in_reduction: float = 0.0
+    loot_bonus: int = 0
+    effect_id: str | None = None
+    effect_summary: str | None = None
+
+
 @dataclass
 class GearPiece:
     """One owned instance of a gear piece. Mirrors a ``dig_gear`` row."""
@@ -73,7 +96,9 @@ class GearPiece:
     equipped: bool
     acquired_at: int
     source: str
-    tier_def: GearTierDef
+    tier_def: GearTierDef | UniqueGearDef
+    item_id: str | None = None
+    max_durability: int = 20
 
 
 @dataclass
@@ -96,11 +121,16 @@ class GearLoadout:
         Caller decides how to fold these into base stats — see
         ``DigService._apply_gear_to_combat``. Empty slots contribute 0.
         """
+        pieces = tuple(
+            piece
+            for piece in (self.weapon, self.armor, self.boots, self.amulet)
+            if piece is not None
+        )
         return {
-            "player_dmg": self.weapon.tier_def.player_dmg if self.weapon else 0,
-            "player_hit": self.weapon.tier_def.player_hit if self.weapon else 0.0,
-            "player_hp_bonus": self.armor.tier_def.player_hp_bonus if self.armor else 0,
-            "boss_hit_reduction": self.boots.tier_def.boss_hit_reduction if self.boots else 0.0,
-            "crit_chance": self.amulet.tier_def.crit_chance if self.amulet else 0.0,
-            "crit_bonus": self.amulet.tier_def.crit_bonus if self.amulet else 0,
+            "player_dmg": sum(p.tier_def.player_dmg for p in pieces),
+            "player_hit": sum(p.tier_def.player_hit for p in pieces),
+            "player_hp_bonus": sum(p.tier_def.player_hp_bonus for p in pieces),
+            "boss_hit_reduction": sum(p.tier_def.boss_hit_reduction for p in pieces),
+            "crit_chance": sum(p.tier_def.crit_chance for p in pieces),
+            "crit_bonus": sum(p.tier_def.crit_bonus for p in pieces),
         }

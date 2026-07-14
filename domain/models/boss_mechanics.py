@@ -2,7 +2,7 @@
 
 A ``BossMechanic`` represents a single "moment" inside a boss fight where the
 player is forced to make a reactive choice. Each boss has a ``mechanic_pool``
-of 4-5 mechanic ids on its ``BossDef``; exactly one is rolled per fight and
+of compatible mechanic ids on its ``BossDef``; exactly one is rolled per fight and
 triggers at its configured round number, pausing the auto-resolve loop until
 the player clicks an option.
 
@@ -122,12 +122,9 @@ EFFECT_APPLIERS: dict[str, EffectApplier] = {
 # ---------------------------------------------------------------------------
 # CONTENT NOTES
 #
-# The registry starts with a compact set of primary mechanics — one per boss
-# (21 total). This is enough to boot the state machine, run tests, and play
-# the feature end to end. The plan calls for 4-5 mechanics per boss
-# (~95 total); the remaining ~75 instances are written by parallel agents
-# after this baseline lands. Expansion only touches THIS file + BossDef.mechanic_pool
-# tuples in dig_constants.py — no state-machine or UI code needs to change.
+# Regular bosses expose three compatible mechanics and pinnacle phases expose
+# two. The compact helper below gives added variety mechanics the same bounded
+# risk profile while their prompts and choices remain boss-specific.
 #
 # Shape conventions (documented for content authors):
 #   - Exactly 3 options per mechanic
@@ -135,6 +132,73 @@ EFFECT_APPLIERS: dict[str, EffectApplier] = {
 #   - trigger_round is typically between 2-6 (fights last <=20 rounds)
 #   - narrative strings should be one sentence, present tense, <=100 chars
 #   - safe_option_idx is the "don't do anything crazy" button — lowest variance.
+
+
+def _variety_mechanic(
+    *,
+    mechanic_id: str,
+    archetype: str,
+    trigger_round: int,
+    title: str,
+    description: str,
+    labels: tuple[str, str, str],
+    flavors: tuple[str, str, str],
+    failure_status: str,
+) -> BossMechanic:
+    """Build a themed mechanic within the established damage/control envelope."""
+    return BossMechanic(
+        id=mechanic_id,
+        archetype=archetype,
+        trigger_round=trigger_round,
+        prompt_title=title,
+        prompt_description=description,
+        options=(
+            MechanicOption(
+                label=labels[0],
+                flavor=flavors[0],
+                outcome_rolls=(
+                    OutcomeRoll(
+                        0.75, -1, 0, None, None,
+                        f"{flavors[0]} You hold steady.",
+                    ),
+                    OutcomeRoll(
+                        0.25, -2, 0, None, None,
+                        f"{flavors[0]} The timing costs you.",
+                    ),
+                ),
+            ),
+            MechanicOption(
+                label=labels[1],
+                flavor=flavors[1],
+                outcome_rolls=(
+                    OutcomeRoll(
+                        0.55, -1, -2, None, "reveal",
+                        f"{flavors[1]} The counter opens a weakness.",
+                    ),
+                    OutcomeRoll(
+                        0.45, -2, 0, None, None,
+                        f"{flavors[1]} The counter comes a beat late.",
+                    ),
+                ),
+            ),
+            MechanicOption(
+                label=labels[2],
+                flavor=flavors[2],
+                outcome_rolls=(
+                    OutcomeRoll(
+                        0.35, 0, -3, None, None,
+                        f"{flavors[2]} The gamble lands cleanly.",
+                    ),
+                    OutcomeRoll(
+                        0.65, -3, 0, None, failure_status,
+                        f"{flavors[2]} The gamble turns against you.",
+                    ),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    )
+
 
 MECHANIC_REGISTRY: dict[str, BossMechanic] = {
 
@@ -2486,6 +2550,434 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
             ),
         ),
         safe_option_idx=0,
+    ),
+
+    # ================================================================
+    # VARIETY EXPANSION — REGULAR BOSSES
+    # ================================================================
+    "grothak_bedrock_bellow": _variety_mechanic(
+        mechanic_id="grothak_bedrock_bellow",
+        archetype="channel_aoe",
+        trigger_round=2,
+        title="Grothak bellows into the bedrock",
+        description="The stone answers him, shaking loose in widening rings.",
+        labels=("Drop below the tremor", "Strike his ribs", "Bellow back"),
+        flavors=("You flatten against the floor.", "You step inside his breath.", "You answer stone with spite."),
+        failure_status="bleed",
+    ),
+    "crystalia_mirror_maze": _variety_mechanic(
+        mechanic_id="crystalia_mirror_maze",
+        archetype="reality_warp",
+        trigger_round=2,
+        title="Crystalia folds the chamber into mirrors",
+        description="Every reflection raises a pick half a heartbeat before you do.",
+        labels=("Watch the floor", "Crack the dull mirror", "Charge your reflection"),
+        flavors=("You follow the one shadow that stays true.", "You find the facet without light.", "You sprint at your own raised pick."),
+        failure_status="frostbite",
+    ),
+    "magmus_lava_tide": _variety_mechanic(
+        mechanic_id="magmus_lava_tide",
+        archetype="dot_debuff",
+        trigger_round=3,
+        title="Magmus calls the lava uphill",
+        description="A molten tide climbs the cavern toward your boots.",
+        labels=("Climb the basalt shelf", "Cut a cooling trench", "Vault through the crest"),
+        flavors=("You scramble above the orange wash.", "You split the black crust ahead of it.", "You leap where the lava curls highest."),
+        failure_status="burn",
+    ),
+    "voidwarden_gravity_well": _variety_mechanic(
+        mechanic_id="voidwarden_gravity_well",
+        archetype="reality_warp",
+        trigger_round=5,
+        title="The Void Warden removes the floor's permission",
+        description="Dust, stone, and your own limbs begin falling sideways.",
+        labels=("Anchor to a seam", "Cut the dark center", "Let the pull sling you"),
+        flavors=("You hook your pick into stubborn stone.", "You drag the blade across the well's edge.", "You surrender to the impossible fall."),
+        failure_status="silence",
+    ),
+    "sporeling_bloom": _variety_mechanic(
+        mechanic_id="sporeling_bloom",
+        archetype="summon_swarm",
+        trigger_round=5,
+        title="The Sovereign blooms all at once",
+        description="A crown of pale caps opens and sheds hungry motes.",
+        labels=("Cover your mouth", "Cull the lowest caps", "Breathe it in and rush"),
+        flavors=("You wrap your sleeve tight.", "You sweep the fresh blooms away.", "You charge through the sweet fog."),
+        failure_status="bleed",
+    ),
+    "chronofrost_time_shard": _variety_mechanic(
+        mechanic_id="chronofrost_time_shard",
+        archetype="rewind",
+        trigger_round=3,
+        title="Chronofrost breaks off a second of time",
+        description="The blue shard shows your next wound already frozen inside it.",
+        labels=("Wait out the vision", "Shatter the shard", "Step into your future"),
+        flavors=("You refuse the moment it offers.", "You strike the frozen second sideways.", "You meet the wound before it exists."),
+        failure_status="frostbite",
+    ),
+    "nameless_false_floor": _variety_mechanic(
+        mechanic_id="nameless_false_floor",
+        archetype="reality_warp",
+        trigger_round=2,
+        title="The floor forgets that it is stone",
+        description="Your boots sink into a depth with no bottom and no name.",
+        labels=("Hold perfectly still", "Name the nearest ledge", "Dive beneath the illusion"),
+        flavors=("You give the lie nothing to use.", "You force one edge back into being.", "You descend into the missing place."),
+        failure_status="silence",
+    ),
+    "pudge_dismember": _variety_mechanic(
+        mechanic_id="pudge_dismember",
+        archetype="channel_big_hit",
+        trigger_round=5,
+        title="Pudge reaches for a butcher's grip",
+        description="The cleaver lowers; the other hand comes in fast.",
+        labels=("Keep outside his reach", "Jam the cleaver arm", "Duck under the grab"),
+        flavors=("You give the butcher no clean hold.", "You wedge your pick against his elbow.", "You slip beneath both enormous arms."),
+        failure_status="bleed",
+    ),
+    "ogre_bloodlust": _variety_mechanic(
+        mechanic_id="ogre_bloodlust",
+        archetype="charge_telegraph",
+        trigger_round=2,
+        title="Ogre Magi argues himself into a frenzy",
+        description="Both heads agree on one thing: hit faster, hit harder.",
+        labels=("Circle until they disagree", "Interrupt the loud head", "Match the frenzy"),
+        flavors=("You wait for the argument to restart.", "You ring the head doing the counting.", "You turn the chamber into a brawl."),
+        failure_status="burn",
+    ),
+    "cm_crystal_nova": _variety_mechanic(
+        mechanic_id="cm_crystal_nova",
+        archetype="channel_aoe",
+        trigger_round=3,
+        title="Crystal Maiden gathers a silent nova",
+        description="Frost races outward beneath the dust in a perfect circle.",
+        labels=("Step beyond the rim", "Break the ice at her feet", "Cross the center"),
+        flavors=("You retreat ahead of the pale ring.", "You fracture the nova before it spreads.", "You run straight through the coldest point."),
+        failure_status="frostbite",
+    ),
+    "tusk_ice_shards": _variety_mechanic(
+        mechanic_id="tusk_ice_shards",
+        archetype="bind_debuff",
+        trigger_round=2,
+        title="Tusk walls the tunnel with ice shards",
+        description="Jagged blue teeth erupt behind and beside you.",
+        labels=("Guard the open lane", "Chip the base", "Vault the forming wall"),
+        flavors=("You keep the last escape lane clear.", "You break the weakest shard at its root.", "You leap before the teeth meet."),
+        failure_status="frostbite",
+    ),
+    "lina_light_strike": _variety_mechanic(
+        mechanic_id="lina_light_strike",
+        archetype="channel_big_hit",
+        trigger_round=2,
+        title="Lina marks the ground with white fire",
+        description="A bright circle tightens around your boots.",
+        labels=("Walk with the edge", "Throw dust at Lina", "Hold and strike upward"),
+        flavors=("You pace the shrinking rim.", "You spoil her sightline with ash.", "You trust the instant before ignition."),
+        failure_status="burn",
+    ),
+    "doom_infernal_blade": _variety_mechanic(
+        mechanic_id="doom_infernal_blade",
+        archetype="mark_delayed",
+        trigger_round=2,
+        title="Doom's blade burns from the inside",
+        description="The sword leaves a red afterimage aimed through your guard.",
+        labels=("Give ground", "Catch the flat", "Trade through the flame"),
+        flavors=("You yield before the blade commits.", "You turn the broad side with your pick.", "You step into the burning arc."),
+        failure_status="burn",
+    ),
+    "spectre_dispersion": _variety_mechanic(
+        mechanic_id="spectre_dispersion",
+        archetype="gamble",
+        trigger_round=4,
+        title="Spectre turns your force back on you",
+        description="Every hard swing returns as a violet echo.",
+        labels=("Use shallow cuts", "Strike between echoes", "Commit everything"),
+        flavors=("You shorten each careful swing.", "You attack in the reflection's blind beat.", "You bet the echo breaks first."),
+        failure_status="bleed",
+    ),
+    "void_spirit_resonant_pulse": _variety_mechanic(
+        mechanic_id="void_spirit_resonant_pulse",
+        archetype="channel_aoe",
+        trigger_round=5,
+        title="Void Spirit rings the aether like a bell",
+        description="A violet pulse swells beneath a shield of impossible angles.",
+        labels=("Ride behind the pulse", "Crack the shield seam", "Meet it head-on"),
+        flavors=("You move in the pulse's quiet wake.", "You find the shield's unfinished edge.", "You drive your pick into the violet wave."),
+        failure_status="silence",
+    ),
+    "treant_living_armor": _variety_mechanic(
+        mechanic_id="treant_living_armor",
+        archetype="bind_debuff",
+        trigger_round=5,
+        title="Treant's bark knits over every wound",
+        description="Fresh rings of wood close around the cuts you made.",
+        labels=("Peel the green bark", "Cut the binding vines", "Split the oldest ring"),
+        flavors=("You strip away the soft new layer.", "You sever the vines feeding the repair.", "You swing for the heartwood beneath."),
+        failure_status="bleed",
+    ),
+    "broodmother_silken_snare": _variety_mechanic(
+        mechanic_id="broodmother_silken_snare",
+        archetype="bind_debuff",
+        trigger_round=2,
+        title="Broodmother snaps a silk line taut",
+        description="The tunnel becomes a web with you at its center.",
+        labels=("Freeze before it tightens", "Cut the anchor strand", "Pull her into the web"),
+        flavors=("You stop the silk from sawing deeper.", "You find the strand carrying all the tension.", "You wrap the line and haul back."),
+        failure_status="bleed",
+    ),
+    "faceless_void_time_dilation": _variety_mechanic(
+        mechanic_id="faceless_void_time_dilation",
+        archetype="time_skip",
+        trigger_round=2,
+        title="Faceless Void stretches the instant between swings",
+        description="Your muscles wait while his mace keeps moving.",
+        labels=("Release your grip", "Move before deciding", "Force the delayed swing"),
+        flavors=("You stop fighting the stolen second.", "You act on instinct before time catches up.", "You drag the trapped motion through."),
+        failure_status="silence",
+    ),
+    "weaver_geminate_strike": _variety_mechanic(
+        mechanic_id="weaver_geminate_strike",
+        archetype="charge_telegraph",
+        trigger_round=4,
+        title="Weaver's first strike pulls a second behind it",
+        description="The echoing claw arrives from an angle that does not exist yet.",
+        labels=("Guard the echo", "Punish the first claw", "Stand between both strikes"),
+        flavors=("You ignore the feint and wait.", "You cut across the first lunge.", "You choose the narrowing space between."),
+        failure_status="bleed",
+    ),
+    "oracle_purifying_flames": _variety_mechanic(
+        mechanic_id="oracle_purifying_flames",
+        archetype="gamble",
+        trigger_round=2,
+        title="Oracle offers a flame that wounds before it heals",
+        description="The green fire asks whether you can survive its first answer.",
+        labels=("Refuse the bargain", "Turn the flame on Oracle", "Take the full prophecy"),
+        flavors=("You step outside the promised cure.", "You catch the green fire on your pick.", "You accept pain and whatever follows."),
+        failure_status="burn",
+    ),
+    "terrorblade_reflection": _variety_mechanic(
+        mechanic_id="terrorblade_reflection",
+        archetype="reality_warp",
+        trigger_round=4,
+        title="Terrorblade pulls your reflection free",
+        description="It knows your stance, your reach, and exactly where you hesitate.",
+        labels=("Change your rhythm", "Attack Terrorblade", "Duel yourself"),
+        flavors=("You become unfamiliar to your copy.", "You ignore the copy and cut at its source.", "You meet your own best swing."),
+        failure_status="silence",
+    ),
+    "xalatath_blackout": _variety_mechanic(
+        mechanic_id="xalatath_blackout",
+        archetype="reality_warp",
+        trigger_round=3,
+        title="Xal'atath closes every source of light",
+        description="Her whisper remains, moving where the chamber should be.",
+        labels=("Count your breaths", "Strike toward the echo", "Answer the whisper"),
+        flavors=("You make your own measure of the dark.", "You cut where the second echo overlaps.", "You speak into the voice behind your eyes."),
+        failure_status="silence",
+    ),
+    "lilith_blood_tether": _variety_mechanic(
+        mechanic_id="lilith_blood_tether",
+        archetype="bind_debuff",
+        trigger_round=4,
+        title="Lilith knots a red tether between your hearts",
+        description="Each beat drags you one step closer to her wings.",
+        labels=("Slow your breathing", "Sever it on a heartbeat", "Pull her closer first"),
+        flavors=("You quiet the rhythm feeding the cord.", "You cut as both hearts strike together.", "You wrap the tether around your wrist."),
+        failure_status="bleed",
+    ),
+    "underlord_dark_rift": _variety_mechanic(
+        mechanic_id="underlord_dark_rift",
+        archetype="reality_warp",
+        trigger_round=3,
+        title="Underlord tears open a dark rift",
+        description="A burning battlefield waits on the other side of the split.",
+        labels=("Brace against the pull", "Collapse the rift edge", "Follow him through"),
+        flavors=("You set both boots against the stone.", "You strike the seam holding two places together.", "You leap after the retreating silhouette."),
+        failure_status="burn",
+    ),
+    "blightcoil_soul_lattice": _variety_mechanic(
+        mechanic_id="blightcoil_soul_lattice",
+        archetype="summon_swarm",
+        trigger_round=5,
+        title="The Blightcoil braids its wards into a soul lattice",
+        description="Cold lines connect every skull and tighten around your shadow.",
+        labels=("Stay between the lines", "Break the lowest skull", "Seize the lattice"),
+        flavors=("You fold yourself into the one open angle.", "You knock the keystone ward loose.", "You grab the cold threads with both hands."),
+        failure_status="silence",
+    ),
+    "rimebound_frozen_throne": _variety_mechanic(
+        mechanic_id="rimebound_frozen_throne",
+        archetype="bind_debuff",
+        trigger_round=5,
+        title="The Rimebound King raises a throne of ice",
+        description="Every shard points outward as he settles into the crown.",
+        labels=("Shelter behind a pillar", "Break the throne's foot", "Climb the front steps"),
+        flavors=("You put thick ice between you and the crown.", "You hammer the weight-bearing corner.", "You charge straight up the frozen dais."),
+        failure_status="frostbite",
+    ),
+    "spineback_quill_barrage": _variety_mechanic(
+        mechanic_id="spineback_quill_barrage",
+        archetype="summon_swarm",
+        trigger_round=2,
+        title="The Spineback fans every quill outward",
+        description="Black needles tremble, each aimed at a different escape.",
+        labels=("Hide behind the shed shell", "Strike before the release", "Thread the barrage"),
+        flavors=("You drag a broken plate into cover.", "You hit the muscle bunching beneath the spines.", "You run through the first opening."),
+        failure_status="bleed",
+    ),
+    "aegis_bulwark": _variety_mechanic(
+        mechanic_id="aegis_bulwark",
+        archetype="bind_debuff",
+        trigger_round=2,
+        title="The Aegis Warden locks the shield into bedrock",
+        description="A golden wall divides the chamber and advances one step at a time.",
+        labels=("Yield one step", "Cut the locking brace", "Ram the shield"),
+        flavors=("You preserve room to breathe.", "You attack the hinge buried in stone.", "You meet the golden wall shoulder-first."),
+        failure_status="bleed",
+    ),
+    "aegis_last_stand": _variety_mechanic(
+        mechanic_id="aegis_last_stand",
+        archetype="second_life",
+        trigger_round=6,
+        title="Every fallen shield rises around the Warden",
+        description="Old defenses answer one final command from the reliquary.",
+        labels=("Wait for the formation", "Topple the nearest shield", "Break through the center"),
+        flavors=("You study where the shields overlap.", "You turn one guardian into a gap.", "You challenge the whole formation at once."),
+        failure_status="silence",
+    ),
+    "heartspire_blood_tithe": _variety_mechanic(
+        mechanic_id="heartspire_blood_tithe",
+        archetype="gamble",
+        trigger_round=3,
+        title="The Heartspire demands a blood tithe",
+        description="A crimson scale hangs between your pulse and the machine's.",
+        labels=("Offer a shallow cut", "Tip the scale with iron", "Refuse the tithe"),
+        flavors=("You give the mechanism almost nothing.", "You lay your pick across the crimson pan.", "You strike the scale instead of paying."),
+        failure_status="bleed",
+    ),
+    "heartspire_crimson_pulse": _variety_mechanic(
+        mechanic_id="heartspire_crimson_pulse",
+        archetype="channel_aoe",
+        trigger_round=4,
+        title="The Heartspire releases a crimson pulse",
+        description="The chamber contracts around the beat of its suspended core.",
+        labels=("Breathe between beats", "Pierce the outer vessel", "Strike on the pulse"),
+        flavors=("You move only in the still interval.", "You vent pressure from a side vein.", "You drive your pick in as the chamber contracts."),
+        failure_status="bleed",
+    ),
+    "emberwright_molten_anvil": _variety_mechanic(
+        mechanic_id="emberwright_molten_anvil",
+        archetype="charge_telegraph",
+        trigger_round=3,
+        title="The Emberwright tips a molten anvil upright",
+        description="The glowing slab begins to fall across the whole work lane.",
+        labels=("Back beyond its reach", "Cool the lower edge", "Slide beneath it"),
+        flavors=("You retreat past the anvil's shadow.", "You throw loose slag against the hottest edge.", "You dive under the descending iron."),
+        failure_status="burn",
+    ),
+    "emberwright_scrap_volley": _variety_mechanic(
+        mechanic_id="emberwright_scrap_volley",
+        archetype="summon_swarm",
+        trigger_round=4,
+        title="The Emberwright feeds scrap into the forge vents",
+        description="A storm of rivets and red-hot teeth erupts toward you.",
+        labels=("Shelter behind the anvil", "Jam the nearest vent", "Bat the scrap aside"),
+        flavors=("You crouch behind cooling iron.", "You wedge your pick into the vent mouth.", "You meet the metal storm swing for swing."),
+        failure_status="burn",
+    ),
+
+    # ================================================================
+    # VARIETY EXPANSION — PINNACLE PHASES
+    # ================================================================
+    "king_crownfall": _variety_mechanic(
+        mechanic_id="king_crownfall",
+        archetype="channel_big_hit",
+        trigger_round=4,
+        title="The Forgotten King's crown falls like a blade",
+        description="Ancient gold widens into a descending ring of judgment.",
+        labels=("Kneel beneath the arc", "Strike the cracked jewel", "Catch the crown"),
+        flavors=("You lower yourself without bowing.", "You aim for the crown's dead center.", "You raise your pick beneath royal gold."),
+        failure_status="bleed",
+    ),
+    "king_royal_hunt": _variety_mechanic(
+        mechanic_id="king_royal_hunt",
+        archetype="charge_telegraph",
+        trigger_round=4,
+        title="The Crowned Hunger declares a royal hunt",
+        description="Ghostly hounds pace out a circle while the King lowers his spear.",
+        labels=("Stay outside the hounds", "Turn the lead hound", "Charge the hunter"),
+        flavors=("You keep the spectral pack in sight.", "You cut across the first hound's path.", "You make the prey run forward."),
+        failure_status="bleed",
+    ),
+    "king_final_judgment": _variety_mechanic(
+        mechanic_id="king_final_judgment",
+        archetype="mark_delayed",
+        trigger_round=5,
+        title="The Last Breath of Kings names your sentence",
+        description="The words carve themselves into the stone beneath you.",
+        labels=("Step outside the inscription", "Erase the final word", "Deliver your own verdict"),
+        flavors=("You leave the sentence unfinished.", "You grind the last rune into dust.", "You answer judgment with a raised pick."),
+        failure_status="silence",
+    ),
+    "hollow_empty_gaze": _variety_mechanic(
+        mechanic_id="hollow_empty_gaze",
+        archetype="reality_warp",
+        trigger_round=4,
+        title="Hollowforged opens an eye made of tunnel",
+        description="Looking into it shows the chamber continuing through your body.",
+        labels=("Look at its shadow", "Blind the stone eye", "Stare through it"),
+        flavors=("You follow what the impossible eye cannot see.", "You fill the hollow lens with shattered rock.", "You force your gaze down the endless shaft."),
+        failure_status="silence",
+    ),
+    "hollow_stolen_face": _variety_mechanic(
+        mechanic_id="hollow_stolen_face",
+        archetype="reform_predict",
+        trigger_round=4,
+        title="Hollowforged Reformed wears your face",
+        description="The mineral copy smiles just before matching your stance.",
+        labels=("Change your footing", "Break the copied jaw", "Mirror the mirror"),
+        flavors=("You move unlike yourself.", "You strike the familiar face at its seam.", "You copy the copy until one of you breaks."),
+        failure_status="bleed",
+    ),
+    "hollow_silence_between": _variety_mechanic(
+        mechanic_id="hollow_silence_between",
+        archetype="bind_debuff",
+        trigger_round=5,
+        title="Hollowforged Pluralized removes the sound between voices",
+        description="The chorus becomes pressure, crushing every unspoken thought.",
+        labels=("Hold one clear thought", "Strike between two voices", "Add your own voice"),
+        flavors=("You keep one small idea entirely yours.", "You attack the instant the chorus changes speaker.", "You shout until the chamber must include you."),
+        failure_status="silence",
+    ),
+    "digger_mirror_swing": _variety_mechanic(
+        mechanic_id="digger_mirror_swing",
+        archetype="weapon_duel",
+        trigger_round=4,
+        title="The First Digger copies your oldest swing",
+        description="He learned it before you were born and knows where it ends.",
+        labels=("Abandon the swing", "Change hands mid-arc", "Finish faster"),
+        flavors=("You let the remembered motion die.", "You turn the familiar blow inside out.", "You race him to the same ending."),
+        failure_status="bleed",
+    ),
+    "digger_faultline_step": _variety_mechanic(
+        mechanic_id="digger_faultline_step",
+        archetype="phase_chase",
+        trigger_round=4,
+        title="The Digger Unbound steps through a fault line",
+        description="His hands emerge from three cracks before the rest of him chooses one.",
+        labels=("Guard the widest crack", "Collapse the center fault", "Follow his hand through"),
+        flavors=("You wait where a body could actually fit.", "You stamp the unstable seam shut.", "You grab the reaching wrist and dive."),
+        failure_status="burn",
+    ),
+    "digger_last_excavation": _variety_mechanic(
+        mechanic_id="digger_last_excavation",
+        archetype="environmental_collapse",
+        trigger_round=5,
+        title="The Digger Eternal begins the last excavation",
+        description="Every wall peels backward toward a shaft older than the mine.",
+        labels=("Brace the nearest wall", "Break his digging rhythm", "Dig toward him"),
+        flavors=("You hold one piece of the chamber in place.", "You strike between the eternal blows.", "You race the first digger into the dark."),
+        failure_status="bleed",
     ),
 }
 
