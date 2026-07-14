@@ -927,6 +927,16 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
+    def rollback_prediction_orderbook(
+        self,
+        prediction_id: int,
+        levels: list[tuple[str, int, int]],
+        rolled_back_by: int | None = None,
+    ) -> dict:
+        """Reverse a settlement and reopen the same market with fresh levels."""
+        ...
+
+    @abstractmethod
     def cancel_orderbook_prediction(self, prediction_id: int) -> dict:
         """Refund each holder's cost basis (yes + no totals); zero out positions."""
         ...
