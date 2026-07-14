@@ -214,6 +214,13 @@ class TestTeam:
 class TestShuffler:
     """Test BalancedShuffler algorithm."""
 
+    def test_lobby_rating_bonus_uses_average_team_total(self):
+        shuffler = BalancedShuffler(use_glicko=False)
+
+        bonus = shuffler._calculate_lobby_rating_bonus([1500] * 10)
+
+        assert bonus == pytest.approx(75)
+
     def test_shuffle_exact_10_players(self):
         """Test shuffling with exactly 10 players."""
         players = [Player(name=f"Player{i}", mmr=1500 + i * 10) for i in range(10)]

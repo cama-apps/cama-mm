@@ -183,7 +183,8 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     # role delta = sum(100, 400, 0, 0, 0) = 500; weighted by 0.19 -> 95
     # rating spread = (2000 - 1000) / 10 = 100
     # off-role penalty and exclusion penalty = 0
-    assert result["goodness_score"] == pytest.approx(495)
+    # lobby rating bonus = average team total / 100 = 13,300 / 2 / 100 = 66.5
+    assert result["goodness_score"] == pytest.approx(428.5)
 
 
 def test_openskill_falls_back_to_glicko_when_player_missing_os_mu(repo_db_path):
