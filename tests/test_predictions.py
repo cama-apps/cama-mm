@@ -994,11 +994,19 @@ class _FakeResponse:
 
 
 class _FakeThread:
-    def __init__(self):
+    def __init__(self, *, archived: bool = False, locked: bool = False):
         self.sent: list[str] = []
+        self.edits: list[dict] = []
+        self.archived = archived
+        self.locked = locked
 
     async def send(self, content=None, embed=None):
         self.sent.append(content if content is not None else "<embed>")
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+        for name, value in kwargs.items():
+            setattr(self, name, value)
 
 
 class _FakeInteraction:
@@ -1147,6 +1155,66 @@ async def test_resolve_announces_all_winners_and_losers(
     assert f"<@102> +{1 * PREDICTION_CONTRACT_VALUE} JC (1 contracts)" in announce
     assert f"<@201> -{loser_201_loss} JC (3 contracts)" in announce
     assert f"<@202> -{loser_202_loss} JC (1 contracts)" in announce
+
+
+async def test_rollback_admin_only(patched_cog_helpers):
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: False)
+    prediction_service = MagicMock()
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+
+    await cog.rollback.callback(cog, interaction, 42)
+
+    prediction_service.rollback_orderbook.assert_not_called()
+    assert interaction.response.messages == [
+        {
+            "content": "Only admins can roll back markets.",
+            "embed": None,
+            "ephemeral": True,
+        }
+    ]
+
+
+async def test_rollback_reopens_thread_refreshes_embed_and_announces(
+    patched_cog_helpers,
+):
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    prediction_service = MagicMock()
+    prediction_service.rollback_orderbook.return_value = {
+        "prediction_id": 42,
+        "previous_outcome": "no",
+        "total_reversed": 30,
+        "affected_players": 2,
+    }
+    prediction_service.get_prediction.return_value = {"thread_id": 12345}
+    thread = _FakeThread(archived=True, locked=True)
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.refresh_market_embed = AsyncMock()
+    cog.announce_to_gamba = AsyncMock()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+
+    await cog.rollback.callback(cog, interaction, 42)
+
+    prediction_service.rollback_orderbook.assert_called_once_with(42, 999)
+    assert thread.edits == [
+        {
+            "locked": False,
+            "archived": False,
+            "auto_archive_duration": THREAD_AUTO_ARCHIVE_MINUTES,
+        }
+    ]
+    cog.refresh_market_embed.assert_awaited_once_with(42)
+    announce = interaction.followup.messages[0]["content"]
+    assert "Market #42" in announce
+    assert "resolution rolled back" in announce
+    assert "NO" in announce
+    assert "30" in announce
+    assert thread.sent == [announce]
+    cog.announce_to_gamba.assert_awaited_once_with(interaction.guild, announce)
 
 
 async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):

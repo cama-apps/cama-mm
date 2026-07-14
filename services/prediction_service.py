@@ -413,6 +413,22 @@ class PredictionService:
             ),
         )
 
+    def rollback_orderbook(
+        self, prediction_id: int, rolled_back_by: int | None = None
+    ) -> dict:
+        """Reverse a settlement and reopen the market with a fresh ladder."""
+        pred = self.prediction_repo.get_prediction(prediction_id)
+        if not pred:
+            raise ValueError("Prediction not found.")
+        if pred.get("current_price") is None:
+            raise ValueError("Prediction has no current price.")
+        levels = self._build_initial_levels(int(pred["current_price"]))
+        return self.prediction_repo.rollback_prediction_orderbook(
+            prediction_id,
+            levels,
+            rolled_back_by=rolled_back_by,
+        )
+
     def cancel_orderbook(self, prediction_id: int) -> dict:
         """Cost-basis refund. Same admin gating enforced at the command layer."""
         return self.prediction_repo.cancel_orderbook_prediction(prediction_id)
