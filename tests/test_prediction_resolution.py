@@ -49,6 +49,22 @@ def _add_player(player_repo: PlayerRepository, discord_id: int, balance: int = 1
     player_repo.update_balance(discord_id, TEST_GUILD_ID, balance)
 
 
+def _rollback_ledger_count(
+    prediction_repo: PredictionRepository,
+    prediction_id: int,
+    guild_id: int = TEST_GUILD_ID,
+) -> int:
+    with prediction_repo.connection() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) AS count FROM economy_ledger_entries "
+                "WHERE guild_id = ? AND source = 'prediction_resolution_rollback' "
+                "AND related_type = 'prediction' AND related_id = ?",
+                (guild_id, str(prediction_id)),
+            ).fetchone()["count"]
+        )
+
+
 # --------------------------------------------------------------------------- #
 # check_and_lock_expired
 # --------------------------------------------------------------------------- #
@@ -364,7 +380,9 @@ def test_rollback_orderbook_restores_market_balances_positions_and_book(
     )
     assert prediction_repo.get_book(pid)["yes_asks"] == []
 
-    result = prediction_service.rollback_orderbook(pid, rolled_back_by=ADMIN_ID)
+    result = prediction_service.rollback_orderbook(
+        pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+    )
 
     assert result == {
         "prediction_id": pid,
@@ -427,12 +445,163 @@ def test_rollback_orderbook_restores_market_balances_positions_and_book(
     }
 
     with pytest.raises(ValueError, match="status 'open'"):
-        prediction_service.rollback_orderbook(pid, rolled_back_by=ADMIN_ID)
+        prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
 
     trade = prediction_service.buy_contracts(
         prediction_id=pid, discord_id=2, side="yes", contracts=1
     )
     assert trade["contracts"] == 1
+
+
+def test_rollback_orderbook_uses_only_current_resolution_ledger_cycle(
+    prediction_service, prediction_repo, player_repository
+):
+    _add_player(player_repository, 1, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="rollback twice?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=2
+    )
+    balance_before_resolution = player_repository.get_balance(1, TEST_GUILD_ID)
+
+    for _ in range(2):
+        prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+        result = prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
+
+        assert result["total_reversed"] == 2 * PREDICTION_CONTRACT_VALUE
+        assert (
+            player_repository.get_balance(1, TEST_GUILD_ID)
+            == balance_before_resolution
+        )
+        assert prediction_repo.get_prediction(pid)["status"] == "open"
+
+    assert _rollback_ledger_count(prediction_repo, pid) == 2
+
+
+def test_rollback_orderbook_rejects_market_from_another_guild(
+    prediction_service, prediction_repo, player_repository
+):
+    _add_player(player_repository, 1, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="guild-isolated rollback?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=2
+    )
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    balance_before = player_repository.get_balance(1, TEST_GUILD_ID)
+    market_before = prediction_repo.get_prediction(pid)
+
+    with pytest.raises(ValueError, match="Prediction not found"):
+        prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID + 1, rolled_back_by=ADMIN_ID
+        )
+
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == balance_before
+    assert prediction_repo.get_prediction(pid) == market_before
+    assert _rollback_ledger_count(prediction_repo, pid) == 0
+
+
+def test_rollback_orderbook_rejects_deleted_winning_player(
+    prediction_service, prediction_repo, player_repository
+):
+    _add_player(player_repository, 1, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="deleted winner rollback?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=2
+    )
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    assert player_repository.delete(1, TEST_GUILD_ID)
+
+    with pytest.raises(ValueError, match="player"):
+        prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
+
+    assert prediction_repo.get_prediction(pid)["status"] == "resolved"
+    assert _rollback_ledger_count(prediction_repo, pid) == 0
+
+
+def test_rollback_orderbook_rejects_deleted_and_recreated_winning_account(
+    prediction_service, prediction_repo, player_repository
+):
+    _add_player(player_repository, 1, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="recreated winner rollback?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=2
+    )
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    assert player_repository.delete(1, TEST_GUILD_ID)
+    _add_player(player_repository, 1, balance=250)
+    recreated_balance = player_repository.get_balance(1, TEST_GUILD_ID)
+
+    with pytest.raises(ValueError, match="re-created"):
+        prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
+
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == recreated_balance
+    assert prediction_repo.get_prediction(pid)["status"] == "resolved"
+    assert _rollback_ledger_count(prediction_repo, pid) == 0
+
+
+def test_rollback_orderbook_rejects_settlement_ledger_mismatch(
+    prediction_service, prediction_repo, player_repository
+):
+    _add_player(player_repository, 1, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="mismatched settlement rollback?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=2
+    )
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    balance_before = player_repository.get_balance(1, TEST_GUILD_ID)
+    with prediction_repo.connection() as conn:
+        settlement = conn.execute(
+            "SELECT ledger_id FROM economy_ledger_entries "
+            "WHERE guild_id = ? AND source = 'prediction_resolution' "
+            "AND related_type = 'prediction' AND related_id = ?",
+            (TEST_GUILD_ID, str(pid)),
+        ).fetchone()
+        assert settlement is not None
+        conn.execute(
+            "UPDATE economy_ledger_entries SET delta = delta + 1 WHERE ledger_id = ?",
+            (settlement["ledger_id"],),
+        )
+
+    with pytest.raises(ValueError, match="[Ss]ettlement ledger"):
+        prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
+
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == balance_before
+    assert prediction_repo.get_prediction(pid)["status"] == "resolved"
+    assert _rollback_ledger_count(prediction_repo, pid) == 0
 
 
 def test_rollback_orderbook_reverses_net_penalty_credit_and_allows_negative_balance(
@@ -482,7 +651,9 @@ def test_rollback_orderbook_reverses_net_penalty_credit_and_allows_negative_bala
     )
 
     player_repository.update_balance(1, TEST_GUILD_ID, 10)
-    result = prediction_service.rollback_orderbook(pid, rolled_back_by=ADMIN_ID)
+    result = prediction_service.rollback_orderbook(
+        pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+    )
 
     assert result["total_reversed"] == net_credit
     assert player_repository.get_balance(1, TEST_GUILD_ID) == 10 - net_credit
@@ -508,14 +679,18 @@ def test_rollback_orderbook_rejects_market_that_is_not_resolved(
     prediction_repo.update_prediction_status(pid, status)
 
     with pytest.raises(ValueError, match=f"status '{status}'"):
-        prediction_service.rollback_orderbook(pid, rolled_back_by=ADMIN_ID)
+        prediction_service.rollback_orderbook(
+            pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
 
     assert prediction_repo.get_prediction(pid)["status"] == status
 
 
 def test_rollback_orderbook_rejects_missing_market(prediction_service):
     with pytest.raises(ValueError, match="Prediction not found"):
-        prediction_service.rollback_orderbook(999_999, rolled_back_by=ADMIN_ID)
+        prediction_service.rollback_orderbook(
+            999_999, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+        )
 
 
 def test_rollback_orderbook_is_atomic_when_ladder_insert_fails(
@@ -549,6 +724,7 @@ def test_rollback_orderbook_is_atomic_when_ladder_insert_fails(
     with pytest.raises(sqlite3.IntegrityError, match="forced ladder failure"):
         prediction_repo.rollback_prediction_orderbook(
             pid,
+            TEST_GUILD_ID,
             [("yes_ask", 55, 1)],
             rolled_back_by=ADMIN_ID,
         )

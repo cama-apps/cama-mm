@@ -965,7 +965,7 @@ from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 import discord  # noqa: E402
 
-from commands.predictions import PredictionCommands  # noqa: E402
+from commands.predictions import PersistentMarketView, PredictionCommands  # noqa: E402
 from utils.thread_safety import THREAD_AUTO_ARCHIVE_MINUTES  # noqa: E402
 
 
@@ -1199,7 +1199,9 @@ async def test_rollback_reopens_thread_refreshes_embed_and_announces(
 
     await cog.rollback.callback(cog, interaction, 42)
 
-    prediction_service.rollback_orderbook.assert_called_once_with(42, 999)
+    prediction_service.rollback_orderbook.assert_called_once_with(
+        42, TEST_GUILD_ID, 999
+    )
     assert thread.edits == [
         {
             "locked": False,
@@ -1207,7 +1209,7 @@ async def test_rollback_reopens_thread_refreshes_embed_and_announces(
             "auto_archive_duration": THREAD_AUTO_ARCHIVE_MINUTES,
         }
     ]
-    cog.refresh_market_embed.assert_awaited_once_with(42)
+    cog.refresh_market_embed.assert_awaited_once_with(42, restore_view=True)
     announce = interaction.followup.messages[0]["content"]
     assert "Market #42" in announce
     assert "resolution rolled back" in announce
@@ -1431,6 +1433,20 @@ async def test_refresh_market_embed_leaves_live_thread_alone(prediction_service)
     await cog.refresh_market_embed(pid)
 
     assert thread.calls == ["fetch_message", "msg.edit"]
+
+
+async def test_refresh_market_embed_restores_persistent_view(prediction_service):
+    msg = _FakeEmbedMessage()
+    thread = _FakeArchivableThread(archived=False, embed_msg=msg)
+
+    pid = _market_with_thread_ids(prediction_service)
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    await cog.refresh_market_embed(pid, restore_view=True)
+
+    assert msg.edit_kwargs is not None
+    assert isinstance(msg.edit_kwargs["view"], PersistentMarketView)
 
 
 async def test_refresh_market_embed_vanished_message_does_not_revive_thread(
