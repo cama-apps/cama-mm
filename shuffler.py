@@ -1169,9 +1169,12 @@ class BalancedShuffler:
                 exclusion_penalty + deal_split_penalty + rating_spread_penalty
                 - lobby_rating_bonus
             )
+            rd_priority = self._calculate_rd_priority(selected_players)
+            combo_lower_bound = combo_penalty - rd_priority
 
-            # Quick pruning: if the combination-wide score exceeds best score, skip
-            if combo_penalty >= best_score:
+            # All remaining score components are nonnegative after accounting
+            # for the combination-wide RD priority bonus.
+            if combo_lower_bound >= best_score:
                 pruned_player_selections += 1
                 continue
 
@@ -1193,18 +1196,12 @@ class BalancedShuffler:
                     continue
                 seen_splits.add(split_key)
 
-                # Compute value difference lower bound (before role optimization)
-                t1_sum = sum(player_values[p.name] for p in team1_players)
-                t2_sum = sum(player_values[p.name] for p in team2_players)
-                value_diff_lb = abs(t1_sum - t2_sum)
-
                 # Compute recent match penalty for selected players
                 selected_player_names = {p.name for p in team1_players + team2_players}
                 recent_in_match = len(selected_player_names & recent_match_names)
                 recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-                # Quick lower bound using the combination-wide adjustment.
-                lower_bound = value_diff_lb + recent_penalty + combo_penalty
+                lower_bound = recent_penalty + combo_lower_bound
 
                 # Prune if lower bound >= best score
                 if lower_bound >= best_score:
@@ -1221,19 +1218,6 @@ class BalancedShuffler:
                 if total_score < best_score:
                     best_score = total_score
                     best_result = (team1, team2, excluded_players)
-
-                    # Early termination on a true perfect match. We compare
-                    # against ``== 0`` rather than ``<= 0`` because the
-                    # rd_priority bonus subtracted inside _optimize can drive
-                    # the score below zero on a non-perfect matchup, which
-                    # would otherwise trip the search to terminate early.
-                    if best_score == 0:
-                        logger.info("Branch & bound: perfect match found, early termination")
-                        break
-
-            # Check for early termination after inner loop (same reasoning).
-            if best_score == 0:
-                break
 
         logger.info(
             f"Branch & bound stats: pruned {pruned_player_selections} player selections, "
