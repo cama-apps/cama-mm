@@ -6,9 +6,11 @@ from PIL import Image
 
 from utils.dig_assets import (
     _MAX_FILE_SIZE,
+    ASSETS_DIR,
     _find_asset,
     _load_cached_bytes,
     get_boss_art,
+    get_event_art,
     get_layer_thumbnail,
 )
 from utils.dig_drawing import (
@@ -191,3 +193,32 @@ class TestGetLayerThumbnail:
     def test_returns_none_for_unknown_layer(self):
         result = get_layer_thumbnail("Nonexistent Layer")
         assert result is None
+
+
+ROGUELIKE_EVENT_ASSET_IDS = (
+    "collapsed_armory",
+    "dead_prospectors_pack",
+    "spore_debt",
+    "clockwork_toll",
+    "collectors_roots",
+    "hungry_beacon",
+)
+
+
+class TestRoguelikeEventAssets:
+    """The new event illustrations match the established asset contract."""
+
+    def test_assets_are_consistently_sized_rgb_pngs(self):
+        for event_id in ROGUELIKE_EVENT_ASSET_IDS:
+            path = ASSETS_DIR / "events" / f"{event_id}.png"
+            assert path.is_file(), f"missing event asset: {path}"
+            with Image.open(path) as image:
+                assert image.format == "PNG"
+                assert image.size == (1024, 576)
+                assert image.mode == "RGB"
+
+    def test_event_loader_resolves_every_new_asset(self):
+        for event_id in ROGUELIKE_EVENT_ASSET_IDS:
+            asset = get_event_art(event_id, "Stone")
+            assert asset is not None
+            assert asset.filename == f"event_{event_id}.png"

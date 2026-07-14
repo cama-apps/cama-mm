@@ -779,6 +779,22 @@ class BossCombatMixin:
             _phase_entry.pop("pending_phase_event_id", None)
             boss_progress[str(at_boss)] = _phase_entry
 
+        player_hp, player_hit, crit_chance, _shifting_idol_bonus = (
+            self._apply_shifting_idol_stats(
+                discord_id,
+                guild_id,
+                player_hp,
+                player_hit,
+                crit_chance,
+            )
+        )
+        bottled_quake_ready = self._has_relic(
+            discord_id, guild_id, "bottled_quake",
+        )
+        legacy_status = self._trophy_status_seed(
+            discord_id, guild_id, player_start_hp=player_hp,
+        )
+
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``
         # would show — per-round hit rate is not the same as duel win rate.
@@ -804,9 +820,20 @@ class BossCombatMixin:
             crit_this_round = False
             if player_roll:
                 dmg_this_round = player_dmg
+                if bottled_quake_ready:
+                    dmg_this_round += 1
+                    bottled_quake_ready = False
+                    entry["bottled_quake"] = True
                 if crit_chance > 0 and random.random() < crit_chance:
                     dmg_this_round += crit_bonus
                     crit_this_round = True
+                    if legacy_status.get("gear_heal_first_crit"):
+                        player_hp = min(
+                            int(legacy_status.get("trophy_start_hp", player_hp + 1)),
+                            player_hp + 1,
+                        )
+                        legacy_status["gear_heal_first_crit"] = False
+                        entry["blood_locket_heal"] = True
                 boss_hp -= dmg_this_round
             entry["player_hit"] = player_roll
             entry["crit"] = crit_this_round
@@ -818,9 +845,21 @@ class BossCombatMixin:
             boss_roll = random.random() < boss_hit_chance
             if boss_roll:
                 player_hp -= boss_dmg
+                if legacy_status.get("gear_reflect_first_hit"):
+                    boss_hp -= 1
+                    legacy_status["gear_reflect_first_hit"] = False
+                    entry["briarplate_reflect"] = True
+            elif legacy_status.get("gear_springheel_counter"):
+                boss_hp -= 1
+                legacy_status["gear_springheel_counter"] = False
+                entry["springheel_counter"] = True
             entry["boss_hit"] = boss_roll
             entry["player_hp"] = max(0, player_hp)
+            entry["boss_hp"] = max(0, boss_hp)
             round_log.append(entry)
+            if boss_hp <= 0:
+                won = True
+                break
             if player_hp <= 0:
                 won = False
                 break
@@ -1352,6 +1391,17 @@ class BossCombatMixin:
                 discord_id, guild_id, boss_progress=json.dumps(boss_progress),
             )
 
+        player_hp, player_hit, crit_chance, shifting_idol_bonus = (
+            self._apply_shifting_idol_stats(
+                discord_id,
+                guild_id,
+                player_hp,
+                player_hit,
+                crit_chance,
+            )
+        )
+        player_hp_max = player_hp
+
         win_chance = dig_service._approx_duel_win_prob(
             player_hp=player_hp,
             boss_hp=boss_hp,
@@ -1375,6 +1425,8 @@ class BossCombatMixin:
         status_effects: dict = self._trophy_status_seed(
             discord_id, guild_id, player_start_hp=player_hp,
         )
+        if shifting_idol_bonus:
+            status_effects["shifting_idol_bonus"] = shifting_idol_bonus
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
             # If a mechanic is scheduled for THIS round, pause and persist.
@@ -1432,7 +1484,7 @@ class BossCombatMixin:
                     risk_tier=risk_tier,
                     wager=wager,
                     player_hp=player_hp,
-                    player_hp_max=int(stats["player_hp"]),
+                    player_hp_max=player_hp_max,
                     boss_hp=boss_hp,
                     boss_hp_max=int(boss_hp_max),
                     round_num=round_num,
@@ -1739,6 +1791,10 @@ class BossCombatMixin:
             crit_this_round = False
             if player_roll:
                 dmg_this_round = player_dmg
+                if status_effects.get("relic_bottled_quake"):
+                    dmg_this_round += 1
+                    status_effects["relic_bottled_quake"] = False
+                    entry["bottled_quake"] = True
                 # Relic — Berserker's Mark: +1 dmg per prior round you took damage (cap +2).
                 berserk = status_effects.get("relic_berserk_rage")
                 if berserk:
@@ -1754,6 +1810,13 @@ class BossCombatMixin:
                 if crit_chance > 0 and random.random() < crit_chance:
                     dmg_this_round += crit_bonus
                     crit_this_round = True
+                    if status_effects.get("gear_heal_first_crit"):
+                        player_hp = min(
+                            int(status_effects.get("trophy_start_hp", player_hp + 1)),
+                            player_hp + 1,
+                        )
+                        status_effects["gear_heal_first_crit"] = False
+                        entry["blood_locket_heal"] = True
                 boss_hp -= dmg_this_round
                 # Trophy — Runebitten Shard: heal 1 on the first landed hit.
                 if status_effects.get("trophy_lifesteal"):
@@ -1782,12 +1845,24 @@ class BossCombatMixin:
             if boss_roll:
                 actual_dmg = boss_dmg + (1 if frost else 0)
                 player_hp -= actual_dmg
+                if status_effects.get("gear_reflect_first_hit"):
+                    boss_hp -= 1
+                    status_effects["gear_reflect_first_hit"] = False
+                    entry["briarplate_reflect"] = True
+            elif status_effects.get("gear_springheel_counter"):
+                boss_hp -= 1
+                status_effects["gear_springheel_counter"] = False
+                entry["springheel_counter"] = True
             entry["boss_hit"] = boss_roll
             entry["player_hp"] = max(0, player_hp)
+            entry["boss_hp"] = max(0, boss_hp)
         else:
             entry["boss_hit"] = False
             entry["player_hp"] = max(0, player_hp)
             entry["skipped_boss"] = True
+
+        if boss_hp <= 0:
+            return entry, player_hp, boss_hp, True
 
         # Relic — Berserker's Mark: tally rounds where the player took damage (cap 2).
         if "relic_berserk_rage" in status_effects and player_hp < hp_at_round_start:
@@ -1843,6 +1918,28 @@ class BossCombatMixin:
             se["relic_double_hit"] = True
         if self._has_relic(discord_id, guild_id, "deaths_door"):
             se["relic_deaths_door"] = True  # one-shot survive-a-killing-blow charge
+        if self._has_relic(discord_id, guild_id, "paper_crane"):
+            se["relic_paper_crane"] = True
+        if self._has_relic(discord_id, guild_id, "bottled_quake"):
+            se["relic_bottled_quake"] = True
+        gear_effect_flags = {
+            "reflect_first_hit": "gear_reflect_first_hit",
+            "block_first_status": "gear_block_first_status",
+            "springheel_counter": "gear_springheel_counter",
+            "block_first_skip": "gear_block_first_skip",
+            "heal_first_crit": "gear_heal_first_crit",
+        }
+        if getattr(self, "dig_repo", None) is not None:
+            loadout = self._get_loadout(discord_id, guild_id)
+            for piece in (
+                loadout.weapon, loadout.armor, loadout.boots, loadout.amulet,
+            ):
+                if piece is None:
+                    continue
+                effect_id = getattr(piece.tier_def, "effect_id", None)
+                flag = gear_effect_flags.get(effect_id)
+                if flag:
+                    se[flag] = True
         if se:
             se["trophy_start_hp"] = int(player_start_hp)
         return se
@@ -1865,14 +1962,46 @@ class BossCombatMixin:
         new_status = dict(status_effects)
         player_hp += chosen.player_hp_delta
         boss_hp += chosen.boss_hp_delta
-        if chosen.skip_next_round_for:
+        if (
+            chosen.skip_next_round_for == "player"
+            and new_status.get("gear_block_first_skip")
+        ):
+            new_status["gear_block_first_skip"] = False
+            new_status["anchor_boots_blocked"] = True
+        elif chosen.skip_next_round_for:
             new_status["skip_next_round_for"] = chosen.skip_next_round_for
-        if chosen.status_effect and chosen.status_effect in _EFFS:
+        if chosen.status_effect and new_status.get("relic_paper_crane"):
+            new_status["relic_paper_crane"] = False
+            new_status["paper_crane_blocked"] = chosen.status_effect
+        elif chosen.status_effect and new_status.get("gear_block_first_status"):
+            new_status["gear_block_first_status"] = False
+            new_status["nullweave_blocked"] = chosen.status_effect
+        elif chosen.status_effect and chosen.status_effect in _EFFS:
             # Appliers mutate a state-like dict in the same shape.
             fake_state = {"status_effects": new_status}
             _EFFS[chosen.status_effect](fake_state)
             new_status = fake_state.get("status_effects") or new_status
         return chosen.narrative, player_hp, boss_hp, new_status
+
+    def _apply_shifting_idol_stats(
+        self,
+        discord_id: int,
+        guild_id,
+        player_hp: int,
+        player_hit: float,
+        crit_chance: float,
+    ) -> tuple[int, float, float, str | None]:
+        """Roll and apply Shifting Idol's fresh bonus for one boss attempt."""
+        if not self._has_relic(discord_id, guild_id, "shifting_idol"):
+            return player_hp, player_hit, crit_chance, None
+        bonus = random.choice(("hp", "hit", "crit"))
+        if bonus == "hp":
+            player_hp += 1
+        elif bonus == "hit":
+            player_hit = min(PLAYER_HIT_CEILING, player_hit + 0.05)
+        else:
+            crit_chance = min(1.0, crit_chance + 0.05)
+        return player_hp, player_hit, crit_chance, bonus
 
     def _get_boss_progress_entries(self, tunnel: dict) -> dict:
         """Return the boss_progress JSON as {depth_str: entry_dict_or_str}."""

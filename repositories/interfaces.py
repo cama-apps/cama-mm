@@ -1824,6 +1824,7 @@ class IDigRepository(ABC):
     def add_gear(
         self, discord_id: int, guild_id: int, slot: str, tier: int,
         source: str = "shop", durability: int | None = None,
+        item_id: str | None = None,
     ) -> int: ...
 
     @abstractmethod
@@ -1860,6 +1861,9 @@ class IDigRepository(ABC):
         balance_delta: int = 0,
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
+        add_relic_artifact_id: str | None = None,
+        add_gear: dict | None = None,
+        consume_inventory_item_ids: list[int] | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None: ...
@@ -1916,6 +1920,15 @@ class IDigRepository(ABC):
         artifact_id: str,
         unequip_artifact_db_ids: list[int],
     ) -> None: ...
+
+    @abstractmethod
+    def atomic_recycle_relics(
+        self,
+        discord_id: int,
+        guild_id: int,
+        artifact_row_ids: list[int],
+        output_artifact_id: str,
+    ) -> int: ...
 
     @abstractmethod
     def atomic_sabotage(

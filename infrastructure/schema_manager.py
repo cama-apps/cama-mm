@@ -438,6 +438,8 @@ class SchemaManager:
             ),
             # Per-miner opt-in auto-buy settings for common dig consumables.
             ("add_dig_auto_buy_settings", self._migration_add_dig_auto_buy_settings),
+            # Stable identity for event-only horizontal gear side-grades.
+            ("add_item_id_to_dig_gear", self._migration_add_item_id_to_dig_gear),
             # Central economy ledger.
             ("create_economy_ledger_tables", self._migration_create_economy_ledger_tables),
             (
@@ -3687,6 +3689,10 @@ class SchemaManager:
         self._add_column_if_not_exists(
             cursor, "tunnels", "auto_buy_hard_hat", "INTEGER NOT NULL DEFAULT 0",
         )
+
+    def _migration_add_item_id_to_dig_gear(self, cursor) -> None:
+        """Add an optional registry key for event-only unique gear."""
+        self._add_column_if_not_exists(cursor, "dig_gear", "item_id", "TEXT")
 
     def _migration_create_economy_ledger_tables(self, cursor) -> None:
         """Create central money-movement ledger and balance-change triggers."""

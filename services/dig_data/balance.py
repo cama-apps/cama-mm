@@ -6,6 +6,7 @@ Extracted from the original ``dig_constants`` module; see
 
 from __future__ import annotations
 
+import math
 import random
 
 # ---------------------------------------------------------------------------
@@ -121,6 +122,15 @@ CAVE_IN_CATASTROPHIC_MILESTONE_STEP: int = 25  # roll back to floor((depth-1)/st
 NEGATIVE_EVENT_JC_MULTIPLIER: float = 1.3   # scales flat JC *losses* on failures
 CURSE_STRENGTH_MULT: float = 1.3            # scales negative curse effect magnitudes
 CURSE_DURATION_BONUS_DIGS: int = 1          # +N digs on every applied curse
+DIG_EVENT_DEFLATION_MULTIPLIER: float = 1.10
+
+
+def strengthen_dig_event_penalty(amount: int) -> int:
+    """Strengthen an authored event penalty, rounding away from zero."""
+    if amount == 0:
+        return 0
+    magnitude = math.ceil(abs(amount) * DIG_EVENT_DEFLATION_MULTIPLIER)
+    return magnitude if amount > 0 else -magnitude
 
 # Helltide bell: marquee guild-wide modifier set by an event. While active,
 # every dig in the guild burns this many JC from its yield (pure deflation,

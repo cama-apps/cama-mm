@@ -13,6 +13,7 @@ the duration of a test — the real event catalog is being re-tuned in a
 separate effort, so nothing here asserts on real catalog numbers.
 """
 
+import json
 import random
 import time
 
@@ -22,6 +23,9 @@ import services.dig_service as dig_service_module
 from commands.dig import EventEncounterView
 from repositories.dig_repository import DigRepository
 from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
+from services.dig_data import event_types
+from services.dig_data.balance import strengthen_dig_event_penalty
+from services.dig_data.event_types import TempCurse
 from services.dig_service import DigService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -279,6 +283,103 @@ class TestCurseThreat:
         "duration_digs": 2,
         "effect": {"advance_bonus": -3},
     }
+
+    def test_new_fractional_effect_keys_are_valid(self):
+        cave_in = TempCurse(
+            "test_cave_in", "Loose Ceiling", 3, {"cave_in_bonus": 0.08},
+        )
+        cooldown = TempCurse(
+            "test_cooldown", "Stopped Clock", 3, {"cooldown_penalty": 0.20},
+        )
+
+        assert cave_in.effect["cave_in_bonus"] == 0.08
+        assert cooldown.effect["cooldown_penalty"] == 0.20
+
+    def test_fractional_curse_scaling_stays_fractional_and_integers_round(self):
+        assert event_types.scale_curse_effects(
+            {
+                "cave_in_bonus": 0.08,
+                "cooldown_penalty": 0.20,
+                "advance_bonus": -3,
+            },
+            multiplier=1.3,
+        ) == {
+            "cave_in_bonus": pytest.approx(0.104),
+            "cooldown_penalty": pytest.approx(0.26),
+            "advance_bonus": -4,
+        }
+
+    def test_capped_fractional_effects_do_not_exceed_active_limits(self, dig_service):
+        effects = {"cave_in_bonus": 0.104, "cooldown_penalty": 0.26}
+
+        assert dig_service._capped_curse_effect(effects, "cave_in_bonus") == 0.10
+        assert dig_service._capped_curse_effect(effects, "cooldown_penalty") == 0.25
+
+    def test_cooldown_curse_applies_after_stamina_and_caps_at_twenty_five_percent(
+        self, dig_service, monkeypatch,
+    ):
+        monkeypatch.setattr(dig_service, "_apply_stamina_to_cooldown", lambda cooldown, tunnel: 4_000)
+        monkeypatch.setattr(dig_service, "_is_bankrupt", lambda discord_id, guild_id: False)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_cooldown_reduction",
+            lambda discord_id, guild_id, cooldown: cooldown,
+        )
+        tunnel = {
+            "discord_id": 10001,
+            "guild_id": 12345,
+            "temp_curses": json.dumps({
+                "digs_remaining": 3,
+                "effect": {"cooldown_penalty": 0.30},
+            }),
+        }
+
+        assert dig_service._get_free_dig_cooldown_duration(tunnel) == 5_000
+
+    def test_cave_in_curse_matches_live_and_precondition_paths(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        preview_id = _register_player(player_repository, 10001)
+        live_id = _register_player(player_repository, 10002)
+        clean_id = _register_player(player_repository, 10003)
+        _start_tunnel(dig_service, dig_repo, preview_id, 12345, monkeypatch, depth=20)
+        _start_tunnel(dig_service, dig_repo, live_id, 12345, monkeypatch, depth=20)
+        _start_tunnel(dig_service, dig_repo, clean_id, 12345, monkeypatch, depth=20)
+        for discord_id in (preview_id, live_id):
+            dig_service.set_temp_curse(discord_id, 12345, {
+                "id": "test_cave_in",
+                "name": "Loose Ceiling",
+                "duration_digs": 3,
+                "effect": {"cave_in_bonus": 0.50},
+            })
+
+        now = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: now)
+        terminal, preconditions = dig_service.dig_with_preconditions(preview_id, 12345)
+        assert terminal is None
+        assert preconditions is not None
+        clean_terminal, clean_preconditions = dig_service.dig_with_preconditions(
+            clean_id, 12345,
+        )
+        assert clean_terminal is None
+        assert clean_preconditions is not None
+        assert (
+            preconditions["cave_in_chance"]
+            > clean_preconditions["cave_in_chance"]
+        )
+
+        compared_chances = []
+
+        class ProbeRoll(float):
+            def __lt__(self, other):
+                compared_chances.append(other)
+                return super().__lt__(other)
+
+        monkeypatch.setattr(random, "random", lambda: ProbeRoll(0.99))
+        result = dig_service.dig(live_id, 12345)
+
+        assert result["success"]
+        assert compared_chances[0] == pytest.approx(preconditions["cave_in_chance"])
 
     def _apply_curse_via_event(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
@@ -646,7 +747,9 @@ class TestJcThreat:
         result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
         assert result["success"]
         # Negative-event tuning scales the authored loss, then economy scaling applies.
-        expected_loss = scale_deflationary_minigame_jc_delta(-260)
+        expected_loss = scale_deflationary_minigame_jc_delta(
+            strengthen_dig_event_penalty(-260)
+        )
         assert result["jc_delta"] == expected_loss
         # The balance went negative — into the debt system, no floor at 0.
         balance = player_repository.get_balance(10001, 12345)

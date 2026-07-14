@@ -617,6 +617,7 @@ class DigRepository(BaseRepository, IDigRepository):
     def add_gear(
         self, discord_id: int, guild_id: int, slot: str, tier: int,
         source: str = "shop", durability: int | None = None,
+        item_id: str | None = None,
     ) -> int:
         """Add a new gear piece to a player's inventory (unequipped). Returns its id."""
         from services.dig_constants import GEAR_MAX_DURABILITY  # avoid import cycle at module load
@@ -629,10 +630,10 @@ class DigRepository(BaseRepository, IDigRepository):
                 """
                 INSERT INTO dig_gear
                     (discord_id, guild_id, slot, tier, durability,
-                     equipped, acquired_at, source)
-                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                     equipped, acquired_at, source, item_id)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
                 """,
-                (discord_id, gid, slot, tier, dur, now, source),
+                (discord_id, gid, slot, tier, dur, now, source, item_id),
             )
             return cursor.lastrowid
 
@@ -805,12 +806,14 @@ class DigRepository(BaseRepository, IDigRepository):
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
         add_relic_artifact_id: str | None = None,
+        add_gear: dict | None = None,
         consume_inventory_item_ids: list[int] | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None:
         """Apply a balance delta + tunnel update + optional inventory/relic add +
-        optional inventory consumption + optional audit log in one BEGIN IMMEDIATE.
+        optional gear add + optional inventory consumption + optional audit log in one
+        BEGIN IMMEDIATE.
 
         Covers the common "debit balance, then mutate the actor's tunnel
         row" two-step pattern (upgrade_pickaxe, set_trap, buy_insurance,
@@ -902,6 +905,28 @@ class DigRepository(BaseRepository, IDigRepository):
                 )
                 relic_id = cursor.lastrowid
 
+            gear_id: int | None = None
+            if add_gear is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO dig_gear
+                        (discord_id, guild_id, slot, tier, durability, equipped,
+                         acquired_at, source, item_id)
+                    VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (
+                        discord_id,
+                        gid,
+                        add_gear["slot"],
+                        int(add_gear["tier"]),
+                        int(add_gear["durability"]),
+                        int(time.time()),
+                        add_gear.get("source", "event"),
+                        add_gear.get("item_id"),
+                    ),
+                )
+                gear_id = cursor.lastrowid
+
             if log_detail is not None:
                 cursor.execute(
                     """
@@ -916,6 +941,8 @@ class DigRepository(BaseRepository, IDigRepository):
                     ),
                 )
 
+            if gear_id is not None:
+                return gear_id
             return relic_id if add_relic_artifact_id is not None else inventory_id
 
     def atomic_boss_full_victory(
@@ -1207,6 +1234,56 @@ class DigRepository(BaseRepository, IDigRepository):
                     f"UPDATE dig_artifacts SET equipped = 0 WHERE id IN ({placeholders})",
                     tuple(unequip_artifact_db_ids),
                 )
+
+    def atomic_recycle_relics(
+        self,
+        discord_id: int,
+        guild_id: int,
+        artifact_row_ids: list[int],
+        output_artifact_id: str,
+    ) -> int:
+        """Replace exactly three owned, unequipped relic rows atomically."""
+        row_ids = [int(row_id) for row_id in artifact_row_ids]
+        if len(row_ids) != 3 or len(set(row_ids)) != 3:
+            raise ValueError("Expected exactly three eligible relic rows.")
+
+        gid = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" for _ in row_ids)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT id FROM dig_artifacts
+                WHERE discord_id = ? AND guild_id = ?
+                  AND is_relic = 1 AND equipped = 0
+                  AND id IN ({placeholders})
+                """,
+                (discord_id, gid, *row_ids),
+            )
+            if len(cursor.fetchall()) != 3:
+                raise ValueError("Expected exactly three eligible relic rows.")
+
+            cursor.execute(
+                f"""
+                DELETE FROM dig_artifacts
+                WHERE discord_id = ? AND guild_id = ?
+                  AND is_relic = 1 AND equipped = 0
+                  AND id IN ({placeholders})
+                """,
+                (discord_id, gid, *row_ids),
+            )
+            if cursor.rowcount != 3:
+                raise ValueError("Expected exactly three eligible relic rows.")
+
+            cursor.execute(
+                """
+                INSERT INTO dig_artifacts
+                    (discord_id, guild_id, artifact_id, found_at, is_relic, equipped)
+                VALUES (?, ?, ?, ?, 1, 0)
+                """,
+                (discord_id, gid, output_artifact_id, int(time.time())),
+            )
+            return cursor.lastrowid
 
     def atomic_sabotage(
         self,

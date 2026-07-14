@@ -35,6 +35,11 @@ from services.dig_constants import (
     PINNACLE_DEPTH,
 )
 
+_FRACTIONAL_CURSE_EFFECT_CAPS = {
+    "cave_in_bonus": 0.10,
+    "cooldown_penalty": 0.25,
+}
+
 
 class EnvironmentMixin:
     """EnvironmentMixin — see module docstring.
@@ -253,6 +258,13 @@ class EnvironmentMixin:
         if not curse:
             return {}
         return dict(curse.get("effect", {}))
+
+    def _capped_curse_effect(self, effects: dict, key: str) -> float:
+        """Return a non-negative fractional curse effect at its active cap."""
+        value = effects.get(key, 0.0)
+        if not isinstance(value, (int, float)):
+            return 0.0
+        return max(0.0, min(float(value), _FRACTIONAL_CURSE_EFFECT_CAPS[key]))
 
     def _decrement_curse(self, discord_id: int, guild_id, tunnel: dict) -> None:
         """Decrement active curse duration by 1 dig. Clear if expired."""

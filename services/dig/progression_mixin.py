@@ -360,7 +360,16 @@ class ProgressionMixin:
     def _apply_stamina_to_paid_cost(self, cost: int, tunnel: dict) -> int:
         stats = self._get_miner_stats(tunnel)
         effects = self._get_stat_effects(stats)
-        return max(1, int(cost * effects["paid_cost_multiplier"]))
+        multiplier = effects["paid_cost_multiplier"]
+        discord_id = tunnel.get("discord_id")
+        guild_id = tunnel.get("guild_id")
+        if (
+            discord_id is not None
+            and self._has_relic(discord_id, guild_id, "bone_abacus")
+        ):
+            stamina_discount = 1.0 - multiplier
+            multiplier = 1.0 - (stamina_discount * 1.25)
+        return max(1, int(cost * multiplier))
 
     def _calculate_paid_dig_cost(self, tunnel: dict, paid_count: int) -> int:
         cost_index = min(paid_count, len(PAID_DIG_COSTS) - 1)

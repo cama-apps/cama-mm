@@ -9,7 +9,7 @@ from services.dig_service import DigService
 
 class TestEventHasRisk:
     """The veteran_miner perk only fires on events where a negative outcome is
-    possible. _event_has_risk encodes that 'could have lost JC' check."""
+    possible. _event_has_risk covers economic and non-economic downsides."""
 
     def test_event_with_negative_failure_is_risky(self):
         event = {
@@ -43,6 +43,24 @@ class TestEventHasRisk:
             "outcomes": {
                 "safe": {"jc": 1},
                 "risky": {"jc": -10},
+            }
+        }
+        assert DigService._event_has_risk(event) is True
+
+    @pytest.mark.parametrize(
+        "failure",
+        (
+            {"advance": -1},
+            {"cave_in": True},
+            {"streak_loss": 1},
+            {"curse": {"id": "bad_luck"}},
+        ),
+    )
+    def test_non_jc_downsides_are_risky(self, failure):
+        event = {
+            "risky_option": {
+                "success": {"jc": 5},
+                "failure": failure,
             }
         }
         assert DigService._event_has_risk(event) is True

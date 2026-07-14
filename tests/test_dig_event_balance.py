@@ -18,10 +18,15 @@ import time
 
 import pytest
 
+import services.dig_service as dig_service_module
 from repositories.dig_repository import DigRepository
 from services.dig_data.aliases import EVENT_POOL
+from services.dig_data.balance import strengthen_dig_event_penalty
 from services.dig_service import DigService
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    scale_deflationary_minigame_jc_delta,
+    scale_minigame_jc_delta,
+)
 
 
 @pytest.fixture
@@ -74,6 +79,70 @@ def _two_branch_events():
         if not safe.get("success") or not risky.get("success"):
             continue
         yield e
+
+
+@pytest.mark.parametrize(("authored", "strengthened"), [(-5, -6), (-10, -11)])
+def test_authored_event_penalties_round_away_from_zero(
+    authored: int,
+    strengthened: int,
+) -> None:
+    assert strengthen_dig_event_penalty(authored) == strengthened
+
+
+def test_negative_actor_event_is_strengthened_before_economy_scaling(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    monkeypatch.setattr(time, "time", lambda: 1_000_000)
+    _seed_tunnel(dig_service, dig_repo, player_repository, depth=120)
+    monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.99)
+    monkeypatch.setattr("services.dig.events_mixin.random.uniform", lambda a, b: 1.0)
+
+    result = dig_service.resolve_event(10001, 12345, "hungering_dark", "risky")
+
+    assert result["success"] and not result["succeeded"], result
+    # Authored -5 -> existing 1.3 tuning/jitter -6 -> event deflation -7.
+    assert result["jc_delta"] == scale_deflationary_minigame_jc_delta(-7)
+
+
+def test_burn_payout_ratio_uses_strengthened_nominal_amount(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    monkeypatch.setattr(time, "time", lambda: 1_000_000)
+    _seed_tunnel(dig_service, dig_repo, player_repository)
+    _register(player_repository, 10002, balance=100)
+    _register(player_repository, 10003, balance=100)
+    event = {
+        "id": "nominal_burn_test",
+        "name": "Nominal Burn Test",
+        "risky_option": {
+            "success_chance": 1.0,
+            "success": {"jc": 10, "advance": 0},
+            "failure": {"jc": 0, "advance": 0},
+        },
+        "splash": {
+            "trigger": "success",
+            "strategy": "random_active",
+            "victim_count": 2,
+            "penalty_jc": 5,
+            "mode": "burn",
+        },
+    }
+    monkeypatch.setattr(dig_service_module, "EVENT_POOL", [event])
+    monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.0)
+    monkeypatch.setattr("services.dig.events_mixin.random.uniform", lambda a, b: 1.0)
+    monkeypatch.setattr("services.dig_splash.random.sample", lambda pool, k: pool[:k])
+
+    class HalfProtection:
+        def apply_hostile_loss(self, *args, **kwargs):
+            return type("Settlement", (), {"applied": 3, "absorbed": 3})()
+
+    dig_service.protection_service = HalfProtection()
+
+    result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
+
+    assert result["splash"]["total_burned"] == 6
+    # Strengthened/scaled nominal burn is 2 * 6, so half of the payout remains.
+    assert result["jc_delta"] == scale_minigame_jc_delta(5)
 
 
 def _carries_threat(outcome: dict | None) -> bool:
