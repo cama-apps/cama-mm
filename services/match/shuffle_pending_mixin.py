@@ -374,11 +374,13 @@ class ShufflePendingMixin:
             for p in selected_players_list
         ]
         rating_spread_penalty = shuffler._calculate_rating_spread_penalty(selected_values)
+        lobby_rating_bonus = shuffler._calculate_lobby_rating_bonus(selected_values)
 
         goodness_score = (
             value_diff + off_role_penalty + weighted_role_matchup_delta
             + excluded_penalty + recent_match_penalty + soft_avoid_penalty
             + package_deal_penalty + region_split_penalty + rating_spread_penalty
+            - lobby_rating_bonus
         )
 
         # Calculate Glicko-2 win probability for Radiant

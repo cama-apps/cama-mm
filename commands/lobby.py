@@ -1024,19 +1024,23 @@ class LobbyCommands(commands.Cog):
                 msg = None
 
         # If the existing check is stale (30+ min old), delete the buried message
-        # and start fresh: prune currently AFK players before posting the new
-        # message. Confirmations from the stale check are reset, so they do not
-        # protect a player who is currently AFK; keep only the trigger-er.
+        # and start fresh: prune currently AFK players who did not confirm the
+        # stale check, then post a new message with confirmations reset. Keep
+        # the trigger-er and anyone who reacted to the check being swept.
         pruned_ids: list[int] = []
         if is_refresh and msg is not None:
             created_at = await asyncio.to_thread(
                 self.lobby_service.get_readycheck_created_at, guild_id=guild_id
             )
             if created_at is not None and (now - created_at) > READYCHECK_STALE_THRESHOLD:
+                old_reacted = await asyncio.to_thread(
+                    self.lobby_service.get_readycheck_reacted, guild_id=guild_id
+                )
                 pruned_ids = [
                     pid
                     for pid in list(current_lobby_set)
                     if player_data.get(pid, {}).get("group") == "afk"
+                    and pid not in old_reacted
                     and pid != invoker_id
                 ]
                 if pruned_ids:

@@ -171,6 +171,11 @@ class BalancedShuffler:
             return 0.0
         return (max(player_values) - min(player_values)) / self.rating_spread_divisor
 
+    @staticmethod
+    def _calculate_lobby_rating_bonus(player_values: list[float]) -> float:
+        """Return the average team rating total divided by 100."""
+        return sum(player_values) / 2 / 100
+
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
         """
         Calculate the sum of role matchup deltas between two teams.
@@ -457,8 +462,12 @@ class BalancedShuffler:
             for p in team1.players + team2.players
         ]
         rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
+        lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
 
-        total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
+        total_score = (
+            base_score + exclusion_penalty + recent_penalty + deal_split_penalty
+            + rating_spread_penalty - lobby_rating_bonus
+        )
 
         return team1, team2, excluded, total_score
 
@@ -773,9 +782,9 @@ class BalancedShuffler:
         """
         Optimize role assignments for one team split and score it.
 
-        ``combo_penalty`` is the sum of penalties that are constant for the
-        enclosing 10-player combination (exclusion + deal-split + rating-spread);
-        the recent-match penalty depends on the split and is added here.
+        ``combo_penalty`` is the combination-wide exclusions, deal split,
+        rating spread, and lobby rating adjustment. The recent-match penalty
+        depends on the split and is added here.
         """
         team1, team2, base_score = self._optimize_role_assignments_for_matchup(
             team1_players,
@@ -970,9 +979,6 @@ class BalancedShuffler:
         else:
             selected_indices_iter = itertools.combinations(range(len(players)), 10)
 
-        early_termination_threshold = 0.0
-        perfect_match = False
-
         # Generate all (or sampled) ways to choose 10 players from the pool
         for selected_indices in selected_indices_iter:
             selected_players = [players[i] for i in selected_indices]
@@ -1002,9 +1008,13 @@ class BalancedShuffler:
                 for p in selected_players
             ]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
+            lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_values)
 
             # Penalties that are constant across every team split of this combination.
-            combo_penalty = exclusion_penalty + deal_split_penalty + rating_spread_penalty
+            combo_penalty = (
+                exclusion_penalty + deal_split_penalty + rating_spread_penalty
+                - lobby_rating_bonus
+            )
 
             # For this combination of 10, try all ways to split into teams
             for team1_indices in itertools.combinations(range(10), 5):
@@ -1065,14 +1075,6 @@ class BalancedShuffler:
                     best_signature = signature
                     best_teams = (matchup.team1, matchup.team2)
                     best_excluded = excluded_players
-
-                    if best_score <= early_termination_threshold:
-                        logger.info(f"Early termination: score <= {early_termination_threshold}")
-                        perfect_match = True
-                        break
-
-            if perfect_match:
-                break
 
         # Log top 5 matchups
         if logger.isEnabledFor(logging.INFO) and top_matchups_heap:
@@ -1162,9 +1164,17 @@ class BalancedShuffler:
             # Rating spread penalty: incentivize selecting players of closer skill
             selected_value_list = [player_values[p.name] for p in selected_players]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_value_list)
+            lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_value_list)
+            combo_penalty = (
+                exclusion_penalty + deal_split_penalty + rating_spread_penalty
+                - lobby_rating_bonus
+            )
+            rd_priority = self._calculate_rd_priority(selected_players)
+            combo_lower_bound = combo_penalty - rd_priority
 
-            # Quick pruning: if exclusion + split + spread penalty exceeds best score, skip
-            if exclusion_penalty + deal_split_penalty + rating_spread_penalty >= best_score:
+            # All remaining score components are nonnegative after accounting
+            # for the combination-wide RD priority bonus.
+            if combo_lower_bound >= best_score:
                 pruned_player_selections += 1
                 continue
 
@@ -1186,18 +1196,12 @@ class BalancedShuffler:
                     continue
                 seen_splits.add(split_key)
 
-                # Compute value difference lower bound (before role optimization)
-                t1_sum = sum(player_values[p.name] for p in team1_players)
-                t2_sum = sum(player_values[p.name] for p in team2_players)
-                value_diff_lb = abs(t1_sum - t2_sum)
-
                 # Compute recent match penalty for selected players
                 selected_player_names = {p.name for p in team1_players + team2_players}
                 recent_in_match = len(selected_player_names & recent_match_names)
                 recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-                # Quick lower bound: value_diff + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
-                lower_bound = value_diff_lb + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
+                lower_bound = recent_penalty + combo_lower_bound
 
                 # Prune if lower bound >= best score
                 if lower_bound >= best_score:
@@ -1209,24 +1213,11 @@ class BalancedShuffler:
                 team1, team2, base_score = self._optimize_role_assignments_for_matchup(
                     team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals                )
 
-                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
+                total_score = base_score + recent_penalty + combo_penalty
 
                 if total_score < best_score:
                     best_score = total_score
                     best_result = (team1, team2, excluded_players)
-
-                    # Early termination on a true perfect match. We compare
-                    # against ``== 0`` rather than ``<= 0`` because the
-                    # rd_priority bonus subtracted inside _optimize can drive
-                    # the score below zero on a non-perfect matchup, which
-                    # would otherwise trip the search to terminate early.
-                    if best_score == 0:
-                        logger.info("Branch & bound: perfect match found, early termination")
-                        break
-
-            # Check for early termination after inner loop (same reasoning).
-            if best_score == 0:
-                break
 
         logger.info(
             f"Branch & bound stats: pruned {pruned_player_selections} player selections, "

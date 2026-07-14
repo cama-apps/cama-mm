@@ -898,11 +898,13 @@ class IPredictionRepository(ABC):
         levels: list[tuple[str, int, int]],
         now_ts: int,
         reason: str = "refresh",
+        min_quote_offset: int = 0,
     ) -> None:
         """Layer fresh size + new fair onto the ladder; record a fair snapshot.
 
         ``reason`` is one of 'refresh' / 'set_fair' / 'create' and is stored on
         the snapshot row so the chart can label admin overrides separately.
+        Non-crossing quotes inside ``min_quote_offset`` are pruned atomically.
         """
         ...
 
@@ -924,6 +926,17 @@ class IPredictionRepository(ABC):
         losers summary and final lp_pnl. When ``bankruptcy_penalty_rate`` is
         set, penalized winners' penalty share of profit is netted in-txn.
         """
+        ...
+
+    @abstractmethod
+    def rollback_prediction_orderbook(
+        self,
+        prediction_id: int,
+        guild_id: int | None,
+        levels: list[tuple[str, int, int]],
+        rolled_back_by: int | None = None,
+    ) -> dict:
+        """Reverse a settlement and reopen the same market with fresh levels."""
         ...
 
     @abstractmethod

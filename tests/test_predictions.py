@@ -142,13 +142,30 @@ def test_create_orderbook_prediction_populates_ladder(prediction_service, predic
     assert len(bids) == PREDICTION_LEVELS_PER_SIDE
 
     # Asks sit above fair, bids below. Spread = SPREAD_TICKS each side.
-    expected_asks = [50 + PREDICTION_SPREAD_TICKS + k for k in range(PREDICTION_LEVELS_PER_SIDE)]
-    expected_bids = [50 - PREDICTION_SPREAD_TICKS - k for k in range(PREDICTION_LEVELS_PER_SIDE)]
+    expected_asks = [52, 53, 54]
+    expected_bids = [48, 47, 46]
     assert [p for p, _ in asks] == sorted(expected_asks)
     assert [p for p, _ in bids] == sorted(expected_bids, reverse=True)
 
     for _, size in asks + bids:
         assert size == PREDICTION_SIZE_PER_LEVEL
+
+
+@pytest.mark.parametrize("initial_fair", [PREDICTION_PRICE_LOW, PREDICTION_PRICE_HIGH])
+def test_create_at_fair_bounds_keeps_full_ladder(
+    prediction_service, prediction_repo, initial_fair,
+):
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="Will the boundary ladder stay full?",
+        initial_fair=initial_fair,
+    )["prediction_id"]
+
+    book = prediction_repo.get_book(pid)
+
+    assert len(book["yes_asks"]) == PREDICTION_LEVELS_PER_SIDE
+    assert len(book["yes_bids"]) == PREDICTION_LEVELS_PER_SIDE
 
 
 def test_create_rejects_question_too_short(prediction_service):
@@ -182,10 +199,10 @@ def test_buy_yes_top_of_book_only(prediction_service, prediction_repo, player_re
     result = prediction_service.buy_contracts(
         prediction_id=pid, discord_id=1, side="yes", contracts=3,
     )
-    expected_cost = _quote_total(3 * 51, "buy")
+    expected_cost = _quote_total(3 * 52, "buy")
     assert result["contracts"] == 3
     assert result["total_cost"] == expected_cost
-    assert result["fills"] == [(51, 3)]
+    assert result["fills"] == [(52, 3)]
     pos = prediction_repo.get_position(pid, 1)
     assert pos["yes_contracts"] == 3
     assert pos["yes_cost_basis_total"] == expected_cost
@@ -203,8 +220,8 @@ def test_buy_yes_walks_deeper(prediction_service, prediction_repo, player_reposi
     result = prediction_service.buy_contracts(
         prediction_id=pid, discord_id=1, side="yes", contracts=take_l1 + take_l2,
     )
-    assert result["fills"] == [(51, take_l1), (52, take_l2)]
-    assert result["total_cost"] == _quote_total(take_l1 * 51 + take_l2 * 52, "buy")
+    assert result["fills"] == [(52, take_l1), (53, take_l2)]
+    assert result["total_cost"] == _quote_total(take_l1 * 52 + take_l2 * 53, "buy")
 
 
 def test_buy_yes_rejects_insufficient_depth(prediction_service, player_repository):
@@ -289,7 +306,7 @@ def test_buy_yes_rejects_in_debt(prediction_service, player_repository):
 
 
 def test_buy_no_mirrors_yes_bid(prediction_service, prediction_repo, player_repository):
-    """NO ask price = 100 - YES bid (top YES bid is 49 -> NO ask cost 51 per contract)."""
+    """NO ask price = 100 - YES bid (top YES bid is 48 -> NO ask cost 52 per contract)."""
     _add_player(player_repository, 1)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market f?", initial_fair=50,
@@ -297,7 +314,7 @@ def test_buy_no_mirrors_yes_bid(prediction_service, prediction_repo, player_repo
     result = prediction_service.buy_contracts(
         prediction_id=pid, discord_id=1, side="no", contracts=3,
     )
-    expected_cost = _quote_total(3 * (100 - 49), "buy")
+    expected_cost = _quote_total(3 * (100 - 48), "buy")
     assert result["total_cost"] == expected_cost
     pos = prediction_repo.get_position(pid, 1)
     assert pos["no_contracts"] == 3
@@ -318,11 +335,11 @@ def test_sell_yes_proceeds_at_top_bid(prediction_service, prediction_repo, playe
     result = prediction_service.sell_contracts(
         prediction_id=pid, discord_id=1, side="yes", contracts=2,
     )
-    assert result["total_proceeds"] == _quote_total(2 * 49, "sell")
+    assert result["total_proceeds"] == _quote_total(2 * 48, "sell")
     pos = prediction_repo.get_position(pid, 1)
     assert pos["yes_contracts"] == 1
     # Cost basis reduced proportionally: original_basis * 2 // 3 worth removed.
-    original_basis = _quote_total(3 * 51, "buy")
+    original_basis = _quote_total(3 * 52, "buy")
     expected_remaining = original_basis - (original_basis * 2) // 3
     assert pos["yes_cost_basis_total"] == expected_remaining
 
@@ -393,8 +410,41 @@ def test_refresh_uses_observed_mid_when_book_intact(prediction_service, predicti
     )["prediction_id"]
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     summary = prediction_service.refresh_market(pid)
-    # observed_mid = (51 + 49) / 2 = 50; drift 0 -> new price 50.
+    # observed_mid = (52 + 48) / 2 = 50; drift 0 -> new price 50.
     assert summary["new_price"] == 50
+
+
+def test_refresh_prunes_legacy_inner_quotes_but_keeps_crossing_levels(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="Will the live book widen safely?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_repo.replace_levels(
+        pid,
+        levels=[
+            ("yes_ask", 49, 5),
+            ("yes_ask", 51, 5),
+            ("yes_ask", 52, 5),
+            ("yes_bid", 51, 5),
+            ("yes_bid", 49, 5),
+            ("yes_bid", 48, 5),
+        ],
+    )
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
+
+    prediction_service.refresh_market(pid)
+
+    post = dict(post_helper(prediction_repo.get_book(pid)))
+    assert ("yes_ask", 51) not in post
+    assert ("yes_bid", 49) not in post
+    assert post[("yes_ask", 52)] == 5
+    assert post[("yes_bid", 48)] == 5
+    assert post[("yes_ask", 49)] == 5
+    assert post[("yes_bid", 51)] == 5
 
 
 def test_refresh_layers_size_onto_existing_levels(
@@ -402,53 +452,53 @@ def test_refresh_layers_size_onto_existing_levels(
 ):
     """Daily refresh tops up the existing ladder where it overlaps.
 
-    Initial seed at fair=50 with spread=1: asks 51..53, bids 49..47, each at
-    PREDICTION_SIZE_PER_LEVEL. Refresh uses a wider spread (3) and smaller
-    per-level size, so it overlaps the seed only at 53 / 47 and adds new outer
-    levels at 54,55 / 46,45; the nearer seed levels (52 / 48) are left alone.
+    Initial seed at fair=50 with spread=2: asks 52..54, bids 48..46, each at
+    PREDICTION_SIZE_PER_LEVEL. Refresh uses a wider spread (4) and smaller
+    per-level size, so it overlaps the seed only at 54 / 46 and adds new outer
+    levels at 55,56 / 45,44; the nearer seed levels (53 / 47) are left alone.
     """
     _add_player(player_repository, 1, balance=1_000_000)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market m?", initial_fair=50,
     )["prediction_id"]
-    # Drain the top ask at 51 so we can confirm a consumed top-of-book level is
+    # Drain the top ask at 52 so we can confirm a consumed top-of-book level is
     # NOT resurrected by the refresh.
     prediction_service.buy_contracts(
         prediction_id=pid, discord_id=1, side="yes", contracts=PREDICTION_SIZE_PER_LEVEL,
     )
-    assert ("yes_ask", 51) not in dict(post_helper(prediction_repo.get_book(pid)))
+    assert ("yes_ask", 52) not in dict(post_helper(prediction_repo.get_book(pid)))
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     summary = prediction_service.refresh_market(pid)
-    # Draining the top ask moves top-of-book to 52, so observed_mid = (52+49)/2
+    # Draining the top ask moves top-of-book to 53, so observed_mid = (53+48)/2
     # = 50.5 and (zero drift) the refresh reposts around fair 50. Pin new_price
     # so the asserted ladder can't silently drift if the rounding/fade rules change.
     assert summary["new_price"] == 50
     post = dict(post_helper(prediction_repo.get_book(pid)))
 
-    # Refresh ladder positions (spread 3) are 53, 54, 55 (asks) and 47, 46, 45 (bids).
-    # 51 (consumed top seed) is NOT in the refresh ladder so stays absent.
-    # 52 / 48 are seed-only (refresh no longer reaches them); 53 / 47 overlap and
-    # gain a refresh layer; 54,55 / 46,45 are new refresh-only levels.
-    assert ("yes_ask", 51) not in post
-    assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_ask", 53)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
-    assert post[("yes_ask", 54)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    # Refresh ladder positions (spread 4) are 54, 55, 56 (asks) and 46, 45, 44 (bids).
+    # 52 (consumed top seed) is NOT in the refresh ladder so stays absent.
+    # 53 / 47 are seed-only (refresh no longer reaches them); 54 / 46 overlap and
+    # gain a refresh layer; 55,56 / 45,44 are new refresh-only levels.
+    assert ("yes_ask", 52) not in post
+    assert post[("yes_ask", 53)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_ask", 54)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
     assert post[("yes_ask", 55)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
-    # Seed bids at 49, 48 untouched (not in refresh ladder).
-    assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_ask", 56)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    # Seed bids at 48, 47 untouched (not in refresh ladder).
     assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_bid", 47)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
-    assert post[("yes_bid", 46)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_bid", 47)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_bid", 46)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
     assert post[("yes_bid", 45)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_bid", 44)] == PREDICTION_REFRESH_SIZE_PER_LEVEL
 
 
 def test_refresh_quiet_market_accumulates_depth(
     prediction_service, prediction_repo, monkeypatch,
 ):
     """No trades + multiple refreshes at same fair = depth grows at the
-    refresh-ladder positions only (fair±3 overlap plus the fair±4/±5 outer
-    levels). Initial-seed-only positions (fair±1/±2) stay flat."""
+    refresh-ladder positions only (fair±4 overlap plus the fair±5/±6 outer
+    levels). Initial-seed-only positions (fair±2/±3) stay flat."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mm?", initial_fair=50,
     )["prediction_id"]
@@ -457,20 +507,20 @@ def test_refresh_quiet_market_accumulates_depth(
     for _ in range(refreshes):
         prediction_service.refresh_market(pid)
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # Seed-only positions (no refresh overlap at spread 3) stay flat.
-    for price in (51, 52):
+    # Seed-only positions (no refresh overlap at spread 4) stay flat.
+    for price in (52, 53):
         assert post[("yes_ask", price)] == PREDICTION_SIZE_PER_LEVEL
-    for price in (49, 48):
+    for price in (48, 47):
         assert post[("yes_bid", price)] == PREDICTION_SIZE_PER_LEVEL
-    # Overlap at fair±3 accumulates seed + one refresh layer per pass.
+    # Overlap at fair±4 accumulates seed + one refresh layer per pass.
     overlap = PREDICTION_SIZE_PER_LEVEL + refreshes * PREDICTION_REFRESH_SIZE_PER_LEVEL
-    assert post[("yes_ask", 53)] == overlap
-    assert post[("yes_bid", 47)] == overlap
+    assert post[("yes_ask", 54)] == overlap
+    assert post[("yes_bid", 46)] == overlap
     # Refresh-only outer levels accumulate one layer per pass.
     outer = refreshes * PREDICTION_REFRESH_SIZE_PER_LEVEL
-    for price in (54, 55):
+    for price in (55, 56):
         assert post[("yes_ask", price)] == outer
-    for price in (46, 45):
+    for price in (45, 44):
         assert post[("yes_bid", price)] == outer
 
 
@@ -492,8 +542,8 @@ def test_refresh_fades_farther_up_when_asks_consumed(
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     summary = prediction_service.refresh_market(pid)
-    # observed_mid = last lifted ask (53) + FADE_TICKS, drift 0.
-    assert summary["new_price"] == 53 + PREDICTION_FADE_TICKS
+    # observed_mid = last lifted ask (54) + FADE_TICKS, drift 0.
+    assert summary["new_price"] == 54 + PREDICTION_FADE_TICKS
 
 
 def test_refresh_fades_farther_down_when_bids_consumed(
@@ -513,8 +563,8 @@ def test_refresh_fades_farther_down_when_bids_consumed(
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     summary = prediction_service.refresh_market(pid)
-    # observed_mid = last hit bid (47) - FADE_TICKS, drift 0.
-    assert summary["new_price"] == 47 - PREDICTION_FADE_TICKS
+    # observed_mid = last hit bid (46) - FADE_TICKS, drift 0.
+    assert summary["new_price"] == 46 - PREDICTION_FADE_TICKS
 
 
 def test_refresh_uses_terminal_fill_midpoint_when_both_sides_consumed(
@@ -567,7 +617,7 @@ def test_refresh_locked_level_at_top_bid_is_kept(prediction_service, prediction_
     prediction_repo.replace_levels(pid, levels=[("yes_ask", 51, 5), ("yes_bid", 49, 5)])
 
     # Apply a refresh whose new top bid lands at exactly 51 → locked, not crossed.
-    # New ladder around fair=52 with spread=1: asks at 52, bids at 51.
+    # Apply an explicit one-level ladder with ask 52 and bid 51.
     prediction_repo.apply_refresh(
         pid,
         new_price=52,
@@ -595,19 +645,19 @@ def test_refresh_preserves_crossing_ask_for_arb(prediction_repo, prediction_serv
     prediction_repo.replace_levels(
         pid,
         levels=[
-            ("yes_ask", 49, 5),
-            ("yes_ask", 51, 5),
+            ("yes_ask", 48, 5),
+            ("yes_ask", 50, 5),
             ("yes_bid", 47, 5),
         ],
     )
     levels_around_52 = PredictionService._build_initial_levels(52)
     prediction_repo.apply_refresh(pid, new_price=52, levels=levels_around_52, now_ts=10**9)
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # Stale crossing ask survives — that's the arb opportunity. New top bid is 51.
-    assert post[("yes_ask", 49)] == 5
-    # The pre-existing ask at 51 also survives (would have been deleted before the
-    # change since 51 < 52 and crosses the new mid).
-    assert post[("yes_ask", 51)] == 5
+    # Stale crossing ask survives — that's the arb opportunity. New top bid is 50.
+    assert post[("yes_ask", 48)] == 5
+    # The pre-existing ask at 50 also survives (would have been deleted before the
+    # change since 50 < 52 and crosses the new mid).
+    assert post[("yes_ask", 50)] == 5
 
 
 def test_set_fair_manual_changes_price_and_layers_ladder(
@@ -624,13 +674,13 @@ def test_set_fair_manual_changes_price_and_layers_ladder(
     book = prediction_repo.get_book(pid)
     ask_prices = sorted(p for p, _ in book["yes_asks"])
     bid_prices = sorted((p for p, _ in book["yes_bids"]), reverse=True)
-    # New ladder layers at 61,62,63 / 59,58,57 around the new fair.
-    assert 61 in ask_prices and 62 in ask_prices and 63 in ask_prices
-    assert 59 in bid_prices and 58 in bid_prices and 57 in bid_prices
+    # New ladder layers at 62,63,64 / 58,57,56 around the new fair.
+    assert 62 in ask_prices and 63 in ask_prices and 64 in ask_prices
+    assert 58 in bid_prices and 57 in bid_prices and 56 in bid_prices
     # Old asks/bids from the previous ladder are preserved — including the ones
     # that now cross the new bid/ask. Whoever spots a stale price arbs it.
-    assert 51 in ask_prices and 52 in ask_prices and 53 in ask_prices
-    assert 47 in bid_prices and 48 in bid_prices and 49 in bid_prices
+    assert 52 in ask_prices and 53 in ask_prices and 54 in ask_prices
+    assert 46 in bid_prices and 47 in bid_prices and 48 in bid_prices
 
 
 def test_refresh_layers_with_refresh_params_not_initial(
@@ -639,9 +689,9 @@ def test_refresh_layers_with_refresh_params_not_initial(
     """Daily refresh uses thinner/wider params than the initial seed.
 
     Initial: PREDICTION_LEVELS_PER_SIDE × PREDICTION_SIZE_PER_LEVEL contracts at
-    spread 1 (fair±1/±2/±3). Refresh: PREDICTION_REFRESH_LEVELS_PER_SIDE ×
-    PREDICTION_REFRESH_SIZE_PER_LEVEL at spread 3 (fair±3/±4/±5), so it overlaps
-    the seed only at fair±3 and adds new refresh-only levels at fair±4/±5.
+    spread 2 (fair±2/±3/±4). Refresh: PREDICTION_REFRESH_LEVELS_PER_SIDE ×
+    PREDICTION_REFRESH_SIZE_PER_LEVEL at spread 4 (fair±4/±5/±6), so it overlaps
+    the seed only at fair±4 and adds new refresh-only levels at fair±5/±6.
     """
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market lr?", initial_fair=50,
@@ -657,21 +707,21 @@ def test_refresh_layers_with_refresh_params_not_initial(
     layered = seed + PREDICTION_REFRESH_SIZE_PER_LEVEL
     refresh_only = PREDICTION_REFRESH_SIZE_PER_LEVEL
 
-    # Refresh (spread 3) overlaps the seed only at fair±3; fair±1/±2 stay seed-only
-    # and fair±4/±5 are new refresh-only levels.
-    assert asks_by_price[51] == seed
+    # Refresh (spread 4) overlaps the seed only at fair±4; fair±2/±3 stay seed-only
+    # and fair±5/±6 are new refresh-only levels.
     assert asks_by_price[52] == seed
-    assert asks_by_price[53] == layered
-    assert asks_by_price[54] == refresh_only
+    assert asks_by_price[53] == seed
+    assert asks_by_price[54] == layered
     assert asks_by_price[55] == refresh_only
-    assert 56 not in asks_by_price           # refresh goes 3 deep: 53, 54, 55
+    assert asks_by_price[56] == refresh_only
+    assert 57 not in asks_by_price           # refresh goes 3 deep: 54, 55, 56
 
-    assert bids_by_price[49] == seed
     assert bids_by_price[48] == seed
-    assert bids_by_price[47] == layered
-    assert bids_by_price[46] == refresh_only
+    assert bids_by_price[47] == seed
+    assert bids_by_price[46] == layered
     assert bids_by_price[45] == refresh_only
-    assert 44 not in bids_by_price
+    assert bids_by_price[44] == refresh_only
+    assert 43 not in bids_by_price
 
     # Guard the "tops up the existing ladder" invariant: the refresh's innermost
     # offset must stay within the seed's reach so the two ladders overlap on at
@@ -738,7 +788,7 @@ def test_refresh_locked_bid_at_top_ask_is_kept(prediction_service, prediction_re
     )["prediction_id"]
     prediction_repo.replace_levels(pid, levels=[("yes_ask", 51, 5), ("yes_bid", 49, 5)])
 
-    # New ladder around fair=48 with spread=1: asks at 49, bids at 48.
+    # Apply an explicit one-level ladder with ask 49 and bid 48.
     prediction_repo.apply_refresh(
         pid,
         new_price=48,
@@ -816,7 +866,7 @@ def test_resolve_lp_pnl_balances_collected_minus_paid(prediction_service, player
     )["prediction_id"]
     prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
     result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
-    expected_collected = _quote_total(5 * 51, "buy")
+    expected_collected = _quote_total(5 * 52, "buy")
     expected_paid = 5 * PREDICTION_CONTRACT_VALUE
     assert result["lp_pnl"] == expected_collected - expected_paid
 
@@ -885,8 +935,8 @@ def test_cancel_refunds_cost_basis(prediction_service, player_repository):
     result = prediction_service.cancel_orderbook(pid)
     bal_1_post = player_repository.get_balance(1, TEST_GUILD_ID)
     bal_2_post = player_repository.get_balance(2, TEST_GUILD_ID)
-    expected_refund_1 = _quote_total(3 * 51, "buy")
-    expected_refund_2 = _quote_total(2 * 51, "buy")  # 100-49 = 51
+    expected_refund_1 = _quote_total(3 * 52, "buy")
+    expected_refund_2 = _quote_total(2 * 52, "buy")  # 100-48 = 52
     assert bal_1_post - bal_1_pre == expected_refund_1
     assert bal_2_post - bal_2_pre == expected_refund_2
     assert result["total_refunded"] == expected_refund_1 + expected_refund_2
@@ -897,8 +947,8 @@ def test_cancel_with_round_trip_keeps_realized_pnl(prediction_service, player_re
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market s?", initial_fair=50,
     )["prediction_id"]
-    buy_cost = _quote_total(5 * 51, "buy")
-    sell_proceeds = _quote_total(2 * 49, "sell")
+    buy_cost = _quote_total(5 * 52, "buy")
+    sell_proceeds = _quote_total(2 * 48, "sell")
     prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
     prediction_service.sell_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=2)
     pre_cancel_balance = 1000 - buy_cost + sell_proceeds
@@ -965,7 +1015,7 @@ from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 import discord  # noqa: E402
 
-from commands.predictions import PredictionCommands  # noqa: E402
+from commands.predictions import PersistentMarketView, PredictionCommands  # noqa: E402
 from utils.thread_safety import THREAD_AUTO_ARCHIVE_MINUTES  # noqa: E402
 
 
@@ -994,11 +1044,19 @@ class _FakeResponse:
 
 
 class _FakeThread:
-    def __init__(self):
+    def __init__(self, *, archived: bool = False, locked: bool = False):
         self.sent: list[str] = []
+        self.edits: list[dict] = []
+        self.archived = archived
+        self.locked = locked
 
     async def send(self, content=None, embed=None):
         self.sent.append(content if content is not None else "<embed>")
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+        for name, value in kwargs.items():
+            setattr(self, name, value)
 
 
 class _FakeInteraction:
@@ -1147,6 +1205,68 @@ async def test_resolve_announces_all_winners_and_losers(
     assert f"<@102> +{1 * PREDICTION_CONTRACT_VALUE} JC (1 contracts)" in announce
     assert f"<@201> -{loser_201_loss} JC (3 contracts)" in announce
     assert f"<@202> -{loser_202_loss} JC (1 contracts)" in announce
+
+
+async def test_rollback_admin_only(patched_cog_helpers):
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: False)
+    prediction_service = MagicMock()
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+
+    await cog.rollback.callback(cog, interaction, 42)
+
+    prediction_service.rollback_orderbook.assert_not_called()
+    assert interaction.response.messages == [
+        {
+            "content": "Only admins can roll back markets.",
+            "embed": None,
+            "ephemeral": True,
+        }
+    ]
+
+
+async def test_rollback_reopens_thread_refreshes_embed_and_announces(
+    patched_cog_helpers,
+):
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    prediction_service = MagicMock()
+    prediction_service.rollback_orderbook.return_value = {
+        "prediction_id": 42,
+        "previous_outcome": "no",
+        "total_reversed": 30,
+        "affected_players": 2,
+    }
+    prediction_service.get_prediction.return_value = {"thread_id": 12345}
+    thread = _FakeThread(archived=True, locked=True)
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.refresh_market_embed = AsyncMock()
+    cog.announce_to_gamba = AsyncMock()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+
+    await cog.rollback.callback(cog, interaction, 42)
+
+    prediction_service.rollback_orderbook.assert_called_once_with(
+        42, TEST_GUILD_ID, 999
+    )
+    assert thread.edits == [
+        {
+            "locked": False,
+            "archived": False,
+            "auto_archive_duration": THREAD_AUTO_ARCHIVE_MINUTES,
+        }
+    ]
+    cog.refresh_market_embed.assert_awaited_once_with(42, restore_view=True)
+    announce = interaction.followup.messages[0]["content"]
+    assert "Market #42" in announce
+    assert "resolution rolled back" in announce
+    assert "NO" in announce
+    assert "30" in announce
+    assert thread.sent == [announce]
+    cog.announce_to_gamba.assert_awaited_once_with(interaction.guild, announce)
 
 
 async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):
@@ -1363,6 +1483,20 @@ async def test_refresh_market_embed_leaves_live_thread_alone(prediction_service)
     await cog.refresh_market_embed(pid)
 
     assert thread.calls == ["fetch_message", "msg.edit"]
+
+
+async def test_refresh_market_embed_restores_persistent_view(prediction_service):
+    msg = _FakeEmbedMessage()
+    thread = _FakeArchivableThread(archived=False, embed_msg=msg)
+
+    pid = _market_with_thread_ids(prediction_service)
+    cog = _make_cog(prediction_service, thread=thread)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    await cog.refresh_market_embed(pid, restore_view=True)
+
+    assert msg.edit_kwargs is not None
+    assert isinstance(msg.edit_kwargs["view"], PersistentMarketView)
 
 
 async def test_refresh_market_embed_vanished_message_does_not_revive_thread(

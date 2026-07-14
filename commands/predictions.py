@@ -905,7 +905,9 @@ class PredictionCommands(commands.Cog):
 
     # -- embed update helpers ---
 
-    async def refresh_market_embed(self, prediction_id: int):
+    async def refresh_market_embed(
+        self, prediction_id: int, *, restore_view: bool = False
+    ):
         """Re-render the market embed in its thread after a state change."""
         try:
             view = await asyncio.to_thread(
@@ -939,7 +941,10 @@ class PredictionCommands(commands.Cog):
                 chart_filename = chart_file.filename if chart_file else None
                 embed = self._build_market_embed(view, chart_filename=chart_filename)
                 attachments = [chart_file] if chart_file else []
-                await msg.edit(embed=embed, attachments=attachments)
+                edit_kwargs = (
+                    {"view": PersistentMarketView(self)} if restore_view else {}
+                )
+                await msg.edit(embed=embed, attachments=attachments, **edit_kwargs)
         except discord.NotFound:
             logger.debug("Market embed message vanished for %s", prediction_id)
         except Exception as e:
@@ -1172,6 +1177,71 @@ class PredictionCommands(commands.Cog):
         if interaction.guild:
             for chunk in announce_chunks:
                 await self.announce_to_gamba(interaction.guild, chunk)
+
+    # -- /predict rollback ---
+
+    @predict.command(
+        name="rollback",
+        description="Roll back a resolution and reopen the market (admin)",
+    )
+    @app_commands.describe(prediction_id="Resolved market ID to reopen")
+    async def rollback(self, interaction: discord.Interaction, prediction_id: int):
+        if not await require_gamba_channel(interaction):
+            return
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can roll back markets.", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            result = await asyncio.to_thread(
+                self.prediction_service.rollback_orderbook,
+                prediction_id,
+                guild_id,
+                interaction.user.id,
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {e}")
+            return
+
+        previous_outcome = result["previous_outcome"].upper()
+        total_reversed = result["total_reversed"]
+        affected_players = result["affected_players"]
+        announce = (
+            f"↩️ Market #{prediction_id} resolution rolled back by "
+            f"<@{interaction.user.id}>. Previous outcome: **{previous_outcome}**. "
+            f"Reversed {total_reversed} {JOPACOIN_EMOTE} across "
+            f"{affected_players} holder(s). Trading is open again."
+        )
+        await safe_followup(interaction, content=announce)
+
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
+        if pred and pred.get("thread_id"):
+            try:
+                thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(
+                    pred["thread_id"]
+                )
+                await thread.edit(
+                    locked=False,
+                    archived=False,
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+                await self.refresh_market_embed(prediction_id, restore_view=True)
+                try:
+                    await thread.send(announce)
+                except Exception as e:
+                    logger.warning(f"Failed to post rollback announcement: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to reopen rolled-back market thread: {e}")
+
+        if interaction.guild:
+            await self.announce_to_gamba(interaction.guild, announce)
 
     # -- /predict set_fair ---
 

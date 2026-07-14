@@ -1033,6 +1033,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         levels: list[tuple[str, int, int]],
         now_ts: int,
         reason: str = "refresh",
+        min_quote_offset: int = 0,
     ) -> None:
         """Layer fresh size onto the ladder and stamp the new fair / refresh time.
 
@@ -1041,6 +1042,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         markets accumulate depth at unchanged price levels). If no match, insert
         a fresh level. Old levels at orphan positions (positions not in the new
         ladder) are left untouched, so the book widens over time as fair drifts.
+        Correctly sided quotes strictly inside ``min_quote_offset`` are removed
+        so legacy books adopt a wider minimum spread without deleting crossing
+        arbitrage levels.
 
         Re-checks status inside the write lock so a concurrent /predict resolve
         or /predict cancel can't be clobbered by a stale refresh.
@@ -1058,6 +1062,23 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             # Crossing levels from earlier flow are left in place on purpose:
             # they're the arb pockets that drive engagement.
+            if min_quote_offset > 0:
+                cursor.execute(
+                    """
+                    DELETE FROM prediction_levels
+                    WHERE prediction_id = ? AND (
+                        (side = 'yes_ask' AND price > ? AND price < ?)
+                        OR (side = 'yes_bid' AND price < ? AND price > ?)
+                    )
+                    """,
+                    (
+                        prediction_id,
+                        new_price,
+                        new_price + min_quote_offset,
+                        new_price,
+                        new_price - min_quote_offset,
+                    ),
+                )
 
             for side, price, size in levels:
                 if side not in self.VALID_BOOK_SIDES:
@@ -1324,6 +1345,226 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 "losers": losers,
                 "total_payout": total_payout,
                 "lp_pnl": lp_pnl,
+            }
+
+    def rollback_prediction_orderbook(
+        self,
+        prediction_id: int,
+        guild_id: int | None,
+        levels: list[tuple[str, int, int]],
+        rolled_back_by: int | None = None,
+    ) -> dict:
+        """Atomically reverse a settlement and reopen the original market."""
+        from config import PREDICTION_CONTRACT_VALUE
+
+        for side, _, _ in levels:
+            if side not in self.VALID_BOOK_SIDES:
+                raise ValueError(f"Invalid book side: {side}")
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status, guild_id, outcome, current_price "
+                "FROM predictions WHERE prediction_id = ? AND guild_id = ?",
+                (prediction_id, normalized_guild),
+            )
+            pred = cursor.fetchone()
+            if not pred:
+                raise ValueError("Prediction not found.")
+            if pred["status"] != "resolved":
+                raise ValueError(
+                    f"Cannot rollback market in status '{pred['status']}'."
+                )
+
+            outcome = str(pred["outcome"] or "")
+            if outcome not in self.VALID_POSITIONS:
+                raise ValueError("Resolved prediction has no valid outcome.")
+            current_price = int(pred["current_price"])
+
+            cursor.execute(
+                """
+                SELECT discord_id, yes_contracts, no_contracts,
+                       COALESCE(bankruptcy_penalty, 0) AS bankruptcy_penalty
+                FROM prediction_positions
+                WHERE prediction_id = ?
+                """,
+                (prediction_id,),
+            )
+            positions = cursor.fetchall()
+
+            total_gross_payout = 0
+            reversals: list[tuple[int, int, int]] = []
+            expected_credits: dict[int, int] = {}
+            for position in positions:
+                winning_contracts = int(position[f"{outcome}_contracts"])
+                gross_payout = winning_contracts * PREDICTION_CONTRACT_VALUE
+                penalty = int(position["bankruptcy_penalty"])
+                credited = gross_payout - penalty
+                total_gross_payout += gross_payout
+                if credited <= 0:
+                    continue
+
+                discord_id = int(position["discord_id"])
+                expected_credits[discord_id] = credited
+                reversals.append((discord_id, gross_payout, penalty))
+
+            cursor.execute(
+                """
+                SELECT ledger_id, account_type, account_id, delta
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND source = 'prediction_resolution'
+                  AND related_type = 'prediction'
+                  AND related_id = ?
+                  AND ledger_id > COALESCE((
+                      SELECT MAX(rollback.ledger_id)
+                      FROM economy_ledger_entries AS rollback
+                      WHERE rollback.guild_id = ?
+                        AND rollback.source = 'prediction_resolution_rollback'
+                        AND rollback.related_type = 'prediction'
+                        AND rollback.related_id = ?
+                  ), 0)
+                ORDER BY ledger_id
+                """,
+                (
+                    normalized_guild,
+                    str(prediction_id),
+                    normalized_guild,
+                    str(prediction_id),
+                ),
+            )
+            settlement_rows = cursor.fetchall()
+            settlements_by_account = {}
+            for row in settlement_rows:
+                account_id = row["account_id"]
+                if row["account_type"] != "player" or account_id is None:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                account_id = int(account_id)
+                if account_id in settlements_by_account:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                expected_credit = expected_credits.get(account_id)
+                delta = int(row["delta"])
+                if expected_credit is None or delta <= 0 or delta != expected_credit:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                settlements_by_account[account_id] = row
+
+            if set(settlements_by_account) != set(expected_credits):
+                raise ValueError("Settlement ledger is inconsistent.")
+
+            for discord_id, _, _ in reversals:
+                settlement = settlements_by_account[discord_id]
+                cursor.execute(
+                    "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+                    (discord_id, normalized_guild),
+                )
+                if cursor.fetchone() is None:
+                    raise ValueError(f"Winning player {discord_id} no longer exists.")
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM economy_ledger_entries
+                    WHERE guild_id = ?
+                      AND account_type = 'player'
+                      AND account_id = ?
+                      AND source = 'player_insert'
+                      AND ledger_id > ?
+                    LIMIT 1
+                    """,
+                    (normalized_guild, discord_id, int(settlement["ledger_id"])),
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError(
+                        f"Winning player {discord_id} account was re-created after settlement."
+                    )
+
+            total_reversed = 0
+            affected_players = 0
+            for discord_id, gross_payout, penalty in reversals:
+                credited = int(settlements_by_account[discord_id]["delta"])
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="prediction_resolution_rollback",
+                    actor_id=rolled_back_by,
+                    related_type="prediction",
+                    related_id=prediction_id,
+                    reason="prediction resolution rollback",
+                    metadata={
+                        "outcome": outcome,
+                        "gross_payout": gross_payout,
+                        "bankruptcy_penalty": penalty,
+                    },
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (credited, discord_id, normalized_guild),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ValueError("Winning player account changed during rollback.")
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+                total_reversed += credited
+                affected_players += 1
+
+            cursor.execute(
+                "UPDATE prediction_positions SET bankruptcy_penalty = 0 "
+                "WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            for side, price, size in levels:
+                cursor.execute(
+                    """
+                    INSERT INTO prediction_levels
+                        (prediction_id, side, price, remaining_size, posted_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (prediction_id, side, price, size, now),
+                )
+
+            cursor.execute(
+                """
+                UPDATE predictions
+                SET status = 'open', outcome = NULL, resolved_at = NULL,
+                    resolved_by = NULL,
+                    lp_pnl = COALESCE(lp_pnl, 0) + ?,
+                    last_refresh_at = ?
+                WHERE prediction_id = ?
+                """,
+                (total_gross_payout, now, prediction_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO prediction_fair_snapshots
+                    (market_id, guild_id, snapshot_at, fair_pct, reason)
+                VALUES (?, ?, ?, ?, 'rollback')
+                """,
+                (prediction_id, normalized_guild, now, current_price),
+            )
+            cursor.execute(
+                "SELECT lp_pnl FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            lp_pnl = int(cursor.fetchone()["lp_pnl"] or 0)
+
+            return {
+                "prediction_id": prediction_id,
+                "guild_id": normalized_guild,
+                "previous_outcome": outcome,
+                "total_reversed": total_reversed,
+                "affected_players": affected_players,
+                "lp_pnl": lp_pnl,
+                "current_price": current_price,
             }
 
     def cancel_orderbook_prediction(self, prediction_id: int) -> dict:
