@@ -2,16 +2,20 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from commands.dig_helpers.gear_views import GearPanelView, RecycleRelicView
 
 
-def test_gear_panel_exposes_recycle_button():
+@pytest.mark.asyncio
+async def test_gear_panel_exposes_recycle_button():
     view = GearPanelView(MagicMock(), user_id=12, guild_id=34)
 
     assert "Recycle Relics" in {item.label for item in view.children}
 
 
-def test_recycle_view_requires_three_relics_and_labels_rarity():
+@pytest.mark.asyncio
+async def test_recycle_view_requires_three_relics_and_labels_rarity():
     service = MagicMock()
     parent = GearPanelView(service, user_id=12, guild_id=34)
     relics = [
