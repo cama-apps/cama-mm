@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from database import Database
 from repositories.player_repository import PlayerRepository
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture

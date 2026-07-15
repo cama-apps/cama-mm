@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from commands.profile import ProfileCommands
-from database import Database
 from repositories.bet_repository import BetRepository
 from repositories.disburse_repository import DisburseRepository
 from repositories.match_repository import MatchRepository
@@ -14,6 +13,7 @@ from repositories.prediction_repository import PredictionRepository
 from repositories.tip_repository import TipRepository
 from services.balance_history_service import BalanceHistoryService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture

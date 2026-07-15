@@ -16,6 +16,7 @@ from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.gambling_stats_service import Leaderboard, LeaderboardEntry
+from services.pairings_service import PairingsService
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -351,7 +352,7 @@ class TestProfileTeammatesSpacerPresent:
         mock_bot = MagicMock()
         mock_bot.player_repo = repositories["player_repo"]
         mock_bot.match_repo = repositories["match_repo"]
-        mock_bot.pairings_repo = repositories["pairings_repo"]
+        mock_bot.pairings_service = PairingsService(repositories["pairings_repo"])
 
         # Create the cog
         cog = ProfileCommands(bot=mock_bot)
@@ -402,7 +403,7 @@ class TestProfileTeammatesSpacerPresent:
         mock_bot = MagicMock()
         mock_bot.player_repo = repositories["player_repo"]
         mock_bot.match_repo = repositories["match_repo"]
-        mock_bot.pairings_repo = repositories["pairings_repo"]
+        mock_bot.pairings_service = PairingsService(repositories["pairings_repo"])
 
         cog = ProfileCommands(bot=mock_bot)
 

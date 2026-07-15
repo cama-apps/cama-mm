@@ -12,12 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
-from database import Database
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
 from services import error_codes
 from services.loan_service import LoanApproval, LoanResult, LoanService, RepaymentResult
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture

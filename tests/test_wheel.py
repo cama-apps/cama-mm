@@ -5,6 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from commands.betting import BettingCommands
+from commands.betting_helpers.wheel_outcomes import (
+    WheelOutcomeContext,
+    WheelOutcomeProcessor,
+    WheelOutcomeState,
+)
 from config import (
     HOSTILE_LOSS_MIN_BALANCE,
     LIGHTNING_BOLT_PCT_MAX,
@@ -18,6 +23,7 @@ from config import (
     WHEEL_BOMB_OMB_VICTIM_LOSS_MAX,
     WHEEL_BOMB_OMB_VICTIM_LOSS_MIN,
     WHEEL_COOLDOWN_SECONDS,
+    WHEEL_GOLDEN_TOP_N,
     WHEEL_GREEN_SHELL_EST_EV,
     WHEEL_LIGHTNING_BOLT_EST_EV,
     WHEEL_RED_SHELL_EST_EV,
@@ -81,6 +87,45 @@ def _assert_gamba_steal_call(
     assert kwargs["actor_id"] == thief_discord_id
     assert kwargs["related_type"] == "wheel_spin"
     assert kwargs["reason"].startswith("gamba ")
+
+
+@pytest.mark.asyncio
+async def test_hostile_takeover_settlement_failure_does_not_grant_fallback():
+    """A failed eligible takeover is a miss, not an ineligible-target credit."""
+    command = MagicMock()
+    command.player_service = MagicMock()
+    interaction = MagicMock()
+    interaction.guild = None
+    context = WheelOutcomeContext(
+        command=command,
+        interaction=interaction,
+        user_id=1001,
+        guild_id=123,
+        bankruptcy_service=None,
+        penalty_games_remaining=0,
+        effects=None,
+        mana_effects_service=None,
+        is_bad_gamba=False,
+        hostile_event_prefix="wheel_spin:test",
+    )
+    state = WheelOutcomeState(("HOSTILE TAKEOVER", "HOSTILE_TAKEOVER", "#000"), 50)
+    processor = WheelOutcomeProcessor(context, state)
+    victim = SimpleNamespace(
+        discord_id=2002,
+        name="Target",
+        jopacoin_balance=HOSTILE_LOSS_MIN_BALANCE,
+    )
+    processor._leaderboard = AsyncMock(
+        return_value=[victim] * (WHEEL_GOLDEN_TOP_N + 1)
+    )
+    processor._hostile_loss = AsyncMock(side_effect=RuntimeError("settlement failed"))
+
+    await processor.process()
+
+    assert state.takeover_missed is True
+    assert state.takeover_amount == 0
+    assert state.log_result() == 0
+    command._adjust_gamba_balance.assert_not_called()
 
 
 @pytest.mark.asyncio

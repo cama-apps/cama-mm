@@ -18,7 +18,6 @@ Consolidates tests from:
 
 import pytest
 
-from database import Database
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
@@ -27,6 +26,7 @@ from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 # =============================================================================
 # FIXTURES

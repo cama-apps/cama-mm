@@ -143,28 +143,6 @@ class PredictionService:
 
         return locked
 
-    def close_betting_early(self, prediction_id: int) -> dict[str, Any]:
-        """
-        Close betting on a prediction early (admin action).
-
-        Returns prediction info.
-        """
-        pred = self.prediction_repo.get_prediction(prediction_id)
-        if not pred:
-            raise ValueError("Prediction not found.")
-        if pred["status"] != "open":
-            raise ValueError(f"Prediction is already {pred['status']}.")
-
-        # Lock and set closes_at to now so resolution voting can proceed
-        now = int(time.time())
-        self.prediction_repo.close_prediction_betting(prediction_id, now)
-
-        return {
-            "prediction_id": prediction_id,
-            "question": pred["question"],
-            "status": "locked",
-        }
-
     # =========================================================================
     # Order-book mechanic (feat/predict-orderbook)
     # =========================================================================

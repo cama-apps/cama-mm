@@ -580,36 +580,6 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ),
             )
 
-    def update_rating_history_openskill(
-        self,
-        match_id: int,
-        discord_id: int,
-        os_mu_before: float,
-        os_mu_after: float,
-        os_sigma_before: float,
-        os_sigma_after: float,
-        fantasy_weight: float | None,
-    ) -> bool:
-        """Update an existing rating_history entry with OpenSkill data.
-
-        Returns True if a row was updated, False if no entry found.
-        """
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE rating_history
-                SET os_mu_before = ?,
-                    os_mu_after = ?,
-                    os_sigma_before = ?,
-                    os_sigma_after = ?,
-                    fantasy_weight = ?
-                WHERE match_id = ? AND discord_id = ?
-                """,
-                (os_mu_before, os_mu_after, os_sigma_before, os_sigma_after, fantasy_weight, match_id, discord_id),
-            )
-            return cursor.rowcount > 0
-
     def save_pending_match(self, guild_id: int | None, payload: dict) -> int:
         """
         Save a pending match and return its ID.
@@ -2615,48 +2585,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_enriched_matches_chronological(self, guild_id: int | None = None) -> list[dict]:
-        """
-        Get all matches with fantasy data in chronological order for backfill.
-
-        Returns matches ordered by match_date ASC (oldest first) where at least
-        one participant has fantasy_points set.
-
-        Returns:
-            List of dicts with match_id, winning_team, match_date, team1_players, team2_players
-        """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT DISTINCT m.match_id, m.winning_team, m.match_date,
-                       m.team1_players, m.team2_players
-                FROM matches m
-                JOIN match_participants mp ON m.match_id = mp.match_id
-                WHERE m.guild_id = ? AND mp.fantasy_points IS NOT NULL
-                ORDER BY m.match_date ASC
-                """,
-                (normalized_guild,),
-            )
-            rows = cursor.fetchall()
-            return [
-                {
-                    "match_id": row["match_id"],
-                    "winning_team": row["winning_team"],
-                    "match_date": row["match_date"],
-                    "team1_players": json.loads(row["team1_players"]),
-                    "team2_players": json.loads(row["team2_players"]),
-                }
-                for row in rows
-            ]
-
     def get_all_matches_chronological(self, guild_id: int | None = None) -> list[dict]:
         """
         Get ALL matches in chronological order for backfill.
 
-        Unlike get_enriched_matches_chronological, this returns ALL matches
-        regardless of whether they have fantasy data. Used for full backfill
+        Returns all matches regardless of whether they have fantasy data. Used for full backfill
         where non-enriched matches use equal weights.
 
         Returns:

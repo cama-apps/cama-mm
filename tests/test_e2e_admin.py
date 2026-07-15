@@ -19,7 +19,6 @@ from discord import app_commands
 
 from commands.match import MatchCommands
 from config import NEW_PLAYER_EXCLUSION_BOOST
-from database import Database
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -30,6 +29,7 @@ from services.match_service import MatchService
 from services.player_service import PlayerService
 from shuffler import BalancedShuffler
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 # =============================================================================
 # Helpers (hoisted from source files)

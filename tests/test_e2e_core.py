@@ -14,13 +14,13 @@ import json
 
 import pytest
 
-from database import Database
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
 from repositories.player_repository import PlayerRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.player_service import PlayerService
 from shuffler import BalancedShuffler
+from tests.repository_harness import RepositoryTestDatabase as Database
 from utils.formatting import JOPACOIN_EMOTE
 
 # Legacy Database.add_player() uses guild_id=0 by default; the win/loss-flow

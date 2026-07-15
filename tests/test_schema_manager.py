@@ -32,6 +32,27 @@ def test_schema_manager_initializes_tables(tmp_path):
         "economy_ledger_context",
     }
     assert required.issubset(tables)
+    assert {"wheel_wars", "war_bets"}.isdisjoint(tables)
+
+
+def test_schema_manager_drops_retired_wheel_war_tables(tmp_path):
+    db_path = str(tmp_path / "legacy-wheel-war.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE wheel_wars (war_id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE war_bets (bet_id INTEGER PRIMARY KEY)")
+
+    SchemaManager(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        remaining = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name IN ('wheel_wars', 'war_bets')
+            """
+        ).fetchall()
+
+    assert remaining == []
 
 
 def test_schema_manager_adds_region_columns(tmp_path):

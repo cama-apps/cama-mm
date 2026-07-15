@@ -233,8 +233,8 @@ class ProfileCommands(commands.Cog):
     def _get_prediction_service(self):
         return getattr(self.bot, "prediction_service", None)
 
-    def _get_pairings_repo(self):
-        return getattr(self.bot, "pairings_repo", None)
+    def _get_pairings_service(self):
+        return getattr(self.bot, "pairings_service", None)
 
     def _get_tip_service(self):
         return getattr(self.bot, "tip_service", None)
@@ -1188,10 +1188,10 @@ class ProfileCommands(commands.Cog):
         guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Teammates tab embed with pairwise statistics."""
-        pairings_repo = self._get_pairings_repo()
+        pairings_service = self._get_pairings_service()
         player_repo = self._get_player_repo()
 
-        if not pairings_repo or not player_repo:
+        if not pairings_service or not player_repo:
             return discord.Embed(
                 title="Error", description="Pairings data unavailable", color=COLOR_RED
             ), None
@@ -1211,6 +1211,15 @@ class ProfileCommands(commands.Cog):
 
         min_games = 3
         limit = 5
+        summary = await asyncio.to_thread(
+            functools.partial(
+                pairings_service.get_player_pairing_summary,
+                target_discord_id,
+                guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
+        )
 
         async def get_player_mention(discord_id: int) -> str:
             """Get a mention string for a player."""
@@ -1220,15 +1229,7 @@ class ProfileCommands(commands.Cog):
             return p.name if p else f"Unknown ({discord_id})"
 
         # Best Teammates (highest win rate with)
-        best_teammates = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_best_teammates,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        best_teammates = summary["best_teammates"]
         if best_teammates:
             lines = []
             for tm in best_teammates:
@@ -1246,15 +1247,7 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="🏆 Best Teammates", value="No data yet", inline=True)
 
         # Worst Teammates (lowest win rate with)
-        worst_teammates = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_worst_teammates,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        worst_teammates = summary["worst_teammates"]
         if worst_teammates:
             lines = []
             for tm in worst_teammates:
@@ -1275,15 +1268,7 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Dominates (best matchups against)
-        best_matchups = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_best_matchups,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        best_matchups = summary["best_matchups"]
         if best_matchups:
             lines = []
             for m in best_matchups:
@@ -1301,15 +1286,7 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="😈 Dominates", value="No data yet", inline=True)
 
         # Struggles Against (worst matchups)
-        worst_matchups = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_worst_matchups,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        worst_matchups = summary["worst_matchups"]
         if worst_matchups:
             lines = []
             for m in worst_matchups:
@@ -1330,15 +1307,7 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Most Played With
-        most_played_with = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_most_played_with,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        most_played_with = summary["most_played_with"]
         if most_played_with:
             lines = []
             for tm in most_played_with:
@@ -1356,15 +1325,7 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="👥 Most Played With", value="No data yet", inline=True)
 
         # Most Played Against
-        most_played_against = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_most_played_against,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        most_played_against = summary["most_played_against"]
         if most_played_against:
             lines = []
             for m in most_played_against:
@@ -1385,15 +1346,7 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Evenly Matched (teammates with ~50% win rate)
-        even_teammates = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_evenly_matched_teammates,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        even_teammates = summary["even_teammates"]
         if even_teammates:
             lines = []
             for tm in even_teammates:
@@ -1410,15 +1363,7 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="⚖️ Even Teammates", value="No data yet", inline=True)
 
         # Evenly Matched Opponents
-        even_opponents = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_evenly_matched_opponents,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-                limit=limit,
-            )
-        )
+        even_opponents = summary["even_opponents"]
         if even_opponents:
             lines = []
             for m in even_opponents:
@@ -1438,14 +1383,7 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Get totals for footer
-        counts = await asyncio.to_thread(
-            functools.partial(
-                pairings_repo.get_pairing_counts,
-                target_discord_id,
-                guild_id=guild_id,
-                min_games=min_games,
-            )
-        )
+        counts = summary["counts"]
         footer_parts = [f"Min {min_games} games"]
         if counts["unique_teammates"] > 0 or counts["unique_opponents"] > 0:
             footer_parts.append(

@@ -8,8 +8,8 @@ import pytest
 
 import remove_fake_users
 from config import NEW_PLAYER_EXCLUSION_BOOST
-from database import Database
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 def _expected_after_exclusions(exclusions: int) -> int:

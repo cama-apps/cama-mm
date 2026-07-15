@@ -317,7 +317,7 @@ def test_resolve_orderbook_settles_locked_market(
 ):
     """A market locked (betting closed) must be settleable via resolve_orderbook.
 
-    check_and_lock_expired / close_betting_early move a market to 'locked'.
+    Expiration checks and admin close paths move a market to 'locked'.
     The admin /predict resolve command calls resolve_orderbook. If the status
     guard in settle_prediction_orderbook only allows 'open', locked markets
     become permanently unresolvable — a dead-end for any market whose betting

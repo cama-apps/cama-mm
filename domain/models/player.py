@@ -89,14 +89,6 @@ class Player:
             return self.glicko_rating
 
         return self.mmr if self.mmr is not None else 0
-
-
-    def get_total_games(self) -> int:
-        """Get total games played."""
-        return self.wins + self.losses
-
-
-
     def __str__(self) -> str:
         mmr_str = f"{self.mmr}" if self.mmr else "No MMR"
         return f"{self.name} (MMR: {mmr_str}, W-L: {self.wins}-{self.losses})"

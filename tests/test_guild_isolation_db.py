@@ -16,9 +16,9 @@ import json
 
 import pytest
 
-from database import Database
 from repositories.match_repository import MatchRepository
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 GUILD_A = TEST_GUILD_ID
 GUILD_B = TEST_GUILD_ID_SECONDARY

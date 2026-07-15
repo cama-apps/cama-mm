@@ -25,11 +25,11 @@ import json
 
 import pytest
 
-from database import Database
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 def _seed(player_repo, ids, guild_id=TEST_GUILD_ID):

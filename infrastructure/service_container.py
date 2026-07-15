@@ -94,7 +94,7 @@ class ServiceContainer:
     def _init_database(self) -> None:
         from database import Database
 
-        self._components["db"] = Database(db_path=self.db_path)
+        self._components["database_runtime"] = Database(db_path=self.db_path)
 
     def _init_repositories(self) -> None:
         from repositories.bankruptcy_repository import BankruptcyRepository
@@ -535,7 +535,6 @@ class ServiceContainer:
         # Repositories accessed directly by cogs
         bot.player_repo = c["player_repo"]
         bot.match_repo = c["match_repo"]
-        bot.pairings_repo = c["pairings_repo"]
         bot.bankruptcy_repo = c["bankruptcy_repo"]
 
         # Services
