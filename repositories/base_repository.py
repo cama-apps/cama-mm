@@ -10,7 +10,7 @@ from abc import ABC
 from contextlib import contextmanager
 from typing import Any
 
-from database import Database
+from infrastructure.schema_manager import SchemaManager
 
 logger = logging.getLogger("cama_bot.repositories")
 
@@ -62,7 +62,10 @@ class BaseRepository(ABC):
         if db_path not in BaseRepository._schema_initialized_paths:
             with BaseRepository._schema_init_lock:
                 if db_path not in BaseRepository._schema_initialized_paths:
-                    Database(db_path)
+                    SchemaManager(
+                        db_path,
+                        use_uri=db_path.startswith("file:"),
+                    ).initialize()
                     BaseRepository._schema_initialized_paths.add(db_path)
 
     @staticmethod
@@ -120,7 +123,11 @@ class BaseRepository(ABC):
 
     def get_connection(self) -> sqlite3.Connection:
         """Get database connection with row factory enabled."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(
+            self.db_path,
+            uri=self.db_path.startswith("file:"),
+            check_same_thread=not self.db_path.startswith("file:"),
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")

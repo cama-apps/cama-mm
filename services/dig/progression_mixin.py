@@ -591,14 +591,6 @@ class ProgressionMixin:
     # Luminosity
     # ------------------------------------------------------------------
 
-    def calculate_decay(self, discord_id: int, guild_id) -> int:
-        """Return the number of blocks lazy decay would remove."""
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return 0
-        result = self._apply_lazy_decay()
-        return result.get("amount", 0)
-
     def get_shop(self, discord_id: int, guild_id) -> dict:
         """Return shop data: consumables, pickaxe upgrades, gear, inventory count."""
         inventory = self.dig_repo.get_inventory(discord_id, guild_id)
@@ -789,9 +781,6 @@ class ProgressionMixin:
 
         target_tunnel = dict(target_tunnel)
         target_tunnel["discord_id"] = target_id
-
-        # Apply lazy decay
-        self._apply_lazy_decay()
 
         target_depth = target_tunnel.get("depth", 0)
         layer = self._get_layer(target_depth)
@@ -1358,9 +1347,6 @@ class ProgressionMixin:
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
-        # Apply lazy decay
-        decay_info = self._apply_lazy_decay()
-
         # Gather data
         inventory = self.get_inventory(discord_id, guild_id)
         relics = self._get_equipped_relics_for_player(discord_id, guild_id)
@@ -1406,7 +1392,6 @@ class ProgressionMixin:
             "at_boss": at_boss,
             "queued_items": queued,
             "cooldown_remaining": cooldown,
-            "decay_info": decay_info,
             "prestige_level": tunnel.get("prestige_level", 0) or 0,
             "streak": tunnel.get("streak_days", 0) or 0,
             "pinnacle_foreshadow": pinnacle_foreshadow,

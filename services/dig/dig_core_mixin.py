@@ -130,7 +130,7 @@ class DigCoreMixin:
     # ── Layer Weather ────────────────────────────────────────────────
 
     def _build_parked_boss_return(
-        self, tunnel: dict, discord_id: int, guild_id, decay_info
+        self, tunnel: dict, discord_id: int, guild_id
     ) -> dict | None:
         """If the tunnel is already at a defeated-eligible boss boundary, return
         a boss-encounter result dict so /dig stops here without charging cooldown
@@ -169,12 +169,11 @@ class DigCoreMixin:
             items_used_ids=[],
             pickaxe_tier=self._get_active_pickaxe_tier(discord_id, guild_id, tunnel),
             tip="A boss blocks your path!",
-            decay_info=decay_info,
             luminosity_info=None,
         )
 
     def _execute_first_dig(
-        self, discord_id: int, guild_id, tunnel: dict, depth_before: int, now: int, today: str, decay_info
+        self, discord_id: int, guild_id, tunnel: dict, depth_before: int, now: int, today: str
     ) -> dict:
         """Run the first-ever dig for a tunnel: guaranteed safe, writes the
         initial depth/streak/run counters, awards small JC, returns a welcome
@@ -230,7 +229,6 @@ class DigCoreMixin:
             items_used_ids=[],
             pickaxe_tier=0,
             tip="Welcome to the mines! Use /dig again after the cooldown.",
-            decay_info=decay_info,
         )
 
     def _consume_streak_charm(self, discord_id: int, guild_id) -> bool:
@@ -689,7 +687,6 @@ class DigCoreMixin:
                 auto_purchases=p.get("auto_purchases", []),
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
-                decay_info=p["decay_info"],
                 luminosity_info=p["lum_info"],
                 weather=p["weather_info"],
             )
@@ -981,7 +978,6 @@ class DigCoreMixin:
             auto_purchases=p.get("auto_purchases", []),
             pickaxe_tier=p["pickaxe_tier"],
             tip=self._pick_tip(new_depth),
-            decay_info=p["decay_info"],
             luminosity_info=p["lum_info"],
             paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
             dynamite_bonus=dynamite_bonus,
@@ -1154,7 +1150,6 @@ class DigCoreMixin:
                 auto_purchases=p.get("auto_purchases", []),
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
-                decay_info=p["decay_info"],
                 luminosity_info=p["lum_info"],
                 weather=p["weather_info"],
             )
@@ -1370,7 +1365,6 @@ class DigCoreMixin:
                 auto_purchases=p.get("auto_purchases", []),
                 pickaxe_tier=p["pickaxe_tier"],
                 tip=self._pick_tip(new_depth),
-                decay_info=p["decay_info"],
                 luminosity_info=p["lum_info"],
                 paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
                 corruption=p["corruption"],

@@ -261,14 +261,6 @@ class DigService(
         return self.tunnel_naming_service.generate_tunnel_name()
 
     # ------------------------------------------------------------------
-    # Lazy Decay
-    # ------------------------------------------------------------------
-
-    def _apply_lazy_decay(self) -> dict:
-        """Decay is disabled. Returns a no-op result for all callers."""
-        return {"decayed": False, "amount": 0, "reason": None}
-
-    # ------------------------------------------------------------------
     # Core Dig
     # ------------------------------------------------------------------
 
@@ -412,10 +404,7 @@ class DigService(
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
-        # 2. Apply lazy decay
-        decay_info = self._apply_lazy_decay()
-
-        # 2a. Slow Drip relic: idle income since last dig (credited inline,
+        # 2. Slow Drip relic: idle income since last dig (credited inline,
         # surfaces only via balance change + audit log).
         self._claim_slow_drip(
             discord_id, guild_id,
@@ -424,7 +413,7 @@ class DigService(
 
         depth_before = tunnel.get("depth", 0)
 
-        # 2b. If the player is already parked at a boss boundary, surface the
+        # 2a. If the player is already parked at a boss boundary, surface the
         #     boss encounter immediately — cooldown and paid-dig gates would
         #     block access to the Fight button. Re-opening the view awards no
         #     JC, which closes the original farm exploit.
@@ -432,12 +421,12 @@ class DigService(
             boss_progress_check = self._get_boss_progress(tunnel)
             if self._at_boss_boundary(depth_before, boss_progress_check) is not None:
                 parked_return = self._build_parked_boss_return(
-                    tunnel, discord_id, guild_id, decay_info
+                    tunnel, discord_id, guild_id
                 )
                 if parked_return is not None:
                     return parked_return
 
-        # 2c. Hard cap: the deep refuses to yield further. Block dig
+        # 2b. Hard cap: the deep refuses to yield further. Block dig
         #     before any cost or cooldown is consumed so the player can
         #     prestige cleanly.
         if not is_first_dig and depth_before >= PRESTIGE_HARD_CAP:
@@ -460,7 +449,7 @@ class DigService(
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
             return self._execute_first_dig(
-                discord_id, guild_id, tunnel, depth_before, now, today, decay_info
+                discord_id, guild_id, tunnel, depth_before, now, today
             )
 
         auto_purchases = self._apply_auto_buy_for_dig(discord_id, guild_id, tunnel)
@@ -884,7 +873,6 @@ class DigService(
                 auto_purchases=auto_purchases,
                 pickaxe_tier=pickaxe_tier,
                 tip=self._pick_tip(new_depth),
-                decay_info=decay_info,
                 luminosity_info=lum_info,
                 weather=weather_info,
             )
@@ -1257,7 +1245,6 @@ class DigService(
             auto_purchases=auto_purchases,
             pickaxe_tier=pickaxe_tier,
             tip=self._pick_tip(new_depth),
-            decay_info=decay_info,
             luminosity_info=lum_info,
             paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
             dynamite_bonus=dynamite_bonus,
@@ -1311,7 +1298,6 @@ class DigService(
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
-        decay_info = self._apply_lazy_decay()
         depth_before = tunnel.get("depth", 0)
 
         # Parked-at-boss short-circuit: surface the encounter before the
@@ -1320,7 +1306,7 @@ class DigService(
             boss_progress_check = self._get_boss_progress(tunnel)
             if self._at_boss_boundary(depth_before, boss_progress_check) is not None:
                 parked_return = self._build_parked_boss_return(
-                    tunnel, discord_id, guild_id, decay_info,
+                    tunnel, discord_id, guild_id,
                 )
                 if parked_return is not None:
                     return parked_return, None
@@ -1336,7 +1322,7 @@ class DigService(
 
         if is_first_dig:
             return self._execute_first_dig(
-                discord_id, guild_id, tunnel, depth_before, now, today, decay_info,
+                discord_id, guild_id, tunnel, depth_before, now, today,
             ), None
 
         auto_purchases = self._apply_auto_buy_for_dig(discord_id, guild_id, tunnel)
@@ -1712,7 +1698,6 @@ class DigService(
             "today": today,
             "tunnel": tunnel,
             "depth_before": depth_before,
-            "decay_info": decay_info,
             "injury_advance_mod": injury_advance_mod,
             "items_used": items_used,
             "items_used_ids": items_used_ids,

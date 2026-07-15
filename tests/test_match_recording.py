@@ -11,7 +11,6 @@ import logging
 import pytest
 
 from config import JOPACOIN_EXCLUSION_REWARD, JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
-from database import Database
 from domain.models.team import Team
 from rating_system import CamaRatingSystem
 from repositories.bet_repository import BetRepository
@@ -20,6 +19,7 @@ from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 # =============================================================================
 # SHARED FIXTURES

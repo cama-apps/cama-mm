@@ -61,12 +61,10 @@ from utils.neon_terminal import (
     render_prediction_resolved,
     render_registration,
     render_rivalry_detected,
-    render_simultaneous_events,
     render_soft_avoid,
     render_soft_avoid_surveillance,
     render_streak,
     render_system_breach,
-    render_unanimous_wrong,
     render_wheel_bankrupt,
     render_win_streak_record,
 )
@@ -1602,26 +1600,6 @@ class NeonDegenService:
             logger.debug(f"neon on_100_bets_milestone error: {e}")
             return None
 
-    async def on_simultaneous_events(
-        self,
-        guild_id: int | None,
-        events: list[str],
-    ) -> NeonResult | None:
-        """Trigger when multiple gambling events fire at once. Layer 2 at 10%."""
-        try:
-            if not self._is_enabled():
-                return None
-            if len(events) < 2:
-                return None
-            if not self._roll(0.10):
-                return None
-
-            text = render_simultaneous_events(len(events), events)
-            return NeonResult(layer=2, text_block=text)
-        except Exception as e:
-            logger.debug(f"neon on_simultaneous_events error: {e}")
-            return None
-
     async def on_captain_symmetry(
         self,
         guild_id: int | None,
@@ -1646,37 +1624,6 @@ class NeonDegenService:
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
             logger.debug(f"neon on_captain_symmetry error: {e}")
-            return None
-
-    async def on_unanimous_wrong(
-        self,
-        guild_id: int | None,
-        consensus_percentage: float,
-        winning_side: str,
-        loser_count: int,
-    ) -> NeonResult | None:
-        """Trigger when 90%+ consensus prediction loses. Layer 3 GIF at 20%."""
-        try:
-            if not self._is_enabled():
-                return None
-            if consensus_percentage < 90:
-                return None
-            if not self._roll(0.20):
-                return None
-
-            # Layer 3: Market crash GIF
-            try:
-                from utils.neon_drawing import create_unanimous_wrong_gif
-                gif = await asyncio.to_thread(create_unanimous_wrong_gif, consensus_percentage, winning_side, loser_count)
-                text = render_unanimous_wrong(consensus_percentage, winning_side, loser_count)
-                return NeonResult(layer=3, text_block=text, gif_file=gif)
-            except Exception as e:
-                logger.debug(f"Unanimous wrong GIF failed: {e}")
-                # Fall back to text only
-                text = render_unanimous_wrong(consensus_percentage, winning_side, loser_count)
-                return NeonResult(layer=2, text_block=text)
-        except Exception as e:
-            logger.debug(f"neon on_unanimous_wrong error: {e}")
             return None
 
     async def on_match_enriched(

@@ -137,14 +137,6 @@ class Team:
 
         return off_role_count
 
-    def _count_off_roles(self, players: list[Player], role_assignments: list[str]) -> int:
-        """Internal helper to count off-role players for a permutation."""
-        off_role_count = 0
-        for player, role in zip(players, role_assignments):
-            if not player.preferred_roles or role not in player.preferred_roles:
-                off_role_count += 1
-        return off_role_count
-
     def _get_player_roles_key(self) -> tuple[tuple[str, ...], ...]:
         """Create a hashable key from player preferred roles for caching."""
         return tuple(tuple(p.preferred_roles) if p.preferred_roles else () for p in self.players)
@@ -203,24 +195,6 @@ class Team:
         cores = distribution["1"] + distribution["2"] + distribution["3"]
         supports = distribution["4"] + distribution["5"]
         return {"cores": cores, "supports": supports, "unknown": distribution["unknown"]}
-
-    def has_balanced_roles(self, target_cores: int = 3, target_supports: int = 2) -> bool:
-        """Check if team has balanced role distribution."""
-        summary = self.get_role_distribution_summary()
-        return summary["cores"] == target_cores and summary["supports"] == target_supports
-
-    def get_role_balance_score(self) -> float:
-        """
-        Calculate a score for how well-balanced the roles are.
-        Lower is better (0 = perfectly balanced).
-        """
-        distribution = self.get_role_distribution()
-        target_per_role = 1
-        penalty = 0
-        for role in self.ROLES:
-            count = distribution.get(role, 0)
-            penalty += abs(count - target_per_role)
-        return penalty
 
     def get_player_by_role(
         self,

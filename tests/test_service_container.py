@@ -90,7 +90,6 @@ class TestServiceContainerBotExposure:
         expected = {
             "player_repo": "player_repo",
             "match_repo": "match_repo",
-            "pairings_repo": "pairings_repo",
             "bankruptcy_repo": "bankruptcy_repo",
             "player_service": "player_service",
             "match_service": "match_service",
@@ -146,6 +145,7 @@ class TestServiceContainerBotExposure:
             "mafia_repo",
             "notification_repo",
             "package_deal_repo",
+            "pairings_repo",
             "prediction_repo",
             "protection_repo",
             "role_emojis",

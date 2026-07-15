@@ -283,39 +283,6 @@ class PlayerService:
         )
         return self.player_repo.get_balance(discord_id, guild_id)
 
-    def set_balance(
-        self,
-        discord_id: int,
-        guild_id: int,
-        amount: int,
-        *,
-        source: str | None = None,
-        actor_id: int | None = None,
-        related_type: str | None = None,
-        related_id: str | int | None = None,
-        reason: str | None = None,
-        metadata: dict | str | None = None,
-    ) -> None:
-        """
-        Set a player's jopacoin balance to a specific amount.
-
-        Args:
-            discord_id: Player's Discord ID
-            guild_id: Guild ID
-            amount: New balance amount
-        """
-        self.player_repo.update_balance(
-            discord_id,
-            guild_id,
-            amount,
-            source=source,
-            actor_id=actor_id,
-            related_type=related_type,
-            related_id=related_id,
-            reason=reason,
-            metadata=metadata,
-        )
-
     # --- Exclusion count operations ---
 
     def get_exclusion_count(self, discord_id: int, guild_id: int) -> int:

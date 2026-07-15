@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 import pytest
 
-from database import Database
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from shuffler import BalancedShuffler
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 # =============================================================================
 # Section: OpenDota integration (from test_e2e_opendota.py)

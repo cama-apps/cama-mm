@@ -7,10 +7,10 @@ Tests for the new match storage invariants:
 
 import pytest
 
-from database import Database
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 TEST_GUILD_ID = 123
 

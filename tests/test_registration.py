@@ -5,10 +5,10 @@ Tests for registration command logic.
 
 import pytest
 
-from database import Database
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 class TestRoleDeduplication:

@@ -27,6 +27,7 @@ from services.garnishment_service import GarnishmentService
 from services.guild_config_service import GuildConfigService
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.match_service import MatchService
+from tests.repository_harness import RepositoryTestDatabase
 
 # =============================================================================
 # CENTRALIZED CONSTANTS
@@ -166,7 +167,7 @@ def test_db(temp_db_path):
 
     Use this fixture instead of defining custom fixtures with time.sleep().
     """
-    return Database(temp_db_path)
+    return RepositoryTestDatabase(temp_db_path)
 
 
 @pytest.fixture
@@ -176,7 +177,7 @@ def test_db_with_schema(repo_db_path):
     Prefer this over ``test_db`` when a test needs tables to exist up front
     (e.g., record_match, player mutations).
     """
-    return Database(repo_db_path)
+    return RepositoryTestDatabase(repo_db_path)
 
 
 @pytest.fixture
@@ -185,7 +186,7 @@ def test_db_memory():
 
     Use this when you don't need persistence across restarts.
     """
-    return Database(":memory:")
+    return RepositoryTestDatabase(":memory:")
 
 
 # =============================================================================
@@ -288,4 +289,3 @@ def match_service_with_betting(
         betting_service=betting_service,
         pairings_repo=pairings_repository,
     )
-

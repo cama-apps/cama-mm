@@ -6,10 +6,11 @@ Tests the _build_teammates_embed method which displays pairwise statistics.
 
 import pytest
 
-from database import Database
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
+from services.pairings_service import PairingsService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture
@@ -56,7 +57,7 @@ class MockBot:
     """Mock Discord bot for testing."""
 
     def __init__(self, pairings_repo=None, player_repo=None):
-        self.pairings_repo = pairings_repo
+        self.pairings_service = PairingsService(pairings_repo) if pairings_repo else None
         self.player_repo = player_repo
 
 

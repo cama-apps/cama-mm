@@ -6,11 +6,11 @@ import pytest
 
 from commands.profile import ProfileCommands
 from config import PREDICTION_CONTRACT_VALUE
-from database import Database
 from repositories.player_repository import PlayerRepository
 from repositories.prediction_repository import PredictionRepository
 from services.prediction_service import PredictionService
 from tests.conftest import TEST_GUILD_ID
+from tests.repository_harness import RepositoryTestDatabase as Database
 
 
 @pytest.fixture

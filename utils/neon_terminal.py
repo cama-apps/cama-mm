@@ -1217,26 +1217,6 @@ def bets_milestone_box(name: str, total_bets: int) -> str:
     return "\n".join(lines)
 
 
-# Simultaneous Events templates (Layer 2)
-def simultaneous_events_box(event_count: int, events: list[str]) -> str:
-    """Layer 2 ASCII art for multiple simultaneous events."""
-    lines = [
-        f"{YELLOW} SYSTEM OVERLOAD{RESET}",
-        f"{DIM}{'=' * 36}{RESET}",
-        f"{DIM}Concurrent events:{RESET} {YELLOW}{event_count}{RESET}",
-        f"{DIM}{'=' * 36}{RESET}",
-        "",
-    ]
-    for event in events[:4]:  # Max 4 events shown
-        lines.append(f"{DIM}[{_ts()}] {event}{RESET}")
-    lines.extend([
-        "",
-        f"{DIM}Processing... Status:{RESET} {YELLOW}OVERWHELMED{RESET}",
-        f"{DIM}({RESET}{corrupt_text('not really')}{DIM}){RESET}",
-    ])
-    return "\n".join(lines)
-
-
 # Captain Symmetry templates (Layer 1)
 CAPTAIN_SYMMETRY_TEMPLATES = [
     lambda c1, c2, diff: f"{DIM}[JOPA-T] MIRROR_MATCH detected. Captains within {diff} rating. The algorithm cannot predict this one.{RESET}",
@@ -1245,26 +1225,6 @@ CAPTAIN_SYMMETRY_TEMPLATES = [
     lambda c1, c2, diff: f"{DIM}[JOPA-T] Symmetric matchup: {c1} ({diff} from {c2}). Pure {corrupt_text('chaos')}.{RESET}",
     lambda c1, c2, diff: f"{DIM}[{_ts()}] PARITY_DETECTED | Captain delta: {diff}. Coin flip territory.{RESET}",
 ]
-
-
-# Unanimous Wrong templates (Layer 3 GIF)
-def unanimous_wrong_box(consensus_pct: float, winning_side: str, loser_count: int) -> str:
-    """Layer 3 ASCII art for 90%+ consensus prediction that loses."""
-    lines = [
-        f"{RED} CONSENSUS COLLAPSE{RESET}",
-        f"{DIM}{'=' * 36}{RESET}",
-        f"{DIM}Consensus:{RESET} {RED}{consensus_pct:.0f}%{RESET} predicted wrong",
-        f"{DIM}Actual winner:{RESET} {GREEN}{winning_side}{RESET}",
-        f"{DIM}Losers:{RESET} {RED}{loser_count}{RESET}",
-        f"{DIM}{'=' * 36}{RESET}",
-        "",
-        f"{DIM}[{_ts()}] {RESET}{RED}MARKET_FAILURE{RESET}",
-        f"{DIM}[{_ts()}] The crowd was confident.{RESET}",
-        f"{DIM}[{_ts()}] The crowd was {RESET}{RED}wrong{RESET}{DIM}.{RESET}",
-        "",
-        f"{DIM}As usual.{RESET}",
-    ]
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1321,17 +1281,7 @@ def render_bets_milestone(name: str, total_bets: int) -> str:
     return ansi_block(bets_milestone_box(name, total_bets))
 
 
-def render_simultaneous_events(event_count: int, events: list[str]) -> str:
-    """Render a Layer 2 simultaneous events box."""
-    return ansi_block(simultaneous_events_box(event_count, events))
-
-
 def render_captain_symmetry(captain1: str, captain2: str, diff: int) -> str:
     """Render a Layer 1 captain symmetry one-liner."""
     template = random.choice(CAPTAIN_SYMMETRY_TEMPLATES)
     return ansi_block(template(captain1, captain2, diff))
-
-
-def render_unanimous_wrong(consensus_pct: float, winning_side: str, loser_count: int) -> str:
-    """Render a Layer 3 unanimous wrong box."""
-    return ansi_block(unanimous_wrong_box(consensus_pct, winning_side, loser_count))
