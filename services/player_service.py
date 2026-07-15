@@ -283,6 +283,24 @@ class PlayerService:
         )
         return self.player_repo.get_balance(discord_id, guild_id)
 
+    def try_purchase_pingedash(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        now: int,
+        cooldown_seconds: int,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically charge for /pingedash and claim its persistent cooldown."""
+        return self.player_repo.try_purchase_pingedash(
+            discord_id,
+            guild_id,
+            cost=cost,
+            now=now,
+            cooldown_seconds=cooldown_seconds,
+        )
+
     # --- Exclusion count operations ---
 
     def get_exclusion_count(self, discord_id: int, guild_id: int) -> int:

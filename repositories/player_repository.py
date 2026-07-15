@@ -2392,6 +2392,107 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             }
 
+    def try_purchase_pingedash(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        now: int,
+        cooldown_seconds: int,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically charge for /pingedash and claim its persistent cooldown."""
+        if cost < 0:
+            raise ValueError("Pingedash cost cannot be negative")
+        if cooldown_seconds < 0:
+            raise ValueError("Pingedash cooldown cannot be negative")
+
+        guild_id = self.normalize_guild_id(guild_id)
+        cooldown_cutoff = now - cooldown_seconds
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            self._set_economy_ledger_context(
+                cursor,
+                source="pingedash",
+                actor_id=discord_id,
+                related_type="command",
+                related_id="pingedash",
+                reason="pingedash purchase",
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        last_pingedash = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND COALESCE(jopacoin_balance, 0) >= ?
+                      AND (last_pingedash IS NULL OR last_pingedash <= ?)
+                    """,
+                    (cost, now, discord_id, guild_id, cost, cooldown_cutoff),
+                )
+                purchased = cursor.rowcount > 0
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
+            if purchased:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    (discord_id, guild_id),
+                )
+                balance = cursor.execute(
+                    """
+                    SELECT jopacoin_balance
+                    FROM players
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (discord_id, guild_id),
+                ).fetchone()["jopacoin_balance"]
+                return {
+                    "success": True,
+                    "reason": None,
+                    "balance": int(balance or 0),
+                    "cooldown_ends_at": now + cooldown_seconds,
+                }
+
+            row = cursor.execute(
+                """
+                SELECT jopacoin_balance, last_pingedash
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, guild_id),
+            ).fetchone()
+            if row is None:
+                return {
+                    "success": False,
+                    "reason": "not_registered",
+                    "balance": None,
+                    "cooldown_ends_at": None,
+                }
+
+            balance = int(row["jopacoin_balance"] or 0)
+            last_pingedash = row["last_pingedash"]
+            if last_pingedash is not None and int(last_pingedash) > cooldown_cutoff:
+                return {
+                    "success": False,
+                    "reason": "on_cooldown",
+                    "balance": balance,
+                    "cooldown_ends_at": int(last_pingedash) + cooldown_seconds,
+                }
+            return {
+                "success": False,
+                "reason": "insufficient_balance",
+                "balance": balance,
+                "cooldown_ends_at": None,
+            }
+
     def get_last_wheel_spin(self, discord_id: int, guild_id: int) -> int | None:
         """
         Get the timestamp of a player's last wheel spin.

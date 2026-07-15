@@ -22,6 +22,16 @@ def _parse_int(env_var: str, default: int) -> int:
         return default
 
 
+def _parse_optional_int(env_var: str) -> int | None:
+    raw = os.getenv(env_var)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _parse_float(env_var: str, default: float) -> float:
     raw = os.getenv(env_var)
     if raw is None:
@@ -195,6 +205,9 @@ WITCHS_CURSE_LOSS_TRIGGER_PCT = _parse_int("WITCHS_CURSE_LOSS_TRIGGER_PCT", 25)
 WITCHS_CURSE_COOLDOWN_SECONDS = _parse_int("WITCHS_CURSE_COOLDOWN_SECONDS", 3600)  # 60-min per-target cap
 SHOP_DOUBLE_OR_NOTHING_COST = _parse_int("SHOP_DOUBLE_OR_NOTHING_COST", 50)
 DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000)  # 30 days
+PINGEDASH_COST = _parse_int("PINGEDASH_COST", 10)
+PINGEDASH_COOLDOWN_SECONDS = _parse_int("PINGEDASH_COOLDOWN_SECONDS", 24 * 60 * 60)
+PINGEDASH_TARGET_USER_ID = _parse_optional_int("PINGEDASH_TARGET_USER_ID")
 
 # Soft Avoid configuration
 SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 700)  # Cost to soft avoid a player

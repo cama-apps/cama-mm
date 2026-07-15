@@ -14,7 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import LEVERAGE_TIERS
+from config import LEVERAGE_TIERS, PINGEDASH_COST
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
@@ -918,6 +918,7 @@ class InfoCommands(commands.Cog):
                 "`/mybets` - View your active bets and potential payout\n"
                 "`/balance` - Check your jopacoin balance and debt\n"
                 "`/paydebt` - Help another player pay off their debt (be a philanthropist!)\n"
+                f"`/pingedash` - Spend {PINGEDASH_COST} jopacoin to send the Pingedash (24h cooldown)\n"
                 "`/bankruptcy` - Declare bankruptcy (clears debt, 1 week cooldown, 5 game penalty)"
             ),
             inline=False,

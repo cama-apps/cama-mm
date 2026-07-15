@@ -482,6 +482,8 @@ class SchemaManager:
             ("add_next_match_pot_to_nonprofit_fund", self._migration_add_next_match_pot_to_nonprofit_fund),
             # Remove storage left behind by the retired Wheel War feature.
             ("drop_retired_wheel_war_tables", self._migration_drop_retired_wheel_war_tables),
+            # Persistent per-guild cooldown for the paid /pingedash command.
+            ("add_last_pingedash_to_players", self._migration_add_last_pingedash_to_players),
         ]
 
     # --- Migrations ---
@@ -494,6 +496,9 @@ class SchemaManager:
     def _migration_drop_retired_wheel_war_tables(self, cursor) -> None:
         cursor.execute("DROP TABLE IF EXISTS war_bets")
         cursor.execute("DROP TABLE IF EXISTS wheel_wars")
+
+    def _migration_add_last_pingedash_to_players(self, cursor) -> None:
+        self._add_column_if_not_exists(cursor, "players", "last_pingedash", "INTEGER")
 
     def _migration_add_glicko_columns(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "glicko_rating", "REAL")

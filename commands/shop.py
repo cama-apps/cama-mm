@@ -21,6 +21,9 @@ from config import (
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
     HOSTILE_LOSS_MIN_BALANCE,
     PACKAGE_DEAL_GAMES_DURATION,
+    PINGEDASH_COOLDOWN_SECONDS,
+    PINGEDASH_COST,
+    PINGEDASH_TARGET_USER_ID,
     SHOP_ANNOUNCE_COST,
     SHOP_ANNOUNCE_TARGET_COST,
     SHOP_DOUBLE_OR_NOTHING_COST,
@@ -61,6 +64,7 @@ logger = logging.getLogger("cama_bot.commands.shop")
 SOUL_HARVEST_COST = 25
 SOUL_HARVEST_DRAIN_PER_TARGET = 2
 SOUL_HARVEST_BONUS_DRAIN_CHANCE = 0.20
+PINGEDASH_TENOR_URL = "https://tenor.com/view/hiash-gif-25282310"
 
 
 def _protection_result_int(result, field: str, default: int = 0) -> int:
@@ -329,6 +333,71 @@ class ShopCommands(commands.Cog):
             await interaction.response.send_message(
                 "Recalibration is on cooldown.", ephemeral=True
             )
+
+    @app_commands.command(
+        name="pingedash",
+        description=f"Spend {PINGEDASH_COST} jopacoin to send the Pingedash",
+    )
+    @require_guild
+    async def pingedash(self, interaction: discord.Interaction):
+        """Buy and send the Pingedash."""
+        await self._handle_pingedash(interaction)
+
+    async def _handle_pingedash(self, interaction: discord.Interaction) -> None:
+        """Charge for Pingedash, claim its cooldown, and send the Tenor embed."""
+        target_user_id = PINGEDASH_TARGET_USER_ID
+        if target_user_id is None or target_user_id <= 0:
+            await interaction.response.send_message(
+                "Pingedash is unavailable because its target user is not configured.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id
+        now = int(time.time())
+        result = await asyncio.to_thread(
+            self.player_service.try_purchase_pingedash,
+            user_id,
+            guild_id,
+            cost=PINGEDASH_COST,
+            now=now,
+            cooldown_seconds=PINGEDASH_COOLDOWN_SECONDS,
+        )
+
+        if not result["success"]:
+            reason = result["reason"]
+            if reason == "not_registered":
+                message = "You need to `/player register` before using `/pingedash`."
+            elif reason == "on_cooldown":
+                message = (
+                    "Pingedash is on cooldown. You can use it again "
+                    f"<t:{result['cooldown_ends_at']}:R>."
+                )
+            elif reason == "insufficient_balance":
+                message = (
+                    f"You need {PINGEDASH_COST} {JOPACOIN_EMOTE} for Pingedash, "
+                    f"but you only have {result['balance']}."
+                )
+            else:
+                message = "Pingedash is unavailable right now."
+            await safe_followup(interaction, content=message, ephemeral=True)
+            return
+
+        allowed_mentions = discord.AllowedMentions(
+            everyone=False,
+            users=[discord.Object(id=target_user_id)],
+            roles=False,
+            replied_user=False,
+        )
+        await safe_followup(
+            interaction,
+            content=f"<@{target_user_id}>\n{PINGEDASH_TENOR_URL}",
+            allowed_mentions=allowed_mentions,
+        )
 
     async def _handle_recalibrate(self, interaction: discord.Interaction):
         """Handle the recalibration purchase."""
