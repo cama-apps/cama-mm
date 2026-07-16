@@ -1,7 +1,8 @@
-"""Tests for channel-activity tracking on PlayerRepository.
+"""Tests for lottery-activity tracking on PlayerRepository.
 
-Covers the last_active_at bump path, the combined lottery-eligibility read, and
-the lottery-selection query now counting channel presence alongside match play.
+Covers the last_active_at bump path (bets), the slash-command log, the combined
+lottery-eligibility read, and the lottery-selection query counting all of them
+alongside match play.
 """
 
 import sqlite3
@@ -134,3 +135,49 @@ class TestLotteryGateCountsActivity:
         eligible = {row["discord_id"] for row in
                     player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID, ACTIVITY_DAYS)}
         assert 3 not in eligible
+
+
+def _epoch(days_ago: int) -> int:
+    return int((datetime.now(UTC) - timedelta(days=days_ago)).timestamp())
+
+
+class TestCommandActivity:
+    def test_recent_command_makes_active(self, player_repo):
+        """A recent slash command alone makes a player active (no match/bet)."""
+        _register(player_repo, 1)
+        player_repo.record_command_use(1, TEST_GUILD_ID)
+
+        assert player_repo.is_active_for_lottery(1, TEST_GUILD_ID, ACTIVITY_DAYS)
+
+    def test_recent_command_appears_in_lottery(self, player_repo):
+        """A recent command qualifies a player in the lottery gate."""
+        _register(player_repo, 1)
+        player_repo.record_command_use(1, TEST_GUILD_ID)
+
+        eligible = {row["discord_id"] for row in
+                    player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID, ACTIVITY_DAYS)}
+        assert 1 in eligible
+
+    def test_old_command_does_not_make_active(self, player_repo):
+        """A command older than the window does not qualify."""
+        _register(player_repo, 1)
+        player_repo.record_command_use(1, TEST_GUILD_ID, used_at=_epoch(30))
+
+        assert not player_repo.is_active_for_lottery(1, TEST_GUILD_ID, ACTIVITY_DAYS)
+
+    def test_upsert_keeps_latest_time(self, player_repo):
+        """A newer command time overrides an older one; older never regresses it."""
+        _register(player_repo, 1)
+        player_repo.record_command_use(1, TEST_GUILD_ID, used_at=_epoch(0))
+        player_repo.record_command_use(1, TEST_GUILD_ID, used_at=_epoch(30))  # older, ignored
+
+        assert player_repo.is_active_for_lottery(1, TEST_GUILD_ID, ACTIVITY_DAYS)
+
+    def test_command_activity_is_guild_scoped(self, player_repo):
+        """A command in one guild doesn't activate the user in another."""
+        _register(player_repo, 1, TEST_GUILD_ID)
+        _register(player_repo, 1, TEST_GUILD_ID_SECONDARY)
+        player_repo.record_command_use(1, TEST_GUILD_ID)
+
+        assert player_repo.is_active_for_lottery(1, TEST_GUILD_ID, ACTIVITY_DAYS)
+        assert not player_repo.is_active_for_lottery(1, TEST_GUILD_ID_SECONDARY, ACTIVITY_DAYS)

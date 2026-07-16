@@ -484,9 +484,12 @@ class SchemaManager:
             ("drop_retired_wheel_war_tables", self._migration_drop_retired_wheel_war_tables),
             # Persistent per-guild cooldown for the paid /pingedash command.
             ("add_last_pingedash_to_players", self._migration_add_last_pingedash_to_players),
-            # Track most recent text/voice channel presence (periodic sweeps) so
-            # lottery eligibility counts hanging out, not just playing matches.
+            # Most recent engagement timestamp (e.g. placing a bet), so lottery
+            # eligibility counts activity, not just playing matches.
             ("add_last_active_at_to_players", self._migration_add_last_active_at_to_players),
+            # Per-player last slash-command time, so using any command keeps a
+            # player lottery-active. Read live at disbursement and on /profile.
+            ("create_command_activity_table", self._migration_create_command_activity_table),
         ]
 
     # --- Migrations ---
@@ -948,12 +951,12 @@ class SchemaManager:
 
     def _migration_add_last_active_at_to_players(self, cursor) -> None:
         """
-        Add last_active_at to players to track most recent text/voice presence.
+        Add last_active_at to players for most-recent engagement (e.g. bets).
 
-        Bumped by periodic channel-activity sweeps. Kept separate from
-        last_match_date (which has other readers) and combined only at read
-        time for lottery eligibility. Backfill from the best signal we already
-        have so pre-existing players aren't instantly counted as inactive.
+        Kept separate from last_match_date (which has other readers) and
+        combined only at read time for lottery eligibility. Backfill from the
+        best signal we already have so pre-existing players aren't instantly
+        counted as inactive.
         """
         self._add_column_if_not_exists(cursor, "players", "last_active_at", "TIMESTAMP")
         cursor.execute(
@@ -961,6 +964,24 @@ class SchemaManager:
             UPDATE players
             SET last_active_at = COALESCE(last_active_at, last_match_date, created_at)
             WHERE last_active_at IS NULL
+            """
+        )
+
+    def _migration_create_command_activity_table(self, cursor) -> None:
+        """
+        One row per (guild, player): the unix time of their last slash command.
+
+        Upserted on each command (tiny write) and read live by the lottery
+        eligibility check, so using any command keeps a player active.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS command_activity (
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                discord_id   INTEGER NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, discord_id)
+            )
             """
         )
 

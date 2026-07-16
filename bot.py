@@ -98,13 +98,6 @@ _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
 
-# Users who ran a slash command since the last daily activity rollup. Held in
-# memory (no per-interaction DB write) and drained once per game-day (4 AM PST)
-# into players.last_active_at for lottery eligibility.
-_pending_command_activity: set[tuple[int | None, int]] = set()
-_activity_rollup_task: asyncio.Task | None = None
-
-
 def _log_task_exit(name: str):
     """Done-callback factory: surface any unexpected task exit to the log.
 
@@ -173,54 +166,6 @@ async def _supervised_loop(name: str, body) -> None:
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 300)
-
-
-def _seconds_until_next_activity_rollup(now=None) -> float:
-    """Seconds until the next 4 AM PST game-day rollover (12:00 UTC), matching
-    the /dig day boundary in utils/game_date.py."""
-    import datetime as _dt
-
-    now = now or _dt.datetime.now(_dt.UTC)
-    target = now.replace(hour=12, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += _dt.timedelta(days=1)
-    return (target - now).total_seconds()
-
-
-def _run_activity_rollup() -> int:
-    """Drain the pending command-activity set and bump last_active_at for those
-    registered players, grouped by guild. Unregistered IDs no-op in the repo.
-    Returns the number of (guild, user) entries processed."""
-    player_repo = getattr(bot, "player_repo", None)
-    if player_repo is None or not _pending_command_activity:
-        return 0
-    pending = list(_pending_command_activity)
-    _pending_command_activity.clear()
-    by_guild: dict[int | None, list[int]] = {}
-    for guild_id, user_id in pending:
-        by_guild.setdefault(guild_id, []).append(user_id)
-    for guild_id, user_ids in by_guild.items():
-        try:
-            player_repo.bump_last_active_many(user_ids, guild_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("activity rollup bump failed for guild %s", guild_id)
-    return len(pending)
-
-
-async def _activity_rollup_loop() -> None:
-    """Once per game-day (4 AM PST), roll the day's command activity into
-    lottery eligibility. No-ops when ACTIVITY_TRACKING_ENABLED is False."""
-    if not ACTIVITY_TRACKING_ENABLED:
-        return
-    await bot.wait_until_ready()
-    logger.info("activity rollup loop started")
-    while not bot.is_closed():
-        await asyncio.sleep(_seconds_until_next_activity_rollup())
-        try:
-            count = await asyncio.to_thread(_run_activity_rollup)
-            logger.info("activity rollup: bumped %d command users", count)
-        except Exception as ex:  # noqa: BLE001
-            logger.exception("activity rollup error: %s", ex)
 
 
 async def _prediction_refresh_loop() -> None:
@@ -843,14 +788,6 @@ async def on_ready():
         )
         _manashop_debt_task.add_done_callback(_log_task_exit("manashop_debt"))
 
-    # Daily rollup of slash-command activity into lottery eligibility (4 AM PST).
-    global _activity_rollup_task
-    if ACTIVITY_TRACKING_ENABLED and (_activity_rollup_task is None or _activity_rollup_task.done()):
-        _activity_rollup_task = bot.loop.create_task(
-            _supervised_loop("activity_rollup", _activity_rollup_loop)
-        )
-        _activity_rollup_task.add_done_callback(_log_task_exit("activity_rollup"))
-
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:
         guild_ids = [guild.id for guild in bot.guilds]
@@ -892,20 +829,24 @@ async def on_interaction(interaction: discord.Interaction):
         return
     command = interaction.command
     usage_monitor.record_command(getattr(command, "qualified_name", None) or getattr(command, "name", None))
-    _note_command_activity(interaction)
+    await _record_command_activity(interaction)
 
 
-def _note_command_activity(interaction: discord.Interaction) -> None:
-    """Record (in memory) that a user ran a command, for the daily activity
-    rollup. No DB write here — _run_activity_rollup batches these once per
-    game-day. Best-effort: never disrupt the command."""
+async def _record_command_activity(interaction: discord.Interaction) -> None:
+    """Record the user's last command time so any command keeps them
+    lottery-active. One tiny upsert per command; read live at disbursement and
+    on /profile. Best-effort — never disrupt the command."""
     if not ACTIVITY_TRACKING_ENABLED:
         return
+    player_repo = getattr(bot, "player_repo", None)
     user = getattr(interaction, "user", None)
-    if user is None:
+    if player_repo is None or user is None:
         return
     guild_id = interaction.guild.id if interaction.guild else None
-    _pending_command_activity.add((guild_id, user.id))
+    try:
+        await asyncio.to_thread(player_repo.record_command_use, user.id, guild_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to record command activity for %s", user.id, exc_info=True)
 
 
 def _is_sword_emoji(emoji) -> bool:

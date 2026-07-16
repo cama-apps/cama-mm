@@ -274,6 +274,13 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def record_command_use(
+        self, discord_id: int, guild_id: int, used_at: int | None = None
+    ) -> None:
+        """Record a player's last slash-command time (upsert), read for activity."""
+        ...
+
+    @abstractmethod
     def is_active_for_lottery(
         self, discord_id: int, guild_id: int, activity_days: int
     ) -> bool:

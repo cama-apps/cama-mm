@@ -580,6 +580,34 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     (timestamp, discord_id, guild_id),
                 )
 
+    def record_command_use(
+        self, discord_id: int, guild_id: int, used_at: int | None = None
+    ) -> None:
+        """
+        Record that a player used a slash command (upsert last-used time).
+
+        Keeps a single row per (guild, player). Read live by
+        ``is_active_for_lottery`` / the lottery gate, so using any command keeps
+        a player lottery-active. ``used_at`` is unix epoch seconds; defaults to
+        now. The conflict guard keeps the stored time monotonic.
+        """
+        import time
+
+        guild_id = self.normalize_guild_id(guild_id)
+        ts = int(used_at if used_at is not None else time.time())
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO command_activity (guild_id, discord_id, last_used_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, discord_id)
+                DO UPDATE SET last_used_at = excluded.last_used_at
+                WHERE excluded.last_used_at > command_activity.last_used_at
+                """,
+                (guild_id, discord_id, ts),
+            )
+
     def bump_last_active_many(
         self, discord_ids: list[int], guild_id: int, timestamp: str | None = None
     ) -> int:
@@ -587,11 +615,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Bump last_active_at for the given players in one transaction.
 
         Only rows that exist for (discord_id, guild_id) are updated, so
-        unregistered IDs are silently ignored — this is how channel-activity
-        sweeps bump only registered players without a separate lookup. The
-        ``last_active_at < ?`` guard keeps the write monotonic and idempotent
-        under overlapping sweeps. ``timestamp`` must be an ISO-8601 UTC string;
-        defaults to now (UTC).
+        unregistered IDs are silently ignored. The ``last_active_at < ?`` guard
+        keeps the write monotonic and idempotent. ``timestamp`` must be an
+        ISO-8601 UTC string; defaults to now (UTC).
 
         Returns the driver-reported affected-row count (best-effort; do not
         rely on it for correctness).
@@ -619,25 +645,33 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         self, discord_id: int, guild_id: int, activity_days: int
     ) -> bool:
         """
-        True if the player played a match OR was present in a text/voice
-        channel within the last ``activity_days`` days.
-
-        Combines last_match_date and last_active_at at read time (whichever is
-        more recent), matching the lottery eligibility gate exactly.
+        True if the player did anything within the last ``activity_days`` days:
+        played a match, placed a bet (last_active_at), or used any slash command
+        (command_activity). Read live, so this is always current at disbursement
+        and on /profile — matching the lottery eligibility gate exactly.
         """
         from datetime import datetime, timedelta
 
         guild_id = self.normalize_guild_id(guild_id)
-        cutoff = (datetime.now(UTC) - timedelta(days=activity_days)).isoformat()
+        now = datetime.now(UTC)
+        iso_cutoff = (now - timedelta(days=activity_days)).isoformat()
+        epoch_cutoff = int((now - timedelta(days=activity_days)).timestamp())
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT 1 FROM players
-                WHERE discord_id = ? AND guild_id = ?
-                  AND MAX(COALESCE(last_match_date, ''), COALESCE(last_active_at, '')) >= ?
+                SELECT 1 FROM players p
+                WHERE p.discord_id = ? AND p.guild_id = ?
+                  AND (
+                    MAX(COALESCE(p.last_match_date, ''), COALESCE(p.last_active_at, '')) >= ?
+                    OR EXISTS (
+                        SELECT 1 FROM command_activity ca
+                        WHERE ca.discord_id = p.discord_id AND ca.guild_id = p.guild_id
+                          AND ca.last_used_at >= ?
+                    )
+                  )
                 """,
-                (discord_id, guild_id, cutoff),
+                (discord_id, guild_id, iso_cutoff, epoch_cutoff),
             )
             return cursor.fetchone() is not None
 
@@ -1607,9 +1641,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Get recently active players (discord_id only) for lottery selection.
 
-        A player counts as active if they played a match OR were present in a
-        text/voice channel within the last ``activity_days`` days (whichever
-        signal is more recent).
+        A player counts as active if, within the last ``activity_days`` days,
+        they played a match, placed a bet (last_active_at), or used any slash
+        command (command_activity). Read live so it is current at disbursement.
 
         Returns:
             List of dicts with 'discord_id' for eligible players.
@@ -1617,16 +1651,25 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         guild_id = self.normalize_guild_id(guild_id)
         from datetime import datetime, timedelta
 
-        cutoff = (datetime.now(UTC) - timedelta(days=activity_days)).isoformat()
+        now = datetime.now(UTC)
+        iso_cutoff = (now - timedelta(days=activity_days)).isoformat()
+        epoch_cutoff = int((now - timedelta(days=activity_days)).timestamp())
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id FROM players
-                WHERE guild_id = ?
-                  AND MAX(COALESCE(last_match_date, ''), COALESCE(last_active_at, '')) >= ?
+                SELECT p.discord_id FROM players p
+                WHERE p.guild_id = ?
+                  AND (
+                    MAX(COALESCE(p.last_match_date, ''), COALESCE(p.last_active_at, '')) >= ?
+                    OR EXISTS (
+                        SELECT 1 FROM command_activity ca
+                        WHERE ca.discord_id = p.discord_id AND ca.guild_id = p.guild_id
+                          AND ca.last_used_at >= ?
+                    )
+                  )
                 """,
-                (guild_id, cutoff),
+                (guild_id, iso_cutoff, epoch_cutoff),
             )
             return [{"discord_id": row["discord_id"]} for row in cursor.fetchall()]
 

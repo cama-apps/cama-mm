@@ -106,6 +106,22 @@ def test_schema_manager_adds_last_active_at_with_backfill(tmp_path):
         assert cursor.fetchone()[0] == "2024-01-01T00:00:00+00:00"
 
 
+def test_schema_manager_creates_command_activity_table(tmp_path):
+    """The activity migration creates the command_activity table."""
+    db_path = str(tmp_path / "test.db")
+    SchemaManager(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cursor.fetchall()}
+        cursor.execute("PRAGMA table_info(command_activity)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+    assert "command_activity" in tables
+    assert {"guild_id", "discord_id", "last_used_at"}.issubset(columns)
+
+
 def test_schema_manager_initialize_is_idempotent(tmp_path):
     """Running initialize twice must not fail or duplicate migration rows."""
     db_path = str(tmp_path / "test.db")
