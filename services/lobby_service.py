@@ -247,10 +247,6 @@ class LobbyService:
         player_ids, players = self.get_lobby_players(lobby, guild_id)
         conditional_ids, conditional_players = self.get_conditional_players(lobby, guild_id)
 
-        # Fetch captain-eligible IDs from all lobby players
-        all_ids = player_ids + conditional_ids
-        captain_eligible_ids = set(self.player_repo.get_captain_eligible_players(all_ids, guild_id)) if all_ids else set()
-
         return create_lobby_embed(
             lobby, players, player_ids,
             conditional_players=conditional_players,
@@ -258,7 +254,6 @@ class LobbyService:
             ready_threshold=self.ready_threshold,
             max_players=self.max_players,
             bankruptcy_repo=self.bankruptcy_repo,
-            captain_eligible_ids=captain_eligible_ids,
             guild_id=guild_id,
         )
 

@@ -50,21 +50,21 @@ class DraftService:
 
     def select_captains(
         self,
-        eligible_ids: list[int],
+        player_pool_ids: list[int],
         player_ratings: dict[int, float],
         specified_captain1: int | None = None,
         specified_captain2: int | None = None,
     ) -> CaptainPair:
         """
-        Select two captains from eligible players.
+        Select two captains from the final player pool.
 
         Algorithm:
         - If both captains specified, use them
-        - If one specified, select the eligible captain closest in Glicko rating
-        - If neither specified, select the eligible pair closest in Glicko rating
+        - If one specified, select the pool member closest in Glicko rating
+        - If neither specified, select the pool pair closest in Glicko rating
 
         Args:
-            eligible_ids: List of captain-eligible player IDs
+            player_pool_ids: Final Immortal Draft player pool IDs
             player_ratings: Dict mapping player ID to rating
             specified_captain1: Optional pre-specified captain
             specified_captain2: Optional pre-specified captain
@@ -73,7 +73,7 @@ class DraftService:
             CaptainPair with both captain IDs and ratings
 
         Raises:
-            ValueError: If not enough eligible captains
+            ValueError: If the pool does not contain enough players
         """
         # Handle specified captains
         if specified_captain1 is not None and specified_captain2 is not None:
@@ -85,7 +85,7 @@ class DraftService:
             )
 
         # Build pool of available captains
-        available = list(eligible_ids)
+        available = list(player_pool_ids)
 
         # Remove specified captains from available pool
         if specified_captain1 is not None and specified_captain1 in available:
@@ -101,7 +101,7 @@ class DraftService:
             # Need to select both
             if len(available) < 2:
                 raise ValueError(
-                    f"Need at least 2 captain-eligible players, but only {len(available)} available."
+                    f"Need at least 2 players in the draft pool, but only {len(available)} available."
                 )
 
             captain1, captain2 = self._closest_rating_pair(available, player_ratings)
@@ -109,7 +109,7 @@ class DraftService:
         elif captain1 is None:
             # captain2 is specified, need to select captain1
             if len(available) < 1:
-                raise ValueError("Need at least 1 captain-eligible player to be second captain.")
+                raise ValueError("Need at least 1 other player in the draft pool.")
             captain1 = self._closest_rating_captain(
                 captain2, available, player_ratings
             )
@@ -117,7 +117,7 @@ class DraftService:
         else:
             # captain1 is specified, need to select captain2
             if len(available) < 1:
-                raise ValueError("Need at least 1 captain-eligible player to be second captain.")
+                raise ValueError("Need at least 1 other player in the draft pool.")
             captain2 = self._closest_rating_captain(
                 captain1, available, player_ratings
             )
@@ -149,7 +149,7 @@ class DraftService:
                     best_pair = (captain1_id, captain2_id)
 
         if best_pair is None:
-            raise ValueError("Need at least 2 captain-eligible players.")
+            raise ValueError("Need at least 2 players in the draft pool.")
 
         return best_pair
 
@@ -181,20 +181,25 @@ class DraftService:
 
     def select_player_pool(
         self,
-        lobby_player_ids: list[int],
+        regular_player_ids: list[int],
+        conditional_player_ids: list[int],
         exclusion_counts: dict[int, int],
+        player_ratings: dict[int, float],
         forced_include_ids: list[int] | None = None,
         pool_size: int = 10,
     ) -> PoolSelectionResult:
         """
-        Select players for the draft pool from lobby.
+        Select players for the draft pool by exclusion factor, then Glicko.
 
-        Uses exclusion counts to prioritize players who have been excluded more.
+        Regular players fill the pool before conditional players. Manually
+        specified captains are always included, even when conditional.
 
         Args:
-            lobby_player_ids: All player IDs in the lobby
+            regular_player_ids: Regular lobby player IDs in lobby order
+            conditional_player_ids: Conditional player IDs in lobby order
             exclusion_counts: Dict mapping player ID to exclusion count
-            forced_include_ids: IDs that must be included (e.g., specified captains)
+            player_ratings: Dict mapping player ID to Glicko rating
+            forced_include_ids: Captain override IDs that must be included
             pool_size: Target pool size (default 10)
 
         Returns:
@@ -203,44 +208,43 @@ class DraftService:
         Raises:
             ValueError: If lobby has fewer than pool_size players
         """
-        if len(lobby_player_ids) < pool_size:
+        all_player_ids = list(dict.fromkeys(regular_player_ids + conditional_player_ids))
+        if len(all_player_ids) < pool_size:
             raise ValueError(
-                f"Need at least {pool_size} players in lobby, but only {len(lobby_player_ids)} present."
+                f"Need at least {pool_size} players in lobby, but only {len(all_player_ids)} present."
             )
 
-        if len(lobby_player_ids) == pool_size:
-            # Exact match, no exclusions needed
-            return PoolSelectionResult(
-                selected_ids=list(lobby_player_ids),
-                excluded_ids=[],
-            )
-
-        forced = set(forced_include_ids or [])
-
-        # Separate forced and non-forced players
-        non_forced = [pid for pid in lobby_player_ids if pid not in forced]
-
-        # Sort non-forced by exclusion count descending (higher = more priority)
-        # Then by ID for deterministic ordering
-        non_forced_sorted = sorted(
-            non_forced,
-            key=lambda pid: (-exclusion_counts.get(pid, 0), pid),
-        )
-
-        # Calculate how many non-forced we need
-        forced_count = len(forced)
-        needed_from_pool = pool_size - forced_count
-
-        if needed_from_pool < 0:
-            # More forced than pool size - shouldn't happen
+        forced = list(dict.fromkeys(forced_include_ids or []))
+        if len(forced) > pool_size:
             raise ValueError("Too many forced-include players for pool size.")
+        if any(pid not in all_player_ids for pid in forced):
+            raise ValueError("Specified captains must be present in the lobby.")
 
-        # Select top N from sorted non-forced
-        selected_non_forced = non_forced_sorted[:needed_from_pool]
-        excluded = non_forced_sorted[needed_from_pool:]
+        forced_set = set(forced)
 
-        # Combine forced + selected
-        selected = list(forced) + selected_non_forced
+        def rank(player_ids: list[int]) -> list[int]:
+            return sorted(
+                (pid for pid in player_ids if pid not in forced_set),
+                key=lambda pid: (
+                    -exclusion_counts.get(pid, 0),
+                    -player_ratings.get(pid, 1500.0),
+                ),
+            )
+
+        selected = list(forced)
+        for player_id in rank(regular_player_ids):
+            if len(selected) >= pool_size:
+                break
+            selected.append(player_id)
+
+        if len(selected) < pool_size:
+            for player_id in rank(conditional_player_ids):
+                if len(selected) >= pool_size:
+                    break
+                selected.append(player_id)
+
+        selected_set = set(selected)
+        excluded = [pid for pid in all_player_ids if pid not in selected_set]
 
         return PoolSelectionResult(
             selected_ids=selected,
@@ -259,26 +263,3 @@ class DraftService:
             Discord ID of the winning captain
         """
         return random.choice([captain1_id, captain2_id])
-
-    def determine_lower_rated_captain(
-        self,
-        captain1_id: int,
-        captain1_rating: float,
-        captain2_id: int,
-        captain2_rating: float,
-    ) -> int:
-        """
-        Determine which captain has the lower rating.
-
-        Args:
-            captain1_id: First captain's Discord ID
-            captain1_rating: First captain's rating
-            captain2_id: Second captain's Discord ID
-            captain2_rating: Second captain's rating
-
-        Returns:
-            Discord ID of the lower-rated captain
-        """
-        if captain1_rating <= captain2_rating:
-            return captain1_id
-        return captain2_id

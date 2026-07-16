@@ -2,6 +2,7 @@
 Tests for embed utilities.
 """
 
+import inspect
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -13,7 +14,14 @@ from utils.embeds import (
     create_enriched_match_embed,
     create_lobby_embed,
     create_match_summary_embed,
+    format_player_list,
 )
+
+
+def test_lobby_embeds_do_not_expose_captain_eligibility():
+    """Lobby presentation has no captain opt-in marker or input."""
+    assert "captain_eligible_ids" not in inspect.signature(format_player_list).parameters
+    assert "captain_eligible_ids" not in inspect.signature(create_lobby_embed).parameters
 
 
 class TestLobbyEmbedTimestamp:

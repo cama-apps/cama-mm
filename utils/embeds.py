@@ -31,7 +31,6 @@ def format_player_list(
     players,
     player_ids,
     bankruptcy_repo=None,
-    captain_eligible_ids=None,
     guild_id: int | None = None,
 ):
     """
@@ -39,13 +38,11 @@ def format_player_list(
 
     Deduplicates by Discord ID to avoid double-counting the same user.
     Adds tombstone emoji for players with active bankruptcy penalties.
-    Adds crown emoji for captain-eligible players.
 
     Args:
         players: List of Player objects
         player_ids: List of Discord IDs
         bankruptcy_repo: BankruptcyRepository instance (optional)
-        captain_eligible_ids: Set of Discord IDs eligible for captaining (optional)
         guild_id: Guild ID for bankruptcy lookups. If omitted, inferred from
             each Player object when available.
     """
@@ -88,8 +85,7 @@ def format_player_list(
         if is_real_user and _get_penalty_games(bankruptcy_repo, pid, lookup_guild_id) > 0:
             tombstone = f"{TOMBSTONE_EMOJI} "
 
-        captain = "👑 " if captain_eligible_ids and pid in captain_eligible_ids else ""
-        display = f"{tombstone}{captain}<@{pid}>" if is_real_user else player.name
+        display = f"{tombstone}<@{pid}>" if is_real_user else player.name
         name = f"{idx}. {display}"
         if player.glicko_rating is not None:
             cama_rating = rating_system.rating_to_display(player.glicko_rating)
@@ -107,7 +103,6 @@ def create_lobby_embed(
     lobby, players, player_ids,
     conditional_players=None, conditional_ids=None,
     ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None,
-    captain_eligible_ids=None,
     guild_id: int | None = None,
 ):
     """Create the lobby embed with player list and status.
@@ -121,7 +116,6 @@ def create_lobby_embed(
         ready_threshold: Minimum players needed to shuffle
         max_players: Maximum players allowed in lobby
         bankruptcy_repo: BankruptcyRepository instance
-        captain_eligible_ids: Set of Discord IDs eligible for captaining (optional)
         guild_id: Guild ID for bankruptcy lookups. If omitted, inferred from lobby.
     """
     lookup_guild_id = guild_id if guild_id is not None else getattr(lobby, "guild_id", None)
@@ -146,7 +140,6 @@ def create_lobby_embed(
         players,
         player_ids,
         bankruptcy_repo,
-        captain_eligible_ids=captain_eligible_ids,
         guild_id=lookup_guild_id,
     )
 
@@ -160,7 +153,6 @@ def create_lobby_embed(
     if conditional_players and conditional_ids:
         conditional_list, _ = format_player_list(
             conditional_players, conditional_ids, bankruptcy_repo,
-            captain_eligible_ids=captain_eligible_ids,
             guild_id=lookup_guild_id,
         )
         embed.add_field(

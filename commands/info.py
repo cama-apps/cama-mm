@@ -901,7 +901,6 @@ class InfoCommands(commands.Cog):
                 "`/shuffle` - Create balanced teams from lobby (pool betting)\n"
                 "`/record` - Record a match result\n"
                 "`/draft start` - Start Immortal Draft (captain mode)\n"
-                "`/draft captain` - Set captain eligibility\n"
                 "`/draft restart` - Restart active draft"
             ),
             inline=False,

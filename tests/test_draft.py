@@ -3,7 +3,7 @@ Tests for Immortal Draft functionality.
 """
 
 import asyncio
-import logging
+import inspect
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,13 +12,28 @@ import pytest
 
 from commands.draft import DraftCommands
 from commands.match import MatchCommands
-from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
+from domain.models.draft import DraftPhase, DraftState
 from domain.models.lobby import Lobby
 from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
 from tests.conftest import TEST_GUILD_ID
+
+
+def test_captain_opt_in_command_is_removed():
+    """Immortal Draft captains are selected automatically, without an opt-in command."""
+    assert not hasattr(DraftCommands, "setcaptain")
+
+
+def test_fake_player_commands_do_not_expose_captain_opt_in():
+    """Testing helpers should mirror the production no-opt-in captain flow."""
+    from commands.admin import AdminCommands
+
+    assert "captain_eligible" not in inspect.signature(AdminCommands.addfake.callback).parameters
+    assert "captain_eligible" not in inspect.signature(
+        AdminCommands.filllobbytest.callback
+    ).parameters
 
 
 class TestDraftState:
@@ -70,23 +85,15 @@ class TestDraftState:
         state.phase = DraftPhase.DRAFTING
         state.radiant_captain_id = 100
         state.dire_captain_id = 200
-        state.player_draft_first_captain_id = 100  # Radiant picks first
+        state.current_round_first_captain_id = 100
 
         # Pick 0: first captain (Radiant)
         state.current_pick_index = 0
         assert state.current_captain_id == 100
 
-        # Pick 1: second captain (Dire) - snake draft
+        # Pick 1: the other captain (Dire)
         state.current_pick_index = 1
         assert state.current_captain_id == 200
-
-        # Pick 2: second captain (Dire) - still Dire's turn
-        state.current_pick_index = 2
-        assert state.current_captain_id == 200
-
-        # Pick 3: first captain (Radiant)
-        state.current_pick_index = 3
-        assert state.current_captain_id == 100
 
     def test_current_captain_id_not_drafting(self):
         """Current captain ID is None when not in drafting phase."""
@@ -100,33 +107,19 @@ class TestDraftState:
         state.phase = DraftPhase.DRAFTING
         state.radiant_captain_id = 100
         state.dire_captain_id = 200
-        state.player_draft_first_captain_id = 100
+        state.current_round_first_captain_id = 100
 
         # Pick 0: Radiant has 1 pick
         state.current_pick_index = 0
         assert state.picks_remaining_this_turn == 1
 
-        # Pick 1: Dire has 2 picks
+        # Pick 1: Dire also has exactly 1 pick
         state.current_pick_index = 1
-        assert state.picks_remaining_this_turn == 2
+        assert state.picks_remaining_this_turn == 1
 
-        # Pick 3: Radiant has 2 picks
+        # Every later pick is also a single-pick turn
         state.current_pick_index = 3
-        assert state.picks_remaining_this_turn == 2
-
-    def test_lower_rated_captain_id(self):
-        """Lower rated captain is correctly identified."""
-        state = DraftState(guild_id=123)
-        state.captain1_id = 100
-        state.captain2_id = 200
-        state.captain1_rating = 1500.0
-        state.captain2_rating = 1600.0
-
-        assert state.lower_rated_captain_id == 100
-
-        # Reverse ratings
-        state.captain1_rating = 1700.0
-        assert state.lower_rated_captain_id == 200
+        assert state.picks_remaining_this_turn == 1
 
     def test_pick_player_success(self):
         """Picking a player adds them to correct team."""
@@ -135,7 +128,7 @@ class TestDraftState:
         state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         state.radiant_captain_id = 100
         state.dire_captain_id = 200
-        state.player_draft_first_captain_id = 100
+        state.current_round_first_captain_id = 100
 
         # First pick goes to Radiant
         result = state.pick_player(5)
@@ -150,7 +143,7 @@ class TestDraftState:
         state.player_pool_ids = [1, 2, 3]
         state.radiant_captain_id = 100
         state.dire_captain_id = 200
-        state.player_draft_first_captain_id = 100
+        state.current_round_first_captain_id = 100
 
         result = state.pick_player(999)  # Not in pool
         assert result is False
@@ -161,7 +154,7 @@ class TestDraftState:
         This is the synchronous turn guard that closes the concurrent-pick race
         (finding 1): two button callbacks from the same captain both pass the
         async pre-defer turn check, then both reach pick_player. The first
-        advances the snake order; the second must be rejected here because it is
+        advances the round order; the second must be rejected here because it is
         no longer that captain's turn.
         """
         state = DraftState(guild_id=123)
@@ -169,7 +162,7 @@ class TestDraftState:
         state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         state.radiant_captain_id = 100
         state.dire_captain_id = 200
-        state.player_draft_first_captain_id = 100  # Radiant (100) picks at index 0
+        state.current_round_first_captain_id = 100
 
         # Index 0 belongs to captain 100. Captain 200 may not pick out of turn.
         assert state.current_captain_id == 100
@@ -408,7 +401,7 @@ class TestDraftService:
         ratings = {100: 1500.0, 200: 1600.0}
 
         result = service.select_captains(
-            eligible_ids=[100, 200, 300],
+            player_pool_ids=[100, 200, 300],
             player_ratings=ratings,
             specified_captain1=100,
             specified_captain2=200,
@@ -419,14 +412,14 @@ class TestDraftService:
         assert result.captain1_rating == 1500.0
         assert result.captain2_rating == 1600.0
 
-    def test_select_captains_not_enough_eligible(self):
-        """Raises error when not enough eligible captains."""
+    def test_select_captains_not_enough_players(self):
+        """Raises an error when the final pool cannot supply two captains."""
         service = DraftService()
         ratings = {100: 1500.0}
 
         with pytest.raises(ValueError, match="at least 2"):
             service.select_captains(
-                eligible_ids=[100],
+                player_pool_ids=[100],
                 player_ratings=ratings,
             )
 
@@ -436,7 +429,7 @@ class TestDraftService:
         ratings = {100: 1500.0, 200: 1500.0, 300: 1500.0}
 
         result = service.select_captains(
-            eligible_ids=[100, 200, 300],
+            player_pool_ids=[100, 200, 300],
             player_ratings=ratings,
         )
 
@@ -456,7 +449,7 @@ class TestDraftService:
         monkeypatch.setattr("domain.services.draft_service.random.random", fail_random)
 
         result = service.select_captains(
-            eligible_ids=[100, 200, 300, 400],
+            player_pool_ids=[100, 200, 300, 400],
             player_ratings=ratings,
         )
 
@@ -464,13 +457,13 @@ class TestDraftService:
         assert abs(result.captain1_rating - result.captain2_rating) == 5.0
 
     def test_select_captains_with_specified_captain_chooses_closest_rating(self):
-        """When one captain is specified, selects the closest-rated eligible captain."""
+        """When one captain is specified, select the closest-rated pool member."""
         service = DraftService()
         # Captain 100 at 1500, captain 200 at 1500, captain 300 at 2000
         ratings = {100: 1500.0, 200: 1500.0, 300: 2000.0}
 
         result = service.select_captains(
-            eligible_ids=[100, 200, 300],
+            player_pool_ids=[100, 200, 300],
             player_ratings=ratings,
             specified_captain1=100,  # Force captain1 to be 100
         )
@@ -482,42 +475,96 @@ class TestDraftService:
         service = DraftService()
 
         result = service.select_player_pool(
-            lobby_player_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            regular_player_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            conditional_player_ids=[],
             exclusion_counts={},
+            player_ratings={},
             pool_size=10,
         )
 
         assert len(result.selected_ids) == 10
         assert result.excluded_ids == []
 
-    def test_select_player_pool_with_exclusions(self):
-        """Players with higher exclusion counts are prioritized."""
+    def test_select_player_pool_prioritizes_exclusion_factor_over_glicko(self):
+        """A higher exclusion factor wins even when its Glicko is lower."""
         service = DraftService()
+        ratings = {pid: 2100.0 - pid * 50 for pid in range(1, 12)}
+        ratings[11] = 900.0
 
         result = service.select_player_pool(
-            lobby_player_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-            exclusion_counts={11: 5, 12: 3},  # 11 and 12 excluded most
+            regular_player_ids=list(range(1, 12)),
+            conditional_player_ids=[],
+            exclusion_counts={11: 1},
+            player_ratings=ratings,
             pool_size=10,
         )
 
-        # 11 and 12 should be included due to high exclusion counts
         assert 11 in result.selected_ids
-        assert 12 in result.selected_ids
-        assert len(result.excluded_ids) == 2
+        assert 10 in result.excluded_ids
 
-    def test_select_player_pool_forced_include(self):
-        """Forced players are always included."""
+    def test_select_player_pool_uses_glicko_for_equal_exclusion_factors(self):
+        """Glicko decides ordering only when exclusion factors are equal."""
         service = DraftService()
+        ratings = {pid: 1000.0 + pid * 50 for pid in range(1, 12)}
 
         result = service.select_player_pool(
-            lobby_player_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            regular_player_ids=list(range(1, 12)),
+            conditional_player_ids=[],
             exclusion_counts={},
-            forced_include_ids=[11, 12],  # Force these captains
+            player_ratings=ratings,
             pool_size=10,
         )
 
-        assert 11 in result.selected_ids
+        assert 1 in result.excluded_ids
+        assert set(result.selected_ids) == set(range(2, 12))
+
+    def test_select_player_pool_preserves_lobby_order_for_exact_ties(self):
+        """No third tie-breaker reorders players with equal exclusion and Glicko."""
+        service = DraftService()
+        lobby_order = [9, 3, 7, 1, 8, 2, 6, 4, 5, 10, 11]
+
+        result = service.select_player_pool(
+            regular_player_ids=lobby_order,
+            conditional_player_ids=[],
+            exclusion_counts={},
+            player_ratings=dict.fromkeys(lobby_order, 1500.0),
+            pool_size=10,
+        )
+
+        assert result.selected_ids == lobby_order[:10]
+        assert result.excluded_ids == [11]
+
+    def test_select_player_pool_uses_conditionals_only_to_fill_shortage(self):
+        """Conditional players cannot displace regular players."""
+        service = DraftService()
+
+        result = service.select_player_pool(
+            regular_player_ids=list(range(1, 9)),
+            conditional_player_ids=[9, 10, 11, 12],
+            exclusion_counts={9: 1, 10: 3, 11: 2, 12: 99},
+            player_ratings=dict.fromkeys(range(1, 13), 1500.0),
+            pool_size=10,
+        )
+
+        assert set(range(1, 9)) <= set(result.selected_ids)
+        assert {12, 10} <= set(result.selected_ids)
+        assert {9, 11} <= set(result.excluded_ids)
+
+    def test_select_player_pool_forces_conditional_captain_into_full_regular_pool(self):
+        """A manual captain override displaces the lowest-ranked regular player."""
+        service = DraftService()
+
+        result = service.select_player_pool(
+            regular_player_ids=list(range(1, 12)),
+            conditional_player_ids=[12],
+            exclusion_counts={},
+            player_ratings={pid: 2200.0 - pid * 50 for pid in range(1, 13)},
+            forced_include_ids=[12],
+            pool_size=10,
+        )
+
         assert 12 in result.selected_ids
+        assert {10, 11} <= set(result.excluded_ids)
 
     def test_select_player_pool_not_enough(self):
         """Raises error when lobby smaller than pool size."""
@@ -525,8 +572,10 @@ class TestDraftService:
 
         with pytest.raises(ValueError, match="Need at least"):
             service.select_player_pool(
-                lobby_player_ids=[1, 2, 3],
+                regular_player_ids=[1, 2, 3],
+                conditional_player_ids=[],
                 exclusion_counts={},
+                player_ratings={},
                 pool_size=10,
             )
 
@@ -542,54 +591,71 @@ class TestDraftService:
         # Should have both outcomes
         assert results == {100, 200}
 
-    def test_determine_lower_rated_captain(self):
-        """Correctly identifies lower-rated captain."""
-        service = DraftService()
+class TestDynamicDraftRounds:
+    """Tests for four two-pick rounds ordered by live team Glicko totals."""
 
-        result = service.determine_lower_rated_captain(
-            captain1_id=100,
-            captain1_rating=1500.0,
-            captain2_id=200,
-            captain2_rating=1600.0,
-        )
-        assert result == 100
+    @staticmethod
+    def _make_state(radiant_rating: float, dire_rating: float) -> DraftState:
+        state = DraftState(guild_id=123)
+        state.captain1_id = 1
+        state.captain2_id = 2
+        state.captain1_rating = radiant_rating
+        state.captain2_rating = dire_rating
+        state.radiant_captain_id = 1
+        state.dire_captain_id = 2
+        state.player_pool_ids = list(range(1, 11))
+        state.player_pool_data = {
+            1: {"rating": radiant_rating},
+            2: {"rating": dire_rating},
+            **{pid: {"rating": 1500.0} for pid in range(3, 11)},
+        }
+        return state
 
-        result = service.determine_lower_rated_captain(
-            captain1_id=100,
-            captain1_rating=1700.0,
-            captain2_id=200,
-            captain2_rating=1600.0,
-        )
-        assert result == 200
+    def test_lower_total_team_picks_first_and_other_team_picks_second(self):
+        state = self._make_state(radiant_rating=1400.0, dire_rating=1600.0)
+
+        state.start_player_draft()
+
+        assert state.current_captain_id == 1
+        assert state.pick_player(3, picker_id=1) is True
+        assert state.current_captain_id == 2
+
+    def test_team_totals_are_recalculated_before_each_round(self):
+        state = self._make_state(radiant_rating=1400.0, dire_rating=1600.0)
+        state.player_pool_data[3]["rating"] = 600.0
+        state.player_pool_data[4]["rating"] = 100.0
+        state.start_player_draft()
+
+        assert state.pick_player(3, picker_id=1) is True
+        assert state.pick_player(4, picker_id=2) is True
+
+        assert state.radiant_rating_total == 2000.0
+        assert state.dire_rating_total == 1700.0
+        assert state.current_captain_id == 2
+
+    def test_tied_later_round_starts_with_previous_round_second_picker(self):
+        state = self._make_state(radiant_rating=1400.0, dire_rating=1600.0)
+        state.player_pool_data[3]["rating"] = 200.0
+        state.player_pool_data[4]["rating"] = 0.0
+        state.start_player_draft()
+
+        assert state.pick_player(3, picker_id=1) is True
+        assert state.pick_player(4, picker_id=2) is True
+
+        assert state.radiant_rating_total == state.dire_rating_total
+        assert state.current_captain_id == 2
+
+    def test_tied_first_round_starts_with_coinflip_loser(self):
+        state = self._make_state(radiant_rating=1500.0, dire_rating=1500.0)
+        state.coinflip_winner_id = 1
+
+        state.start_player_draft()
+
+        assert state.current_captain_id == 2
 
 
-class TestSnakeDraftOrder:
-    """Tests for snake draft order constant."""
-
-    def test_snake_draft_order_length(self):
-        """Snake draft order has 8 picks."""
-        assert len(SNAKE_DRAFT_ORDER) == 8
-
-    def test_snake_draft_order_pattern(self):
-        """Snake draft follows 1-2-2-2-1 pattern."""
-        # [0, 1, 1, 0, 0, 1, 1, 0] means:
-        # Pick 1: Captain 0
-        # Pick 2-3: Captain 1
-        # Pick 4-5: Captain 0
-        # Pick 6-7: Captain 1
-        # Pick 8: Captain 0
-        assert SNAKE_DRAFT_ORDER[0] == 0  # First captain
-        assert SNAKE_DRAFT_ORDER[1] == 1  # Second captain
-        assert SNAKE_DRAFT_ORDER[2] == 1  # Second captain
-        assert SNAKE_DRAFT_ORDER[3] == 0  # First captain
-        assert SNAKE_DRAFT_ORDER[4] == 0  # First captain
-        assert SNAKE_DRAFT_ORDER[5] == 1  # Second captain
-        assert SNAKE_DRAFT_ORDER[6] == 1  # Second captain
-        assert SNAKE_DRAFT_ORDER[7] == 0  # First captain
-
-
-class TestSnakeDraftPickOrder:
-    """Integration test: drive a complete draft and assert pick sequence and guild isolation."""
+class TestDynamicDraftPickOrder:
+    """Drive complete four-round drafts and assert guild isolation."""
 
     def _make_state(self, guild_id: int) -> DraftState:
         """Return a DRAFTING-phase state with two captains and 8 draftable players."""
@@ -598,63 +664,45 @@ class TestSnakeDraftPickOrder:
         state.dire_captain_id = 2
         state.captain1_id = 1
         state.captain2_id = 2
-        # player_draft_first_captain_id = 1 means captain 1 (index 0) picks first
-        state.player_draft_first_captain_id = 1
-        state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # includes captains
-        state.phase = DraftPhase.DRAFTING
+        state.captain1_rating = 1400.0
+        state.captain2_rating = 1500.0
+        state.player_pool_ids = [1, 2, 11, 12, 13, 14, 15, 16, 17, 18]
+        state.player_pool_data = {
+            1: {"rating": 1400.0},
+            2: {"rating": 1500.0},
+            **{pid: {"rating": 1500.0} for pid in range(11, 19)},
+        }
+        state.start_player_draft()
         return state
 
-    def test_full_snake_draft_assigns_correct_sides(self):
-        """Complete 8-pick snake draft: verify pick order matches SNAKE_DRAFT_ORDER
-        and both teams end up with 4 players each plus their captain.
-
-        SNAKE_DRAFT_ORDER = [0,1,1,0,0,1,1,0]  (0=captain1/Radiant, 1=captain2/Dire)
-        Expected radiant picks: indices 0,3,4,7 → players 11,14,15,18 (sequential)
-        Expected dire picks:    indices 1,2,5,6 → players 12,13,16,17
-        """
+    def test_full_dynamic_draft_assigns_four_picks_per_side(self):
         state = self._make_state(guild_id=1001)
-        # Draftable players: 11-18 (captains 1 and 2 are pre-assigned, not in pool)
-        state.player_pool_ids = [11, 12, 13, 14, 15, 16, 17, 18]
+        picker_log = []
 
-        expected_radiant_picks = []
-        expected_dire_picks = []
-        pick_log = []
-
-        for pick_num, picker_index in enumerate(SNAKE_DRAFT_ORDER):
-            expected_captain = state.current_captain_id
-            # picker_index 0 → captain1 (radiant), 1 → captain2 (dire)
-            if picker_index == 0:
-                assert expected_captain == 1, f"Pick {pick_num}: expected captain1"
-            else:
-                assert expected_captain == 2, f"Pick {pick_num}: expected captain2"
-
+        for pick_num in range(8):
+            picker_log.append(state.current_captain_id)
             player_to_pick = state.available_player_ids[0]
-            success = state.pick_player(player_to_pick)
+            success = state.pick_player(player_to_pick, picker_id=state.current_captain_id)
             assert success, f"pick_player failed at pick {pick_num}"
-            pick_log.append((picker_index, player_to_pick))
-
-            if picker_index == 0:
-                expected_radiant_picks.append(player_to_pick)
-            else:
-                expected_dire_picks.append(player_to_pick)
 
         assert state.phase == DraftPhase.COMPLETE
         assert state.current_pick_index == 8
-        assert set(state.radiant_player_ids) == set(expected_radiant_picks)
-        assert set(state.dire_player_ids) == set(expected_dire_picks)
-        assert len(state.radiant_player_ids) == 4
-        assert len(state.dire_player_ids) == 4
+        assert picker_log == [1, 2, 1, 2, 1, 2, 1, 2]
+        assert len(state.radiant_player_ids) == 5
+        assert len(state.dire_player_ids) == 5
         assert not state.available_player_ids
 
     def test_guild_isolation_draft_states(self):
         """Two guilds can run independent drafts; picks in one do not affect the other."""
         state_a = self._make_state(guild_id=2001)
         state_b = self._make_state(guild_id=2002)
-        state_a.player_pool_ids = [11, 12, 13, 14, 15, 16, 17, 18]
-        state_b.player_pool_ids = [21, 22, 23, 24, 25, 26, 27, 28]
+        state_b.player_pool_ids = [1, 2, 21, 22, 23, 24, 25, 26, 27, 28]
+        state_b.player_pool_data.update(
+            {pid: {"rating": 1500.0} for pid in range(21, 29)}
+        )
 
         # Pick all 8 players in guild A
-        for _ in SNAKE_DRAFT_ORDER:
+        for _ in range(8):
             player = state_a.available_player_ids[0]
             state_a.pick_player(player)
 
@@ -664,27 +712,30 @@ class TestSnakeDraftPickOrder:
         assert state_b.phase == DraftPhase.DRAFTING
 
         # Pick all 8 players in guild B
-        for _ in SNAKE_DRAFT_ORDER:
+        for _ in range(8):
             player = state_b.available_player_ids[0]
             state_b.pick_player(player)
 
         assert state_a.phase == DraftPhase.COMPLETE
         assert state_b.phase == DraftPhase.COMPLETE
         # No overlap between teams across guilds
-        assert not (set(state_a.radiant_player_ids) & set(state_b.radiant_player_ids))
+        assert not (
+            (set(state_a.radiant_player_ids) - {1, 2})
+            & (set(state_b.radiant_player_ids) - {1, 2})
+        )
 
 
 class TestSpecifiedCaptains:
     """Tests for specified captain handling."""
 
     def test_select_captains_both_specified_from_eligible_pool(self):
-        """DraftService.select_captains picks from the eligible_ids list provided."""
+        """DraftService.select_captains picks from the final player pool provided."""
         service = DraftService()
         ratings = {1: 1500.0, 2: 1500.0, 3: 1500.0, 4: 1500.0, 5: 1500.0}
         selected = [1, 2]
 
         result = service.select_captains(
-            eligible_ids=[1, 2, 3, 4, 5],
+            player_pool_ids=[1, 2, 3, 4, 5],
             player_ratings=ratings,
             specified_captain1=selected[0],
             specified_captain2=selected[1],
@@ -701,7 +752,7 @@ class TestSpecifiedCaptains:
 
         for _ in range(50):
             result = service.select_captains(
-                eligible_ids=player_ids,
+                player_pool_ids=player_ids,
                 player_ratings=ratings,
             )
             assert result.captain1_id != result.captain2_id
@@ -1061,378 +1112,6 @@ class TestPlayerPoolVisibility:
         assert restored.player_pool_data[2]["roles"] == ["1", "2", "3", "4", "5"]
 
 
-class TestConditionalPlayerPromotion:
-    """
-    Tests for conditional player promotion logic in draft.
-
-    Conditional players ("froglings") are only promoted to the draft pool
-    when there aren't enough regular players. Regular players are always
-    included first; conditional players are randomly selected to fill
-    remaining spots up to 10.
-    """
-
-    def test_enough_regular_players_excludes_conditional(self):
-        """When >= 10 regular players, conditional players are excluded."""
-        from datetime import datetime
-
-        from domain.models.lobby import Lobby
-
-        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Add 12 regular players
-        for i in range(1, 13):
-            lobby.add_player(i)
-        # Add 3 conditional players
-        for i in range(101, 104):
-            lobby.add_conditional_player(i)
-
-        regular_players = list(lobby.players)
-        conditional_players = list(lobby.conditional_players)
-        DRAFT_POOL_SIZE = 10
-
-        if len(regular_players) >= DRAFT_POOL_SIZE:
-            lobby_player_ids = regular_players
-        else:
-            needed = DRAFT_POOL_SIZE - len(regular_players)
-            import random
-            promoted_conditional = random.sample(
-                conditional_players, min(needed, len(conditional_players))
-            )
-            lobby_player_ids = regular_players + promoted_conditional
-
-        # All should be regular players, no conditional
-        assert len(lobby_player_ids) == 12
-        assert all(pid < 100 for pid in lobby_player_ids)
-        assert not any(pid >= 100 for pid in lobby_player_ids)
-
-    def test_promotes_conditional_when_not_enough_regular(self):
-        """When < 10 regular players, promotes random conditional players."""
-        import random
-        from datetime import datetime
-
-        from domain.models.lobby import Lobby
-
-        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Add 8 regular players
-        for i in range(1, 9):
-            lobby.add_player(i)
-        # Add 4 conditional players
-        for i in range(101, 105):
-            lobby.add_conditional_player(i)
-
-        regular_players = list(lobby.players)
-        conditional_players = list(lobby.conditional_players)
-        DRAFT_POOL_SIZE = 10
-
-        if len(regular_players) >= DRAFT_POOL_SIZE:
-            lobby_player_ids = regular_players
-        else:
-            needed = DRAFT_POOL_SIZE - len(regular_players)
-            promoted_conditional = random.sample(
-                conditional_players, min(needed, len(conditional_players))
-            )
-            lobby_player_ids = regular_players + promoted_conditional
-
-        # Should have 10 players: 8 regular + 2 promoted conditional
-        assert len(lobby_player_ids) == 10
-
-        # All 8 regular players should be included
-        for i in range(1, 9):
-            assert i in lobby_player_ids
-
-        # Exactly 2 conditional players should be promoted
-        conditional_in_pool = [pid for pid in lobby_player_ids if pid >= 100]
-        assert len(conditional_in_pool) == 2
-
-    def test_promotes_all_conditional_if_needed(self):
-        """When regular + conditional < 10, promotes all conditional."""
-        import random
-        from datetime import datetime
-
-        from domain.models.lobby import Lobby
-
-        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Add 7 regular players
-        for i in range(1, 8):
-            lobby.add_player(i)
-        # Add 3 conditional players (total 10)
-        for i in range(101, 104):
-            lobby.add_conditional_player(i)
-
-        regular_players = list(lobby.players)
-        conditional_players = list(lobby.conditional_players)
-        DRAFT_POOL_SIZE = 10
-
-        if len(regular_players) >= DRAFT_POOL_SIZE:
-            lobby_player_ids = regular_players
-        else:
-            needed = DRAFT_POOL_SIZE - len(regular_players)  # 3 needed
-            promoted_conditional = random.sample(
-                conditional_players, min(needed, len(conditional_players))
-            )
-            lobby_player_ids = regular_players + promoted_conditional
-
-        # Should have 10 players: 7 regular + 3 conditional
-        assert len(lobby_player_ids) == 10
-
-        # All 7 regular players should be included
-        for i in range(1, 8):
-            assert i in lobby_player_ids
-
-        # All 3 conditional players should be promoted
-        for i in range(101, 104):
-            assert i in lobby_player_ids
-
-    def test_conditional_promotion_is_random(self):
-        """Conditional player promotion uses random selection, not rating."""
-        import random
-        from datetime import datetime
-
-        from domain.models.lobby import Lobby
-
-        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Add 8 regular players
-        for i in range(1, 9):
-            lobby.add_player(i)
-        # Add 5 conditional players
-        for i in range(101, 106):
-            lobby.add_conditional_player(i)
-
-        regular_players = list(lobby.players)
-        conditional_players = list(lobby.conditional_players)
-        DRAFT_POOL_SIZE = 10
-
-        # Run multiple times to verify randomness
-        promoted_sets = []
-        for _ in range(20):
-            needed = DRAFT_POOL_SIZE - len(regular_players)  # 2 needed
-            promoted = tuple(sorted(random.sample(
-                conditional_players, min(needed, len(conditional_players))
-            )))
-            promoted_sets.append(promoted)
-
-        # Should have multiple different combinations (randomness)
-        unique_combinations = set(promoted_sets)
-        # With 5 choose 2 = 10 possible combinations, we should see variety
-        assert len(unique_combinations) > 1, "Promotion should be random, not deterministic"
-
-    def test_exactly_ten_regular_no_conditional_needed(self):
-        """Exactly 10 regular players means no conditional promotion."""
-        import random
-        from datetime import datetime
-
-        from domain.models.lobby import Lobby
-
-        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Add exactly 10 regular players
-        for i in range(1, 11):
-            lobby.add_player(i)
-        # Add 2 conditional players
-        for i in range(101, 103):
-            lobby.add_conditional_player(i)
-
-        regular_players = list(lobby.players)
-        conditional_players = list(lobby.conditional_players)
-        DRAFT_POOL_SIZE = 10
-
-        if len(regular_players) >= DRAFT_POOL_SIZE:
-            lobby_player_ids = regular_players
-        else:
-            needed = DRAFT_POOL_SIZE - len(regular_players)
-            promoted_conditional = random.sample(
-                conditional_players, min(needed, len(conditional_players))
-            )
-            lobby_player_ids = regular_players + promoted_conditional
-
-        # Should have exactly 10 regular players
-        assert len(lobby_player_ids) == 10
-        assert all(pid < 100 for pid in lobby_player_ids)
-        # No conditional players promoted
-        assert 101 not in lobby_player_ids
-        assert 102 not in lobby_player_ids
-
-
-class TestCandidatePrePruning:
-    """Tests for pre-pruning logic when too many candidates for balanced selection."""
-
-    def test_prune_priority_regular_over_conditional(self):
-        """Regular players are prioritized over conditional players."""
-        from domain.models.player import Player
-
-        # Create mixed players: 10 regular (IDs 1-10), 8 conditional (IDs 101-108)
-        regular_ids = set(range(1, 11))
-        players = []
-        for i in range(1, 11):
-            players.append(Player(
-                name=f"Regular{i}",
-                discord_id=i,
-                glicko_rating=1500.0,
-            ))
-        for i in range(101, 109):
-            players.append(Player(
-                name=f"Conditional{i}",
-                discord_id=i,
-                glicko_rating=1600.0,  # Higher rating but conditional
-            ))
-
-        exclusion_counts = {p.discord_id: 0 for p in players}
-        MAX_CANDIDATES = 14
-
-        def prune_priority(p):
-            is_regular = p.discord_id in regular_ids
-            exc_count = exclusion_counts.get(p.discord_id, 0)
-            rating = p.glicko_rating or 1500.0
-            return (0 if is_regular else 1, -exc_count, -rating)
-
-        sorted_candidates = sorted(players, key=prune_priority)
-        kept = sorted_candidates[:MAX_CANDIDATES]
-        pruned = sorted_candidates[MAX_CANDIDATES:]
-
-        # All 10 regular players should be kept
-        kept_ids = {p.discord_id for p in kept}
-        for i in range(1, 11):
-            assert i in kept_ids, f"Regular player {i} should be kept"
-
-        # 4 conditional players should be kept (10 + 4 = 14)
-        # 4 conditional players should be pruned (8 - 4 = 4)
-        assert len(pruned) == 4
-        for p in pruned:
-            assert p.discord_id >= 101, "Only conditional players should be pruned"
-
-    def test_prune_priority_higher_exclusion_first(self):
-        """Players with higher exclusion counts are prioritized."""
-        from domain.models.player import Player
-
-        regular_ids = set(range(1, 17))  # 16 regular players
-        players = [
-            Player(name=f"Player{i}", discord_id=i, glicko_rating=1500.0)
-            for i in range(1, 17)
-        ]
-
-        # Vary exclusion counts: players 1-5 have high counts, 6-16 have low
-        exclusion_counts = {}
-        for i in range(1, 6):
-            exclusion_counts[i] = 10  # High exclusion count
-        for i in range(6, 17):
-            exclusion_counts[i] = 0  # Low exclusion count
-
-        MAX_CANDIDATES = 14
-
-        def prune_priority(p):
-            is_regular = p.discord_id in regular_ids
-            exc_count = exclusion_counts.get(p.discord_id, 0)
-            rating = p.glicko_rating or 1500.0
-            return (0 if is_regular else 1, -exc_count, -rating)
-
-        sorted_candidates = sorted(players, key=prune_priority)
-        kept = sorted_candidates[:MAX_CANDIDATES]
-        pruned = sorted_candidates[MAX_CANDIDATES:]
-
-        # High-exclusion players (1-5) should all be kept
-        kept_ids = {p.discord_id for p in kept}
-        for i in range(1, 6):
-            assert i in kept_ids, f"High-exclusion player {i} should be kept"
-
-        # 2 low-exclusion players should be pruned (16 - 14 = 2)
-        assert len(pruned) == 2
-        for p in pruned:
-            assert exclusion_counts.get(p.discord_id, 0) == 0, "Low-exclusion players should be pruned"
-
-    def test_prune_priority_higher_rating_tiebreaker(self):
-        """Higher rating breaks ties when regular status and exclusion are equal."""
-        from domain.models.player import Player
-
-        regular_ids = set(range(1, 17))  # 16 regular players
-        players = []
-        for i in range(1, 17):
-            players.append(Player(
-                name=f"Player{i}",
-                discord_id=i,
-                glicko_rating=1000.0 + i * 100,  # Player 16 has highest rating
-            ))
-
-        exclusion_counts = {p.discord_id: 0 for p in players}  # All equal
-        MAX_CANDIDATES = 14
-
-        def prune_priority(p):
-            is_regular = p.discord_id in regular_ids
-            exc_count = exclusion_counts.get(p.discord_id, 0)
-            rating = p.glicko_rating or 1500.0
-            return (0 if is_regular else 1, -exc_count, -rating)
-
-        sorted_candidates = sorted(players, key=prune_priority)
-        pruned = sorted_candidates[MAX_CANDIDATES:]
-
-        # Highest rated players (ID 3-16 with ratings 1300-2600) should be kept
-        # Lowest rated players (ID 1-2 with ratings 1100-1200) should be pruned
-        pruned_ids = {p.discord_id for p in pruned}
-        assert len(pruned) == 2
-        assert 1 in pruned_ids, "Lowest rated player should be pruned"
-        assert 2 in pruned_ids, "Second lowest rated player should be pruned"
-
-    def test_no_pruning_at_threshold(self):
-        """No pruning when candidates <= MAX_CANDIDATES."""
-        from domain.models.player import Player
-
-        regular_ids = set(range(1, 15))  # 14 regular players (exactly at limit)
-        players = [
-            Player(name=f"Player{i}", discord_id=i, glicko_rating=1500.0)
-            for i in range(1, 15)
-        ]
-
-        exclusion_counts = {p.discord_id: 0 for p in players}
-        MAX_CANDIDATES = 14
-
-        # Simulate the condition check
-        if len(players) > MAX_CANDIDATES:
-            def prune_priority(p):
-                is_regular = p.discord_id in regular_ids
-                exc_count = exclusion_counts.get(p.discord_id, 0)
-                rating = p.glicko_rating or 1500.0
-                return (0 if is_regular else 1, -exc_count, -rating)
-
-            sorted_candidates = sorted(players, key=prune_priority)
-            candidates_for_pool = sorted_candidates[:MAX_CANDIDATES]
-            pre_excluded = sorted_candidates[MAX_CANDIDATES:]
-        else:
-            candidates_for_pool = players
-            pre_excluded = []
-
-        # No pruning should occur
-        assert len(candidates_for_pool) == 14
-        assert len(pre_excluded) == 0
-
-    def test_pruning_at_threshold_plus_one(self):
-        """Pruning occurs when candidates = MAX_CANDIDATES + 1."""
-        from domain.models.player import Player
-
-        regular_ids = set(range(1, 16))  # 15 regular players (1 over limit)
-        players = [
-            Player(name=f"Player{i}", discord_id=i, glicko_rating=1500.0)
-            for i in range(1, 16)
-        ]
-
-        exclusion_counts = {p.discord_id: 0 for p in players}
-        MAX_CANDIDATES = 14
-
-        if len(players) > MAX_CANDIDATES:
-            def prune_priority(p):
-                is_regular = p.discord_id in regular_ids
-                exc_count = exclusion_counts.get(p.discord_id, 0)
-                rating = p.glicko_rating or 1500.0
-                return (0 if is_regular else 1, -exc_count, -rating)
-
-            sorted_candidates = sorted(players, key=prune_priority)
-            candidates_for_pool = sorted_candidates[:MAX_CANDIDATES]
-            pre_excluded = sorted_candidates[MAX_CANDIDATES:]
-        else:
-            candidates_for_pool = players
-            pre_excluded = []
-
-        # Exactly 1 player should be pruned
-        assert len(candidates_for_pool) == 14
-        assert len(pre_excluded) == 1
-
-
 # ============================================================================
 # Integration tests for _execute_draft (the immortal-draft execution path)
 # ============================================================================
@@ -1680,12 +1359,81 @@ class TestExecuteDraft:
     immortal-draft flow that broke in production and had no test coverage.
     """
 
+    async def test_completed_pre_draft_choices_start_dynamic_rounds(
+        self, player_repository, monkeypatch
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        captain1, captain2 = player_ids[:2]
+        cog = _make_draft_cog(player_repository)
+        state = DraftState(guild_id=guild_id)
+        state.player_pool_ids = player_ids
+        state.player_pool_data = {
+            player_id: {"name": f"Player {player_id}", "rating": 1400.0 + index * 30}
+            for index, player_id in enumerate(player_ids)
+        }
+        state.captain1_id = captain1
+        state.captain2_id = captain2
+        state.captain1_rating = 1400.0
+        state.captain2_rating = 1430.0
+        state.radiant_captain_id = captain1
+        state.dire_captain_id = captain2
+        state.coinflip_winner_id = captain1
+        state.winner_choice_type = "side"
+        state.loser_choice_value = "first"
+
+        interaction = SimpleNamespace(
+            guild=_FakeGuild(guild_id),
+            channel=_FakeChannel(),
+        )
+        show_draft_ui = AsyncMock()
+        monkeypatch.setattr(cog, "_show_draft_ui", show_draft_ui)
+        monkeypatch.setattr("commands.draft.get_neon_service", lambda _bot: None)
+
+        await cog._start_player_draft(interaction, guild_id, state)
+
+        assert state.phase == DraftPhase.DRAFTING
+        assert state.radiant_player_ids == [captain1]
+        assert state.dire_player_ids == [captain2]
+        assert state.current_captain_id == captain1
+        show_draft_ui.assert_awaited_once_with(interaction, guild_id, state)
+
+    async def test_draft_embed_shows_round_order_and_team_totals(self, player_repository):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        captain1, captain2 = player_ids[:2]
+        cog = _make_draft_cog(player_repository)
+        state = DraftState(guild_id=guild_id)
+        state.player_pool_ids = player_ids
+        state.player_pool_data = {
+            player_id: {
+                "name": f"Player {player_id}",
+                "rating": 1400.0 + index * 30,
+                "roles": [],
+            }
+            for index, player_id in enumerate(player_ids)
+        }
+        state.captain1_id = captain1
+        state.captain2_id = captain2
+        state.captain1_rating = 1400.0
+        state.captain2_rating = 1430.0
+        state.radiant_captain_id = captain1
+        state.dire_captain_id = captain2
+        state.radiant_hero_pick_order = 1
+        state.dire_hero_pick_order = 2
+        state.start_player_draft()
+
+        embed = await cog._build_draft_embed(_FakeGuild(guild_id), state)
+
+        assert "Round 1/4" in embed.description
+        assert "Radiant → 🔴 Dire" in embed.description
+        assert "🟢 1400" in embed.description
+        assert "🔴 1430" in embed.description
+
     async def test_succeeds_with_sixteen_players(self, player_repository):
-        """A full 16-player lobby produces a 10-player draft awaiting choices."""
+        """A full lobby needs no opt-ins and selects captains from the final pool."""
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 16)
-        for pid in player_ids:
-            player_repository.set_captain_eligible(pid, guild_id, True)
         exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
 
         cog = _make_draft_cog(player_repository)
@@ -1699,8 +1447,8 @@ class TestExecuteDraft:
         assert state.phase == DraftPhase.WINNER_CHOICE
         # 2 captains + 8 drafted players
         assert len(state.player_pool_ids) == 10
-        assert state.captain1_id != state.captain2_id
-        assert {state.captain1_id, state.captain2_id} <= set(player_ids)
+        assert set(state.player_pool_ids) == set(player_ids[-10:])
+        assert {state.captain1_id, state.captain2_id} == set(player_ids[-2:])
         # 16 lobby players - 10 selected = 6 excluded, with no overlap
         assert len(state.excluded_player_ids) == 6
         assert not (set(state.player_pool_ids) & set(state.excluded_player_ids))
@@ -1722,8 +1470,6 @@ class TestExecuteDraft:
     async def test_conditional_exclusions_are_deferred_and_classified(self, player_repository):
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 16)
-        for pid in player_ids:
-            player_repository.set_captain_eligible(pid, guild_id, True)
         regular_ids = player_ids[:14]
         conditional_ids = player_ids[14:]
         lobby = _make_lobby(regular_ids)
@@ -1743,11 +1489,10 @@ class TestExecuteDraft:
         assert set(state.half_exclusion_increment_ids) == set(conditional_ids)
         assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
 
-    async def test_fails_without_enough_captains(self, player_repository):
-        """With fewer than 2 captain opt-ins, the draft is rejected cleanly."""
+    async def test_captain_eligibility_flags_do_not_limit_selection(self, player_repository):
+        """Legacy eligibility values do not affect automatic captains."""
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 16)
-        # only one player opts in as captain — two are required
         player_repository.set_captain_eligible(player_ids[0], guild_id, True)
 
         cog = _make_draft_cog(player_repository)
@@ -1755,15 +1500,11 @@ class TestExecuteDraft:
 
         result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
 
-        assert result is False
-        # no zombie draft state is left behind
-        assert cog.draft_state_manager.get_state(guild_id) is None
-        # the user is told why — _execute_draft owns its own error messaging,
-        # which commands/match.py relies on (it adds no message of its own).
-        assert len(interaction.followup.messages) == 1
-        # the message names the specific fix, pinning it to the eligibility
-        # guard rather than a generic "captain" error
-        assert "/draft captain yes" in interaction.followup.messages[0].content
+        assert result is True
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+        assert player_ids[0] not in {state.captain1_id, state.captain2_id}
+        assert {state.captain1_id, state.captain2_id} == set(player_ids[-2:])
 
     async def test_fails_when_draft_already_active(self, player_repository):
         """An existing active draft blocks a new one and is left untouched."""
@@ -1812,40 +1553,6 @@ class TestExecuteDraft:
         # and the progress message was cleaned up
         assert interaction.followup.messages[0].deleted is True
 
-    async def test_unexpected_pool_error_falls_back_and_warns(
-        self, player_repository, monkeypatch, caplog
-    ):
-        """An unexpected error in balanced selection is logged loudly and the
-        draft still completes via the exclusion-count fallback pool."""
-        guild_id = TEST_GUILD_ID
-        player_ids = _register_draft_players(player_repository, guild_id, 16)
-        for pid in player_ids:
-            player_repository.set_captain_eligible(pid, guild_id, True)
-
-        def _boom(*args, **kwargs):
-            raise RuntimeError("balanced selection blew up")
-
-        monkeypatch.setattr("commands.draft.BalancedShuffler.select_draft_pool", _boom)
-
-        cog = _make_draft_cog(player_repository)
-        interaction = _FakeInteraction(guild_id)
-        with caplog.at_level(logging.WARNING, logger="cama_bot.commands.draft"):
-            result = await cog._execute_draft(
-                interaction, guild_id, _make_lobby(player_ids)
-            )
-
-        # the draft still completes via the fallback pool
-        assert result is True
-        state = cog.draft_state_manager.get_state(guild_id)
-        assert state is not None
-        assert len(state.player_pool_ids) == 10
-        # the unexpected error surfaces as a warning, not buried as info
-        assert any(
-            rec.levelno == logging.WARNING and "unexpected" in rec.getMessage()
-            for rec in caplog.records
-        )
-
-
 def _make_final_pick_scenario(
     player_repository, guild_id, player_ids, *, bot, match_service, lobby_manager=None
 ):
@@ -1872,7 +1579,7 @@ def _make_final_pick_scenario(
     state.captain2_rating = 1600
     state.radiant_captain_id = captain1
     state.dire_captain_id = captain2
-    state.player_draft_first_captain_id = captain1
+    state.current_round_first_captain_id = captain2
     state.radiant_hero_pick_order = 1
     state.dire_hero_pick_order = 2
     state.draft_channel_id = 555_000
@@ -1891,6 +1598,31 @@ def _make_final_pick_scenario(
 
 class TestHandlePlayerPick:
     """Regression tests for Discord component handling during active drafting."""
+
+    async def test_pending_match_preserves_conditional_exclusions(self, player_repository):
+        """Excluded conditionals retain their half-credit pending-match classification."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 12)
+        match_service = _FakeDraftMatchService()
+        bot = SimpleNamespace(get_cog=lambda _name: None)
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids[:10],
+            bot=bot,
+            match_service=match_service,
+        )
+        state.radiant_player_ids.append(player_ids[9])
+        state.excluded_player_ids = [player_ids[10]]
+        state.full_exclusion_increment_ids = [player_ids[10]]
+        state.half_exclusion_increment_ids = [player_ids[11]]
+
+        pending_match_id = await cog._create_pending_match(guild_id, state)
+
+        assert pending_match_id == 1234
+        assert match_service.state.excluded_player_ids == [player_ids[10]]
+        assert match_service.state.excluded_conditional_player_ids == [player_ids[11]]
+        assert match_service.state.half_exclusion_increment_ids == [player_ids[11]]
 
     async def test_final_pick_defers_then_edits_original_message(self, player_repository):
         """The last pick does slow match setup, so it must acknowledge the button first."""
@@ -2027,16 +1759,14 @@ class TestHandlePlayerPick:
         state.captain2_id = captain2
         state.radiant_captain_id = captain1
         state.dire_captain_id = captain2
-        state.player_draft_first_captain_id = captain1  # captain1 picks at index 0
+        state.current_round_first_captain_id = captain1
         state.radiant_hero_pick_order = 1
         state.dire_hero_pick_order = 2
         state.draft_channel_id = 555_000
         state.draft_message_id = 9_000_001
         state.radiant_player_ids = [captain1]
         state.dire_player_ids = [captain2]
-        # captain1 owns index 0; index 1 belongs to captain2 (SNAKE_DRAFT_ORDER[1] == 1).
         assert state.current_captain_id == captain1
-        assert SNAKE_DRAFT_ORDER[1] == 1
 
         interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
 
@@ -2148,6 +1878,52 @@ class TestPreDraftChoiceDoubleClick:
         )
         assert total_edits == 1
         # ...and the losing click was told the choice was already made.
+        rejections = inter_a.response.sent_messages + inter_b.response.sent_messages
+        assert len(rejections) == 1
+        assert "already been made" in rejections[0]["content"]
+
+    async def test_double_click_final_choice_only_starts_player_draft_once(
+        self, player_repository, monkeypatch
+    ):
+        """Two final pre-draft clicks cannot both enter the player-draft start path."""
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        winner_id, loser_id = player_ids[:2]
+        cog = _make_draft_cog(player_repository)
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.phase = DraftPhase.LOSER_CHOICE
+        state.player_pool_ids = player_ids
+        state.player_pool_data = {
+            player_id: {"rating": 1400.0 + index * 30}
+            for index, player_id in enumerate(player_ids)
+        }
+        state.captain1_id = winner_id
+        state.captain2_id = loser_id
+        state.coinflip_winner_id = winner_id
+        state.winner_choice_type = "side"
+        state.winner_choice_value = "radiant"
+        state.radiant_captain_id = winner_id
+        state.dire_captain_id = loser_id
+
+        async def yielding_name_lookup(_guild, _user_id):
+            await asyncio.sleep(0)
+            return "Captain"
+
+        show_draft_ui = AsyncMock()
+        monkeypatch.setattr(cog, "_get_member_name", yielding_name_lookup)
+        monkeypatch.setattr(cog, "_show_draft_ui", show_draft_ui)
+        monkeypatch.setattr("commands.draft.get_neon_service", lambda _bot: None)
+
+        inter_a = _FakeWinnerChoiceInteraction(guild_id, user_id=loser_id)
+        inter_b = _FakeWinnerChoiceInteraction(guild_id, user_id=loser_id)
+
+        await asyncio.gather(
+            cog.handle_hero_pick_choice(inter_a, guild_id, "first", is_winner=False),
+            cog.handle_hero_pick_choice(inter_b, guild_id, "first", is_winner=False),
+        )
+
+        assert state.phase == DraftPhase.DRAFTING
+        show_draft_ui.assert_awaited_once()
         rejections = inter_a.response.sent_messages + inter_b.response.sent_messages
         assert len(rejections) == 1
         assert "already been made" in rejections[0]["content"]
