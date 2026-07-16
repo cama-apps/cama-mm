@@ -41,6 +41,7 @@ _discord_logger.handlers.clear()  # Remove discord.py's default handler
 _discord_logger.setLevel(logging.INFO)  # Ensure it logs at INFO level
 
 from config import (
+    ACTIVITY_TRACKING_ENABLED,
     ADMIN_USER_IDS,
     AI_MAX_TOKENS,
     AI_MODEL,
@@ -96,6 +97,10 @@ _reminder_recovery_task: asyncio.Task | None = None
 _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
+
+# Channel-activity sweep task handles
+_voice_sweep_task: asyncio.Task | None = None
+_text_sweep_task: asyncio.Task | None = None
 
 
 def _log_task_exit(name: str):
@@ -166,6 +171,48 @@ async def _supervised_loop(name: str, body) -> None:
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 300)
+
+
+async def _voice_sweep_loop() -> None:
+    """Frequent sweep: bump last_active_at for members currently in voice."""
+    from config import ACTIVITY_TRACKING_ENABLED, ACTIVITY_VOICE_SWEEP_SECONDS
+
+    if not ACTIVITY_TRACKING_ENABLED:
+        return
+    await bot.wait_until_ready()
+    svc = getattr(bot, "activity_service", None)
+    if svc is None:
+        logger.warning("voice sweep loop: activity_service unavailable")
+        return
+    logger.info("voice sweep loop started (interval=%ss)", ACTIVITY_VOICE_SWEEP_SECONDS)
+    while not bot.is_closed():
+        try:
+            for guild in bot.guilds:
+                await svc.sweep_voice(guild)
+        except Exception as ex:  # noqa: BLE001
+            logger.exception("voice sweep error: %s", ex)
+        await asyncio.sleep(ACTIVITY_VOICE_SWEEP_SECONDS)
+
+
+async def _text_sweep_loop() -> None:
+    """Infrequent sweep: bump last_active_at for recent text-channel authors."""
+    from config import ACTIVITY_TEXT_SWEEP_SECONDS, ACTIVITY_TRACKING_ENABLED
+
+    if not ACTIVITY_TRACKING_ENABLED:
+        return
+    await bot.wait_until_ready()
+    svc = getattr(bot, "activity_service", None)
+    if svc is None:
+        logger.warning("text sweep loop: activity_service unavailable")
+        return
+    logger.info("text sweep loop started (interval=%ss)", ACTIVITY_TEXT_SWEEP_SECONDS)
+    while not bot.is_closed():
+        try:
+            for guild in bot.guilds:
+                await svc.sweep_text(guild, ACTIVITY_TEXT_SWEEP_SECONDS)
+        except Exception as ex:  # noqa: BLE001
+            logger.exception("text sweep error: %s", ex)
+        await asyncio.sleep(ACTIVITY_TEXT_SWEEP_SECONDS)
 
 
 async def _prediction_refresh_loop() -> None:
@@ -787,6 +834,21 @@ async def on_ready():
             _supervised_loop("manashop_debt", _manashop_debt_loop)
         )
         _manashop_debt_task.add_done_callback(_log_task_exit("manashop_debt"))
+
+    # Start channel-activity sweeps (voice frequent, text infrequent). The
+    # loops no-op when ACTIVITY_TRACKING_ENABLED is False.
+    global _voice_sweep_task, _text_sweep_task
+    if ACTIVITY_TRACKING_ENABLED:
+        if _voice_sweep_task is None or _voice_sweep_task.done():
+            _voice_sweep_task = bot.loop.create_task(
+                _supervised_loop("voice_sweep", _voice_sweep_loop)
+            )
+            _voice_sweep_task.add_done_callback(_log_task_exit("voice_sweep"))
+        if _text_sweep_task is None or _text_sweep_task.done():
+            _text_sweep_task = bot.loop.create_task(
+                _supervised_loop("text_sweep", _text_sweep_loop)
+            )
+            _text_sweep_task.add_done_callback(_log_task_exit("text_sweep"))
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:

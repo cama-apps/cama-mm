@@ -415,6 +415,28 @@ class ProfileCommands(commands.Cog):
         else:
             embed.add_field(name="Server", value="Not set", inline=True)
 
+        # Lottery eligibility: active if the player played a match OR was present
+        # in a text/voice channel within the activity window.
+        player_repo = self._get_player_repo()
+        if player_repo and hasattr(player_repo, "is_active_for_lottery"):
+            from config import LOTTERY_ACTIVITY_DAYS
+
+            active = await asyncio.to_thread(
+                player_repo.is_active_for_lottery,
+                target_discord_id,
+                guild_id,
+                LOTTERY_ACTIVITY_DAYS,
+            )
+            embed.add_field(
+                name="Lottery",
+                value=(
+                    "✅ Active"
+                    if active
+                    else f"❌ Inactive (need activity in {LOTTERY_ACTIVITY_DAYS}d)"
+                ),
+                inline=True,
+            )
+
         # Hero stats from enriched matches
         match_repo = self._get_match_repo()
         if match_repo and hasattr(match_repo, "get_player_hero_stats"):

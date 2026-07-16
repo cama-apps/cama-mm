@@ -123,6 +123,7 @@ class TestServiceContainerBotExposure:
             "dig_service": "dig_service",
             "dig_flavor_service": "dig_flavor_service",
             "reminder_service": "reminder_service",
+            "activity_service": "activity_service",
             "curse_service": "curse_service",
             "mafia_service": "mafia_service",
             "mafia_flavor_service": "mafia_flavor_service",

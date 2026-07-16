@@ -580,6 +580,66 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     (timestamp, discord_id, guild_id),
                 )
 
+    def bump_last_active_many(
+        self, discord_ids: list[int], guild_id: int, timestamp: str | None = None
+    ) -> int:
+        """
+        Bump last_active_at for the given players in one transaction.
+
+        Only rows that exist for (discord_id, guild_id) are updated, so
+        unregistered IDs are silently ignored — this is how channel-activity
+        sweeps bump only registered players without a separate lookup. The
+        ``last_active_at < ?`` guard keeps the write monotonic and idempotent
+        under overlapping sweeps. ``timestamp`` must be an ISO-8601 UTC string;
+        defaults to now (UTC).
+
+        Returns the driver-reported affected-row count (best-effort; do not
+        rely on it for correctness).
+        """
+        from datetime import datetime
+
+        guild_id = self.normalize_guild_id(guild_id)
+        if not discord_ids:
+            return 0
+        ts = timestamp or datetime.now(UTC).isoformat()
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE players
+                SET last_active_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (last_active_at IS NULL OR last_active_at < ?)
+                """,
+                [(ts, discord_id, guild_id, ts) for discord_id in discord_ids],
+            )
+            return cursor.rowcount
+
+    def is_active_for_lottery(
+        self, discord_id: int, guild_id: int, activity_days: int
+    ) -> bool:
+        """
+        True if the player played a match OR was present in a text/voice
+        channel within the last ``activity_days`` days.
+
+        Combines last_match_date and last_active_at at read time (whichever is
+        more recent), matching the lottery eligibility gate exactly.
+        """
+        from datetime import datetime, timedelta
+
+        guild_id = self.normalize_guild_id(guild_id)
+        cutoff = (datetime.now(UTC) - timedelta(days=activity_days)).isoformat()
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                  AND MAX(COALESCE(last_match_date, ''), COALESCE(last_active_at, '')) >= ?
+                """,
+                (discord_id, guild_id, cutoff),
+            )
+            return cursor.fetchone() is not None
 
     def get_balance(self, discord_id: int, guild_id: int) -> int:
         """Get a player's jopacoin balance."""
@@ -1547,8 +1607,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Get recently active players (discord_id only) for lottery selection.
 
-        Only includes players who have played a match within the last
-        ``activity_days`` days.
+        A player counts as active if they played a match OR were present in a
+        text/voice channel within the last ``activity_days`` days (whichever
+        signal is more recent).
 
         Returns:
             List of dicts with 'discord_id' for eligible players.
@@ -1563,8 +1624,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """
                 SELECT discord_id FROM players
                 WHERE guild_id = ?
-                  AND last_match_date IS NOT NULL
-                  AND last_match_date >= ?
+                  AND MAX(COALESCE(last_match_date, ''), COALESCE(last_active_at, '')) >= ?
                 """,
                 (guild_id, cutoff),
             )

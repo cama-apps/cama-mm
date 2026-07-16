@@ -267,6 +267,20 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def bump_last_active_many(
+        self, discord_ids: list[int], guild_id: int, timestamp: str | None = None
+    ) -> int:
+        """Bump last_active_at for registered players; unknown IDs are ignored."""
+        ...
+
+    @abstractmethod
+    def is_active_for_lottery(
+        self, discord_id: int, guild_id: int, activity_days: int
+    ) -> bool:
+        """True if the player played or was present in a channel within the window."""
+        ...
+
+    @abstractmethod
     def get_richest_players(
         self, guild_id: int, limit: int = 5, min_balance: int = 1
     ) -> list[dict]:

@@ -83,6 +83,7 @@ class ServiceContainer:
         self._init_mafia_service()
         self._init_extras()
         self._init_reminder_service()
+        self._init_activity_service()
 
         self._initialized = True
         logger.info("ServiceContainer initialization complete")
@@ -518,6 +519,12 @@ class ServiceContainer:
             dig_service=c["dig_service"],
         )
 
+    def _init_activity_service(self) -> None:
+        from services.activity_service import ActivityService
+
+        c = self._components
+        c["activity_service"] = ActivityService(player_repo=c["player_repo"])
+
     # ------------------------------------------------------------------
     # Bot exposure
     # ------------------------------------------------------------------
@@ -570,6 +577,7 @@ class ServiceContainer:
         bot.dig_service = c["dig_service"]
         bot.dig_flavor_service = c.get("dig_flavor_service")
         bot.reminder_service = c["reminder_service"]
+        bot.activity_service = c["activity_service"]
         bot.curse_service = c["curse_service"]
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]

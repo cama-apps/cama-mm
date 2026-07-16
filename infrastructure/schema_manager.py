@@ -484,6 +484,9 @@ class SchemaManager:
             ("drop_retired_wheel_war_tables", self._migration_drop_retired_wheel_war_tables),
             # Persistent per-guild cooldown for the paid /pingedash command.
             ("add_last_pingedash_to_players", self._migration_add_last_pingedash_to_players),
+            # Track most recent text/voice channel presence (periodic sweeps) so
+            # lottery eligibility counts hanging out, not just playing matches.
+            ("add_last_active_at_to_players", self._migration_add_last_active_at_to_players),
         ]
 
     # --- Migrations ---
@@ -940,6 +943,24 @@ class SchemaManager:
             UPDATE players
             SET last_match_date = COALESCE(last_match_date, created_at)
             WHERE last_match_date IS NULL
+            """
+        )
+
+    def _migration_add_last_active_at_to_players(self, cursor) -> None:
+        """
+        Add last_active_at to players to track most recent text/voice presence.
+
+        Bumped by periodic channel-activity sweeps. Kept separate from
+        last_match_date (which has other readers) and combined only at read
+        time for lottery eligibility. Backfill from the best signal we already
+        have so pre-existing players aren't instantly counted as inactive.
+        """
+        self._add_column_if_not_exists(cursor, "players", "last_active_at", "TIMESTAMP")
+        cursor.execute(
+            """
+            UPDATE players
+            SET last_active_at = COALESCE(last_active_at, last_match_date, created_at)
+            WHERE last_active_at IS NULL
             """
         )
 
