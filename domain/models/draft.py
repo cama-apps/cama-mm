@@ -15,15 +15,8 @@ class DraftPhase(Enum):
     WINNER_SIDE_CHOICE = "winner_side_choice"  # Winner chose to pick side
     WINNER_HERO_CHOICE = "winner_hero_choice"  # Winner chose to pick hero order
     LOSER_CHOICE = "loser_choice"  # Loser gets remaining choice
-    PLAYER_DRAFT_ORDER = "player_draft_order"  # Lower-rated captain chooses 1st/2nd
     DRAFTING = "drafting"  # Active player draft
     COMPLETE = "complete"
-
-
-# Snake draft order: which captain picks at each step (0 = first captain, 1 = second captain)
-# 8 picks total, in consecutive runs of 1-2-2-2-1:
-# first picks 1, second picks 2, first picks 2, second picks 2, first picks 1.
-SNAKE_DRAFT_ORDER = [0, 1, 1, 0, 0, 1, 1, 0]
 
 
 @dataclass
@@ -81,8 +74,7 @@ class DraftState:
     dire_hero_pick_order: int | None = None
 
     # Player draft
-    # ID of captain who picks first in player draft
-    player_draft_first_captain_id: int | None = None
+    current_round_first_captain_id: int | None = None
     current_pick_index: int = 0  # 0-7 for 8 picks
 
     # Teams being built during draft
@@ -114,19 +106,12 @@ class DraftState:
         """Get the ID of the captain whose turn it is to pick."""
         if self.phase != DraftPhase.DRAFTING:
             return None
-        if self.current_pick_index >= len(SNAKE_DRAFT_ORDER):
+        if self.current_pick_index >= 8:
             return None
 
-        # Determine which captain (0 or 1) picks at this index
-        picker_index = SNAKE_DRAFT_ORDER[self.current_pick_index]
-
-        # Map picker_index to actual captain ID based on who picks first
-        if self.player_draft_first_captain_id == self.radiant_captain_id:
-            # Radiant captain picks first
-            return self.radiant_captain_id if picker_index == 0 else self.dire_captain_id
-        else:
-            # Dire captain picks first
-            return self.dire_captain_id if picker_index == 0 else self.radiant_captain_id
+        if self.current_pick_index % 2 == 0:
+            return self.current_round_first_captain_id
+        return self._other_captain_id(self.current_round_first_captain_id)
 
     @property
     def current_captain_team(self) -> str | None:
@@ -140,38 +125,64 @@ class DraftState:
 
     @property
     def picks_remaining_this_turn(self) -> int:
-        """Get how many consecutive picks the current captain has."""
+        """Each captain makes exactly one pick in the current round."""
         if self.phase != DraftPhase.DRAFTING:
             return 0
-        if self.current_pick_index >= len(SNAKE_DRAFT_ORDER):
+        if self.current_pick_index >= 8:
             return 0
+        return 1
 
-        current_picker = SNAKE_DRAFT_ORDER[self.current_pick_index]
-        count = 0
-        for i in range(self.current_pick_index, len(SNAKE_DRAFT_ORDER)):
-            if SNAKE_DRAFT_ORDER[i] == current_picker:
-                count += 1
-            else:
-                break
-        return count
-
-    @property
-    def lower_rated_captain_id(self) -> int | None:
-        """Get the ID of the lower-rated captain."""
-        if self.captain1_id is None or self.captain2_id is None:
-            return None
-        if self.captain1_rating <= self.captain2_rating:
-            return self.captain1_id
-        return self.captain2_id
+    def _player_rating(self, player_id: int) -> float:
+        player_data = self.player_pool_data.get(player_id, {})
+        rating = player_data.get("rating")
+        if rating is not None:
+            return float(rating)
+        if player_id == self.captain1_id:
+            return self.captain1_rating
+        if player_id == self.captain2_id:
+            return self.captain2_rating
+        return 1500.0
 
     @property
-    def higher_rated_captain_id(self) -> int | None:
-        """Get the ID of the higher-rated captain."""
-        if self.captain1_id is None or self.captain2_id is None:
-            return None
-        if self.captain1_rating > self.captain2_rating:
-            return self.captain1_id
-        return self.captain2_id
+    def radiant_rating_total(self) -> float:
+        """Glicko total for the current Radiant roster."""
+        return sum(self._player_rating(player_id) for player_id in self.radiant_player_ids)
+
+    @property
+    def dire_rating_total(self) -> float:
+        """Glicko total for the current Dire roster."""
+        return sum(self._player_rating(player_id) for player_id in self.dire_player_ids)
+
+    def _other_captain_id(self, captain_id: int | None) -> int | None:
+        if captain_id == self.radiant_captain_id:
+            return self.dire_captain_id
+        if captain_id == self.dire_captain_id:
+            return self.radiant_captain_id
+        return None
+
+    def _choose_round_first_captain(self) -> int | None:
+        if self.radiant_rating_total < self.dire_rating_total:
+            return self.radiant_captain_id
+        if self.dire_rating_total < self.radiant_rating_total:
+            return self.dire_captain_id
+
+        if self.current_pick_index == 0:
+            return self._other_captain_id(self.coinflip_winner_id) or self.radiant_captain_id
+
+        return (
+            self._other_captain_id(self.current_round_first_captain_id)
+            or self.radiant_captain_id
+        )
+
+    def start_player_draft(self) -> None:
+        """Assign captains to teams and start the first two-pick round."""
+        if self.radiant_captain_id not in self.radiant_player_ids:
+            self.radiant_player_ids.append(self.radiant_captain_id)
+        if self.dire_captain_id not in self.dire_player_ids:
+            self.dire_player_ids.append(self.dire_captain_id)
+        self.current_pick_index = 0
+        self.phase = DraftPhase.DRAFTING
+        self.current_round_first_captain_id = self._choose_round_first_captain()
 
     @property
     def is_draft_complete(self) -> bool:
@@ -188,7 +199,7 @@ class DraftState:
                 provided, the pick is rejected unless it is that captain's turn.
                 This guard runs synchronously (no awaits between the check and the
                 state mutation), so concurrent button callbacks for the same
-                captain can never both land — the first pick advances the snake
+                captain can never both land — the first pick advances the round
                 order and changes ``current_captain_id``, so the second's
                 ``picker_id`` no longer matches.
 
@@ -219,6 +230,8 @@ class DraftState:
         # Check if draft is complete
         if self.is_draft_complete:
             self.phase = DraftPhase.COMPLETE
+        elif self.current_pick_index % 2 == 0:
+            self.current_round_first_captain_id = self._choose_round_first_captain()
 
         return True
 
@@ -263,7 +276,7 @@ class DraftState:
             "loser_choice_value": self.loser_choice_value,
             "radiant_hero_pick_order": self.radiant_hero_pick_order,
             "dire_hero_pick_order": self.dire_hero_pick_order,
-            "player_draft_first_captain_id": self.player_draft_first_captain_id,
+            "current_round_first_captain_id": self.current_round_first_captain_id,
             "current_pick_index": self.current_pick_index,
             "radiant_player_ids": self.radiant_player_ids,
             "dire_player_ids": self.dire_player_ids,
@@ -295,7 +308,7 @@ class DraftState:
         state.loser_choice_value = data.get("loser_choice_value")
         state.radiant_hero_pick_order = data.get("radiant_hero_pick_order")
         state.dire_hero_pick_order = data.get("dire_hero_pick_order")
-        state.player_draft_first_captain_id = data.get("player_draft_first_captain_id")
+        state.current_round_first_captain_id = data.get("current_round_first_captain_id")
         state.current_pick_index = data.get("current_pick_index", 0)
         state.radiant_player_ids = data.get("radiant_player_ids", [])
         state.dire_player_ids = data.get("dire_player_ids", [])

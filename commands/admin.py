@@ -90,14 +90,12 @@ class AdminCommands(commands.Cog):
     )
     @app_commands.describe(
         count="Number of fake users to add (1-10)",
-        captain_eligible="Make fake users captain-eligible for Immortal Draft testing",
     )
     @require_guild
     async def addfake(
         self,
         interaction: discord.Interaction,
         count: int = 1,
-        captain_eligible: bool = False,
     ):
         rl_gid = interaction.guild.id
         rl = GLOBAL_RATE_LIMITER.check(
@@ -212,10 +210,6 @@ class AdminCommands(commands.Cog):
                     except ValueError:
                         pass
 
-                # Set captain eligibility if requested
-                if captain_eligible:
-                    self.player_service.set_captain_eligible(fake_id, addfake_guild_id, True)
-
                 success, _, _ = self.lobby_service.join_lobby(fake_id, addfake_guild_id)
                 if success:
                     fake_users_added.append(fake_name)
@@ -245,11 +239,10 @@ class AdminCommands(commands.Cog):
                 logger.warning(f"Failed to refresh lobby message after addfake: {exc}")
 
         if can_respond:
-            captain_note = " (captain-eligible)" if captain_eligible else ""
             await safe_followup(
                 interaction,
                 content=(
-                    f"✅ Added {len(fake_users_added)} fake user(s){captain_note}: "
+                    f"✅ Added {len(fake_users_added)} fake user(s): "
                     + ", ".join(fake_users_added)
                 ),
                 ephemeral=True,
@@ -260,14 +253,10 @@ class AdminCommands(commands.Cog):
         name="filllobbytest",
         description="Fill remaining lobby spots with fake users for testing (Admin only)",
     )
-    @app_commands.describe(
-        captain_eligible="Make fake users captain-eligible for Immortal Draft testing",
-    )
     @require_guild
     async def filllobbytest(
         self,
         interaction: discord.Interaction,
-        captain_eligible: bool = False,
     ):
         """Fill lobby to ready threshold with fake users."""
         if not has_admin_permission(interaction):
@@ -330,9 +319,6 @@ class AdminCommands(commands.Cog):
                     except ValueError:
                         pass
 
-                if captain_eligible:
-                    self.player_service.set_captain_eligible(fake_id, fill_guild_id, True)
-
                 success, _, _ = self.lobby_service.join_lobby(fake_id, fill_guild_id)
                 if success:
                     fake_users_added.append((fake_name, fake_id))
@@ -372,10 +358,9 @@ class AdminCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to refresh lobby message after filllobbytest: {exc}")
 
-        captain_note = " (captain-eligible)" if captain_eligible else ""
         await safe_followup(
             interaction,
-            content=f"✅ Added {len(fake_users_added)} fake user(s){captain_note} to fill lobby.",
+            content=f"✅ Added {len(fake_users_added)} fake user(s) to fill lobby.",
             ephemeral=True,
         )
         logger.info(f"filllobbytest completed: added {len(fake_users_added)} fake users")

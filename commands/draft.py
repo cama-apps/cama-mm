@@ -1,6 +1,4 @@
-"""
-Draft commands for Immortal Draft mode: /draft captain, /draft start, /draft restart
-"""
+"""Draft commands for Immortal Draft mode: /draft start and /draft restart."""
 
 import asyncio
 import contextlib
@@ -16,12 +14,11 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from config import BET_LOCK_SECONDS, BOMB_POT_CHANCE, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
-from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
+from domain.models.draft import DraftPhase, DraftState
 from domain.models.pending_match_state import PendingMatchState
 from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
 from services.permissions import has_admin_permission
-from shuffler import BalancedShuffler
 from utils.draft_embeds import format_player_row, format_roles
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
 from utils.interaction_safety import safe_defer
@@ -161,43 +158,6 @@ class HeroPickOrderView(discord.ui.View):
     @discord.ui.button(label="Second Pick", style=discord.ButtonStyle.secondary, emoji="2️⃣")
     async def choose_second(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_hero_pick_choice(interaction, self.guild_id, "second", self.is_winner)
-        self.stop()
-
-    async def on_timeout(self):
-        await self.cog._handle_draft_timeout(self.guild_id)
-
-
-class PlayerDraftOrderView(discord.ui.View):
-    """Lower-rated captain chooses first or second in player draft."""
-
-    def __init__(
-        self,
-        cog: "DraftCommands",
-        guild_id: int,
-        chooser_id: int,
-        timeout: float = PRE_DRAFT_TIMEOUT,
-    ):
-        super().__init__(timeout=timeout)
-        self.cog = cog
-        self.guild_id = guild_id
-        self.chooser_id = chooser_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.chooser_id:
-            await interaction.response.send_message(
-                "Only the lower-rated captain can make this choice.", ephemeral=True
-            )
-            return False
-        return True
-
-    @discord.ui.button(label="Pick First", style=discord.ButtonStyle.primary, emoji="1️⃣")
-    async def pick_first(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_player_draft_order_choice(interaction, self.guild_id, "first")
-        self.stop()
-
-    @discord.ui.button(label="Pick Second", style=discord.ButtonStyle.secondary, emoji="2️⃣")
-    async def pick_second(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.handle_player_draft_order_choice(interaction, self.guild_id, "second")
         self.stop()
 
     async def on_timeout(self):
@@ -396,61 +356,6 @@ class DraftCommands(commands.Cog):
         return getattr(interaction, "message", None)
 
     # ========================================================================
-    # /setcaptain command
-    # ========================================================================
-
-    @draft.command(
-        name="captain",
-        description="Set yourself as eligible (or ineligible) to be a captain in Immortal Draft",
-    )
-    @app_commands.describe(
-        eligible="Yes to be captain-eligible, No to opt out",
-    )
-    @app_commands.choices(
-        eligible=[
-            app_commands.Choice(name="Yes", value="yes"),
-            app_commands.Choice(name="No", value="no"),
-        ]
-    )
-    @require_guild
-    async def setcaptain(
-        self,
-        interaction: discord.Interaction,
-        eligible: app_commands.Choice[str],
-    ):
-        """Toggle captain eligibility for Immortal Draft mode."""
-        logger.info(
-            f"Setcaptain command: User {interaction.user.id} ({interaction.user}) "
-            f"setting eligible={eligible.value}"
-        )
-
-        guild_id = interaction.guild.id
-
-        # Check if user is registered
-        player = await asyncio.to_thread(self.player_repo.get_by_id, interaction.user.id, guild_id)
-        if not player:
-            await interaction.response.send_message(
-                "❌ You must be registered first. Use `/player register` to sign up.",
-                ephemeral=True,
-            )
-            return
-
-        is_eligible = eligible.value == "yes"
-        await asyncio.to_thread(self.player_repo.set_captain_eligible, interaction.user.id, guild_id, is_eligible)
-
-        if is_eligible:
-            await interaction.response.send_message(
-                "✅ You are now **captain-eligible** for Immortal Draft!\n"
-                "You may be selected as a captain when `/draft start` is used.",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                "✅ You are no longer captain-eligible for Immortal Draft.",
-                ephemeral=True,
-            )
-
-    # ========================================================================
     # /restartdraft command
     # ========================================================================
 
@@ -541,7 +446,8 @@ class DraftCommands(commands.Cog):
         state.coinflip_winner_id = -101
         state.radiant_hero_pick_order = 1
         state.dire_hero_pick_order = 2
-        state.player_draft_first_captain_id = -102  # Lower rated picks first
+        state.current_round_first_captain_id = -102
+        state.current_pick_index = 1
         state.phase = DraftPhase.DRAFTING
 
         # Pool of 10 players (2 captains + 8 available), plus 2 excluded
@@ -702,232 +608,61 @@ class DraftCommands(commands.Cog):
             sends its own user-facing error first, so callers must not post a
             generic failure message when this returns False.
         """
-        # Handle regular and conditional players separately
-        # Regular players are always included; conditional players fill remaining spots if needed
         regular_players = list(lobby.players)
         conditional_players = list(lobby.conditional_players)
+        lobby_player_ids = regular_players + conditional_players
 
         logger.info(
             "Immortal Draft starting: guild=%s, %d regular + %d conditional player(s)",
             guild_id, len(regular_players), len(conditional_players),
         )
 
-        # Track which IDs are regular for pre-pruning priority (regular > conditional)
-        regular_player_ids_set = set(regular_players)
-
-        # Track promoted conditional players for exclusion bonus handling
-        promoted_conditional_set: set[int] = set()
-        unpromoted_conditional_ids: list[int] = []
-
-        if len(regular_players) >= DRAFT_POOL_SIZE:
-            # Enough regular players - use them (all conditional players excluded)
-            lobby_player_ids = regular_players
-            unpromoted_conditional_ids = conditional_players
-        else:
-            # Need to promote some conditional players to reach 10
-            needed = DRAFT_POOL_SIZE - len(regular_players)
-            # Randomly select conditional players to promote (per plan: random.sample, not rating-based)
-            promoted_conditional = random.sample(
-                conditional_players, min(needed, len(conditional_players))
-            )
-            promoted_conditional_set = set(promoted_conditional)
-            unpromoted_conditional_ids = [
-                cid for cid in conditional_players if cid not in promoted_conditional_set
-            ]
-            lobby_player_ids = regular_players + promoted_conditional
-
-        # Get player ratings for captain selection
         players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
-        # Check captain eligibility (require pre-existing opt-ins)
-        eligible_captain_ids = await asyncio.to_thread(
-            self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id
+        # Get exclusion counts for player pool selection
+        exclusion_counts = await asyncio.to_thread(self.player_repo.get_exclusion_counts, lobby_player_ids, guild_id)
+
+        progress_message = await interaction.followup.send(
+            "⚙️ Building the Immortal Draft player pool…"
         )
 
-        # Specified captains must also be eligible (no bypass)
-        if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
-            cap1_name = await self._get_member_name(interaction.guild, specified_captain1_id)
-            await interaction.followup.send(
-                f"❌ **{cap1_name}** has not opted in as captain. "
-                f"They must use `/draft captain yes` first.",
-                ephemeral=True,
-            )
-            return False
-        if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
-            cap2_name = await self._get_member_name(interaction.guild, specified_captain2_id)
-            await interaction.followup.send(
-                f"❌ **{cap2_name}** has not opted in as captain. "
-                f"They must use `/draft captain yes` first.",
-                ephemeral=True,
-            )
-            return False
+        forced_captain_ids = [
+            captain_id
+            for captain_id in (specified_captain1_id, specified_captain2_id)
+            if captain_id is not None
+        ]
 
-        if len(eligible_captain_ids) < 2:
-            await interaction.followup.send(
-                "❌ Not enough captain-eligible players. "
-                "At least 2 players must use `/draft captain yes`.",
-                ephemeral=True,
-            )
-            return False
-
-        # Select captains
         try:
+            pool_result = await asyncio.to_thread(
+                self.draft_service.select_player_pool,
+                regular_player_ids=regular_players,
+                conditional_player_ids=conditional_players,
+                exclusion_counts=exclusion_counts,
+                player_ratings=player_ratings,
+                forced_include_ids=forced_captain_ids,
+                pool_size=DRAFT_POOL_SIZE,
+            )
             captain_pair = await asyncio.to_thread(
                 self.draft_service.select_captains,
-                eligible_ids=eligible_captain_ids,
+                player_pool_ids=pool_result.selected_ids,
                 player_ratings=player_ratings,
                 specified_captain1=specified_captain1_id,
                 specified_captain2=specified_captain2_id,
             )
         except ValueError as e:
+            logger.warning("Immortal Draft setup failed — %s", e)
+            with contextlib.suppress(Exception):
+                await progress_message.delete()
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return False
 
-        # Get exclusion counts for player pool selection
-        exclusion_counts = await asyncio.to_thread(self.player_repo.get_exclusion_counts, lobby_player_ids, guild_id)
-
-        # Surface progress: pool selection is the one slow step. This message
-        # is converted in place into the draft embed once the pool is ready.
-        progress_message = await interaction.followup.send(
-            "⚙️ Building balanced Immortal Draft teams…"
-        )
-
-        # Select player pool (10 players, captains always included)
-        # Use balanced pool selection when possible, fall back to exclusion-count-only
-        try:
-            # Build player map and non-captain candidate list
-            player_map = {p.discord_id: p for p in players}
-            captain_a = player_map.get(captain_pair.captain1_id)
-            captain_b = player_map.get(captain_pair.captain2_id)
-            non_captain_candidates = [
-                p for p in players
-                if p.discord_id not in (captain_pair.captain1_id, captain_pair.captain2_id)
-            ]
-
-            if captain_a and captain_b and len(non_captain_candidates) >= 8:
-                # Convert exclusion counts from ID-keyed to name-keyed
-                name_exclusion_counts = {
-                    player_map[pid].name: count
-                    for pid, count in exclusion_counts.items()
-                    if pid in player_map
-                }
-
-                # Get recent match participant names
-                recent_match_names: set[str] = set()
-                if self.match_service:
-                    try:
-                        match_repo = getattr(self.match_service, "match_repo", None)
-                        if match_repo:
-                            recent_ids = await asyncio.to_thread(
-                                match_repo.get_last_match_participant_ids, guild_id
-                            )
-                            recent_match_names = {
-                                player_map[pid].name
-                                for pid in recent_ids
-                                if pid in player_map
-                            }
-                    except Exception as e:
-                        logger.debug("Failed to fetch recent match participants: %s", e)
-
-                # Cap candidates so select_draft_pool stays in its fast
-                # exhaustive branch: C(12,8)=495 pools is ~1.5s (measured).
-                # Beam search (>12 candidates) is bimodal — milliseconds when
-                # it early-exits on an easy roster, but 20s+ when it grinds on
-                # a hard one — so we never feed it more than this.
-                MAX_CANDIDATES_FOR_BALANCED = 12
-                pre_excluded_players = []
-
-                if len(non_captain_candidates) > MAX_CANDIDATES_FOR_BALANCED:
-                    # Pre-prune using priority: regular > conditional, higher exclusion, higher rating
-                    def prune_priority(p):
-                        is_regular = p.discord_id in regular_player_ids_set
-                        exc_count = exclusion_counts.get(p.discord_id, 0)
-                        rating = p.glicko_rating or 1500.0
-                        # Sort key: regular first (0 < 1), then higher exclusion, then higher rating
-                        return (0 if is_regular else 1, -exc_count, -rating)
-
-                    sorted_candidates = sorted(non_captain_candidates, key=prune_priority)
-                    candidates_for_pool = sorted_candidates[:MAX_CANDIDATES_FOR_BALANCED]
-                    pre_excluded_players = sorted_candidates[MAX_CANDIDATES_FOR_BALANCED:]
-                    logger.info(
-                        f"Pre-pruned {len(pre_excluded_players)} candidates "
-                        f"({len(non_captain_candidates)} -> {len(candidates_for_pool)}) "
-                        f"for balanced pool selection"
-                    )
-                else:
-                    candidates_for_pool = non_captain_candidates
-
-                shuffler = BalancedShuffler()
-                _pool_started = time.perf_counter()
-                draft_pool_result = await asyncio.to_thread(
-                    shuffler.select_draft_pool,
-                    captain_a=captain_a,
-                    captain_b=captain_b,
-                    candidates=candidates_for_pool,
-                    exclusion_counts=name_exclusion_counts,
-                    recent_match_names=recent_match_names,
-                )
-                logger.info(
-                    "Draft pool selection: %d candidates scored in %.2fs",
-                    len(candidates_for_pool), time.perf_counter() - _pool_started,
-                )
-
-                # Add pre-excluded players to the excluded list
-                if pre_excluded_players:
-                    draft_pool_result.excluded_players.extend(pre_excluded_players)
-
-                # Convert back to ID-based PoolSelectionResult format
-                selected_ids = (
-                    [captain_pair.captain1_id, captain_pair.captain2_id]
-                    + [p.discord_id for p in draft_pool_result.selected_players]
-                )
-                excluded_ids = [p.discord_id for p in draft_pool_result.excluded_players]
-
-                from domain.services.draft_service import PoolSelectionResult
-                pool_result = PoolSelectionResult(
-                    selected_ids=selected_ids,
-                    excluded_ids=excluded_ids,
-                )
-                logger.info(
-                    f"Balanced draft pool selected: score={draft_pool_result.pool_score:.1f}"
-                )
-            else:
-                raise ValueError("Missing captain data or insufficient candidates")
-
-        except Exception as e:
-            # A ValueError is the balanced path's own "can't run" signal
-            # (missing captains / too few candidates) — fall back quietly.
-            # Anything else is a real defect: log it loudly, don't bury it.
-            if isinstance(e, ValueError):
-                logger.info("Balanced pool selection unavailable (%s), using fallback", e)
-            else:
-                logger.warning(
-                    "Balanced pool selection raised an unexpected error, using fallback",
-                    exc_info=True,
-                )
-            try:
-                pool_result = await asyncio.to_thread(
-                    self.draft_service.select_player_pool,
-                    lobby_player_ids=lobby_player_ids,
-                    exclusion_counts=exclusion_counts,
-                    forced_include_ids=[captain_pair.captain1_id, captain_pair.captain2_id],
-                    pool_size=DRAFT_POOL_SIZE,
-                )
-            except ValueError as e2:
-                logger.warning("Immortal Draft: pool selection failed — %s", e2)
-                with contextlib.suppress(Exception):
-                    await progress_message.delete()
-                await interaction.followup.send(f"❌ {e2}", ephemeral=True)
-                return False
-
         full_exclusion_increment_ids = [
-            pid for pid in pool_result.excluded_ids if pid not in promoted_conditional_set
+            pid for pid in pool_result.excluded_ids if pid in regular_players
         ]
         half_exclusion_increment_ids = [
-            pid for pid in pool_result.excluded_ids if pid in promoted_conditional_set
+            pid for pid in pool_result.excluded_ids if pid in conditional_players
         ]
-        half_exclusion_increment_ids.extend(unpromoted_conditional_ids)
 
         # Create draft state
         try:
@@ -945,7 +680,7 @@ class DraftCommands(commands.Cog):
         try:
             # Initialize state
             state.player_pool_ids = pool_result.selected_ids
-            state.excluded_player_ids = pool_result.excluded_ids
+            state.excluded_player_ids = full_exclusion_increment_ids
             state.full_exclusion_increment_ids = full_exclusion_increment_ids
             state.half_exclusion_increment_ids = half_exclusion_increment_ids
             state.captain1_id = captain_pair.captain1_id
@@ -1194,7 +929,7 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Execute draft with specified captains (normal captain eligibility check)
+        # Execute draft with optional captain overrides.
         await self._execute_draft(
             interaction,
             guild_id,
@@ -1331,6 +1066,15 @@ class DraftCommands(commands.Cog):
         )
         loser_name = await self._get_member_name(interaction.guild, loser_id)
 
+        expected_phase = (
+            DraftPhase.WINNER_SIDE_CHOICE if is_winner else DraftPhase.LOSER_CHOICE
+        )
+        if state.phase != expected_phase:
+            await interaction.response.send_message(
+                "❌ That choice has already been made.", ephemeral=True
+            )
+            return
+
         if is_winner:
             state.winner_choice_value = side
             # Assign sides
@@ -1376,8 +1120,8 @@ class DraftCommands(commands.Cog):
                 state.dire_captain_id = chooser_id
                 state.radiant_captain_id = state.coinflip_winner_id
 
-            # Move to player draft order phase
-            await self._show_player_draft_order_choice(interaction, guild_id, state)
+            # Begin player draft rounds
+            await self._start_player_draft(interaction, guild_id, state)
 
     async def handle_hero_pick_choice(
         self,
@@ -1402,6 +1146,15 @@ class DraftCommands(commands.Cog):
             else state.captain1_id
         )
         loser_name = await self._get_member_name(interaction.guild, loser_id)
+
+        expected_phase = (
+            DraftPhase.WINNER_HERO_CHOICE if is_winner else DraftPhase.LOSER_CHOICE
+        )
+        if state.phase != expected_phase:
+            await interaction.response.send_message(
+                "❌ That choice has already been made.", ephemeral=True
+            )
+            return
 
         if is_winner:
             state.winner_choice_value = pick_order
@@ -1433,16 +1186,15 @@ class DraftCommands(commands.Cog):
         else:
             # Loser is choosing hero order (winner picked side first)
             state.loser_choice_value = pick_order
-            # Move to player draft order phase
-            await self._show_player_draft_order_choice(interaction, guild_id, state)
+            await self._start_player_draft(interaction, guild_id, state)
 
-    async def _show_player_draft_order_choice(
+    async def _start_player_draft(
         self,
         interaction: discord.Interaction,
         guild_id: int,
         state: DraftState,
     ):
-        """Show player draft order choice to lower-rated captain."""
+        """Finish pre-draft setup and begin dynamic player-draft rounds."""
         # Assign hero pick order based on choices
         # winner_choice_type tells us what winner chose to pick
         # winner_choice_value is the winner's choice
@@ -1486,75 +1238,7 @@ class DraftCommands(commands.Cog):
                 state.dire_hero_pick_order = 2
                 state.radiant_hero_pick_order = 1
 
-        state.phase = DraftPhase.PLAYER_DRAFT_ORDER
-
-        lower_captain_id = state.lower_rated_captain_id
-        lower_captain_name = await self._get_member_name(interaction.guild, lower_captain_id)
-
-        radiant_name = await self._get_member_name(interaction.guild, state.radiant_captain_id)
-        dire_name = await self._get_member_name(interaction.guild, state.dire_captain_id)
-
-        first_hero_team = "Radiant" if state.radiant_hero_pick_order == 1 else "Dire"
-
-        embed = discord.Embed(
-            title="🎲 IMMORTAL DRAFT - Pre-Draft Setup Complete",
-            color=discord.Color.purple(),
-        )
-
-        embed.add_field(
-            name="Teams",
-            value=(f"🟢 **Radiant**: {radiant_name}\n🔴 **Dire**: {dire_name}"),
-            inline=False,
-        )
-
-        embed.add_field(
-            name="Hero Draft Order (In-Game)",
-            value=f"**{first_hero_team}** picks first",
-            inline=False,
-        )
-
-        embed.add_field(
-            name="Player Draft Order",
-            value=f"{lower_captain_name} (lower-rated) chooses first or second pick for player draft.",
-            inline=False,
-        )
-
-        # Show player pool
-        player_pool_display = self._build_player_pool_field(state)
-        embed.add_field(
-            name="📋 Player Pool",
-            value=player_pool_display,
-            inline=False,
-        )
-
-        view = PlayerDraftOrderView(self, guild_id, lower_captain_id)
-        await interaction.response.edit_message(embed=embed, view=view)
-
-    async def handle_player_draft_order_choice(
-        self,
-        interaction: discord.Interaction,
-        guild_id: int,
-        order: str,
-    ):
-        """Handle player draft order choice."""
-        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
-        if not state:
-            await interaction.response.send_message("❌ This draft is no longer active — start a new one with `/draft start`.", ephemeral=True)
-            return
-
-        lower_captain_id = state.lower_rated_captain_id
-        higher_captain_id = state.higher_rated_captain_id
-
-        if order == "first":
-            state.player_draft_first_captain_id = lower_captain_id
-        else:
-            state.player_draft_first_captain_id = higher_captain_id
-
-        state.phase = DraftPhase.DRAFTING
-
-        # Add captains to their teams
-        state.radiant_player_ids.append(state.radiant_captain_id)
-        state.dire_player_ids.append(state.dire_captain_id)
+        state.start_player_draft()
 
         # Neon Degen Terminal hook for captain symmetry
         try:
@@ -1625,7 +1309,6 @@ class DraftCommands(commands.Cog):
             await self._get_member_name(guild, current_captain_id) if current_captain_id else "N/A"
         )
         current_team = state.current_captain_team or "N/A"
-        picks_remaining = state.picks_remaining_this_turn
 
         # Get all players for role display
         all_player_ids = state.radiant_player_ids + state.dire_player_ids
@@ -1694,40 +1377,23 @@ class DraftCommands(commands.Cog):
         else:
             color = discord.Color.gold()
 
-        # Pick count indicator
-        pick_text = (
-            f"{picks_remaining} pick{'s' if picks_remaining != 1 else ''}"
-            if picks_remaining > 0
-            else "No picks"
+        round_number = min(state.current_pick_index // 2 + 1, 4)
+        pick_in_round = state.current_pick_index % 2 + 1
+        first_is_radiant = (
+            state.current_round_first_captain_id == state.radiant_captain_id
         )
-
-        # Build draft order visual with progress
-        # Snake order: [0, 1, 1, 0, 0, 1, 1, 0] where 0 = first picker's team
-        first_is_radiant = state.player_draft_first_captain_id == state.radiant_captain_id
-        current_pick = state.current_pick_index
-
-        order_parts = []
-        for i, pick_team in enumerate(SNAKE_DRAFT_ORDER):
-            if first_is_radiant:
-                icon = "🟢" if pick_team == 0 else "🔴"
-            else:
-                icon = "🔴" if pick_team == 0 else "🟢"
-
-            if i < current_pick:
-                # Completed pick - grey dot
-                order_parts.append("⚫")
-            elif i == current_pick:
-                # Current pick - highlight with brackets
-                order_parts.append(f"[{icon}]")
-            else:
-                # Future pick
-                order_parts.append(icon)
-
-        draft_order_visual = " ".join(order_parts)
+        first_team = "🟢 Radiant" if first_is_radiant else "🔴 Dire"
+        second_team = "🔴 Dire" if first_is_radiant else "🟢 Radiant"
 
         embed = discord.Embed(
             title="⚔️ IMMORTAL DRAFT - Player Selection",
-            description=f"**Draft Order:** {draft_order_visual}\n\n**{current_captain_name}** ({current_team.title()}) to pick! ({pick_text})",
+            description=(
+                f"**Round {round_number}/4:** {first_team} → {second_team}\n"
+                f"**Team Totals:** 🟢 {state.radiant_rating_total:.0f} • "
+                f"🔴 {state.dire_rating_total:.0f}\n\n"
+                f"**{current_captain_name}** ({current_team.title()}) to pick! "
+                f"(Pick {pick_in_round}/2)"
+            ),
             color=color,
         )
 
@@ -2171,6 +1837,7 @@ class DraftCommands(commands.Cog):
             radiant_team_ids=state.radiant_player_ids,
             dire_team_ids=state.dire_player_ids,
             excluded_player_ids=state.excluded_player_ids,
+            excluded_conditional_player_ids=state.half_exclusion_increment_ids,
             radiant_roles=[],  # No role assignments for draft
             dire_roles=[],
             radiant_value=radiant_value,
