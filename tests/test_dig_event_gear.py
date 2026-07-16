@@ -124,6 +124,30 @@ def test_service_hydrates_and_serializes_unique_gear(repo_db_path):
     assert equipped["effect"] == unique["effect"]
 
 
+def test_unique_gear_repair_preview_matches_prorated_debit(repo_db_path):
+    service = _service(repo_db_path)
+    gear_id = service.dig_repo.add_gear(
+        101,
+        7,
+        "armor",
+        3,
+        source="event:dead_prospectors_pack",
+        durability=7,
+        item_id="briarplate",
+    )
+
+    preview = service.compute_repair_cost(
+        "armor", 3, "briarplate", durability=7, max_durability=14,
+    )
+    balance_before = service.player_repo.get_balance(101, 7)
+    result = service.repair_gear(101, 7, gear_id)
+
+    assert preview == 10
+    assert result["cost"] == preview
+    assert service.player_repo.get_balance(101, 7) == balance_before - preview
+    assert service.dig_repo.get_gear_by_id(gear_id)["durability"] == 14
+
+
 def test_unique_weapon_uses_authored_dig_modifiers(repo_db_path, monkeypatch):
     service = _service(repo_db_path)
     gear_id = service.dig_repo.add_gear(

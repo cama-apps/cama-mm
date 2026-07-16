@@ -684,6 +684,48 @@ class TestDigEmbed:
         assert "Torch: bought" in auto_buy.value
         assert "Hard Hat: skipped (need 8 JC)" in auto_buy.value
 
+    def test_cave_in_broken_gear_renders_repair_notification(self):
+        from commands.dig import _build_dig_embed
+
+        result = SimpleNamespace(
+            depth=180,
+            tunnel_name="T",
+            pickaxe_tier=0,
+            cave_in=True,
+            advance=0,
+            jc_earned=0,
+            cave_in_detail={
+                "type": "gear_nick",
+                "block_loss": 5,
+                "message": "Gear took a beating.",
+                "gear_broken": ["Ironclad Armor"],
+            },
+            milestone_bonus=0,
+            streak_bonus=0,
+            artifact=None,
+            event=None,
+            sonar_skipped=False,
+            event_preview=None,
+            boss_scout=None,
+            items_used=None,
+            luminosity_info=None,
+            corruption=None,
+            mutations=None,
+            tip="tip",
+        )
+        user = SimpleNamespace(
+            display_name="Tester",
+            display_avatar=SimpleNamespace(url=""),
+        )
+
+        embed, _, _, _ = _build_dig_embed(result, user)
+
+        field = next((f for f in embed.fields if f.name == "Gear Broken"), None)
+        assert field is not None
+        assert "Ironclad Armor" in field.value
+        assert "effects disabled" in field.value
+        assert "Repair All" in field.value
+
 
 class TestEventPoolInvariants:
     """Invariants on the EVENT_POOL itself, independent of the service."""

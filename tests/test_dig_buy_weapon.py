@@ -115,6 +115,48 @@ class TestUpgradePickaxeToTier:
         assert not result["success"]
         assert "already" in result["error"].lower()
 
+    def test_broken_high_tier_weapon_cannot_be_replaced_by_lower_tier(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        _register(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "TestTunnel")
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=300, prestige_level=5, pickaxe_tier=7,
+        )
+        starter_id = dig_repo.get_equipped_gear(10001, guild_id)["weapon"]["id"]
+        dig_repo.unequip_gear(starter_id)
+        broken_id = dig_repo.add_gear(
+            10001, guild_id, "weapon", 7, durability=0,
+        )
+        dig_repo.equip_gear(broken_id, 10001, guild_id, "weapon")
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 1)
+
+        assert not result["success"]
+        assert "already" in result["error"].lower()
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+        assert dig_repo.get_equipped_gear(10001, guild_id)["weapon"]["id"] == broken_id
+
+    def test_shop_does_not_reoffer_pickaxe_tiers_below_broken_weapon(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        _register(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "TestTunnel")
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=300, prestige_level=5, pickaxe_tier=7,
+        )
+        starter_id = dig_repo.get_equipped_gear(10001, guild_id)["weapon"]["id"]
+        dig_repo.unequip_gear(starter_id)
+        broken_id = dig_repo.add_gear(
+            10001, guild_id, "weapon", 7, durability=0,
+        )
+        dig_repo.equip_gear(broken_id, 10001, guild_id, "weapon")
+
+        shop = dig_service.get_shop(10001, guild_id)
+
+        assert shop["pickaxe_upgrades"] == []
+
     def test_no_tunnel_rejected(self, dig_service, player_repository, guild_id):
         _register(player_repository)
         result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 1)

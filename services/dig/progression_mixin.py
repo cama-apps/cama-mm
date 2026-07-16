@@ -605,7 +605,7 @@ class ProgressionMixin:
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         current_tier = 0
         if tunnel:
-            current_tier = self._get_active_pickaxe_tier(discord_id, guild_id, dict(tunnel))
+            current_tier = self._get_owned_pickaxe_tier(discord_id, guild_id, dict(tunnel))
 
         pickaxe_upgrades = []
         for i in range(current_tier + 1, len(PICKAXE_TIERS)):
@@ -671,7 +671,7 @@ class ProgressionMixin:
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return self._error("You don't have a tunnel.")
-        current_tier = self._get_active_pickaxe_tier(
+        current_tier = self._get_owned_pickaxe_tier(
             discord_id, guild_id, dict(tunnel),
         )
         if target_tier != current_tier + 1:
@@ -698,7 +698,7 @@ class ProgressionMixin:
             return self._error("You don't have a tunnel.")
 
         tunnel = dict(tunnel)
-        current_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
+        current_tier = self._get_owned_pickaxe_tier(discord_id, guild_id, tunnel)
 
         if current_tier >= len(PICKAXE_TIERS) - 1:
             return self._error("Already at max pickaxe tier.")

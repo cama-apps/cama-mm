@@ -224,12 +224,107 @@ def test_phase_transition_forwards_callback_to_replacement_encounter(monkeypatch
                 dialogue="Again.",
                 boss_name="Test Boss",
                 wager=12,
+                gear_broken=["Stone Cuirass"],
             ),
             on_boss_resolved=callback,
         )
 
+        transition_embed = channel.send.await_args_list[0].kwargs["embed"]
+        broken_field = next(
+            (field for field in transition_embed.fields if field.name == "Gear Broken"),
+            None,
+        )
+        assert broken_field is not None
+        assert "Stone Cuirass" in broken_field.value
         assert encounter_factory.call_args.kwargs["on_boss_resolved"] is callback
         assert encounter.message is channel.send.return_value
+
+    asyncio.run(scenario())
+
+
+def test_duel_prompt_surfaces_stale_cleanup_break_notification():
+    result = _result(
+        pending_prompt={
+            "prompt_title": "Choose",
+            "prompt_description": "React.",
+            "options": [],
+        },
+        round_num=2,
+        player_hp=4,
+        player_hp_max=5,
+        boss_hp=5,
+        boss_hp_max=6,
+        gear_broken=["Stone Cuirass"],
+    )
+
+    embed = bv._build_duel_prompt_embed(result)
+
+    broken_field = next(
+        (field for field in embed.fields if field.name == "Gear Broken"), None,
+    )
+    assert broken_field is not None
+    assert "Stone Cuirass" in broken_field.value
+
+
+def test_no_wager_resolution_surfaces_break_notification(monkeypatch):
+    monkeypatch.setattr(bv, "_send_boss_victory_neon", AsyncMock())
+
+    async def scenario():
+        service = MagicMock()
+        service.start_boss_duel.return_value = _result(
+            gear_broken=["Stone Cuirass"],
+        )
+        interaction = _interaction()
+
+        await bv._resolve_phase_fight_without_modal(
+            interaction,
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            risk_tier="bold",
+            wager=0,
+        )
+
+        embed = interaction.followup.send.await_args.kwargs["embed"]
+        broken_field = next(
+            (field for field in embed.fields if field.name == "Gear Broken"), None,
+        )
+        assert broken_field is not None
+        assert "Stone Cuirass" in broken_field.value
+
+    asyncio.run(scenario())
+
+
+def test_wager_modal_resolution_surfaces_break_notification(monkeypatch):
+    monkeypatch.setattr(bv, "safe_defer", AsyncMock())
+    monkeypatch.setattr(bv, "_send_boss_victory_neon", AsyncMock())
+
+    async def scenario():
+        service = MagicMock()
+        service.start_boss_duel.return_value = _result(
+            gear_broken=["Stone Cuirass"],
+        )
+        modal = SimpleNamespace(
+            risk_tier=SimpleNamespace(value="bold"),
+            wager=SimpleNamespace(value="12"),
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            dig_flavor_service=None,
+            on_boss_resolved=None,
+            result=None,
+            stop=MagicMock(),
+        )
+        interaction = _interaction()
+
+        await bv.BossWagerModal.on_submit(modal, interaction)
+
+        embed = interaction.followup.send.await_args.kwargs["embed"]
+        broken_field = next(
+            (field for field in embed.fields if field.name == "Gear Broken"), None,
+        )
+        assert broken_field is not None
+        assert "Stone Cuirass" in broken_field.value
 
     asyncio.run(scenario())
 

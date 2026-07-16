@@ -1840,6 +1840,10 @@ class TestBoss:
         gained = player_repository.get_balance(10001, guild_id) - balance_before
         assert gained == result["payout"]
 
+    def test_boss_base_reward_scales_with_ascension(self, dig_service):
+        assert dig_service._boss_base_reward(25, prestige_level=0) == 15
+        assert dig_service._boss_base_reward(25, prestige_level=4) == 22
+
     def test_boss_fight_rejects_wager_before_final_phase(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):

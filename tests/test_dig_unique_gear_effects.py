@@ -20,7 +20,7 @@ def unique_service(repo_db_path):
     return DigService(dig_repo, player_repo)
 
 
-def _equip_unique(service: DigService, item_id: str) -> None:
+def _equip_unique(service: DigService, item_id: str) -> int:
     definition = UNIQUE_GEAR[item_id]
     gear_id = service.dig_repo.add_gear(
         901,
@@ -34,6 +34,16 @@ def _equip_unique(service: DigService, item_id: str) -> None:
     service.dig_repo.equip_gear(
         gear_id, 901, 19, definition.slot.value,
     )
+    return gear_id
+
+
+def test_broken_unique_gear_does_not_seed_its_combat_effect(unique_service):
+    gear_id = _equip_unique(unique_service, "briarplate")
+    unique_service.dig_repo.repair_gear(gear_id, 0)
+
+    status = unique_service._trophy_status_seed(901, 19, player_start_hp=5)
+
+    assert "gear_reflect_first_hit" not in status
 
 
 def test_nullweave_blocks_first_status_and_anchor_blocks_first_player_skip(

@@ -10,6 +10,7 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
+    ARMOR_TIERS,
     CAVE_IN_BAND_DEEP,
     CAVE_IN_BAND_ENDGAME,
     CAVE_IN_BAND_MID,
@@ -174,6 +175,103 @@ class TestConsequencePicker:
                 can_lower_luminosity=False, has_hard_hat_charges=False,
             )
             assert cid in {"stun", "injury", "medical_bill"}
+
+
+class TestCaveInGearBreaks:
+    def test_gear_nick_reports_newly_broken_piece(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        player_id = _register(player_repository, guild_id=guild_id)
+        tunnel = dig_repo.create_tunnel(player_id, guild_id, "Test Tunnel")
+        gear_id = dig_repo.add_gear(
+            player_id, guild_id, "armor", 1, durability=1,
+        )
+        dig_repo.equip_gear(gear_id, player_id, guild_id, "armor")
+        monkeypatch.setattr(
+            "services.dig.dig_core_mixin.pick_cave_in_consequence",
+            lambda *args, **kwargs: "gear_nick",
+        )
+
+        detail, debit = dig_service._apply_cave_in_consequence(
+            discord_id=player_id,
+            guild_id=guild_id,
+            tunnel=tunnel,
+            depth_before=180,
+            band=CAVE_IN_BAND_DEEP,
+            block_loss=5,
+            catastrophic=False,
+            balance=10000,
+            injury_bonus=0,
+            tunnel_updates={"depth": 175},
+        )
+
+        assert debit == 0
+        assert detail["gear_broken"] == [ARMOR_TIERS[1].name]
+        broken = dig_repo.get_gear_by_id(gear_id)
+        assert broken["durability"] == 0
+        assert broken["equipped"] == 1
+
+    def test_catastrophic_cave_in_reports_newly_broken_piece(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        player_id = _register(player_repository, guild_id=guild_id)
+        tunnel = dig_repo.create_tunnel(player_id, guild_id, "Test Tunnel")
+        gear_id = dig_repo.add_gear(
+            player_id, guild_id, "armor", 1, durability=1,
+        )
+        dig_repo.equip_gear(gear_id, player_id, guild_id, "armor")
+
+        detail, _debit = dig_service._apply_cave_in_consequence(
+            discord_id=player_id,
+            guild_id=guild_id,
+            tunnel=tunnel,
+            depth_before=180,
+            band=CAVE_IN_BAND_DEEP,
+            block_loss=5,
+            catastrophic=True,
+            balance=10000,
+            injury_bonus=0,
+            tunnel_updates={"depth": 175},
+        )
+
+        assert detail["gear_broken"] == [ARMOR_TIERS[1].name]
+        assert dig_repo.get_gear_by_id(gear_id)["equipped"] == 1
+
+    def test_broken_gear_is_not_an_applicable_gear_nick_target(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        player_id = _register(player_repository, guild_id=guild_id)
+        tunnel = dig_repo.create_tunnel(player_id, guild_id, "Test Tunnel")
+        for row in dig_repo.get_equipped_gear(player_id, guild_id).values():
+            dig_repo.unequip_gear(row["id"])
+        gear_id = dig_repo.add_gear(
+            player_id, guild_id, "armor", 1, durability=0,
+        )
+        dig_repo.equip_gear(gear_id, player_id, guild_id, "armor")
+        applicability = {}
+
+        def capture_picker(*args, **kwargs):
+            applicability.update(kwargs)
+            return "stun"
+
+        monkeypatch.setattr(
+            "services.dig.dig_core_mixin.pick_cave_in_consequence", capture_picker,
+        )
+
+        dig_service._apply_cave_in_consequence(
+            discord_id=player_id,
+            guild_id=guild_id,
+            tunnel=tunnel,
+            depth_before=180,
+            band=CAVE_IN_BAND_DEEP,
+            block_loss=5,
+            catastrophic=False,
+            balance=10000,
+            injury_bonus=0,
+            tunnel_updates={"depth": 175},
+        )
+
+        assert applicability["has_equipped_gear"] is False
 
 
 class TestEndToEndCaveInDeep:

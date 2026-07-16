@@ -707,34 +707,30 @@ class DigRepository(BaseRepository, IDigRepository):
     def tick_gear_durability(self, discord_id: int, guild_id: int) -> list[int]:
         """Decrement durability on every equipped piece by 1.
 
-        Returns the ids of pieces whose durability hit 0 — those rows are
-        also auto-unequipped here so the next fight reflects the loss.
+        Returns the ids of pieces whose durability transitioned from 1 to 0.
+        Broken pieces remain equipped so repairing them restores their slot.
         """
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                UPDATE dig_gear
-                SET durability = MAX(0, durability - 1)
-                WHERE discord_id = ? AND guild_id = ? AND equipped = 1
-                """,
-                (discord_id, gid),
-            )
-            cursor.execute(
-                """
                 SELECT id FROM dig_gear
-                WHERE discord_id = ? AND guild_id = ? AND equipped = 1 AND durability = 0
+                WHERE discord_id = ? AND guild_id = ?
+                  AND equipped = 1 AND durability = 1
                 """,
                 (discord_id, gid),
             )
             broken_ids = [row["id"] for row in cursor.fetchall()]
-            if broken_ids:
-                placeholders = ",".join("?" for _ in broken_ids)
-                cursor.execute(
-                    f"UPDATE dig_gear SET equipped = 0 WHERE id IN ({placeholders})",
-                    broken_ids,
-                )
+            cursor.execute(
+                """
+                UPDATE dig_gear
+                SET durability = MAX(0, durability - 1)
+                WHERE discord_id = ? AND guild_id = ?
+                  AND equipped = 1 AND durability > 0
+                """,
+                (discord_id, gid),
+            )
             return broken_ids
 
     def tick_gear_durability_ids(self, gear_ids: list[int]) -> list[int]:
@@ -743,7 +739,7 @@ class DigRepository(BaseRepository, IDigRepository):
         Used by the boss-duel resume path to tick the pieces that fought
         the original fight, even if the player swapped gear during the
         mid-fight pause. Returns the ids of pieces whose durability hit 0.
-        Auto-unequips broken pieces.
+        Their current equipped state is preserved.
         """
         if not gear_ids:
             return []
@@ -751,24 +747,18 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
             placeholders = ",".join("?" for _ in gear_ids)
             cursor.execute(
-                f"""
-                UPDATE dig_gear
-                SET durability = MAX(0, durability - 1)
-                WHERE id IN ({placeholders})
-                """,
-                gear_ids,
-            )
-            cursor.execute(
-                f"SELECT id FROM dig_gear WHERE id IN ({placeholders}) AND durability = 0",
+                f"SELECT id FROM dig_gear WHERE id IN ({placeholders}) AND durability = 1",
                 gear_ids,
             )
             broken_ids = [row["id"] for row in cursor.fetchall()]
-            if broken_ids:
-                broken_placeholders = ",".join("?" for _ in broken_ids)
-                cursor.execute(
-                    f"UPDATE dig_gear SET equipped = 0 WHERE id IN ({broken_placeholders})",
-                    broken_ids,
-                )
+            cursor.execute(
+                f"""
+                UPDATE dig_gear
+                SET durability = MAX(0, durability - 1)
+                WHERE id IN ({placeholders}) AND durability > 0
+                """,
+                gear_ids,
+            )
             return broken_ids
 
     def repair_gear(self, gear_id: int, to_durability: int) -> None:

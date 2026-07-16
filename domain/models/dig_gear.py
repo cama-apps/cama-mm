@@ -124,7 +124,7 @@ class GearLoadout:
         pieces = tuple(
             piece
             for piece in (self.weapon, self.armor, self.boots, self.amulet)
-            if piece is not None
+            if piece is not None and piece.durability > 0
         )
         return {
             "player_dmg": sum(p.tier_def.player_dmg for p in pieces),

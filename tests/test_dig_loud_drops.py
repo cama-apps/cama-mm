@@ -28,6 +28,7 @@ class TestBossFightResultEmbedDrops:
             "luminosity_display": None,
             "echo_applied": False,
             "gear_drop": None,
+            "gear_broken": [],
             "prestige_relic_drop": None,
         }
         defaults.update(overrides)
@@ -68,3 +69,18 @@ class TestBossFightResultEmbedDrops:
         embed = _build_boss_fight_result_embed(result=result, risk_tier="cautious", amount=10)
         names = [f.name for f in embed.fields]
         assert "Boss Drop" not in names
+
+    def test_broken_gear_renders_repair_notification(self):
+        result = _FakeResult(**self._base_kwargs(
+            gear_broken=["Ironclad Armor"],
+        ))
+
+        embed = _build_boss_fight_result_embed(
+            result=result, risk_tier="cautious", amount=10,
+        )
+
+        field = next((f for f in embed.fields if f.name == "Gear Broken"), None)
+        assert field is not None
+        assert "Ironclad Armor" in field.value
+        assert "effects disabled" in field.value
+        assert "Repair All" in field.value

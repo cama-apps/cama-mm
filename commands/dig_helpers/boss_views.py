@@ -24,6 +24,22 @@ logger = logging.getLogger("cama_bot.commands.dig")
 BossResolvedCallback = Callable[[int, int | None], Awaitable[None]]
 
 
+def _add_gear_broken_notice(embed: discord.Embed, result) -> None:
+    raw = result._d if hasattr(result, "_d") else (result if isinstance(result, dict) else {})
+    gear_broken = getattr(result, "gear_broken", None) or raw.get("gear_broken") or []
+    if not gear_broken:
+        return
+    embed.add_field(
+        name="Gear Broken",
+        value=(
+            "\n".join(f"• **{name}**" for name in gear_broken)
+            + "\nThese items stay equipped with their effects disabled until repaired. "
+            "Use **Repair All** in `/dig gear`."
+        ),
+        inline=False,
+    )
+
+
 async def _run_boss_resolved_callback(
     callback: BossResolvedCallback | None,
     user_id: int,
@@ -245,6 +261,7 @@ class BossWagerModal(discord.ui.Modal):
                 )
                 if boss_narrative:
                     embed.add_field(name="​", value=f"*{boss_narrative}*", inline=False)
+            _add_gear_broken_notice(embed, self.result)
             embed.add_field(
                 name="Details",
                 value=(
@@ -394,6 +411,7 @@ async def _post_phase_transition_followup(
             value=f"Your **{wager}** {JOPACOIN_EMOTE} wager rides on the next phase.",
             inline=False,
         )
+    _add_gear_broken_notice(transition_embed, result)
 
     # Phase-3 transitions (from the resume_boss_duel path) reach this helper
     # with phase3_incoming=True; pick the right asset key so the embed art
@@ -549,6 +567,7 @@ async def _resolve_phase_fight_without_modal(
     soften_line = getattr(result, "soften_line", None)
     if soften_line:
         embed.add_field(name="​", value=soften_line, inline=False)
+    _add_gear_broken_notice(embed, result)
     embed.add_field(
         name="Details",
         value=(
@@ -605,6 +624,7 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     lum_line = raw.get("luminosity_display")
     if lum_line:
         embed.add_field(name="​", value=lum_line, inline=False)
+    _add_gear_broken_notice(embed, result)
     opts = pp.get("options") or []
     if opts:
         lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
@@ -718,10 +738,12 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             f"You lost **{loss}** {JOPACOIN_EMOTE} and were knocked back {knockback} blocks."
         )
 
+    raw = result._d if hasattr(result, "_d") else (result if isinstance(result, dict) else {})
+    _add_gear_broken_notice(embed, result)
+
     # Surface the mid-fight option the player picked plus its rolled narrative.
     # Without this, picking a button on the reactive prompt jumps straight to
     # a generic "Defeat!" and the player has no idea what happened.
-    raw = result._d if hasattr(result, "_d") else (result if isinstance(result, dict) else {})
     round_log = raw.get("round_log") or []
     mechanic_entry = next(
         (e for e in reversed(round_log) if isinstance(e, dict) and e.get("mechanic_id")),

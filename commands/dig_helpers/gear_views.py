@@ -37,13 +37,18 @@ def _build_gear_embed(
         if piece is None:
             return "_— Empty —_"
         line = f"**{piece['name']}** ({piece['durability']}/{piece['max_durability']})"
+        if piece["durability"] <= 0:
+            line += "\n**BROKEN — effects disabled until repaired.**"
         if piece.get("effect"):
             line += f"\n{piece['effect']}"
         if (
             dig_service is not None
             and piece["durability"] < piece["max_durability"]
         ):
-            cost = dig_service.compute_repair_cost(piece["slot"], piece["tier"])
+            cost = dig_service.compute_repair_cost(
+                piece["slot"], piece["tier"], piece.get("item_id"),
+                piece["durability"], piece["max_durability"],
+            )
             if cost > 0:
                 line += f"\nRepair: {cost} {JOPACOIN_EMOTE}"
         return line
@@ -89,6 +94,7 @@ class GearPanelView(discord.ui.View):
         user_id: int,
         guild_id: int | None,
         repair_all_cost: int = 0,
+        has_damaged_gear: bool = False,
     ):
         super().__init__(timeout=180)
         self.dig_service = dig_service
@@ -96,8 +102,11 @@ class GearPanelView(discord.ui.View):
         self.guild_id = guild_id
         # Surface the total repair cost on the button so players see the
         # bill before they click. Disable when nothing is damaged.
-        if repair_all_cost > 0:
-            self.repair_all_btn.label = f"Repair All ({repair_all_cost} JC)"
+        if has_damaged_gear:
+            if repair_all_cost > 0:
+                self.repair_all_btn.label = f"Repair All ({repair_all_cost} JC)"
+            else:
+                self.repair_all_btn.label = "Repair All (Free)"
             self.repair_all_btn.disabled = False
         else:
             self.repair_all_btn.label = "Repair All"
@@ -112,14 +121,14 @@ class GearPanelView(discord.ui.View):
             self.dig_service.get_inventory_gear, self.user_id, self.guild_id
         )
         damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
-        total_cost = sum(
-            self.dig_service.compute_repair_cost(g["slot"], g["tier"])
-            for g in damaged
+        total_cost = await asyncio.to_thread(
+            self.dig_service.compute_repair_all_cost, self.user_id, self.guild_id,
         )
         embed = _build_gear_embed(loadout, inventory, damaged, self.dig_service)
         # Reset to the main panel buttons (in case we're being called from a sub-view).
         view = GearPanelView(
-            self.dig_service, self.user_id, self.guild_id, repair_all_cost=total_cost,
+            self.dig_service, self.user_id, self.guild_id,
+            repair_all_cost=total_cost, has_damaged_gear=bool(damaged),
         )
         await interaction.edit_original_response(embed=embed, view=view)
 
@@ -373,7 +382,10 @@ class GearSelectView(discord.ui.View):
             slot_label = g["slot"].title()
             label = f"[{slot_label}] {g['name']} ({g['durability']}/{g['max_durability']})"
             if mode == "repair":
-                cost = dig_service.compute_repair_cost(g["slot"], g["tier"])
+                cost = dig_service.compute_repair_cost(
+                    g["slot"], g["tier"], g.get("item_id"),
+                    g["durability"], g["max_durability"],
+                )
                 if cost > 0:
                     label += f" — {cost} JC"
             options.append(discord.SelectOption(

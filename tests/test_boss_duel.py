@@ -11,6 +11,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig._common import DIG_BOSS_STAT_POINT_BONUS
 from services.dig_constants import (
+    ARMOR_TIERS,
     BOSS_ARCHETYPE_BY_ID,
     BOSS_ARCHETYPES,
     BOSS_DUEL_STATS,
@@ -277,6 +278,48 @@ class TestDuelScaling:
 
 class TestDuelPayout:
     """Win pays wager * BOSS_PAYOUTS[depth][tier]; loss forfeits wager + cave-in."""
+
+    @pytest.mark.parametrize("entrypoint", ["legacy", "state_machine"])
+    def test_p4_ascension_scales_regular_boss_base_reward(
+        self,
+        entrypoint,
+        dig_service,
+        dig_repo,
+        player_repository,
+        monkeypatch,
+    ):
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+        _at_boss(
+            dig_service, dig_repo, player_repository, monkeypatch, prestige=4,
+        )
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            boss_progress=json.dumps({
+                "25": {"boss_id": "grothak", "status": "phase1_defeated"},
+            }),
+        )
+        starter_id = dig_repo.get_equipped_gear(
+            10001, TEST_GUILD_ID,
+        )["weapon"]["id"]
+        dig_repo.unequip_gear(starter_id)
+        weapon_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "weapon", 7)
+        armor_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 7)
+        dig_repo.equip_gear(weapon_id, 10001, TEST_GUILD_ID, "weapon")
+        dig_repo.equip_gear(armor_id, 10001, TEST_GUILD_ID, "armor")
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+
+        if entrypoint == "legacy":
+            result = dig_service.fight_boss(
+                10001, TEST_GUILD_ID, "cautious", wager=0,
+            )
+        else:
+            result = dig_service.start_boss_duel(
+                10001, TEST_GUILD_ID, "cautious", wager=0,
+            )
+
+        assert result["won"] is True
+        assert result["payout"] == 22
 
     def test_win_pays_from_payout_table(self, dig_service, dig_repo, player_repository, monkeypatch):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
@@ -744,6 +787,31 @@ class TestAbandonedDuelCleanup:
         assert durability_after == durability_before - 1, (
             "stale cleanup did not tick the snapshot gear that fought the duel"
         )
+
+    def test_stale_cleanup_reports_snapshot_gear_that_breaks(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        snapshot_gid = dig_repo.add_gear(
+            10001, TEST_GUILD_ID, "armor", 1, durability=1,
+        )
+        state = {
+            "boss_id": "grothak", "tier": 25, "mechanic_id": "fake_mechanic",
+            "risk_tier": "cautious", "wager": 0, "player_hp": 5, "boss_hp": 5,
+            "round_num": 3, "round_log": "[]", "pending_prompt": "{}",
+            "rng_state": "",
+            "status_effects": json.dumps({"gear_snapshot_ids": [snapshot_gid]}),
+            "echo_applied": 0, "echo_killer_id": None,
+            "player_hit": 0.6, "player_dmg": 1, "boss_hit": 0.3, "boss_dmg": 1,
+        }
+        dig_repo.save_active_duel(10001, TEST_GUILD_ID, state)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert result["gear_broken"] == [ARMOR_TIERS[1].name]
+        assert dig_repo.get_gear_by_id(snapshot_gid)["durability"] == 0
 
     def test_no_stale_row_means_no_cleanup_tick(
         self, dig_service, dig_repo, player_repository, monkeypatch,

@@ -2118,13 +2118,15 @@ class DigCommands(commands.Cog):
             await safe_followup(interaction, content="Gear panel unavailable.", ephemeral=True)
             return
         damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
-        total_cost = sum(
-            self.dig_service.compute_repair_cost(g["slot"], g["tier"])
-            for g in damaged
+        total_cost = await asyncio.to_thread(
+            self.dig_service.compute_repair_all_cost,
+            interaction.user.id,
+            guild_id,
         )
         embed = _build_gear_embed(loadout, inventory, damaged, self.dig_service)
         view = GearPanelView(
-            self.dig_service, interaction.user.id, guild_id, repair_all_cost=total_cost,
+            self.dig_service, interaction.user.id, guild_id,
+            repair_all_cost=total_cost, has_damaged_gear=bool(damaged),
         )
         await safe_followup(interaction, embed=embed, view=view)
 
@@ -2515,8 +2517,14 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     # Cave-in
     cave_in_detail = getattr(result, "cave_in_detail", None)
     if cave_in and cave_in_detail:
-        block_loss = getattr(cave_in_detail, "block_loss", "?")
-        jc_lost = getattr(cave_in_detail, "jc_lost", 0)
+        if isinstance(cave_in_detail, dict):
+            block_loss = cave_in_detail.get("block_loss", "?")
+            jc_lost = cave_in_detail.get("jc_lost", 0)
+            gear_broken = cave_in_detail.get("gear_broken") or []
+        else:
+            block_loss = getattr(cave_in_detail, "block_loss", "?")
+            jc_lost = getattr(cave_in_detail, "jc_lost", 0)
+            gear_broken = getattr(cave_in_detail, "gear_broken", None) or []
         llm_cave_in = getattr(result, "llm_cave_in_flavor", None)
         cave_in_type = getattr(cave_in_detail, "type", "") if not isinstance(cave_in_detail, dict) else cave_in_detail.get("type", "")
         if llm_cave_in:
@@ -2546,6 +2554,16 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
             value=cave_in_text,
             inline=False,
         )
+        if gear_broken:
+            embed.add_field(
+                name="Gear Broken",
+                value=(
+                    "\n".join(f"• **{name}**" for name in gear_broken)
+                    + "\nThese items stay equipped with their effects disabled until repaired. "
+                    "Use **Repair All** in `/dig gear`."
+                ),
+                inline=False,
+            )
 
     # Milestone bonus
     milestone = getattr(result, "milestone_bonus", 0)
