@@ -210,7 +210,7 @@ PINGEDASH_COOLDOWN_SECONDS = _parse_int("PINGEDASH_COOLDOWN_SECONDS", 24 * 60 * 
 PINGEDASH_TARGET_USER_ID = _parse_optional_int("PINGEDASH_TARGET_USER_ID")
 
 # Soft Avoid configuration
-SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 700)  # Cost to soft avoid a player
+SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 750)  # Fallback cost to soft avoid a player
 SOFT_AVOID_GAMES_DURATION = _parse_int("SOFT_AVOID_GAMES_DURATION", 10)  # Number of games avoid lasts
 SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 180.0)  # Penalty added to shuffler when pair on same team
 
