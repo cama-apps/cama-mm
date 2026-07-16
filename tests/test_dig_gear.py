@@ -265,18 +265,19 @@ class TestDigGearRepositoryDurabilityTick:
         unequipped = [r for r in rows.values() if r["id"] != a]
         assert all(r["durability"] == 20 for r in unequipped)
 
-    def test_tick_to_zero_returns_broken_ids_and_unequips(self, gear_repo):
+    def test_tick_to_zero_returns_broken_ids_and_stays_equipped(self, gear_repo):
         a = gear_repo.add_gear(111, 0, "boots", 2, durability=1)
         gear_repo.equip_gear(a, 111, 0, "boots")
         broken = gear_repo.tick_gear_durability(111, 0)
         assert broken == [a]
-        # Auto-unequipped at zero
+        # Broken gear stays slotted so Repair All reactivates it in place.
         equipped = gear_repo.get_equipped_gear(111, 0)
-        assert equipped == {}
+        assert equipped["boots"]["id"] == a
+        assert equipped["boots"]["durability"] == 0
         # Durability now 0
         row = gear_repo.get_gear_by_id(a)
         assert row["durability"] == 0
-        assert row["equipped"] == 0
+        assert row["equipped"] == 1
 
     def test_tick_floors_at_zero(self, gear_repo):
         """A second tick on a zero-durability piece must not go negative."""
@@ -335,7 +336,7 @@ class TestDigGearRepositoryTickById:
         assert broken == [a]
         row = gear_repo.get_gear_by_id(a)
         assert row["durability"] == 0
-        assert row["equipped"] == 0  # auto-unequipped
+        assert row["equipped"] == 1
 
     def test_empty_list_is_a_noop(self, gear_repo):
         a = gear_repo.add_gear(111, 0, "armor", 1)
@@ -390,8 +391,8 @@ class TestDigGearServiceEquipUnequip:
 
 
 class TestDigGearServiceRepair:
-    def test_repair_charges_15pct_of_tier_price(self, svc, player):
-        # Diamond Breastplate: tier 3, shop_price 180 -> repair = 27 (180 * 0.15)
+    def test_repair_charges_ten_percent_prorated_by_damage(self, svc, player):
+        # Diamond Breastplate full repair is 18 JC; 15/20 missing rounds up to 14.
         r = svc.buy_gear(player, 0, "armor", 3)
         gid = r["gear_id"]
         # Drop durability to 5 manually
@@ -399,8 +400,8 @@ class TestDigGearServiceRepair:
         bal_before = svc.player_repo.get_balance(player, 0)
         result = svc.repair_gear(player, 0, gid)
         assert result["success"]
-        assert result["cost"] == 27
-        assert svc.player_repo.get_balance(player, 0) == bal_before - 27
+        assert result["cost"] == 14
+        assert svc.player_repo.get_balance(player, 0) == bal_before - 14
         assert svc.dig_repo.get_gear_by_id(gid)["durability"] == GEAR_MAX_DURABILITY
 
     def test_repair_refuses_when_full(self, svc, player):
@@ -410,7 +411,7 @@ class TestDigGearServiceRepair:
         assert "full durability" in result["error"]
 
     def test_repair_all_sums_costs(self, svc, player):
-        # 15% repair pct: armor:1 (20 JC) -> 3, boots:2 (70 JC) -> round(10.5)=10
+        # 10% full repair, prorated: armor is 2 JC and boots are 5 JC.
         a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]
         b = svc.buy_gear(player, 0, "boots", 2)["gear_id"]
         # /repair all only touches equipped pieces — equip both first.
@@ -423,8 +424,8 @@ class TestDigGearServiceRepair:
         result = svc.repair_all_gear(player, 0)
         assert result["success"]
         assert result["repaired"] == 2
-        assert result["cost"] == 3 + 10
-        assert svc.player_repo.get_balance(player, 0) == bal_before - 13
+        assert result["cost"] == 2 + 5
+        assert svc.player_repo.get_balance(player, 0) == bal_before - 7
 
     def test_repair_all_with_nothing_damaged_errors(self, svc, player):
         svc.buy_gear(player, 0, "armor", 1)  # full durability
@@ -432,7 +433,7 @@ class TestDigGearServiceRepair:
         assert not result["success"]
 
     def test_repair_all_repairs_damaged_unequipped_pieces(self, svc, player):
-        # Broken gear is auto-unequipped, so Repair All must still catch it.
+        # Repair All also catches damaged pieces the player chose to unequip.
         a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]
         b = svc.buy_gear(player, 0, "boots", 1)["gear_id"]
         svc.dig_repo.repair_gear(a, 5)
@@ -812,18 +813,18 @@ class TestDigGearServiceAtomicDebit:
         """``try_debit`` is a single conditional UPDATE — if it succeeds the
         balance is debited atomically by exactly ``cost`` JC."""
         # Buy Diamond Breastplate (180 JC) while flush, then drain balance to 28
-        # and damage the piece. Diamond repair = 27 JC (15%), so 28 is enough.
+        # and damage the piece. Repairing 15/20 durability costs 14 JC.
         gid = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
         svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 28))
         svc.dig_repo.repair_gear(gid, 5)
         assert svc.player_repo.get_balance(player, 0) == 28
         r = svc.repair_gear(player, 0, gid)
         assert r["success"]
-        assert svc.player_repo.get_balance(player, 0) == 1
+        assert svc.player_repo.get_balance(player, 0) == 14
 
     def test_repair_does_not_charge_on_insufficient_balance(self, svc, player):
         gid = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
-        # Drain to 5 JC (Diamond repair would cost 59)
+        # Drain to 5 JC (the prorated Diamond repair costs 14)
         svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 5))
         svc.dig_repo.repair_gear(gid, 5)
         bal_before = svc.player_repo.get_balance(player, 0)
@@ -947,3 +948,124 @@ class TestRelicLabelFormatter:
                     "the legacy pinnacle suffix pool; format_relic_label would "
                     "re-derive it and drop the bespoke name"
                 )
+
+
+class TestBrokenGearStaysSlotted:
+    def test_tick_to_zero_preserves_equipped_and_reports_transition_once(self, gear_repo):
+        gear_id = gear_repo.add_gear(111, 0, "armor", 1, durability=1)
+        gear_repo.equip_gear(gear_id, 111, 0, "armor")
+
+        assert gear_repo.tick_gear_durability(111, 0) == [gear_id]
+        broken = gear_repo.get_gear_by_id(gear_id)
+        assert broken["durability"] == 0
+        assert broken["equipped"] == 1
+        assert gear_repo.tick_gear_durability(111, 0) == []
+
+    def test_snapshot_tick_to_zero_preserves_current_equipped_state(self, gear_repo):
+        gear_id = gear_repo.add_gear(111, 0, "boots", 1, durability=1)
+        gear_repo.equip_gear(gear_id, 111, 0, "boots")
+
+        assert gear_repo.tick_gear_durability_ids([gear_id]) == [gear_id]
+        broken = gear_repo.get_gear_by_id(gear_id)
+        assert broken["durability"] == 0
+        assert broken["equipped"] == 1
+        assert gear_repo.tick_gear_durability_ids([gear_id]) == []
+
+    def test_repair_all_reactivates_broken_piece_in_place(self, svc, player):
+        gear_id = svc.buy_gear(player, 0, "armor", 1)["gear_id"]
+        svc.equip_gear(player, 0, gear_id)
+        svc.dig_repo.repair_gear(gear_id, 1)
+        assert svc.dig_repo.tick_gear_durability(player, 0) == [gear_id]
+
+        result = svc.repair_all_gear(player, 0)
+
+        assert result["success"]
+        equipped = svc.dig_repo.get_equipped_gear(player, 0)["armor"]
+        assert equipped["id"] == gear_id
+        assert equipped["durability"] == GEAR_MAX_DURABILITY
+
+
+class TestBrokenGearEffects:
+    def test_broken_piece_contributes_no_combat_modifiers(self):
+        piece = GearPiece(
+            id=1,
+            slot=GearSlot.ARMOR,
+            tier=3,
+            durability=0,
+            equipped=True,
+            acquired_at=0,
+            source="shop",
+            tier_def=ARMOR_TIERS[3],
+        )
+
+        assert GearLoadout(armor=piece).combat_modifiers() == {
+            "player_dmg": 0,
+            "player_hit": 0,
+            "player_hp_bonus": 0,
+            "boss_hit_reduction": 0,
+            "crit_chance": 0,
+            "crit_bonus": 0,
+        }
+
+    def test_broken_weapon_has_no_active_pickaxe_effects(self, svc, player):
+        starter = svc.dig_repo.get_equipped_gear(player, 0)["weapon"]
+        svc.dig_repo.unequip_gear(starter["id"])
+        gear_id = svc.dig_repo.add_gear(
+            player, 0, "weapon", 7, durability=0,
+        )
+        svc.dig_repo.equip_gear(gear_id, player, 0, "weapon")
+        tunnel = svc.dig_repo.get_tunnel(player, 0)
+
+        assert svc._get_active_pickaxe_tier(player, 0, tunnel) == 0
+        assert svc._get_active_pickaxe_data(player, 0, tunnel) == {}
+
+
+class TestProratedRepairBalance:
+    def test_full_repair_value_is_ten_percent(self):
+        from services.dig_constants import GEAR_REPAIR_COST_PCT
+
+        assert pytest.approx(0.10) == GEAR_REPAIR_COST_PCT
+
+    def test_single_repair_prorates_cost_by_missing_durability(self, svc, player):
+        gear_id = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
+        svc.dig_repo.repair_gear(gear_id, 10)
+
+        preview = svc.compute_repair_cost(
+            "armor", 3, durability=10, max_durability=20,
+        )
+        balance_before = svc.player_repo.get_balance(player, 0)
+        result = svc.repair_gear(player, 0, gear_id)
+
+        assert preview == 9
+        assert result["cost"] == preview
+        assert svc.player_repo.get_balance(player, 0) == balance_before - preview
+
+    def test_repair_all_preview_matches_prorated_debit(self, svc, player):
+        armor_id = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
+        boots_id = svc.buy_gear(player, 0, "boots", 3)["gear_id"]
+        svc.dig_repo.repair_gear(armor_id, 10)  # 18 full cost, half missing -> 9
+        svc.dig_repo.repair_gear(boots_id, 15)  # 20 full cost, quarter missing -> 5
+
+        preview = svc.compute_repair_all_cost(player, 0)
+        balance_before = svc.player_repo.get_balance(player, 0)
+        result = svc.repair_all_gear(player, 0)
+
+        assert preview == 14
+        assert result["cost"] == preview
+        assert svc.player_repo.get_balance(player, 0) == balance_before - preview
+
+    def test_broken_loadout_marks_effects_disabled(self, svc, player):
+        from commands.dig_helpers.gear_views import _build_gear_embed
+
+        armor_id = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
+        svc.equip_gear(player, 0, armor_id)
+        svc.dig_repo.repair_gear(armor_id, 0)
+        loadout = svc.get_loadout(player, 0)
+        inventory = svc.get_inventory_gear(player, 0)
+        damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
+
+        embed = _build_gear_embed(loadout, inventory, damaged, svc)
+        armor = next(field for field in embed.fields if field.name == "Armor")
+
+        assert "BROKEN" in armor.value
+        assert "effects disabled" in armor.value

@@ -55,13 +55,13 @@ PICKAXE_TIERS: list[dict] = [
 # Boots, and Amulet each vary their suffix per tier (Iron Hauberk, Iron
 # Sabatons, Iron Talisman, ...). Shop sells Wooden–Diamond;
 # Obsidian–Void-Touched are boss-drop-only. Durability ticks once per
-# boss fight; at zero the piece auto-unequips and must be repaired
-# before re-equipping.
+# boss fight; at zero the piece stays equipped but its effects remain
+# disabled until repaired.
 
 from domain.models.dig_gear import GearSlot, GearTierDef, UniqueGearDef  # noqa: E402
 
 GEAR_MAX_DURABILITY: int = 20
-GEAR_REPAIR_COST_PCT: float = 0.15
+GEAR_REPAIR_COST_PCT: float = 0.10
 GEAR_BOSS_DROP_RATE: float = 0.07
 # Maps boss-boundary depth → tier index of the dropped piece. Boundaries
 # missing from this map (25/50/75) drop nothing; players buy low-tier

@@ -7,6 +7,7 @@ Mixin split out of the former monolithic ``dig_service`` module; it
 carries no state of its own and is composed into ``DigService``.
 """
 
+import math
 import random
 import time
 
@@ -347,6 +348,16 @@ class GearMixin:
         equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
         wpn = equipped.get("weapon")
         if wpn is not None:
+            if int(wpn["durability"]) <= 0:
+                return 0
+            return int(wpn["tier"])
+        return int(tunnel.get("pickaxe_tier", 0) or 0)
+
+    def _get_owned_pickaxe_tier(self, discord_id: int, guild_id, tunnel: dict) -> int:
+        """Tier used for shop and upgrade progression, even while broken."""
+        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        wpn = equipped.get("weapon")
+        if wpn is not None:
             return int(wpn["tier"])
         return int(tunnel.get("pickaxe_tier", 0) or 0)
 
@@ -357,6 +368,8 @@ class GearMixin:
         equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
         wpn = equipped.get("weapon")
         if wpn is not None:
+            if int(wpn["durability"]) <= 0:
+                return {}
             item_id = wpn.get("item_id")
             if item_id:
                 unique = UNIQUE_GEAR.get(str(item_id))
@@ -458,36 +471,60 @@ class GearMixin:
         return self._ok(slot=row["slot"], gear_id=gear_id)
 
     def _gear_repair_cost(
-        self, slot: str, tier: int, item_id: str | None = None,
+        self,
+        slot: str,
+        tier: int,
+        item_id: str | None = None,
+        durability: int = 0,
+        max_durability: int | None = None,
     ) -> int:
-        """Repair price = ``GEAR_REPAIR_COST_PCT`` of the tier's shop_price."""
+        """Return the repair price prorated by the durability being restored."""
         if item_id:
             unique = UNIQUE_GEAR.get(item_id)
             if unique is None:
                 return 0
-            return int(round(unique.repair_value * GEAR_REPAIR_COST_PCT))
-        try:
-            slot_enum = GearSlot(slot)
-        except ValueError:
+            full_cost = int(round(unique.repair_value * GEAR_REPAIR_COST_PCT))
+            piece_max = unique.max_durability
+        else:
+            try:
+                slot_enum = GearSlot(slot)
+            except ValueError:
+                return 0
+            table = GEAR_TIER_TABLES.get(slot_enum, [])
+            if tier < 0 or tier >= len(table):
+                return 0
+            full_cost = int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
+            piece_max = GEAR_MAX_DURABILITY
+
+        maximum = max(1, int(max_durability or piece_max))
+        missing = max(0, maximum - min(maximum, int(durability)))
+        if missing == 0 or full_cost == 0:
             return 0
-        table = GEAR_TIER_TABLES.get(slot_enum, [])
-        if tier < 0 or tier >= len(table):
-            return 0
-        return int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
+        return max(1, math.ceil(full_cost * missing / maximum))
 
     def compute_repair_cost(
-        self, slot: str, tier: int, item_id: str | None = None,
+        self,
+        slot: str,
+        tier: int,
+        item_id: str | None = None,
+        durability: int = 0,
+        max_durability: int | None = None,
     ) -> int:
         """Public read of the repair price for a (slot, tier). Mirrors the
         cost ``repair_gear`` would charge for a damaged piece, without
         touching balance or durability."""
-        return self._gear_repair_cost(slot, tier, item_id)
+        return self._gear_repair_cost(
+            slot, tier, item_id, durability, max_durability,
+        )
 
     def compute_repair_all_cost(self, discord_id: int, guild_id) -> int:
         """Sum repair cost across every damaged piece the player owns."""
         rows = self.dig_repo.get_gear(discord_id, guild_id)
         return sum(
-            self._gear_repair_cost(r["slot"], int(r["tier"]), r.get("item_id"))
+            self._gear_repair_cost(
+                r["slot"], int(r["tier"]), r.get("item_id"),
+                int(r["durability"]), piece.max_durability,
+            )
             for r in rows
             if (
                 (piece := self._hydrate_gear_piece(r)) is not None
@@ -515,6 +552,7 @@ class GearMixin:
             return self._error("That piece is already at full durability.")
         cost = self._gear_repair_cost(
             row["slot"], int(row["tier"]), row.get("item_id"),
+            int(row["durability"]), piece.max_durability,
         )
         if cost > 0 and not self.player_repo.try_debit(
             discord_id,
@@ -548,8 +586,11 @@ class GearMixin:
         if not damaged:
             return self._error("Nothing to repair.")
         total_cost = sum(
-            self._gear_repair_cost(r["slot"], int(r["tier"]), r.get("item_id"))
-            for r in damaged
+            self._gear_repair_cost(
+                r["slot"], int(r["tier"]), r.get("item_id"),
+                int(r["durability"]), piece.max_durability,
+            )
+            for r, piece in pieces
         )
         if total_cost > 0 and not self.player_repo.try_debit(
             discord_id,

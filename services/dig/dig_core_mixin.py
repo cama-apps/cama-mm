@@ -338,6 +338,14 @@ class DigCoreMixin:
         ``(cave_in_detail, jc_debit)`` where ``jc_debit`` is the JC amount
         the caller should subtract from the player's balance.
         """
+        def gear_name_map(equipped_gear: dict) -> dict[int, str]:
+            names: dict[int, str] = {}
+            for row in equipped_gear.values():
+                piece = self._hydrate_gear_piece(row)
+                if piece is not None:
+                    names[piece.id] = piece.tier_def.name
+            return names
+
         # Catastrophic overrides the consequence pick entirely.
         if catastrophic:
             # Insurance keeps the player at depth — covers the rollback only,
@@ -372,12 +380,24 @@ class DigCoreMixin:
                 {"type": "slower_cooldown", "digs_remaining": stun_digs}
             )
 
+            try:
+                equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id) or {}
+            except Exception:
+                equipped = {}
+            name_by_id = gear_name_map(equipped)
+            broken_ids: list[int] = []
             for _ in range(CAVE_IN_CATASTROPHIC_GEAR_TICKS):
                 try:
-                    self.dig_repo.tick_gear_durability(discord_id, guild_id)
+                    broken_ids.extend(
+                        self.dig_repo.tick_gear_durability(discord_id, guild_id)
+                    )
                 except Exception:
                     logger.debug("catastrophic gear tick failed", exc_info=True)
                     break
+            gear_broken = [
+                name_by_id.get(gear_id, "a piece of gear")
+                for gear_id in dict.fromkeys(broken_ids)
+            ]
 
             total_block_loss = max(block_loss, depth_before - new_depth)
             insurance_note = " Insurance held the depth." if insurance_saved else ""
@@ -388,6 +408,7 @@ class DigCoreMixin:
                 "stun_digs": stun_digs,
                 "depth_after": new_depth,
                 "insurance_saved": insurance_saved,
+                "gear_broken": gear_broken,
                 "message": (
                     f"CATASTROPHIC CAVE-IN! Tunnel folds in on itself. "
                     f"Lost {total_block_loss} blocks, paid {med_cost} JC, "
@@ -412,7 +433,10 @@ class DigCoreMixin:
         consequence_id = pick_cave_in_consequence(
             band,
             has_consumables=bool(inventory),
-            has_equipped_gear=bool(equipped),
+            has_equipped_gear=any(
+                int(row.get("durability") or 0) > 0
+                for row in equipped.values()
+            ),
             can_lower_luminosity=luminosity_now > 0,
             has_hard_hat_charges=hard_hat_charges > 0,
         )
@@ -459,13 +483,19 @@ class DigCoreMixin:
                 med_cost,
             )
         if consequence_id == "gear_nick":
+            name_by_id = gear_name_map(equipped)
+            broken_ids = []
             try:
-                self.dig_repo.tick_gear_durability(discord_id, guild_id)
+                broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
             except Exception:
                 logger.debug("gear_nick tick failed", exc_info=True)
             return (
                 {
                     "type": "gear_nick", "block_loss": block_loss,
+                    "gear_broken": [
+                        name_by_id.get(gear_id, "a piece of gear")
+                        for gear_id in broken_ids
+                    ],
                     "message": f"Cave-in! Lost {block_loss} blocks. Gear took a beating.",
                 },
                 0,

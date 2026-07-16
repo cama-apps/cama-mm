@@ -57,6 +57,13 @@ class BossCombatMixin:
     Composed into :class:`~services.dig_service.DigService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
+    def _boss_base_reward(self, boundary: int, *, prestige_level: int) -> int:
+        """Return the regular boss-clear reward after ascension bonuses."""
+        base_reward = BOSS_VICTORY_BASE_JC.get(boundary, 15)
+        ascension = self._get_ascension_effects(prestige_level)
+        multiplier = 1.0 + ascension.get("boss_payout_multiplier", 0)
+        return int(base_reward * multiplier)
+
     def has_scout_lantern(self, discord_id: int, guild_id) -> bool:
         """True if the player can scout a boss right now.
 
@@ -1021,7 +1028,9 @@ class BossCombatMixin:
             # Every boss victory pays a flat depth-scaled base reward so a
             # win is never empty; a wagered win adds its taper-floored profit
             # on top.
-            base_reward = BOSS_VICTORY_BASE_JC.get(at_boss, 15)
+            base_reward = self._boss_base_reward(
+                at_boss, prestige_level=prestige_level,
+            )
             if wager > 0:
                 # A won wager never returns less than the stake — the taper
                 # plus loot penalties (echo) can otherwise drive it negative.
@@ -1210,29 +1219,6 @@ class BossCombatMixin:
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
-        # Abandoned-duel cleanup: if a previous mid-fight pause was never
-        # resumed, the stale dig_active_duels row would otherwise leak the
-        # durability tick for that fight. Tick once for the prior fight
-        # and clear the row before starting a fresh duel. Tick the gear that
-        # actually fought the stale duel (the start-time snapshot persisted in
-        # status_effects), not the player's CURRENT loadout — they may have
-        # swapped/repaired gear during the abandoned pause, so ticking the
-        # live equipment would burn durability on pieces that never fought.
-        stale = self.dig_repo.get_active_duel(discord_id, guild_id)
-        if stale is not None:
-            stale_snapshot_ids: list[int] = []
-            try:
-                _se = json.loads(stale.get("status_effects") or "{}")
-                stale_snapshot_ids = [int(g) for g in (_se.get("gear_snapshot_ids") or [])]
-            except (json.JSONDecodeError, TypeError, ValueError):
-                stale_snapshot_ids = []
-            if stale_snapshot_ids:
-                self.dig_repo.tick_gear_durability_ids(stale_snapshot_ids)
-            else:
-                # Legacy rows without a snapshot fall back to the live loadout.
-                self.dig_repo.tick_gear_durability(discord_id, guild_id)
-            self.dig_repo.clear_active_duel(discord_id, guild_id)
-
         boss_progress = self._get_boss_progress_entries(tunnel)
         depth = tunnel.get("depth", 0)
         at_boss = self._at_boss_boundary(depth, boss_progress)
@@ -1267,9 +1253,65 @@ class BossCombatMixin:
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
 
+        # Apply the deferred durability tick from an abandoned paused duel.
+        # Capture transitions now because later ticks only report each newly
+        # broken piece once.
+        stale_gear_broken_names: list[str] = []
+        stale = self.dig_repo.get_active_duel(discord_id, guild_id)
+        if stale is not None:
+            stale_snapshot_ids: list[int] = []
+            try:
+                stale_status_effects = json.loads(
+                    stale.get("status_effects") or "{}",
+                )
+                stale_snapshot_ids = [
+                    int(gear_id)
+                    for gear_id in (
+                        stale_status_effects.get("gear_snapshot_ids") or []
+                    )
+                ]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                stale_snapshot_ids = []
+
+            name_by_id: dict[int, str] = {}
+            if stale_snapshot_ids:
+                for gear_id in stale_snapshot_ids:
+                    row = self.dig_repo.get_gear_by_id(gear_id)
+                    piece = self._hydrate_gear_piece(row) if row is not None else None
+                    if piece is not None:
+                        name_by_id[piece.id] = piece.tier_def.name
+                stale_broken_ids = self.dig_repo.tick_gear_durability_ids(
+                    stale_snapshot_ids,
+                )
+            else:
+                stale_loadout = self._get_loadout(discord_id, guild_id)
+                for piece in (
+                    stale_loadout.weapon,
+                    stale_loadout.armor,
+                    stale_loadout.boots,
+                    stale_loadout.amulet,
+                ):
+                    if piece is not None:
+                        name_by_id[piece.id] = piece.tier_def.name
+                stale_broken_ids = self.dig_repo.tick_gear_durability(
+                    discord_id, guild_id,
+                )
+            stale_gear_broken_names = [
+                name_by_id.get(gear_id, "a piece of gear")
+                for gear_id in stale_broken_ids
+            ]
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+
         # Pinnacle uses its own resolver — no mid-fight prompts (yet).
         if self._is_pinnacle_depth(at_boss):
-            return self._fight_pinnacle(discord_id, guild_id, tunnel, risk_tier, wager)
+            result = self._fight_pinnacle(
+                discord_id, guild_id, tunnel, risk_tier, wager,
+            )
+            if stale_gear_broken_names:
+                result["gear_broken"] = list(dict.fromkeys(
+                    stale_gear_broken_names + list(result.get("gear_broken") or [])
+                ))
+            return result
 
         # Ensure a specific boss is locked for this tunnel at this tier.
         boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
@@ -1495,6 +1537,7 @@ class BossCombatMixin:
                         active_echo.get("killer_discord_id")
                         if echo_applied and active_echo else None
                     ),
+                    gear_broken=stale_gear_broken_names,
                     luminosity_display=self._luminosity_combat_display(tunnel),
                 )
 
@@ -1518,7 +1561,7 @@ class BossCombatMixin:
             won = False
 
         # Auto-resolve without a prompt firing.
-        return self._resolve_duel_outcome(
+        result = self._resolve_duel_outcome(
             discord_id=discord_id, guild_id=guild_id,
             tunnel=tunnel, boss=boss, at_boss=at_boss,
             risk_tier=risk_tier, wager=wager,
@@ -1532,6 +1575,11 @@ class BossCombatMixin:
             starting_boss_hp=starting_boss_hp,
             forced_no_wager_phase=forced_no_wager_phase,
         )
+        if stale_gear_broken_names:
+            result["gear_broken"] = list(dict.fromkeys(
+                stale_gear_broken_names + list(result.get("gear_broken") or [])
+            ))
+        return result
 
     def resume_boss_duel(
         self, discord_id: int, guild_id, option_idx: int,
@@ -1934,7 +1982,7 @@ class BossCombatMixin:
             for piece in (
                 loadout.weapon, loadout.armor, loadout.boots, loadout.amulet,
             ):
-                if piece is None:
+                if piece is None or piece.durability <= 0:
                     continue
                 effect_id = getattr(piece.tier_def, "effect_id", None)
                 flag = gear_effect_flags.get(effect_id)
@@ -2242,7 +2290,9 @@ class BossCombatMixin:
             # Every boss victory pays a flat depth-scaled base reward so a
             # win is never empty; a wagered win adds its taper-floored profit
             # on top.
-            base_reward = BOSS_VICTORY_BASE_JC.get(at_boss, 15)
+            base_reward = self._boss_base_reward(
+                at_boss, prestige_level=prestige_level,
+            )
             if wager > 0:
                 # A won wager never returns less than the stake — the taper
                 # plus loot penalties (echo, drain curse) can otherwise drive
