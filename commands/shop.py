@@ -65,6 +65,9 @@ SOUL_HARVEST_COST = 25
 SOUL_HARVEST_DRAIN_PER_TARGET = 2
 SOUL_HARVEST_BONUS_DRAIN_CHANCE = 0.20
 PINGEDASH_TENOR_URL = "https://tenor.com/view/hiash-gif-25282310"
+SOFT_AVOID_MIN_TEAMMATE_GAMES = 3
+SOFT_AVOID_WINRATE_COST_SCALE = 1500
+PACKAGE_DEAL_NO_ACTIVE_COST = 1
 
 
 def _protection_result_int(result, field: str, default: int = 0) -> int:
@@ -86,6 +89,34 @@ def _protection_result_int(result, field: str, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _calculate_soft_avoid_cost(pairing: dict | None) -> int:
+    if not pairing:
+        return SHOP_SOFT_AVOID_COST
+
+    games_together = pairing.get("games_together", 0)
+    if games_together < SOFT_AVOID_MIN_TEAMMATE_GAMES:
+        return SHOP_SOFT_AVOID_COST
+
+    wins_together = pairing.get("wins_together", 0)
+    return (SOFT_AVOID_WINRATE_COST_SCALE * wins_together + games_together - 1) // games_together
+
+
+def _calculate_package_deal_cost(
+    active_deal_count: int,
+    is_extend: bool,
+    buyer_rating: float | None,
+    partner_rating: float | None,
+) -> int:
+    if active_deal_count == 0 and not is_extend:
+        return PACKAGE_DEAL_NO_ACTIVE_COST
+
+    buyer_rating = buyer_rating or 1500
+    partner_rating = partner_rating or 1500
+    return SHOP_PACKAGE_DEAL_BASE_COST + int(
+        (buyer_rating + partner_rating) / SHOP_PACKAGE_DEAL_RATING_DIVISOR
+    )
 
 
 # Bounty Hunter theme
@@ -190,11 +221,17 @@ class ShopCommands(commands.Cog):
                 value="double_or_nothing",
             ),
             app_commands.Choice(
-                name=f"Soft Avoid ({SHOP_SOFT_AVOID_COST} jopacoin for {SOFT_AVOID_GAMES_DURATION} games)",
+                name=(
+                    f"Soft Avoid (dynamic, default {SHOP_SOFT_AVOID_COST} jopacoin "
+                    f"for {SOFT_AVOID_GAMES_DURATION} games)"
+                ),
                 value="soft_avoid",
             ),
             app_commands.Choice(
-                name=f"Package Deal (FREE first, {SHOP_PACKAGE_DEAL_BASE_COST}+ after for {PACKAGE_DEAL_GAMES_DURATION} games)",
+                name=(
+                    f"Package Deal ({PACKAGE_DEAL_NO_ACTIVE_COST} JC at 0 active, "
+                    f"{SHOP_PACKAGE_DEAL_BASE_COST}+ after for {PACKAGE_DEAL_GAMES_DURATION} games)"
+                ),
                 value="package_deal",
             ),
         ]
@@ -1394,7 +1431,6 @@ class ShopCommands(commands.Cog):
         """Handle the soft avoid purchase."""
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
-        cost = SHOP_SOFT_AVOID_COST
 
         # Can't avoid yourself
         if target.id == user_id:
@@ -1431,32 +1467,66 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Check balance
-        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-        if balance < cost:
-            await interaction.response.send_message(
-                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
-                ephemeral=True,
+        pairings_service = getattr(self.bot, "pairings_service", None)
+        pairing = None
+        if pairings_service:
+            pairing = await asyncio.to_thread(
+                pairings_service.get_head_to_head,
+                user_id,
+                target.id,
+                guild_id,
             )
-            return
+        cost = _calculate_soft_avoid_cost(pairing)
 
-        # Defer before deduction so we can't lose the response window after charging.
+        # Check balance
+        if cost > 0:
+            balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+            if balance < cost:
+                await interaction.response.send_message(
+                    f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                    ephemeral=True,
+                )
+                return
+
+        # Defer before the write so a slow DB call cannot leave a created avoid
+        # behind a failed Discord interaction.
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        # Deduct cost
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+        if cost > 0:
+            # Deduct cost
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
-        # Create or extend avoid
-        avoid = await asyncio.to_thread(
-            functools.partial(
-                soft_avoid_service.create_or_extend_avoid,
-                guild_id=guild_id,
-                avoider_id=user_id,
-                avoided_id=target.id,
-                games=SOFT_AVOID_GAMES_DURATION,
+        try:
+            # Create or extend avoid
+            avoid = await asyncio.to_thread(
+                functools.partial(
+                    soft_avoid_service.create_or_extend_avoid,
+                    guild_id=guild_id,
+                    avoider_id=user_id,
+                    avoided_id=target.id,
+                    games=SOFT_AVOID_GAMES_DURATION,
+                )
             )
-        )
+        except Exception:
+            logger.exception("Failed to create soft avoid purchase")
+            if cost > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+                failure_message = (
+                    "Soft avoid purchase failed before it could be activated. "
+                    "Your jopacoin was refunded."
+                )
+            else:
+                failure_message = (
+                    "Soft avoid purchase failed before it could be activated. "
+                    "You were not charged."
+                )
+            await safe_followup(
+                interaction,
+                content=failure_message,
+                ephemeral=True,
+            )
+            return
 
         # Build confirmation embed (ephemeral)
         embed = discord.Embed(
@@ -1548,47 +1618,60 @@ class ShopCommands(commands.Cog):
         # Check active deals to determine pricing
         active_deals = await asyncio.to_thread(package_deal_service.get_user_deals, guild_id, user_id)
         is_extend = any(d.partner_discord_id == target.id for d in active_deals)
-
-        # First deal is free (no active deals and not extending an existing one)
-        if len(active_deals) == 0 and not is_extend:
-            cost = 0
-        else:
-            # Calculate dynamic cost: base + (sum of ratings / divisor)
-            buyer_rating = player.glicko_rating or 1500
-            partner_rating = target_player.glicko_rating or 1500
-            cost = SHOP_PACKAGE_DEAL_BASE_COST + int(
-                (buyer_rating + partner_rating) / SHOP_PACKAGE_DEAL_RATING_DIVISOR
-            )
-
-        # Check balance and deduct cost (skip for free deals)
-        if cost > 0:
-            balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-            if balance < cost:
-                await interaction.response.send_message(
-                    f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.\n"
-                    f"*(Base: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST})*",
-                    ephemeral=True,
-                )
-                return
-            # Defer before deduction so we can't lose the response window after charging.
-            if not await safe_defer(interaction, ephemeral=True):
-                return
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-
-        # Create or extend deal
-        deal = await asyncio.to_thread(
-            functools.partial(
-                package_deal_service.create_or_extend_deal,
-                guild_id=guild_id,
-                buyer_id=user_id,
-                partner_id=target.id,
-                games=PACKAGE_DEAL_GAMES_DURATION,
-                cost=cost,
-            )
+        cost = _calculate_package_deal_cost(
+            len(active_deals),
+            is_extend,
+            getattr(player, "glicko_rating", None),
+            getattr(target_player, "glicko_rating", None),
         )
 
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+        if balance < cost:
+            if cost == PACKAGE_DEAL_NO_ACTIVE_COST and len(active_deals) == 0 and not is_extend:
+                cost_detail = "*(No active package deals: 1 jopacoin)*"
+            else:
+                cost_detail = (
+                    f"*(Base: {SHOP_PACKAGE_DEAL_BASE_COST} + "
+                    f"Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST})*"
+                )
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.\n"
+                f"{cost_detail}",
+                ephemeral=True,
+            )
+            return
+        # Defer before deduction so we can't lose the response window after charging.
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+
+        try:
+            # Create or extend deal
+            deal = await asyncio.to_thread(
+                functools.partial(
+                    package_deal_service.create_or_extend_deal,
+                    guild_id=guild_id,
+                    buyer_id=user_id,
+                    partner_id=target.id,
+                    games=PACKAGE_DEAL_GAMES_DURATION,
+                    cost=cost,
+                )
+            )
+        except Exception:
+            logger.exception("Failed to create package deal purchase")
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+            await safe_followup(
+                interaction,
+                content=(
+                    "Package deal purchase failed before it could be activated. "
+                    "Your jopacoin was refunded."
+                ),
+                ephemeral=True,
+            )
+            return
+
         # Build confirmation embed (ephemeral)
-        cost_display = "FREE (first deal!)" if cost == 0 else f"{cost} {JOPACOIN_EMOTE}"
+        cost_display = f"{cost} {JOPACOIN_EMOTE}"
         embed = discord.Embed(
             title="Package Deal Active",
             description=(
@@ -1601,20 +1684,15 @@ class ShopCommands(commands.Cog):
             ),
             color=0x2ECC71,  # Green for partnership
         )
-        if cost == 0:
-            embed.set_footer(text="Your first package deal is free!")
+        if cost == PACKAGE_DEAL_NO_ACTIVE_COST and len(active_deals) == 0 and not is_extend:
+            embed.set_footer(text="No active package deals: 1 jopacoin")
         else:
             embed.set_footer(
                 text=f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST}"
             )
 
-        # Ephemeral response (private - target not notified). For free deals we
-        # never deferred, so go straight through response.send_message; for paid
-        # deals the deferred path needs followup.
-        if cost > 0:
-            await safe_followup(interaction, embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Ephemeral response (private - target not notified).
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(name="myavoids", description="View your active soft avoids")
     @require_guild
