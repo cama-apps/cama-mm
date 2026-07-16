@@ -981,3 +981,31 @@ def test_bet_history_distinguishes_zero_payout_from_null(repo_db_path):
     # NULL payout: the 2x house estimate still applies → profit = 20 - 10 = 10.
     assert by_match[902]["profit"] == 10, \
         "A genuinely unsettled (NULL) winning bet should keep the 2x fallback"
+
+
+def test_placing_bet_marks_bettor_active_for_lottery(services):
+    """Placing a bet counts as channel activity for lottery eligibility."""
+    from config import LOTTERY_ACTIVITY_DAYS
+
+    match_service = services["match_service"]
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+
+    player_ids = list(range(5000, 5010))
+    for pid in player_ids:
+        player_repo.add(discord_id=pid, discord_username=f"P{pid}", guild_id=TEST_GUILD_ID)
+
+    # A pure spectator (not in the match) with no prior activity.
+    bettor = 6000
+    player_repo.add(discord_id=bettor, discord_username="Bettor", guild_id=TEST_GUILD_ID)
+    player_repo.add_balance(bettor, TEST_GUILD_ID, 50)
+    assert not player_repo.is_active_for_lottery(bettor, TEST_GUILD_ID, LOTTERY_ACTIVITY_DAYS)
+
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    if pending.bet_lock_until is None or pending.bet_lock_until <= int(time.time()):
+        pending.bet_lock_until = int(time.time()) + 600
+
+    betting_service.place_bet(TEST_GUILD_ID, bettor, "radiant", 5, pending)
+
+    assert player_repo.is_active_for_lottery(bettor, TEST_GUILD_ID, LOTTERY_ACTIVITY_DAYS)

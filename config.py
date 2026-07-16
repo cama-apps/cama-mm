@@ -193,6 +193,11 @@ DISBURSE_MIN_FUND = _parse_int("DISBURSE_MIN_FUND", 250)  # Min fund to propose 
 DISBURSE_QUORUM_PERCENTAGE = _parse_float("DISBURSE_QUORUM_PERCENTAGE", 0.40)  # 40% of players
 LOTTERY_ACTIVITY_DAYS = _parse_int("LOTTERY_ACTIVITY_DAYS", 14)  # Days of activity required for lottery eligibility
 
+# Activity tracking: using any slash command records the player's command time
+# (and placing a bet bumps last_active_at), so engagement — not just match-play
+# — counts toward lottery eligibility. Read live at disbursement and on /profile.
+ACTIVITY_TRACKING_ENABLED = _parse_bool("ACTIVITY_TRACKING_ENABLED", True)
+
 # Shop pricing
 SHOP_ANNOUNCE_COST = _parse_int("SHOP_ANNOUNCE_COST", 10)
 SHOP_ANNOUNCE_TARGET_COST = _parse_int("SHOP_ANNOUNCE_TARGET_COST", 100)

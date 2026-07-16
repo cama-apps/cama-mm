@@ -41,6 +41,7 @@ _discord_logger.handlers.clear()  # Remove discord.py's default handler
 _discord_logger.setLevel(logging.INFO)  # Ensure it logs at INFO level
 
 from config import (
+    ACTIVITY_TRACKING_ENABLED,
     ADMIN_USER_IDS,
     AI_MAX_TOKENS,
     AI_MODEL,
@@ -96,7 +97,6 @@ _reminder_recovery_task: asyncio.Task | None = None
 _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
-
 
 def _log_task_exit(name: str):
     """Done-callback factory: surface any unexpected task exit to the log.
@@ -824,11 +824,29 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    """Track slash command usage for health reporting."""
+    """Track slash command usage for health reporting and lottery activity."""
     if interaction.type != discord.InteractionType.application_command:
         return
     command = interaction.command
     usage_monitor.record_command(getattr(command, "qualified_name", None) or getattr(command, "name", None))
+    await _record_command_activity(interaction)
+
+
+async def _record_command_activity(interaction: discord.Interaction) -> None:
+    """Record the user's last command time so any command keeps them
+    lottery-active. One tiny upsert per command; read live at disbursement and
+    on /profile. Best-effort — never disrupt the command."""
+    if not ACTIVITY_TRACKING_ENABLED:
+        return
+    player_repo = getattr(bot, "player_repo", None)
+    user = getattr(interaction, "user", None)
+    if player_repo is None or user is None:
+        return
+    guild_id = interaction.guild.id if interaction.guild else None
+    try:
+        await asyncio.to_thread(player_repo.record_command_use, user.id, guild_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to record command activity for %s", user.id, exc_info=True)
 
 
 def _is_sword_emoji(emoji) -> bool:

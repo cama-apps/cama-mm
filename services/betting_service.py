@@ -145,6 +145,13 @@ class BettingService:
             pending_match_id=pending_match_id,
         )
 
+        # Placing a bet is engagement — count it toward lottery activity. Never
+        # let an activity-tracking hiccup fail an already-committed bet.
+        try:
+            self.player_repo.bump_last_active_many([discord_id], guild_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("failed to bump last_active for bettor %s", discord_id, exc_info=True)
+
     def award_participation(
         self,
         player_ids: list[int],
