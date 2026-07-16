@@ -98,9 +98,11 @@ _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
 
-# Channel-activity sweep task handles
-_voice_sweep_task: asyncio.Task | None = None
-_text_sweep_task: asyncio.Task | None = None
+# Users who ran a slash command since the last daily activity rollup. Held in
+# memory (no per-interaction DB write) and drained once per game-day (4 AM PST)
+# into players.last_active_at for lottery eligibility.
+_pending_command_activity: set[tuple[int | None, int]] = set()
+_activity_rollup_task: asyncio.Task | None = None
 
 
 def _log_task_exit(name: str):
@@ -173,46 +175,52 @@ async def _supervised_loop(name: str, body) -> None:
             backoff = min(backoff * 2, 300)
 
 
-async def _voice_sweep_loop() -> None:
-    """Frequent sweep: bump last_active_at for members currently in voice."""
-    from config import ACTIVITY_TRACKING_ENABLED, ACTIVITY_VOICE_SWEEP_SECONDS
+def _seconds_until_next_activity_rollup(now=None) -> float:
+    """Seconds until the next 4 AM PST game-day rollover (12:00 UTC), matching
+    the /dig day boundary in utils/game_date.py."""
+    import datetime as _dt
 
+    now = now or _dt.datetime.now(_dt.UTC)
+    target = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += _dt.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def _run_activity_rollup() -> int:
+    """Drain the pending command-activity set and bump last_active_at for those
+    registered players, grouped by guild. Unregistered IDs no-op in the repo.
+    Returns the number of (guild, user) entries processed."""
+    player_repo = getattr(bot, "player_repo", None)
+    if player_repo is None or not _pending_command_activity:
+        return 0
+    pending = list(_pending_command_activity)
+    _pending_command_activity.clear()
+    by_guild: dict[int | None, list[int]] = {}
+    for guild_id, user_id in pending:
+        by_guild.setdefault(guild_id, []).append(user_id)
+    for guild_id, user_ids in by_guild.items():
+        try:
+            player_repo.bump_last_active_many(user_ids, guild_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("activity rollup bump failed for guild %s", guild_id)
+    return len(pending)
+
+
+async def _activity_rollup_loop() -> None:
+    """Once per game-day (4 AM PST), roll the day's command activity into
+    lottery eligibility. No-ops when ACTIVITY_TRACKING_ENABLED is False."""
     if not ACTIVITY_TRACKING_ENABLED:
         return
     await bot.wait_until_ready()
-    svc = getattr(bot, "activity_service", None)
-    if svc is None:
-        logger.warning("voice sweep loop: activity_service unavailable")
-        return
-    logger.info("voice sweep loop started (interval=%ss)", ACTIVITY_VOICE_SWEEP_SECONDS)
+    logger.info("activity rollup loop started")
     while not bot.is_closed():
+        await asyncio.sleep(_seconds_until_next_activity_rollup())
         try:
-            for guild in bot.guilds:
-                await svc.sweep_voice(guild)
+            count = await asyncio.to_thread(_run_activity_rollup)
+            logger.info("activity rollup: bumped %d command users", count)
         except Exception as ex:  # noqa: BLE001
-            logger.exception("voice sweep error: %s", ex)
-        await asyncio.sleep(ACTIVITY_VOICE_SWEEP_SECONDS)
-
-
-async def _text_sweep_loop() -> None:
-    """Infrequent sweep: bump last_active_at for recent text-channel authors."""
-    from config import ACTIVITY_TEXT_SWEEP_SECONDS, ACTIVITY_TRACKING_ENABLED
-
-    if not ACTIVITY_TRACKING_ENABLED:
-        return
-    await bot.wait_until_ready()
-    svc = getattr(bot, "activity_service", None)
-    if svc is None:
-        logger.warning("text sweep loop: activity_service unavailable")
-        return
-    logger.info("text sweep loop started (interval=%ss)", ACTIVITY_TEXT_SWEEP_SECONDS)
-    while not bot.is_closed():
-        try:
-            for guild in bot.guilds:
-                await svc.sweep_text(guild, ACTIVITY_TEXT_SWEEP_SECONDS)
-        except Exception as ex:  # noqa: BLE001
-            logger.exception("text sweep error: %s", ex)
-        await asyncio.sleep(ACTIVITY_TEXT_SWEEP_SECONDS)
+            logger.exception("activity rollup error: %s", ex)
 
 
 async def _prediction_refresh_loop() -> None:
@@ -835,20 +843,13 @@ async def on_ready():
         )
         _manashop_debt_task.add_done_callback(_log_task_exit("manashop_debt"))
 
-    # Start channel-activity sweeps (voice frequent, text infrequent). The
-    # loops no-op when ACTIVITY_TRACKING_ENABLED is False.
-    global _voice_sweep_task, _text_sweep_task
-    if ACTIVITY_TRACKING_ENABLED:
-        if _voice_sweep_task is None or _voice_sweep_task.done():
-            _voice_sweep_task = bot.loop.create_task(
-                _supervised_loop("voice_sweep", _voice_sweep_loop)
-            )
-            _voice_sweep_task.add_done_callback(_log_task_exit("voice_sweep"))
-        if _text_sweep_task is None or _text_sweep_task.done():
-            _text_sweep_task = bot.loop.create_task(
-                _supervised_loop("text_sweep", _text_sweep_loop)
-            )
-            _text_sweep_task.add_done_callback(_log_task_exit("text_sweep"))
+    # Daily rollup of slash-command activity into lottery eligibility (4 AM PST).
+    global _activity_rollup_task
+    if ACTIVITY_TRACKING_ENABLED and (_activity_rollup_task is None or _activity_rollup_task.done()):
+        _activity_rollup_task = bot.loop.create_task(
+            _supervised_loop("activity_rollup", _activity_rollup_loop)
+        )
+        _activity_rollup_task.add_done_callback(_log_task_exit("activity_rollup"))
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:
@@ -886,11 +887,25 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    """Track slash command usage for health reporting."""
+    """Track slash command usage for health reporting and lottery activity."""
     if interaction.type != discord.InteractionType.application_command:
         return
     command = interaction.command
     usage_monitor.record_command(getattr(command, "qualified_name", None) or getattr(command, "name", None))
+    _note_command_activity(interaction)
+
+
+def _note_command_activity(interaction: discord.Interaction) -> None:
+    """Record (in memory) that a user ran a command, for the daily activity
+    rollup. No DB write here — _run_activity_rollup batches these once per
+    game-day. Best-effort: never disrupt the command."""
+    if not ACTIVITY_TRACKING_ENABLED:
+        return
+    user = getattr(interaction, "user", None)
+    if user is None:
+        return
+    guild_id = interaction.guild.id if interaction.guild else None
+    _pending_command_activity.add((guild_id, user.id))
 
 
 def _is_sword_emoji(emoji) -> bool:
