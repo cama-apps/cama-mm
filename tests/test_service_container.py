@@ -21,6 +21,19 @@ class TestServiceContainerInitialization:
 
         assert first is second
 
+    def test_duel_repository_and_service_are_initialized_once(self, repo_db_path):
+        """Duel components share one stable repository instance."""
+        container = ServiceContainer(repo_db_path)
+
+        container.initialize()
+        repo = container._components["duel_repo"]
+        service = container._components["duel_service"]
+        container.initialize()
+
+        assert container._components["duel_repo"] is repo
+        assert container._components["duel_service"] is service
+        assert service.repo is repo
+
     def test_initialized_flag(self, repo_db_path):
         """_initialized returns correct state."""
         container = ServiceContainer(repo_db_path)
@@ -122,6 +135,7 @@ class TestServiceContainerBotExposure:
             "buff_service": "buff_service",
             "dig_service": "dig_service",
             "dig_flavor_service": "dig_flavor_service",
+            "duel_service": "duel_service",
             "reminder_service": "reminder_service",
             "curse_service": "curse_service",
             "mafia_service": "mafia_service",
