@@ -83,6 +83,8 @@ class DuelChallengeRepository(BaseRepository):
             cursor = conn.cursor()
             if challenger_id == recipient_id:
                 raise ValueError("You cannot challenge yourself to a duel.")
+            if type(wager) is not int:
+                raise ValueError("The wager must be a whole number of jopacoin.")
             if not 500 <= wager <= 1000:
                 raise ValueError("The wager must be between 500 and 1000 jopacoin.")
 
