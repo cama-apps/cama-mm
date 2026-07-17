@@ -293,7 +293,8 @@ class DuelCommands(commands.Cog):
         if challenge.status is DuelStatus.VOIDED:
             detail = (
                 f"Challenge #{challenge.challenge_id} was voided. "
-                f"{challenge.wager} JC was refunded to each player."
+                f"The {challenge.wager} JC stakes were refunded to each player; "
+                "the issuance fee was not refunded."
             )
         else:
             detail = (
@@ -446,6 +447,12 @@ class DuelCommands(commands.Cog):
             name="Wager", value=f"{challenge.wager} JC"
         )
         embed.add_field(
+            name="Issuance Fee",
+            value=(
+                f"{challenge.issuance_fee} JC — nonrefundable after delivery"
+            ),
+        )
+        embed.add_field(
             name="Challenger", value=f"<@{challenge.challenger_id}>"
         )
         embed.add_field(
@@ -486,7 +493,10 @@ class DuelCommands(commands.Cog):
         if challenge.status is DuelStatus.VOIDED:
             embed.add_field(
                 name="Refund",
-                value=f"{challenge.wager} JC to each player",
+                value=(
+                    f"{challenge.wager} JC stake to each player; "
+                    "issuance fee remains nonrefundable"
+                ),
             )
         return embed
 
@@ -554,6 +564,7 @@ class DuelCommands(commands.Cog):
             "challenger_id": challenge.challenger_id,
             "recipient_id": challenge.recipient_id,
             "wager": challenge.wager,
+            "issuance_fee": challenge.issuance_fee,
             "status": challenge.status.value,
             "trial": challenge.trial_type.value if challenge.trial_type else None,
         }

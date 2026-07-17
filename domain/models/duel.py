@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+DUEL_ISSUANCE_FEE = 50
+
 
 class DuelStatus(StrEnum):
     PENDING = "pending"
@@ -41,6 +43,7 @@ class DuelChallenge:
     challenger_id: int
     recipient_id: int
     wager: int
+    issuance_fee: int
     status: DuelStatus
     trial_type: DuelTrial | None
     challenger_glicko: float

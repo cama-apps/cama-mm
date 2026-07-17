@@ -633,6 +633,7 @@ class SchemaManager:
                 challenger_id INTEGER NOT NULL,
                 recipient_id INTEGER NOT NULL,
                 wager INTEGER NOT NULL CHECK (wager BETWEEN 500 AND 1000),
+                issuance_fee INTEGER NOT NULL DEFAULT 50 CHECK (issuance_fee = 50),
                 status TEXT NOT NULL CHECK (status IN (
                     'pending', 'accepted', 'declined', 'expired',
                     'resolved', 'voided', 'delivery_failed'
