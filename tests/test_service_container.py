@@ -126,6 +126,7 @@ class TestServiceContainerBotExposure:
             "curse_service": "curse_service",
             "mafia_service": "mafia_service",
             "mafia_flavor_service": "mafia_flavor_service",
+            "player_trivia_service": "player_trivia_service",
             "sql_query_service": "sql_query_service",
             "flavor_text_service": "flavor_text_service",
         }

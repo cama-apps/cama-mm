@@ -97,6 +97,8 @@ class ServiceContainer:
         self._components["database_runtime"] = Database(db_path=self.db_path)
 
     def _init_repositories(self) -> None:
+        from repositories.player_trivia_repository import PlayerTriviaRepository
+
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
         from repositories.buff_repository import BuffRepository
@@ -129,6 +131,7 @@ class ServiceContainer:
         p = self.db_path
         self._components.update({
             "player_repo": PlayerRepository(p),
+            "player_trivia_repo": PlayerTriviaRepository(p),
             "match_repo": MatchRepository(p),
             "bet_repo": BetRepository(p),
             "lobby_repo": LobbyRepository(p),
@@ -485,10 +488,13 @@ class ServiceContainer:
 
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
+        from services.player_trivia_service import PlayerTriviaService
+
         from services.neon_degen_service import NeonDegenService
         from services.wrapped_service import WrappedService
 
         c = self._components
+        c["player_trivia_service"] = PlayerTriviaService(c["player_trivia_repo"])
         c["neon_degen_service"] = NeonDegenService(
             player_repo=c["player_repo"],
             bet_repo=c["bet_repo"],
@@ -573,6 +579,7 @@ class ServiceContainer:
         bot.curse_service = c["curse_service"]
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
+        bot.player_trivia_service = c["player_trivia_service"]
 
         # AI services (may be None)
         bot.sql_query_service = c["sql_query_service"]

@@ -135,6 +135,135 @@ def _eruption_reward(last_spin: dict | None) -> int:
     return eruption_reward(last_spin)
 
 
+def _canonical_wheel_outcome_code(
+    landed_wedge: tuple[str, int | str, str],
+    resolved_value: int | str,
+    *,
+    is_bankrupt: bool,
+    is_golden: bool,
+) -> str:
+    """Return a stable outcome identifier independent of rendered labels.
+
+    Dynamic BANKRUPT and OVEREXTENDED wedges replace their display labels with
+    the computed numeric loss. CROWN is likewise rendered as its scaled numeric
+    payout. Infer those three identities from wheel context/color so future
+    history preserves the actual wedge rather than collapsing them into an
+    ordinary numeric result.
+    """
+    label, landed_value, color = landed_wedge
+    normalized_label = str(label).strip().upper().replace(" ", "_")
+
+    if isinstance(landed_value, str):
+        return str(resolved_value) if isinstance(resolved_value, str) else landed_value
+    if landed_value < 0:
+        return "OVEREXTENDED" if is_golden else "BANKRUPT"
+    if landed_value == 0:
+        return "LOSE"
+    if normalized_label == "CROWN" or (is_golden and color.lower() == "#fffacd"):
+        return "CROWN"
+    return f"NUMERIC_{resolved_value}"
+
+
+def _wheel_outcome_metadata(
+    state: WheelOutcomeState,
+    landed_wedge: tuple[str, int | str, str],
+    outcome_code: str,
+    logged_result: int,
+) -> dict:
+    """Build JSON-safe, non-identifying details for an exact wheel record."""
+    metadata: dict[str, int | str | bool] = {
+        "wedge_label": str(landed_wedge[0]),
+        "wedge_value": landed_wedge[1],
+        "resolved_value": state.result_value,
+        "logged_result": logged_result,
+    }
+
+    if state.garnished_amount:
+        metadata["garnished_amount"] = state.garnished_amount
+    if state.shield_absorbed_total:
+        metadata["shield_absorbed_total"] = state.shield_absorbed_total
+    if state.shielded_count:
+        metadata["shielded_count"] = state.shielded_count
+    if state.pardon_consumed:
+        metadata["pardon_consumed"] = True
+
+    if outcome_code in {"RED_SHELL", "BLUE_SHELL"}:
+        metadata.update(
+            shell_amount=state.shell_amount,
+            shell_missed=state.shell_missed,
+            shell_self_hit=state.shell_self_hit,
+        )
+    elif outcome_code == "LIGHTNING_BOLT":
+        metadata.update(
+            lightning_total=state.lightning_total,
+            lightning_count=state.lightning_count,
+        )
+    elif outcome_code == "EMERGENCY":
+        metadata.update(
+            emergency_total=state.emergency_total,
+            emergency_count=state.emergency_count,
+        )
+    elif outcome_code == "COMMUNE":
+        metadata.update(
+            commune_total=state.commune_total,
+            commune_count=state.commune_count,
+        )
+    elif outcome_code == "HEIST":
+        metadata.update(heist_total=state.heist_total, heist_count=state.heist_count)
+    elif outcome_code == "MARKET_CRASH":
+        metadata.update(
+            market_crash_total=state.market_crash_total,
+            market_crash_count=state.market_crash_count,
+        )
+    elif outcome_code == "TRICKLE_DOWN":
+        metadata.update(
+            trickle_total=state.trickle_total,
+            trickle_count=state.trickle_count,
+        )
+    elif outcome_code == "DIVIDEND":
+        metadata["dividend_amount"] = state.dividend_amount
+    elif outcome_code == "COMPOUND_INTEREST":
+        metadata["compound_amount"] = state.compound_amount
+    elif outcome_code == "HOSTILE_TAKEOVER":
+        metadata.update(
+            takeover_amount=state.takeover_amount,
+            takeover_missed=state.takeover_missed,
+        )
+    elif outcome_code == "RECESSION":
+        metadata.update(
+            recession_total=state.recession_total,
+            recession_count=state.recession_count,
+            recession_self_loss=state.recession_self_loss,
+        )
+    elif outcome_code == "BANANA_PEEL":
+        metadata.update(
+            banana_victim_loss=state.banana_victim_loss,
+            banana_missed=state.banana_missed,
+        )
+    elif outcome_code == "GREEN_SHELL":
+        metadata.update(
+            green_shell_amount=state.green_shell_amount,
+            green_shell_missed=state.green_shell_missed,
+        )
+    elif outcome_code == "BOMB_OMB":
+        metadata.update(
+            bomb_omb_burn_total=state.bomb_omb_burn_total,
+            bomb_omb_victim_count=len(state.bomb_omb_victims),
+            bomb_omb_missed=state.bomb_omb_missed,
+        )
+    elif outcome_code in {"EXTEND_1", "EXTEND_2"}:
+        metadata.update(
+            extend_games_added=state.extend_games_added,
+            extend_new_total=state.extend_new_total,
+        )
+    elif outcome_code == "JAILBREAK":
+        metadata["jailbreak_new_total"] = state.jailbreak_new_total
+    elif outcome_code == "CHAIN_REACTION" and state.chain_value is not None:
+        metadata["chain_value"] = state.chain_value
+
+    return metadata
+
+
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
 
@@ -533,6 +662,10 @@ class BettingCommands(commands.Cog):
         user_id = interaction.user.id
         guild_id = interaction.guild.id
         now = time.time()
+        raw_event_id = getattr(interaction, "id", None)
+        wheel_event_id = (
+            str(raw_event_id) if isinstance(raw_event_id, int) else uuid.uuid4().hex
+        )
 
         # Check if player is registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
@@ -611,6 +744,17 @@ class BettingCommands(commands.Cog):
             # Apply explosion reward (debuffed if under bankruptcy penalty)
             garnished_amount = 0
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+            explosion_is_bankrupt = new_balance < 0
+            explosion_is_golden = False
+            if not explosion_is_bankrupt:
+                top_n = await asyncio.to_thread(
+                    functools.partial(
+                        self.player_service.get_leaderboard,
+                        guild_id,
+                        limit=WHEEL_GOLDEN_TOP_N,
+                    )
+                )
+                explosion_is_golden = user_id in {p.discord_id for p in top_n}
 
             explosion_reward = WHEEL_EXPLOSION_REWARD
             explosion_penalty = 0
@@ -655,6 +799,17 @@ class BettingCommands(commands.Cog):
                     # is a separate balance event surfaced in the embed.
                     result=WHEEL_EXPLOSION_REWARD,
                     spin_time=int(now),
+                    is_bankrupt=explosion_is_bankrupt,
+                    is_golden=explosion_is_golden,
+                    outcome_code="EXPLOSION",
+                    is_bonus=bonus_spin,
+                    event_id=wheel_event_id,
+                    outcome_metadata={
+                        "gross_reward": WHEEL_EXPLOSION_REWARD,
+                        "credited_reward": explosion_reward,
+                        "bankruptcy_penalty": explosion_penalty,
+                        "garnished_amount": garnished_amount,
+                    },
                 )
             )
 
@@ -1088,13 +1243,11 @@ class BettingCommands(commands.Cog):
                 self.player_service.get_balance, user_id, guild_id
             )
 
-        interaction_event_id = getattr(interaction, "id", None)
-        if not isinstance(interaction_event_id, int):
-            interaction_event_id = uuid.uuid4().hex
         hostile_event_prefix = (
-            f"wheel:{guild_id}:{interaction_event_id}:{str(result_value).lower()}"
+            f"wheel:{guild_id}:{wheel_event_id}:{str(result_value).lower()}"
         )
 
+        landed_wedge = result_wedge
         outcome_state = WheelOutcomeState(
             result_wedge=result_wedge,
             new_balance=new_balance,
@@ -1137,6 +1290,22 @@ class BettingCommands(commands.Cog):
 
         # Log the wheel spin for history tracking.
         log_result = outcome_state.log_result()
+        outcome_code = _canonical_wheel_outcome_code(
+            landed_wedge,
+            result_value,
+            is_bankrupt=is_eligible_for_bad_gamba,
+            is_golden=is_golden,
+        )
+        outcome_metadata = _wheel_outcome_metadata(
+            outcome_state,
+            landed_wedge,
+            outcome_code,
+            log_result,
+        )
+        if _insurance_activated:
+            outcome_metadata["mana_insurance_activated"] = True
+        if _reroll_used:
+            outcome_metadata["mana_reroll_used"] = True
 
         await asyncio.to_thread(
             functools.partial(
@@ -1147,6 +1316,10 @@ class BettingCommands(commands.Cog):
                 spin_time=int(now),
                 is_bankrupt=is_eligible_for_bad_gamba,
                 is_golden=is_golden,
+                outcome_code=outcome_code,
+                is_bonus=bonus_spin,
+                event_id=wheel_event_id,
+                outcome_metadata=outcome_metadata,
             )
         )
 

@@ -359,7 +359,9 @@ class DisburseService:
         # between them cannot strand the reserve.
         if method == "cancel":
             was_active = self.disburse_repo.reset_and_return_fund_atomic(
-                guild_id, fund_amount,
+                guild_id,
+                fund_amount,
+                proposal_outcome="cancelled",
             )
             if not was_active:
                 # Another caller already handled this proposal. No-op.
@@ -382,7 +384,7 @@ class DisburseService:
         if method == "stimulus":
             eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
             if not eligible:
-                self._finalize_noop(guild_id, fund_amount)
+                self._finalize_noop(guild_id, fund_amount, method)
                 return self._empty_result(
                     method,
                     message=(
@@ -397,7 +399,7 @@ class DisburseService:
                 guild_id, activity_days=LOTTERY_ACTIVITY_DAYS
             )
             if not eligible:
-                self._finalize_noop(guild_id, fund_amount)
+                self._finalize_noop(guild_id, fund_amount, method)
                 return self._empty_result(
                     method,
                     message=(
@@ -410,7 +412,7 @@ class DisburseService:
         elif method == "social_security":
             eligible = self.player_repo.get_players_by_games_played(guild_id)
             if not eligible:
-                self._finalize_noop(guild_id, fund_amount)
+                self._finalize_noop(guild_id, fund_amount, method)
                 return self._empty_result(
                     method, message="No players with games played for social security."
                 )
@@ -418,7 +420,7 @@ class DisburseService:
         elif method == "richest":
             richest = self.player_repo.get_richest_player(guild_id)
             if not richest:
-                self._finalize_noop(guild_id, fund_amount)
+                self._finalize_noop(guild_id, fund_amount, method)
                 return self._empty_result(
                     method, message="No players found for richest distribution."
                 )
@@ -427,7 +429,7 @@ class DisburseService:
             # Debtor-based methods: even, proportional, neediest
             debtors = self.player_repo.get_players_with_negative_balance(guild_id)
             if not debtors:
-                self._finalize_noop(guild_id, fund_amount)
+                self._finalize_noop(guild_id, fund_amount, method)
                 return self._empty_result(
                     method, message="No players with negative balance to receive funds."
                 )
@@ -461,7 +463,9 @@ class DisburseService:
             "recipient_count": len(distributions),
         }
 
-    def _finalize_noop(self, guild_id: int | None, fund_amount: int) -> None:
+    def _finalize_noop(
+        self, guild_id: int | None, fund_amount: int, method: str
+    ) -> None:
         """Return reserved fund to pool and mark proposal complete (empty distribution).
 
         Routes through the same atomic path as the happy case so a crash
@@ -472,7 +476,7 @@ class DisburseService:
             guild_id=guild_id,
             fund_amount_to_return=fund_amount,
             distributions=[],
-            method="noop",
+            method=method,
         )
 
     def _empty_result(self, method: str, *, message: str) -> dict:
@@ -532,7 +536,9 @@ class DisburseService:
             # Single BEGIN IMMEDIATE: status flip + nonprofit credit. A crash
             # between the two would otherwise destroy ``fund_amount`` JC.
             return self.disburse_repo.reset_and_return_fund_atomic(
-                guild_id, fund_amount,
+                guild_id,
+                fund_amount,
+                proposal_outcome="reset",
             )
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:

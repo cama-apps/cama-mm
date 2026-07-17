@@ -401,6 +401,22 @@ TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
 TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
 TRIVIA_BANKRUPT_MULTIPLIER = _parse_float("TRIVIA_BANKRUPT_MULTIPLIER", 2.0)  # Streak-bonus multiplier when balance ≤ 0
 
+# Player-stat trivia configuration. This is intentionally a separate cooldown
+# from /trivia: each run is a fixed daily set whose questions are frozen when
+# the session starts, so later stat updates cannot change an answer mid-game.
+PLAYER_TRIVIA_COOLDOWN_SECONDS = _parse_int(
+    "PLAYER_TRIVIA_COOLDOWN_SECONDS", 86400
+)
+PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int(
+    "PLAYER_TRIVIA_ANSWER_TIMEOUT_SECONDS", 20
+)
+PLAYER_TRIVIA_QUESTION_COUNT = _parse_int("PLAYER_TRIVIA_QUESTION_COUNT", 10)
+PLAYER_TRIVIA_REWARD_PER_CORRECT = _parse_int(
+    "PLAYER_TRIVIA_REWARD_PER_CORRECT", 1
+)
+PLAYER_TRIVIA_RECENT_DAYS = _parse_int("PLAYER_TRIVIA_RECENT_DAYS", 30)
+PLAYER_TRIVIA_INCLUDE_SPICY = _parse_bool("PLAYER_TRIVIA_INCLUDE_SPICY", False)
+
 # White mana stipend (paid from nonprofit fund on /mana claim while bankrupt)
 WHITE_BANKRUPT_STIPEND = _parse_int("WHITE_BANKRUPT_STIPEND", 5)
 

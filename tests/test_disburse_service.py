@@ -2,6 +2,7 @@
 Tests for DisburseService - nonprofit fund distribution voting and distribution.
 """
 
+import sqlite3
 from datetime import UTC
 
 import pytest
@@ -11,6 +12,23 @@ from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
 from services.disburse_service import DisburseService
 from tests.conftest import TEST_GUILD_ID
+
+
+def _archived_ballots(
+    disburse_repo: DisburseRepository, proposal_id: int
+) -> list[sqlite3.Row]:
+    with sqlite3.connect(disburse_repo.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            """
+            SELECT guild_id, proposal_id, discord_id, vote_method, voted_at,
+                   proposal_outcome, finalized_at
+            FROM disburse_vote_history
+            WHERE guild_id = ? AND proposal_id = ?
+            ORDER BY discord_id
+            """,
+            (TEST_GUILD_ID, proposal_id),
+        ).fetchall()
 
 
 @pytest.fixture
@@ -487,11 +505,18 @@ class TestResetProposal:
         self, disburse_service, setup_players, setup_nonprofit_fund
     ):
         """Test resetting an active proposal."""
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        proposal = disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
         disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="even")
 
         success = disburse_service.reset_proposal(guild_id=TEST_GUILD_ID)
         assert success
+
+        ballots = _archived_ballots(disburse_service.disburse_repo, proposal.proposal_id)
+        assert len(ballots) == 1
+        assert ballots[0]["discord_id"] == 1003
+        assert ballots[0]["vote_method"] == "even"
+        assert ballots[0]["proposal_outcome"] == "reset"
+        assert ballots[0]["finalized_at"] >= ballots[0]["voted_at"]
 
         # Should be able to create a new proposal
         can, _ = disburse_service.can_propose(guild_id=TEST_GUILD_ID)
@@ -527,6 +552,36 @@ class TestDisbursementHistory:
         """Test when no disbursement history exists."""
         last = disburse_service.get_last_disbursement(guild_id=TEST_GUILD_ID)
         assert last is None
+
+    def test_resolved_proposal_archives_each_voters_latest_ballot(
+        self,
+        disburse_service,
+        player_repo,
+        setup_players,
+        setup_nonprofit_fund,
+    ):
+        proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+        # Re-voting replaces the active ballot; only the final choice is archived.
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "proportional")
+        disburse_service.add_vote(TEST_GUILD_ID, 1004, "proportional")
+        balances_before = {
+            player_id: player_repo.get_balance(player_id, TEST_GUILD_ID)
+            for player_id in (1001, 1002)
+        }
+
+        result = disburse_service.execute_disbursement(TEST_GUILD_ID)
+
+        assert result["method"] == "proportional"
+        assert sum(
+            player_repo.get_balance(player_id, TEST_GUILD_ID) - balance
+            for player_id, balance in balances_before.items()
+        ) == result["total_disbursed"]
+        ballots = _archived_ballots(disburse_service.disburse_repo, proposal.proposal_id)
+        assert [row["discord_id"] for row in ballots] == [1003, 1004]
+        assert {row["vote_method"] for row in ballots} == {"proportional"}
+        assert {row["proposal_outcome"] for row in ballots} == {"proportional"}
+        assert len({row["finalized_at"] for row in ballots}) == 1
 
 
 class TestStimulusDistribution:
@@ -1039,7 +1094,7 @@ class TestCancelDisbursement:
         self, disburse_service, setup_players, setup_nonprofit_fund
     ):
         """Test that cancel vote resets proposal instead of distributing."""
-        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        proposal = disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
         # Vote for cancel
         disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="cancel")
@@ -1052,6 +1107,10 @@ class TestCancelDisbursement:
         assert result["cancelled"] is True
         assert result["total_disbursed"] == 0
         assert "cancelled" in result["message"].lower() or "remain" in result["message"].lower()
+        ballots = _archived_ballots(disburse_service.disburse_repo, proposal.proposal_id)
+        assert [row["discord_id"] for row in ballots] == [1003, 1004]
+        assert {row["vote_method"] for row in ballots} == {"cancel"}
+        assert {row["proposal_outcome"] for row in ballots} == {"cancelled"}
 
     def test_cancel_tiebreaker_loses(
         self, disburse_service, setup_players, setup_nonprofit_fund

@@ -484,6 +484,24 @@ class SchemaManager:
             ("drop_retired_wheel_war_tables", self._migration_drop_retired_wheel_war_tables),
             # Persistent per-guild cooldown for the paid /pingedash command.
             ("add_last_pingedash_to_players", self._migration_add_last_pingedash_to_players),
+            # Player-history trivia: immutable question snapshots and atomic
+            # per-session scoring/reward state.
+            (
+                "create_player_trivia_tables",
+                self._migration_create_player_trivia_tables,
+            ),
+            # Persist semantic wheel outcomes so trivia does not have to infer
+            # them from balance deltas or display labels.
+            (
+                "add_player_trivia_wheel_audit_columns",
+                self._migration_add_player_trivia_wheel_audit_columns,
+            ),
+            # Durable copy of finalized nonprofit votes. The active vote table
+            # is cleared between proposals and is therefore not historical.
+            (
+                "create_disburse_vote_history",
+                self._migration_create_disburse_vote_history,
+            ),
         ]
 
     # --- Migrations ---
@@ -499,6 +517,109 @@ class SchemaManager:
 
     def _migration_add_last_pingedash_to_players(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "last_pingedash", "INTEGER")
+
+    def _migration_create_player_trivia_tables(self, cursor) -> None:
+        """Create durable player-trivia sessions and question snapshots."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_trivia_sessions (
+                session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active', 'completed', 'timed_out', 'error', 'cancelled')),
+                question_count INTEGER NOT NULL DEFAULT 0 CHECK(question_count >= 0),
+                score INTEGER NOT NULL DEFAULT 0 CHECK(score >= 0),
+                jc_earned INTEGER NOT NULL DEFAULT 0 CHECK(jc_earned >= 0)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_trivia_sessions_guild_user_start
+            ON player_trivia_sessions(guild_id, discord_id, started_at DESC, session_id DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_trivia_questions (
+                session_id INTEGER NOT NULL,
+                question_number INTEGER NOT NULL CHECK(question_number > 0),
+                question_key TEXT NOT NULL,
+                category TEXT NOT NULL,
+                spicy INTEGER NOT NULL DEFAULT 0 CHECK(spicy IN (0, 1)),
+                question_text TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                correct_index INTEGER NOT NULL CHECK(correct_index >= 0),
+                explanation TEXT,
+                selected_index INTEGER CHECK(selected_index >= 0),
+                is_correct INTEGER CHECK(is_correct IN (0, 1)),
+                reward INTEGER NOT NULL DEFAULT 0 CHECK(reward >= 0),
+                answered_at INTEGER,
+                PRIMARY KEY (session_id, question_number),
+                FOREIGN KEY (session_id)
+                    REFERENCES player_trivia_sessions(session_id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_trivia_questions_key
+            ON player_trivia_questions(question_key, session_id)
+            """
+        )
+
+    def _migration_add_player_trivia_wheel_audit_columns(self, cursor) -> None:
+        """Add stable semantic identifiers and metadata to wheel history."""
+        self._add_column_if_not_exists(cursor, "wheel_spins", "outcome_code", "TEXT")
+        self._add_column_if_not_exists(
+            cursor, "wheel_spins", "is_bonus", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(cursor, "wheel_spins", "event_id", "TEXT")
+        self._add_column_if_not_exists(cursor, "wheel_spins", "outcome_metadata", "TEXT")
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wheel_spins_guild_player_time
+            ON wheel_spins(guild_id, discord_id, spin_time DESC, spin_id DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_wheel_spins_guild_event
+            ON wheel_spins(guild_id, event_id)
+            """
+        )
+
+    def _migration_create_disburse_vote_history(self, cursor) -> None:
+        """Create an immutable, guild-scoped nonprofit vote history."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disburse_vote_history (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                proposal_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                vote_method TEXT NOT NULL,
+                voted_at INTEGER NOT NULL,
+                proposal_outcome TEXT,
+                finalized_at INTEGER,
+                PRIMARY KEY (guild_id, proposal_id, discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_disburse_vote_history_voter
+            ON disburse_vote_history(guild_id, discord_id, voted_at DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_disburse_vote_history_proposal
+            ON disburse_vote_history(guild_id, proposal_id, finalized_at)
+            """
+        )
 
     def _migration_add_glicko_columns(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "glicko_rating", "REAL")
