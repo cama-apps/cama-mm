@@ -380,3 +380,23 @@ class TestTriviaSessionRecording:
         assert lb[0]["best_streak"] == 5
         assert lb[1]["best_streak"] == 4
         assert lb[2]["best_streak"] == 3
+
+    def test_leaderboard_uses_discord_id_for_streak_ties(self, player_service):
+        """Equal best streaks have a stable final Discord-ID ordering."""
+        for discord_id in (300002, 300001):
+            player_service.register_player(
+                discord_id=discord_id,
+                discord_username=f"lb_tie_{discord_id}",
+                guild_id=TEST_GUILD_ID,
+                steam_id=discord_id,
+                mmr_override=3000,
+            )
+            player_service.record_trivia_session(
+                discord_id,
+                TEST_GUILD_ID,
+                streak=7,
+                jc_earned=7,
+            )
+
+        leaderboard = player_service.get_trivia_leaderboard(TEST_GUILD_ID)
+        assert [entry["discord_id"] for entry in leaderboard] == [300001, 300002]

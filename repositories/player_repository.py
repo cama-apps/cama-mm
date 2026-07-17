@@ -245,7 +245,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 ORDER BY
                     COALESCE(jopacoin_balance, 0) DESC,
                     COALESCE(wins, 0) DESC,
-                    COALESCE(glicko_rating, 0) DESC
+                    COALESCE(glicko_rating, 0) DESC,
+                    discord_id ASC
                 LIMIT ? OFFSET ?
                 """,
                 (guild_id, limit, offset),
@@ -279,7 +280,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     ORDER BY
                         CASE WHEN glicko_rating IS NULL THEN 1 ELSE 0 END,
                         glicko_rating DESC,
-                        COALESCE(wins, 0) DESC
+                        COALESCE(wins, 0) DESC,
+                        discord_id ASC
                     LIMIT ? OFFSET ?
                     """,
                     (guild_id, min_games, limit, offset),
@@ -292,7 +294,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     ORDER BY
                         CASE WHEN glicko_rating IS NULL THEN 1 ELSE 0 END,
                         glicko_rating DESC,
-                        COALESCE(wins, 0) DESC
+                        COALESCE(wins, 0) DESC,
+                        discord_id ASC
                     LIMIT ? OFFSET ?
                     """,
                     (guild_id, limit, offset),
@@ -326,7 +329,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     ORDER BY
                         CASE WHEN os_mu IS NULL THEN 1 ELSE 0 END,
                         os_mu DESC,
-                        COALESCE(wins, 0) DESC
+                        COALESCE(wins, 0) DESC,
+                        discord_id ASC
                     LIMIT ? OFFSET ?
                     """,
                     (guild_id, min_games, limit, offset),
@@ -339,7 +343,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     ORDER BY
                         CASE WHEN os_mu IS NULL THEN 1 ELSE 0 END,
                         os_mu DESC,
-                        COALESCE(wins, 0) DESC
+                        COALESCE(wins, 0) DESC,
+                        discord_id ASC
                     LIMIT ? OFFSET ?
                     """,
                     (guild_id, limit, offset),
@@ -3134,9 +3139,15 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            # First, get the user's balance
+            # Read the complete canonical balance-leaderboard sort key.
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance,
+                       COALESCE(wins, 0) AS wins,
+                       COALESCE(glicko_rating, 0) AS rating
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
                 (discord_id, guild_id),
             )
             user_row = cursor.fetchone()
@@ -3144,10 +3155,12 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
 
             user_balance = int(user_row["balance"])
+            user_wins = int(user_row["wins"])
+            user_rating = float(user_row["rating"])
             eligible_min_balance = user_balance if min_balance is None else min_balance
 
-            # Find the nearest eligible player above the user. If there's a tie at
-            # the user's balance, get the one with lower discord_id (tiebreaker).
+            # Reverse the canonical ordering to select the closest qualifying row
+            # ahead of the user: balance, wins, Glicko, then Discord ID.
             cursor.execute(
                 """
                 SELECT * FROM players
@@ -3155,9 +3168,26 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                   AND COALESCE(jopacoin_balance, 0) >= ?
                   AND (
                     COALESCE(jopacoin_balance, 0) > ?
-                    OR (COALESCE(jopacoin_balance, 0) = ? AND discord_id < ?)
+                    OR (
+                      COALESCE(jopacoin_balance, 0) = ?
+                      AND (
+                        COALESCE(wins, 0) > ?
+                        OR (
+                          COALESCE(wins, 0) = ?
+                          AND (
+                            COALESCE(glicko_rating, 0) > ?
+                            OR (
+                              COALESCE(glicko_rating, 0) = ?
+                              AND discord_id < ?
+                            )
+                          )
+                        )
+                      )
+                    )
                 )
                 ORDER BY COALESCE(jopacoin_balance, 0) ASC,
+                         COALESCE(wins, 0) ASC,
+                         COALESCE(glicko_rating, 0) ASC,
                          discord_id DESC
                 LIMIT 1
                 """,
@@ -3166,6 +3196,10 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     eligible_min_balance,
                     user_balance,
                     user_balance,
+                    user_wins,
+                    user_wins,
+                    user_rating,
+                    user_rating,
                     discord_id,
                 ),
             )
@@ -3195,7 +3229,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor = conn.cursor()
 
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance,
+                       COALESCE(wins, 0) AS wins,
+                       COALESCE(glicko_rating, 0) AS rating
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
                 (discord_id, guild_id),
             )
             user_row = cursor.fetchone()
@@ -3203,21 +3243,49 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
 
             user_balance = int(user_row["balance"])
+            user_wins = int(user_row["wins"])
+            user_rating = float(user_row["rating"])
 
-            # Find player with the largest balance strictly less than user's, or
-            # tied at user's balance with a higher discord_id (stable tiebreaker).
+            # Use the canonical balance-leaderboard ordering to find the closest
+            # row behind the user.
             cursor.execute(
                 """
                 SELECT * FROM players
                 WHERE guild_id = ? AND (
                     COALESCE(jopacoin_balance, 0) < ?
-                    OR (COALESCE(jopacoin_balance, 0) = ? AND discord_id > ?)
+                    OR (
+                      COALESCE(jopacoin_balance, 0) = ?
+                      AND (
+                        COALESCE(wins, 0) < ?
+                        OR (
+                          COALESCE(wins, 0) = ?
+                          AND (
+                            COALESCE(glicko_rating, 0) < ?
+                            OR (
+                              COALESCE(glicko_rating, 0) = ?
+                              AND discord_id > ?
+                            )
+                          )
+                        )
+                      )
+                    )
                 )
                 ORDER BY COALESCE(jopacoin_balance, 0) DESC,
+                         COALESCE(wins, 0) DESC,
+                         COALESCE(glicko_rating, 0) DESC,
                          discord_id ASC
                 LIMIT 1
                 """,
-                (guild_id, user_balance, user_balance, discord_id),
+                (
+                    guild_id,
+                    user_balance,
+                    user_balance,
+                    user_wins,
+                    user_wins,
+                    user_rating,
+                    user_rating,
+                    discord_id,
+                ),
             )
             row = cursor.fetchone()
 
@@ -3249,7 +3317,10 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """
                 SELECT * FROM players
                 WHERE guild_id = ? AND COALESCE(jopacoin_balance, 0) >= ?
-                ORDER BY COALESCE(jopacoin_balance, 0) ASC
+                ORDER BY COALESCE(jopacoin_balance, 0) ASC,
+                         COALESCE(wins, 0) ASC,
+                         COALESCE(glicko_rating, 0) ASC,
+                         discord_id DESC
                 LIMIT ?
                 """,
                 (guild_id, min_balance, limit),
@@ -3410,7 +3481,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 FROM trivia_sessions
                 WHERE guild_id = ? AND played_at >= ?
                 GROUP BY discord_id
-                ORDER BY best_streak DESC
+                ORDER BY best_streak DESC, discord_id ASC
                 LIMIT ?
                 """,
                 (guild_id, since_timestamp, limit),

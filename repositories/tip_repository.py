@@ -171,7 +171,7 @@ class TipRepository(BaseRepository, ITipRepository):
                 FROM tip_transactions
                 WHERE guild_id = ?
                 GROUP BY sender_id
-                ORDER BY total_amount DESC
+                ORDER BY total_amount DESC, sender_id ASC
                 LIMIT ?
                 """,
                 (normalized_guild_id, limit),
@@ -205,7 +205,7 @@ class TipRepository(BaseRepository, ITipRepository):
                 FROM tip_transactions
                 WHERE guild_id = ?
                 GROUP BY recipient_id
-                ORDER BY total_amount DESC
+                ORDER BY total_amount DESC, recipient_id ASC
                 LIMIT ?
                 """,
                 (normalized_guild_id, limit),

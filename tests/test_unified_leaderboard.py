@@ -8,12 +8,14 @@ Tests cover:
 - Deep-linking via type parameter works
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 # Import the classes we're testing
 from commands.info import (
+    ALL_LEADERBOARD_ENTRIES_LIMIT,
     MULTI_SECTION_PAGE_SIZE,
     SINGLE_SECTION_PAGE_SIZE,
     LeaderboardTab,
@@ -35,6 +37,7 @@ def mock_cog():
     cog.player_repo.get_leaderboard_by_glicko.return_value = []
     cog.player_repo.get_leaderboard_by_openskill.return_value = []
     cog.player_repo.get_rated_player_count.return_value = 0
+    cog.player_service = cog.player_repo
 
     # Mock gambling_stats_service
     cog.gambling_stats_service = MagicMock()
@@ -59,6 +62,21 @@ def create_mock_member(discord_id: int, name: str = None) -> MagicMock:
     member.id = discord_id
     member.display_name = name or f"User{discord_id}"
     return member
+
+
+def create_mock_player(discord_id: int) -> SimpleNamespace:
+    """Create a player carrying fields used by every player leaderboard tab."""
+    return SimpleNamespace(
+        discord_id=discord_id,
+        name=f"Player{discord_id}",
+        wins=1,
+        losses=1,
+        glicko_rating=1500.0,
+        glicko_rd=80.0,
+        os_mu=25.0,
+        os_sigma=2.0,
+        jopacoin_balance=100,
+    )
 
 
 @pytest.fixture
@@ -306,6 +324,147 @@ class TestLazyLoading:
 
         # Should not have called again
         assert mock_cog.player_repo.get_leaderboard.call_count == call_count
+
+
+class TestMembershipFilteringBeforeLimit:
+    """Departed users must not consume visible leaderboard slots."""
+
+    @pytest.mark.asyncio
+    async def test_balance_backfills_after_departed_member(self, mock_cog, mock_interaction):
+        mock_cog.player_service.get_leaderboard.return_value = [
+            create_mock_player(999),
+            create_mock_player(123),
+            create_mock_player(456),
+        ]
+        mock_cog.player_service.get_player_count.return_value = 3
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            limit=2,
+        )
+
+        await view._load_tab_data(LeaderboardTab.BALANCE)
+
+        state = view._tab_states[LeaderboardTab.BALANCE]
+        assert [entry["discord_id"] for entry in state.data["players"]] == [123, 456]
+        assert state.data["total_count"] == 2
+        assert mock_cog.player_service.get_leaderboard.call_args.kwargs["limit"] == (
+            ALL_LEADERBOARD_ENTRIES_LIMIT
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tab", "method_name"),
+        [
+            (LeaderboardTab.GLICKO, "get_leaderboard_by_glicko"),
+            (LeaderboardTab.OPENSKILL, "get_leaderboard_by_openskill"),
+        ],
+    )
+    async def test_rating_tabs_backfill_after_departed_member(
+        self, mock_cog, mock_interaction, tab, method_name
+    ):
+        method = getattr(mock_cog.player_service, method_name)
+        method.return_value = [
+            create_mock_player(999),
+            create_mock_player(123),
+            create_mock_player(456),
+        ]
+        mock_cog.player_service.get_rated_player_count.return_value = 3
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=tab,
+            limit=2,
+        )
+
+        await view._load_tab_data(tab)
+
+        state = view._tab_states[tab]
+        assert [entry["discord_id"] for entry in state.data["players"]] == [123, 456]
+        assert state.data["total_rated"] == 2
+        assert method.call_args.kwargs["limit"] == ALL_LEADERBOARD_ENTRIES_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_gambling_backfills_after_departed_member(
+        self, mock_cog, mock_interaction
+    ):
+        leaderboard = mock_cog.gambling_stats_service.get_leaderboard.return_value
+        leaderboard.top_earners = [
+            SimpleNamespace(discord_id=999),
+            SimpleNamespace(discord_id=123),
+            SimpleNamespace(discord_id=456),
+        ]
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.GAMBLING,
+            limit=2,
+        )
+
+        await view._load_tab_data(LeaderboardTab.GAMBLING)
+
+        assert [entry.discord_id for entry in leaderboard.top_earners] == [123, 456]
+        assert mock_cog.gambling_stats_service.get_leaderboard.call_args.kwargs[
+            "limit"
+        ] == ALL_LEADERBOARD_ENTRIES_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_tips_backfill_after_departed_member(self, mock_cog, mock_interaction):
+        tip_service = MagicMock()
+        tip_service.get_top_senders.return_value = [
+            {"discord_id": 999},
+            {"discord_id": 123},
+            {"discord_id": 456},
+        ]
+        tip_service.get_top_receivers.return_value = []
+        tip_service.get_total_tip_volume.return_value = {}
+        mock_cog.bot.tip_service = tip_service
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.TIPS,
+            limit=2,
+        )
+
+        await view._load_tab_data(LeaderboardTab.TIPS)
+
+        state = view._tab_states[LeaderboardTab.TIPS]
+        assert [entry["discord_id"] for entry in state.data["top_senders"]] == [
+            123,
+            456,
+        ]
+        assert tip_service.get_top_senders.call_args.kwargs["limit"] == (
+            ALL_LEADERBOARD_ENTRIES_LIMIT
+        )
+
+    @pytest.mark.asyncio
+    async def test_trivia_backfills_after_departed_member(
+        self, mock_cog, mock_interaction
+    ):
+        mock_cog.player_service.get_trivia_leaderboard.return_value = [
+            {"discord_id": 999, "best_streak": 10},
+            {"discord_id": 123, "best_streak": 9},
+            {"discord_id": 456, "best_streak": 8},
+        ]
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.TRIVIA,
+            limit=2,
+        )
+
+        await view._load_tab_data(LeaderboardTab.TRIVIA)
+
+        state = view._tab_states[LeaderboardTab.TRIVIA]
+        assert [entry["discord_id"] for entry in state.data] == [123, 456]
+        assert mock_cog.player_service.get_trivia_leaderboard.call_args.args[-1] == (
+            ALL_LEADERBOARD_ENTRIES_LIMIT
+        )
 
 
 class TestEmbedBuilding:

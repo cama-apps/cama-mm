@@ -295,6 +295,66 @@ class TestPlayerRepository:
         below = player_repository.get_player_below(99999, TEST_GUILD_ID)
         assert below is None
 
+    def test_balance_neighbors_match_wins_and_rating_tiebreakers(
+        self, player_repository
+    ):
+        """Wheel neighbors must follow the same tie order as the leaderboard."""
+        for discord_id, rating in ((5003, 1600), (5002, 1400), (5001, 1400)):
+            player_repository.add(
+                discord_id=discord_id,
+                discord_username=f"Player {discord_id}",
+                guild_id=TEST_GUILD_ID,
+                glicko_rating=rating,
+            )
+            player_repository.update_balance(discord_id, TEST_GUILD_ID, 50)
+
+        player_repository.increment_wins(5001, TEST_GUILD_ID)
+        player_repository.increment_wins(5002, TEST_GUILD_ID)
+
+        leaderboard = player_repository.get_leaderboard(TEST_GUILD_ID, limit=3)
+        assert [player.discord_id for player in leaderboard] == [5001, 5002, 5003]
+        assert player_repository.get_player_above(5002, TEST_GUILD_ID).discord_id == 5001
+        assert player_repository.get_player_below(5002, TEST_GUILD_ID).discord_id == 5003
+        assert player_repository.get_player_above(5003, TEST_GUILD_ID).discord_id == 5002
+
+    def test_balance_neighbors_use_rating_before_discord_id(self, player_repository):
+        """Glicko decides equal-balance/equal-win neighbors before ID does."""
+        player_repository.add(
+            discord_id=5101,
+            discord_username="Lower rating",
+            guild_id=TEST_GUILD_ID,
+            glicko_rating=1400,
+        )
+        player_repository.add(
+            discord_id=5102,
+            discord_username="Higher rating",
+            guild_id=TEST_GUILD_ID,
+            glicko_rating=1600,
+        )
+        player_repository.update_balance(5101, TEST_GUILD_ID, 50)
+        player_repository.update_balance(5102, TEST_GUILD_ID, 50)
+
+        assert player_repository.get_player_above(5101, TEST_GUILD_ID).discord_id == 5102
+        assert player_repository.get_player_below(5102, TEST_GUILD_ID).discord_id == 5101
+
+    def test_player_leaderboards_use_id_for_exact_ties(self, player_repository):
+        """Exact metric ties have a stable final Discord-ID ordering."""
+        for discord_id in (5202, 5201):
+            player_repository.add(
+                discord_id=discord_id,
+                discord_username=f"Player {discord_id}",
+                guild_id=TEST_GUILD_ID,
+                glicko_rating=1500,
+                os_mu=25,
+            )
+
+        for leaderboard in (
+            player_repository.get_leaderboard(TEST_GUILD_ID, limit=2),
+            player_repository.get_leaderboard_by_glicko(TEST_GUILD_ID, limit=2),
+            player_repository.get_leaderboard_by_openskill(TEST_GUILD_ID, limit=2),
+        ):
+            assert [player.discord_id for player in leaderboard] == [5201, 5202]
+
     def test_steal_atomic_transfers_coins(self, player_repository):
         """Test steal_atomic atomically transfers coins from victim to thief."""
         # Add thief and victim

@@ -246,6 +246,25 @@ class TestTipRepository:
         assert len(top_senders) == 1
         assert top_senders[0]["discord_id"] == 1
 
+    def test_top_tip_lists_use_discord_id_for_amount_ties(
+        self, tip_repo, player_repo
+    ):
+        """Equal tip totals have deterministic sender and recipient ordering."""
+        for discord_id in (1, 2, 3, 4):
+            register_player(player_repo, discord_id)
+
+        tip_repo.log_tip(2, 4, 50, 5, 111)
+        tip_repo.log_tip(1, 3, 50, 5, 111)
+
+        assert [
+            entry["discord_id"]
+            for entry in tip_repo.get_top_senders(guild_id=111, limit=10)
+        ] == [1, 2]
+        assert [
+            entry["discord_id"]
+            for entry in tip_repo.get_top_receivers(guild_id=111, limit=10)
+        ] == [3, 4]
+
     def test_get_top_receivers(self, tip_repo, player_repo):
         """Test getting top receivers by total amount."""
         register_player(player_repo, 1)
