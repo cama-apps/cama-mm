@@ -42,6 +42,7 @@ def create_real_pending_duel(repo_db_path, *, bind_message=True):
             glicko_volatility=0.06,
         )
     players.update_balance(1, GUILD_ID, 550)
+    players.update_balance(2, GUILD_ID, 500)
     repo = DuelChallengeRepository(repo_db_path)
     service = DuelService(repo, clock=lambda: NOW)
     challenge = service.issue(GUILD_ID, 77, 1, 2, 500)

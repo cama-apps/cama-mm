@@ -4,7 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from domain.models.duel import DuelChallenge, DuelDueKind, DuelStatus, DuelTrial
+from domain.models.duel import (
+    DuelChallenge,
+    DuelDueKind,
+    DuelRecipientFundingError,
+    DuelStatus,
+    DuelTrial,
+)
 from repositories.duel_challenge_repository import DuelChallengeRepository
 from repositories.player_repository import PlayerRepository
 
@@ -46,7 +52,7 @@ def create_challenge(repo, challenger_id=1, recipient_id=2, *, guild_id=GUILD_ID
 def duel_fixture(repo_db_path):
     def make(*, wager=500, recipient_balance=0):
         players = seed_player(repo_db_path, 1, 1400.0, wager + 50)
-        seed_player(repo_db_path, 2, 1500.0, recipient_balance)
+        seed_player(repo_db_path, 2, 1500.0, max(wager, recipient_balance))
         repo = DuelChallengeRepository(repo_db_path)
         challenge = repo.create_challenge_atomic(
             GUILD_ID,
@@ -68,6 +74,8 @@ def duel_fixture(repo_db_path):
         # Keep a constant 500-coin pre-escrow baseline for the exact odd-wager
         # accounting assertion below, including its existing one-coin debt.
         players.update_balance(1, GUILD_ID, 500 - wager)
+        # A recipient may spend funds after the challenge is validly issued.
+        players.update_balance(2, GUILD_ID, recipient_balance)
         with sqlite3.connect(repo_db_path) as conn:
             conn.execute("DELETE FROM economy_ledger_entries")
         return repo, players, challenge
@@ -182,7 +190,7 @@ def test_duel_schema_enforces_wager_and_status(repo_db_path):
 
 def test_create_requires_wager_plus_issuance_fee(repo_db_path):
     players = seed_player(repo_db_path, 1, 1400.0, 500)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
 
     with pytest.raises(ValueError, match="balance"):
@@ -193,7 +201,7 @@ def test_create_requires_wager_plus_issuance_fee(repo_db_path):
 
 def test_create_challenge_escrows_fee_and_snapshots(repo_db_path):
     players = seed_player(repo_db_path, 1, 1400.0, 700)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 501)
     repo = DuelChallengeRepository(repo_db_path)
 
     challenge = repo.create_challenge_atomic(
@@ -217,6 +225,7 @@ def test_create_challenge_escrows_fee_and_snapshots(repo_db_path):
     assert challenge.expires_at == NOW + 7 * DAY
     assert challenge.next_reminder_at == NOW + DAY
     assert players.get_balance(1, GUILD_ID) == 149
+    assert players.get_balance(2, GUILD_ID) == 501
 
     rows = ledger_rows(repo_db_path, challenge.challenge_id)
     assert [(row["account_id"], row["delta"], row["reason"]) for row in rows] == [
@@ -228,6 +237,37 @@ def test_create_challenge_escrows_fee_and_snapshots(repo_db_path):
         "total_debit": 551,
         "recipient_id": 2,
     }
+
+
+def test_create_rejects_unfunded_recipient_without_side_effects_or_cooldown(
+    repo_db_path,
+):
+    players = seed_player(repo_db_path, 1, 1400.0, 1000)
+    seed_player(repo_db_path, 2, 1500.0, 499)
+    repo = DuelChallengeRepository(repo_db_path)
+
+    with pytest.raises(DuelRecipientFundingError) as raised:
+        create_challenge(repo)
+
+    assert raised.value.recipient_id == 2
+    assert raised.value.wager == 500
+    assert str(raised.value) == "The challenged player cannot cover the duel wager."
+    assert players.get_balance(1, GUILD_ID) == 1000
+    assert players.get_balance(2, GUILD_ID) == 499
+    assert repo.list_pending_all() == []
+    with sqlite3.connect(repo_db_path) as conn:
+        duel_ledger_count = conn.execute(
+            "SELECT COUNT(*) FROM economy_ledger_entries "
+            "WHERE related_type = 'duel_challenge'"
+        ).fetchone()[0]
+    assert duel_ledger_count == 0
+
+    players.update_balance(2, GUILD_ID, 500)
+    challenge = create_challenge(repo)
+
+    assert challenge.status is DuelStatus.PENDING
+    assert players.get_balance(1, GUILD_ID) == 450
+    assert players.get_balance(2, GUILD_ID) == 500
 
 
 @pytest.mark.parametrize(
@@ -300,7 +340,7 @@ def test_create_rejects_unregistered_or_unrated_players(
 
 def test_create_allows_equal_ratings(repo_db_path):
     seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1400.0, 0)
+    seed_player(repo_db_path, 2, 1400.0, 500)
 
     challenge = create_challenge(DuelChallengeRepository(repo_db_path))
 
@@ -309,7 +349,7 @@ def test_create_allows_equal_ratings(repo_db_path):
 
 def test_challenger_cooldown_allows_exact_boundary(repo_db_path):
     seed_player(repo_db_path, 1, 1400.0, 1500)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
     first = create_challenge(repo)
     with sqlite3.connect(repo_db_path) as conn:
@@ -328,7 +368,7 @@ def test_challenger_cooldown_allows_exact_boundary(repo_db_path):
 
 def test_recipient_cooldown_allows_exact_boundary(repo_db_path):
     seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1600.0, 0)
+    seed_player(repo_db_path, 2, 1600.0, 500)
     seed_player(repo_db_path, 3, 1500.0, 1000)
     repo = DuelChallengeRepository(repo_db_path)
     first = create_challenge(repo)
@@ -364,7 +404,7 @@ def test_duel_creation_and_reads_are_guild_isolated(repo_db_path):
     other_guild = GUILD_ID + 1
     for guild_id in (GUILD_ID, other_guild):
         seed_player(repo_db_path, 1, 1400.0, 550, guild_id=guild_id)
-        seed_player(repo_db_path, 2, 1500.0, 0, guild_id=guild_id)
+        seed_player(repo_db_path, 2, 1500.0, 500, guild_id=guild_id)
     repo = DuelChallengeRepository(repo_db_path)
 
     first = create_challenge(repo)
@@ -383,7 +423,7 @@ def test_duel_creation_and_reads_are_guild_isolated(repo_db_path):
 
 def test_message_binding_is_guarded(repo_db_path):
     seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
     challenge = create_challenge(repo)
 
@@ -400,7 +440,7 @@ def test_unbound_pending_is_inert_but_available_for_startup_reconciliation(
     repo_db_path,
 ):
     seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
     challenge = create_challenge(repo)
 
@@ -428,9 +468,9 @@ def test_unbound_pending_is_inert_but_available_for_startup_reconciliation(
 def test_outstanding_reads_are_ordered_and_status_filtered(repo_db_path):
     for discord_id, rating, balance in (
         (1, 1400.0, 550),
-        (2, 1500.0, 0),
+        (2, 1500.0, 500),
         (3, 1450.0, 550),
-        (4, 1550.0, 0),
+        (4, 1550.0, 500),
     ):
         seed_player(repo_db_path, discord_id, rating, balance)
     repo = DuelChallengeRepository(repo_db_path)
@@ -453,7 +493,7 @@ def test_outstanding_reads_are_ordered_and_status_filtered(repo_db_path):
 
 def test_delivery_failure_refunds_and_does_not_block_retry(repo_db_path):
     players = seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
     first = create_challenge(repo)
 
@@ -486,7 +526,7 @@ def test_delivery_failure_refunds_and_does_not_block_retry(repo_db_path):
 
 def test_delivery_failure_cannot_refund_a_bound_challenge(repo_db_path):
     players = seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
     challenge = create_challenge(repo)
     bound = repo.bind_message(challenge.challenge_id, GUILD_ID, 1234)
@@ -524,7 +564,7 @@ def test_expiry_uses_ceiling_half_and_allows_debt(duel_fixture):
 
 def test_expiry_rejects_unbound_pending_without_moving_balances(repo_db_path):
     players = seed_player(repo_db_path, 1, 1400.0, 550)
-    seed_player(repo_db_path, 2, 1500.0, 0)
+    seed_player(repo_db_path, 2, 1500.0, 500)
     repo = DuelChallengeRepository(repo_db_path)
     challenge = create_challenge(repo)
     balances_before = (
@@ -584,23 +624,47 @@ def test_void_refunds_both_stakes(duel_fixture):
     assert players.get_balance(2, GUILD_ID) == 500
 
 
-def test_accept_requires_recipient_current_balance(duel_fixture, repo_db_path):
+def test_unfunded_acceptance_voids_and_refunds_only_challenger_wager(
+    duel_fixture, repo_db_path
+):
     repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
     players.update_balance(2, GUILD_ID, 499)
 
-    with pytest.raises(ValueError, match="cannot cover the duel wager"):
+    voided = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        2,
+        DuelTrial.TRIAL_BY_COMBAT,
+        NOW + 100,
+        2,
+    )
+
+    assert players.get_balance(1, GUILD_ID) == 500
+    assert players.get_balance(2, GUILD_ID) == 499
+    assert voided.status is DuelStatus.VOIDED
+    assert voided.trial_type is None
+    assert voided.responded_at == NOW + 100
+    assert voided.resolved_at == NOW + 100
+    assert voided.resolution_actor_id == 2
+    assert voided.next_reminder_at is None
+    assert repo.get_challenge(challenge.challenge_id, GUILD_ID) == voided
+    rows = ledger_rows(repo_db_path, challenge.challenge_id)
+    assert [(row["account_id"], row["delta"], row["reason"]) for row in rows] == [
+        (1, 500, "unfunded acceptance challenger wager refund")
+    ]
+    assert json.loads(rows[0]["metadata"]) == {"wager": 500}
+
+    with pytest.raises(ValueError, match="Only a pending duel can be accepted"):
         repo.accept_atomic(
             challenge.challenge_id,
             GUILD_ID,
             2,
             DuelTrial.TRIAL_BY_COMBAT,
-            NOW + 100,
+            NOW + 101,
             2,
         )
-
-    assert players.get_balance(2, GUILD_ID) == 499
-    assert repo.get_challenge(challenge.challenge_id, GUILD_ID).status is DuelStatus.PENDING
-    assert ledger_rows(repo_db_path, challenge.challenge_id) == []
+    assert players.get_balance(1, GUILD_ID) == 500
+    assert len(ledger_rows(repo_db_path, challenge.challenge_id)) == 1
 
 
 def test_accept_allows_exact_recipient_balance(duel_fixture):
@@ -765,7 +829,7 @@ def test_due_scan_returns_guild_pairs_with_expiry_first(repo_db_path):
     other_guild = GUILD_ID + 1
     for guild_id in (GUILD_ID, other_guild):
         seed_player(repo_db_path, 1, 1400.0, 550, guild_id=guild_id)
-        seed_player(repo_db_path, 2, 1500.0, 0, guild_id=guild_id)
+        seed_player(repo_db_path, 2, 1500.0, 500, guild_id=guild_id)
     repo = DuelChallengeRepository(repo_db_path)
     reminder_due = create_challenge(repo)
     expiry_due = repo.create_challenge_atomic(
