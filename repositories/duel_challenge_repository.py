@@ -525,11 +525,15 @@ class DuelChallengeRepository(BaseRepository):
             cursor = conn.cursor()
             challenge = self._challenge_from_row(
                 cursor.execute(
-                    "SELECT * FROM duel_challenges WHERE challenge_id = ? AND guild_id = ?",
+                    """
+                    SELECT * FROM duel_challenges
+                    WHERE challenge_id = ? AND guild_id = ?
+                      AND status = 'pending' AND message_id IS NOT NULL
+                    """,
                     (challenge_id, guild_id),
                 ).fetchone()
             )
-            if challenge is None or challenge.status is not DuelStatus.PENDING:
+            if challenge is None:
                 raise ValueError("Only a pending duel can expire.")
             if now < challenge.expires_at:
                 raise ValueError("This duel challenge has not expired yet.")
@@ -567,7 +571,7 @@ class DuelChallengeRepository(BaseRepository):
                 UPDATE duel_challenges
                 SET status = 'expired', next_reminder_at = NULL, resolved_at = ?
                 WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
-                  AND expires_at <= ?
+                  AND message_id IS NOT NULL AND expires_at <= ?
                 """,
                 (now, challenge_id, guild_id, now),
             )
