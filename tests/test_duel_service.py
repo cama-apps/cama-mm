@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from domain.models.duel import DuelDueKind, DuelResolution, DuelTrial
+from domain.models.duel import DuelDueKind, DuelResolution, DuelStatus, DuelTrial
 from repositories.duel_challenge_repository import DuelChallengeRepository
 from repositories.player_repository import PlayerRepository
 from services.duel_service import (
@@ -30,7 +30,7 @@ def duel_repo_mock():
     return repo
 
 
-def create_real_pending_duel(repo_db_path):
+def create_real_pending_duel(repo_db_path, *, bind_message=True):
     players = PlayerRepository(repo_db_path)
     for player_id, rating in ((1, 1400.0), (2, 1500.0)):
         players.add(
@@ -45,7 +45,8 @@ def create_real_pending_duel(repo_db_path):
     repo = DuelChallengeRepository(repo_db_path)
     service = DuelService(repo, clock=lambda: NOW)
     challenge = service.issue(GUILD_ID, 77, 1, 2, 500)
-    challenge = service.bind_message(challenge.challenge_id, GUILD_ID, 1234)
+    if bind_message:
+        challenge = service.bind_message(challenge.challenge_id, GUILD_ID, 1234)
     return service, challenge
 
 
@@ -264,6 +265,35 @@ def test_service_process_due_real_repository_returns_expiry(repo_db_path):
     assert result is not None
     assert result.kind is DuelDueKind.EXPIRED
     assert result.challenge.challenge_id == challenge.challenge_id
+
+
+def test_service_process_due_skips_unbound_expiry_without_moving_balances(
+    repo_db_path,
+):
+    service, challenge = create_real_pending_duel(
+        repo_db_path,
+        bind_message=False,
+    )
+    players = PlayerRepository(repo_db_path)
+    balances_before = (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    )
+
+    result = service.process_due(
+        challenge.challenge_id,
+        GUILD_ID,
+        challenge.expires_at,
+    )
+
+    assert result is None
+    assert (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    ) == balances_before
+    stored = service.repo.get_challenge(challenge.challenge_id, GUILD_ID)
+    assert stored.status is DuelStatus.PENDING
+    assert stored.message_id is None
 
 
 def test_service_process_due_real_repository_returns_none_when_not_due(repo_db_path):

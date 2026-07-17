@@ -502,6 +502,28 @@ def test_expiry_uses_ceiling_half_and_allows_debt(duel_fixture):
     assert expired.next_reminder_at is None
 
 
+def test_expiry_rejects_unbound_pending_without_moving_balances(repo_db_path):
+    players = seed_player(repo_db_path, 1, 1400.0, 550)
+    seed_player(repo_db_path, 2, 1500.0, 0)
+    repo = DuelChallengeRepository(repo_db_path)
+    challenge = create_challenge(repo)
+    balances_before = (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    )
+
+    with pytest.raises(ValueError, match="pending"):
+        repo.expire_atomic(challenge.challenge_id, GUILD_ID, challenge.expires_at)
+
+    assert (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    ) == balances_before
+    stored = repo.get_challenge(challenge.challenge_id, GUILD_ID)
+    assert stored.status is DuelStatus.PENDING
+    assert stored.message_id is None
+
+
 def test_accept_then_winner_receives_double_pot(duel_fixture):
     repo, players, challenge = duel_fixture(wager=500, recipient_balance=0)
     accepted = repo.accept_atomic(
