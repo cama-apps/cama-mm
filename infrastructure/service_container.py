@@ -77,6 +77,7 @@ class ServiceContainer:
         self._init_match_services()
         self._init_advanced_services()
         self._init_ai_services()
+        self._init_duel_flavor_service()
         self._init_curse_service()
         self._init_mana_service()
         self._init_dig_service()
@@ -350,6 +351,16 @@ class ServiceContainer:
         c["sql_query_service"] = sql_query_service
         c["flavor_text_service"] = flavor_text_service
 
+    def _init_duel_flavor_service(self) -> None:
+        """Duel herald narration with optional AI and static fallbacks."""
+        from services.duel_flavor_service import DuelFlavorService
+
+        c = self._components
+        c["duel_flavor_service"] = DuelFlavorService(
+            c.get("ai_service"),
+            c["guild_config_repo"],
+        )
+
     def _init_curse_service(self) -> None:
         """Witch's Curse service. Depends on flavor_text_service (optional)."""
         from services.curse_service import CurseService
@@ -578,6 +589,7 @@ class ServiceContainer:
         bot.dig_service = c["dig_service"]
         bot.dig_flavor_service = c.get("dig_flavor_service")
         bot.duel_service = c["duel_service"]
+        bot.duel_flavor_service = c["duel_flavor_service"]
         bot.reminder_service = c["reminder_service"]
         bot.curse_service = c["curse_service"]
         bot.mafia_service = c["mafia_service"]

@@ -136,6 +136,7 @@ class TestServiceContainerBotExposure:
             "dig_service": "dig_service",
             "dig_flavor_service": "dig_flavor_service",
             "duel_service": "duel_service",
+            "duel_flavor_service": "duel_flavor_service",
             "reminder_service": "reminder_service",
             "curse_service": "curse_service",
             "mafia_service": "mafia_service",
@@ -183,9 +184,35 @@ class TestServiceContainerBotExposure:
         ):
             assert getattr(bot, attribute) is None
 
+    def test_duel_flavor_service_is_always_exposed(self, repo_db_path):
+        """Static duel narration remains available without an AI provider."""
+        container = ServiceContainer(repo_db_path)
+        container.initialize()
+
+        class MockBot:
+            pass
+
+        bot = MockBot()
+        container.expose_to_bot(bot)
+
+        assert bot.duel_flavor_service is container._components["duel_flavor_service"]
+        assert bot.duel_flavor_service.ai_service is None
+
 
 class TestServiceDependencies:
     """Tests for proper service dependency wiring."""
+
+    def test_duel_flavor_service_has_optional_ai_and_guild_config(
+        self, repo_db_path
+    ):
+        """Duel flavor receives the shared optional AI and guild config services."""
+        container = ServiceContainer(repo_db_path)
+        container.initialize()
+
+        flavor = container._components["duel_flavor_service"]
+
+        assert flavor.ai_service is container._components["ai_service"]
+        assert flavor.guild_config_repo is container._components["guild_config_repo"]
 
     def test_betting_service_has_garnishment(self, repo_db_path):
         """BettingService is wired with GarnishmentService."""
