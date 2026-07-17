@@ -6,6 +6,7 @@ import asyncio
 import functools
 import logging
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,6 +35,36 @@ from config import (
 from utils.economy_scaling import scale_minigame_jc_delta
 
 logger = logging.getLogger("cama_bot.commands.betting.wheel_outcomes")
+
+# SQLite accepts a signed 32-bit LIMIT; this mirrors the unified leaderboard's
+# full candidate fetch before Discord membership filtering.
+ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT = 2**31 - 1
+
+
+def has_guild_member_snapshot(guild: discord.Guild | None) -> bool:
+    """Return whether a concrete guild member cache is available."""
+    return guild is not None and isinstance(guild.members, Sequence)
+
+
+def filter_visible_leaderboard(
+    players: list[Any],
+    guild: discord.Guild | None,
+    *,
+    limit: int,
+) -> list[Any]:
+    """Return leaderboard rows visible in the current Discord guild.
+
+    The balance leaderboard omits registered players who are no longer guild
+    members. Rank-based wheel mechanics must apply the same rule or Golden
+    Wheel eligibility and victims can disagree with ``/leaderboard``.
+
+    When guild membership cannot be verified (for example, lightweight tests),
+    preserve the repository ordering.
+    """
+    if has_guild_member_snapshot(guild):
+        member_ids = {member.id for member in guild.members}
+        players = [player for player in players if player.discord_id in member_ids]
+    return players[:limit]
 
 
 def eruption_reward(last_spin: dict | None) -> int:
@@ -758,9 +789,17 @@ class WheelOutcomeProcessor:
         self.state.bomb_omb_missed = self.state.bomb_omb_burn_total == 0
 
     async def _heist(self) -> None:
-        victims = [
-            player
-            for player in await asyncio.to_thread(
+        if has_guild_member_snapshot(self.context.interaction.guild):
+            visible_players = await self._leaderboard(
+                limit=ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT
+            )
+            bottom_players = [
+                player
+                for player in reversed(visible_players)
+                if player.jopacoin_balance >= 1
+            ][:30]
+        else:
+            bottom_players = await asyncio.to_thread(
                 functools.partial(
                     self.player_service.get_leaderboard_bottom,
                     self.context.guild_id,
@@ -768,9 +807,12 @@ class WheelOutcomeProcessor:
                     min_balance=1,
                 )
             )
+        victims = [
+            player
+            for player in bottom_players
             if player.discord_id != self.context.user_id
             and player.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
-        ]
+        ][:30]
         for victim in victims:
             requested = scale_minigame_jc_delta(
                 max(1, int(victim.jopacoin_balance * random.uniform(0.05, 0.12)))
@@ -897,10 +939,18 @@ class WheelOutcomeProcessor:
             )
 
     async def _dividend(self) -> None:
-        total_wealth = await asyncio.to_thread(
-            self.player_service.get_total_positive_balance,
-            self.context.guild_id,
-        )
+        if has_guild_member_snapshot(self.context.interaction.guild):
+            total_wealth = sum(
+                max(0, player.jopacoin_balance)
+                for player in await self._leaderboard(
+                    limit=ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT
+                )
+            )
+        else:
+            total_wealth = await asyncio.to_thread(
+                self.player_service.get_total_positive_balance,
+                self.context.guild_id,
+            )
         self.state.dividend_amount = scale_minigame_jc_delta(
             max(10, int(total_wealth * 0.005))
         )
@@ -1098,12 +1148,24 @@ class WheelOutcomeProcessor:
                 logger.warning("Failed to add wheel loss to nonprofit fund")
 
     async def _leaderboard(self, *, limit: int):
-        return await asyncio.to_thread(
+        # Filter after fetching all rows so a departed raw top-N player cannot
+        # displace an active member from the visible rank.
+        query_limit = (
+            ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT
+            if has_guild_member_snapshot(self.context.interaction.guild)
+            else limit
+        )
+        players = await asyncio.to_thread(
             functools.partial(
                 self.player_service.get_leaderboard,
                 self.context.guild_id,
-                limit=limit,
+                limit=query_limit,
             )
+        )
+        return filter_visible_leaderboard(
+            players,
+            self.context.interaction.guild,
+            limit=limit,
         )
 
     async def _refresh_balance(self) -> None:
