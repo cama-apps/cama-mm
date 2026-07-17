@@ -438,12 +438,15 @@ async def test_decline_edits_original_disables_buttons_and_posts_detail(
 
 
 @pytest.mark.asyncio
-async def test_due_reminder_posts_only_the_recipient_ping(cog, bot, flavor_service):
+@pytest.mark.parametrize("remaining_seconds", [48 * 3600, 24 * 3600])
+async def test_final_due_reminders_post_only_the_recipient_ping(
+    cog, bot, flavor_service, remaining_seconds
+):
     challenge = make_challenge()
     result = DuelDueResult(
         kind=DuelDueKind.REMINDER,
         challenge=challenge,
-        remaining_seconds=172_800,
+        remaining_seconds=remaining_seconds,
         ping_recipient=True,
     )
 
@@ -462,6 +465,65 @@ async def test_due_reminder_posts_only_the_recipient_ping(cog, bot, flavor_servi
     assert allowed.roles is False
     assert allowed.replied_user is False
     assert [user.id for user in allowed.users] == [RECIPIENT_ID]
+
+
+@pytest.mark.asyncio
+async def test_earlier_daily_reminder_suppresses_recipient_ping(cog, bot):
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=72 * 3600,
+        ping_recipient=False,
+    )
+
+    await cog.deliver_due_result(result)
+
+    sent = bot.get_channel.return_value.send.await_args
+    _assert_mentions_disabled(sent.kwargs["allowed_mentions"])
+    assert not sent.kwargs["content"].startswith(f"<@{RECIPIENT_ID}>")
+
+
+@pytest.mark.asyncio
+async def test_due_delivery_fetches_channel_after_cache_miss(cog, bot, interaction):
+    bot.get_channel.return_value = None
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    bot.fetch_channel.assert_awaited_once_with(CHANNEL_ID)
+    interaction.channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_due_challenge_claims_off_loop_and_delivers(cog, duel_service):
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+    duel_service.process_due.return_value = result
+    cog.deliver_due_result = AsyncMock()
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(7, GUILD_ID, 1_700_432_000)
+    cog.deliver_due_result.assert_awaited_once_with(result)
+
+
+@pytest.mark.asyncio
+async def test_process_due_challenge_ignores_lost_claim(cog, duel_service):
+    duel_service.process_due.return_value = None
+    cog.deliver_due_result = AsyncMock()
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    cog.deliver_due_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio

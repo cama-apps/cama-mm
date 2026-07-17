@@ -96,6 +96,9 @@ _reminder_recovery_task: asyncio.Task | None = None
 _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
+_duel_challenge_task: asyncio.Task | None = None
+
+DUEL_WORKER_WAKE_SECONDS = 60
 
 
 def _log_task_exit(name: str):
@@ -195,6 +198,31 @@ async def _prediction_refresh_loop() -> None:
         except Exception as ex:
             logger.exception("prediction refresh outer loop error: %s", ex)
         await asyncio.sleep(PREDICTION_REFRESH_WAKE_SECONDS)
+
+
+async def _duel_challenge_loop() -> None:
+    """Claim and deliver persisted duel reminders and expirations."""
+    await bot.wait_until_ready()
+    logger.info("duel challenge loop started (wake=%ss)", DUEL_WORKER_WAKE_SECONDS)
+    while not bot.is_closed():
+        now = int(time.time())
+        try:
+            service = getattr(bot, "duel_service", None)
+            cog = bot.get_cog("DuelCommands")
+            if service is not None and cog is not None:
+                due = await asyncio.to_thread(service.get_due_challenge_ids, now)
+                for challenge_id, guild_id in due:
+                    try:
+                        await cog.process_due_challenge(challenge_id, guild_id, now)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "duel due delivery failed challenge=%s guild=%s",
+                            challenge_id,
+                            guild_id,
+                        )
+        except Exception:  # noqa: BLE001
+            logger.exception("duel challenge loop wake failed")
+        await asyncio.sleep(DUEL_WORKER_WAKE_SECONDS)
 
 
 async def _process_one_refresh(market: dict) -> None:
@@ -774,6 +802,7 @@ async def on_ready():
     # crash, and a done-callback that surfaces an unexpected exit to the log
     # so we can never lose a feature to silent failure.
     global _prediction_refresh_task, _prediction_digest_task, _manashop_debt_task
+    global _duel_challenge_task
     if _prediction_refresh_task is None or _prediction_refresh_task.done():
         _prediction_refresh_task = bot.loop.create_task(
             _supervised_loop("prediction_refresh", _prediction_refresh_loop)
@@ -789,6 +818,13 @@ async def on_ready():
             _supervised_loop("manashop_debt", _manashop_debt_loop)
         )
         _manashop_debt_task.add_done_callback(_log_task_exit("manashop_debt"))
+    if _duel_challenge_task is None or _duel_challenge_task.done():
+        _duel_challenge_task = bot.loop.create_task(
+            _supervised_loop("duel_challenges", _duel_challenge_loop)
+        )
+        _duel_challenge_task.add_done_callback(
+            _log_task_exit("duel_challenges")
+        )
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:

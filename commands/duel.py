@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterable
 
@@ -428,6 +429,23 @@ class DuelCommands(commands.Cog):
             )
         except discord.DiscordException:
             logger.exception("Unable to deliver duel lifecycle message")
+
+    async def process_due_challenge(
+        self,
+        challenge_id: int,
+        guild_id: int,
+        now: int,
+    ) -> None:
+        """Atomically claim one due challenge, then deliver its result."""
+        result = await asyncio.to_thread(
+            self.duel_service.process_due,
+            challenge_id,
+            guild_id,
+            now,
+        )
+        if result is None:
+            return
+        await self.deliver_due_result(result)
 
     def build_challenge_embed(
         self,
