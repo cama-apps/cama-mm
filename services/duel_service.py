@@ -94,6 +94,9 @@ class DuelService:
     def bind_message(self, challenge_id, guild_id, message_id):
         return self.repo.bind_message(challenge_id, guild_id, message_id)
 
+    def get_challenge(self, challenge_id, guild_id):
+        return self.repo.get_challenge(challenge_id, guild_id)
+
     def mark_delivery_failed(self, challenge_id, guild_id, actor_id):
         return self.repo.mark_delivery_failed_atomic(
             challenge_id,

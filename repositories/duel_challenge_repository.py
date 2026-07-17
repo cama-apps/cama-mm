@@ -316,12 +316,15 @@ class DuelChallengeRepository(BaseRepository):
                 """
                 SELECT * FROM duel_challenges
                 WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
+                  AND message_id IS NULL
                 """,
                 (challenge_id, guild_id),
             ).fetchone()
             challenge = self._challenge_from_row(row)
             if challenge is None:
-                raise ValueError("Only a pending duel can fail initial delivery.")
+                raise ValueError(
+                    "Only an unbound pending duel can fail initial delivery."
+                )
             total_refund = challenge.wager + challenge.issuance_fee
 
             self._set_economy_ledger_context(
@@ -357,6 +360,7 @@ class DuelChallengeRepository(BaseRepository):
                 SET status = 'delivery_failed', next_reminder_at = NULL,
                     resolved_at = ?, resolution_actor_id = ?
                 WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
+                  AND message_id IS NULL
                 """,
                 (now, actor_id, challenge_id, guild_id),
             )
