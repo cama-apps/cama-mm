@@ -430,6 +430,7 @@ EXTENSIONS = [
     "commands.dota_info",
     "commands.shop",
     "commands.predictions",
+    "commands.duel",
     "commands.tax",
     "commands.ask",
     "commands.profile",
