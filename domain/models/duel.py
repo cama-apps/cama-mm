@@ -8,6 +8,15 @@ from typing import Any
 DUEL_ISSUANCE_FEE = 50
 
 
+class DuelRecipientFundingError(ValueError):
+    """Raised when a recipient cannot fund a newly issued duel."""
+
+    def __init__(self, recipient_id: int, wager: int) -> None:
+        self.recipient_id = recipient_id
+        self.wager = wager
+        super().__init__("The challenged player cannot cover the duel wager.")
+
+
 class DuelStatus(StrEnum):
     PENDING = "pending"
     ACCEPTED = "accepted"

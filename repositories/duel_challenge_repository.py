@@ -9,6 +9,7 @@ from domain.models.duel import (
     DuelChallenge,
     DuelDueKind,
     DuelDueResult,
+    DuelRecipientFundingError,
     DuelStatus,
     DuelTrial,
 )
@@ -228,6 +229,8 @@ class DuelChallengeRepository(BaseRepository):
                 raise ValueError(
                     "Your jopacoin balance cannot cover the wager and issuance fee."
                 )
+            if int(recipient["balance"]) < wager:
+                raise DuelRecipientFundingError(recipient_id, wager)
 
             expires_at = now + response_seconds
             cursor.execute(
@@ -417,16 +420,61 @@ class DuelChallengeRepository(BaseRepository):
             if not isinstance(trial, DuelTrial):
                 raise ValueError("A valid duel trial is required.")
 
-            self._update_player_balance(
-                cursor,
-                player_id=challenge.recipient_id,
-                guild_id=guild_id,
-                delta=-challenge.wager,
-                challenge=challenge,
-                actor_id=actor_id,
-                reason="recipient escrow debit",
-                require_nonnegative=True,
-            )
+            recipient_funded = True
+            try:
+                self._update_player_balance(
+                    cursor,
+                    player_id=challenge.recipient_id,
+                    guild_id=guild_id,
+                    delta=-challenge.wager,
+                    challenge=challenge,
+                    actor_id=actor_id,
+                    reason="recipient escrow debit",
+                    require_nonnegative=True,
+                )
+            except ValueError:
+                recipient_funded = False
+
+            if not recipient_funded:
+                self._update_player_balance(
+                    cursor,
+                    player_id=challenge.challenger_id,
+                    guild_id=guild_id,
+                    delta=challenge.wager,
+                    challenge=challenge,
+                    actor_id=actor_id,
+                    reason="unfunded acceptance challenger wager refund",
+                )
+                cursor.execute(
+                    """
+                    UPDATE duel_challenges
+                    SET status = 'voided', responded_at = ?, resolved_at = ?,
+                        resolution_actor_id = ?, next_reminder_at = NULL
+                    WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
+                      AND recipient_id = ? AND expires_at > ?
+                    """,
+                    (
+                        now,
+                        now,
+                        actor_id,
+                        challenge_id,
+                        guild_id,
+                        recipient_id,
+                        now,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Unfunded duel void state was not recorded.")
+                voided = self._challenge_from_row(
+                    cursor.execute(
+                        "SELECT * FROM duel_challenges "
+                        "WHERE challenge_id = ? AND guild_id = ?",
+                        (challenge_id, guild_id),
+                    ).fetchone()
+                )
+                if voided is None:
+                    raise RuntimeError("Voided duel challenge could not be read.")
+                return voided
             cursor.execute(
                 """
                 UPDATE duel_challenges
