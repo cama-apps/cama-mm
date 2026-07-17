@@ -52,6 +52,7 @@ def test_bot_commands_registered(tmp_path):
                     "player",
                     "draft",
                     "predict",
+                    "duel",
                     "admin",
                     "enrich",
                     "dota",
