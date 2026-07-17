@@ -150,32 +150,42 @@ class DuelCommands(commands.Cog):
                 interaction,
                 content=player.mention,
                 embed=embed,
-                view=DuelChallengeView(self, challenge.challenge_id),
                 allowed_mentions=allowed_mentions,
             )
             if message is None:
                 raise discord.DiscordException("Initial duel message was not delivered.")
-        except discord.DiscordException:
-            self.duel_service.mark_delivery_failed(
-                challenge.challenge_id,
+        except Exception:
+            await self._refund_failed_delivery(
+                interaction,
+                challenge,
                 guild_id,
                 actor_id,
             )
-            try:
-                await interaction.followup.send(
-                    content="The challenge could not be delivered; the wager was refunded.",
-                    ephemeral=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            except discord.DiscordException:
-                logger.exception("Unable to report failed duel delivery")
             return
 
-        self.duel_service.bind_message(
-            challenge.challenge_id,
-            guild_id,
-            message.id,
-        )
+        try:
+            self.duel_service.bind_message(
+                challenge.challenge_id,
+                guild_id,
+                message.id,
+            )
+        except Exception:
+            logger.exception("Unable to bind delivered duel challenge message")
+            await self._refund_failed_delivery(
+                interaction,
+                challenge,
+                guild_id,
+                actor_id,
+            )
+            return
+
+        try:
+            await message.edit(
+                view=DuelChallengeView(self, challenge.challenge_id),
+                allowed_mentions=allowed_mentions,
+            )
+        except discord.DiscordException:
+            logger.exception("Unable to attach duel challenge response controls")
 
     @duel.command(name="respond", description="Answer your pending duel challenge")
     @app_commands.choices(
@@ -549,6 +559,30 @@ class DuelCommands(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    async def _refund_failed_delivery(
+        self,
+        interaction: discord.Interaction,
+        challenge: DuelChallenge,
+        guild_id: int,
+        actor_id: int,
+    ) -> None:
+        self.duel_service.mark_delivery_failed(
+            challenge.challenge_id,
+            guild_id,
+            actor_id,
+        )
+        try:
+            await interaction.followup.send(
+                content=(
+                    "The challenge could not be delivered; the wager and "
+                    f"{challenge.issuance_fee} JC issuance fee were refunded."
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException:
+            logger.exception("Unable to report failed duel delivery")
+
     @staticmethod
     def _response_event(challenge: DuelChallenge) -> DuelFlavorEvent:
         if challenge.status is DuelStatus.DECLINED:
@@ -601,8 +635,33 @@ async def setup(bot: commands.Bot) -> None:
     cog = DuelCommands(bot, duel_service, flavor_service)
     await bot.add_cog(cog)
     for challenge in duel_service.list_pending_all():
-        view = DuelChallengeView(cog, challenge.challenge_id)
         if challenge.message_id is None:
-            bot.add_view(view)
-        else:
-            bot.add_view(view, message_id=challenge.message_id)
+            try:
+                duel_service.mark_delivery_failed(
+                    challenge.challenge_id,
+                    challenge.guild_id,
+                    challenge.challenger_id,
+                )
+            except ValueError:
+                logger.info(
+                    "Duel challenge %s changed before startup refund",
+                    challenge.challenge_id,
+                )
+            continue
+
+        view = DuelChallengeView(cog, challenge.challenge_id)
+        bot.add_view(view, message_id=challenge.message_id)
+        channel = await cog._get_channel(challenge.channel_id)
+        if channel is None:
+            continue
+        try:
+            message = await channel.fetch_message(challenge.message_id)
+            await message.edit(
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.DiscordException:
+            logger.exception(
+                "Unable to restore controls for duel challenge %s",
+                challenge.challenge_id,
+            )

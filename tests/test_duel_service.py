@@ -45,6 +45,7 @@ def create_real_pending_duel(repo_db_path):
     repo = DuelChallengeRepository(repo_db_path)
     service = DuelService(repo, clock=lambda: NOW)
     challenge = service.issue(GUILD_ID, 77, 1, 2, 500)
+    challenge = service.bind_message(challenge.challenge_id, GUILD_ID, 1234)
     return service, challenge
 
 

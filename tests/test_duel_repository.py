@@ -60,6 +60,11 @@ def duel_fixture(repo_db_path):
             7 * DAY,
             1,
         )
+        challenge = repo.bind_message(
+            challenge.challenge_id,
+            GUILD_ID,
+            10_000 + challenge.challenge_id,
+        )
         # Keep a constant 500-coin pre-escrow baseline for the exact odd-wager
         # accounting assertion below, including its existing one-coin debt.
         players.update_balance(1, GUILD_ID, 500 - wager)
@@ -364,6 +369,8 @@ def test_duel_creation_and_reads_are_guild_isolated(repo_db_path):
 
     first = create_challenge(repo)
     second = create_challenge(repo, guild_id=other_guild)
+    repo.bind_message(first.challenge_id, GUILD_ID, 1001)
+    repo.bind_message(second.challenge_id, other_guild, 1002)
 
     assert repo.get_challenge(first.challenge_id, other_guild) is None
     assert [row.challenge_id for row in repo.list_outstanding(GUILD_ID)] == [
@@ -389,6 +396,35 @@ def test_message_binding_is_guarded(repo_db_path):
         repo.bind_message(challenge.challenge_id, GUILD_ID + 1, 5678)
 
 
+def test_unbound_pending_is_inert_but_available_for_startup_reconciliation(
+    repo_db_path,
+):
+    seed_player(repo_db_path, 1, 1400.0, 550)
+    seed_player(repo_db_path, 2, 1500.0, 0)
+    repo = DuelChallengeRepository(repo_db_path)
+    challenge = create_challenge(repo)
+
+    assert repo.get_pending_for_recipient(2, GUILD_ID) is None
+    assert repo.list_outstanding(GUILD_ID) == []
+    assert [row.challenge_id for row in repo.list_pending_all()] == [
+        challenge.challenge_id
+    ]
+    assert repo.get_due_challenge_ids(challenge.expires_at) == []
+    assert repo.claim_reminder_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        challenge.created_at + DAY,
+    ) is None
+
+    bound = repo.bind_message(challenge.challenge_id, GUILD_ID, 1234)
+
+    assert repo.get_pending_for_recipient(2, GUILD_ID) == bound
+    assert repo.list_outstanding(GUILD_ID) == [bound]
+    assert repo.get_due_challenge_ids(challenge.expires_at) == [
+        (challenge.challenge_id, GUILD_ID)
+    ]
+
+
 def test_outstanding_reads_are_ordered_and_status_filtered(repo_db_path):
     for discord_id, rating, balance in (
         (1, 1400.0, 550),
@@ -400,6 +436,7 @@ def test_outstanding_reads_are_ordered_and_status_filtered(repo_db_path):
     repo = DuelChallengeRepository(repo_db_path)
     older = create_challenge(repo)
     newer = create_challenge(repo, challenger_id=3, recipient_id=4, now=NOW + 10)
+    newer = repo.bind_message(newer.challenge_id, GUILD_ID, 1234)
     with sqlite3.connect(repo_db_path) as conn:
         conn.execute(
             "UPDATE duel_challenges SET status = 'accepted' WHERE challenge_id = ?",
@@ -666,6 +703,8 @@ def test_due_scan_returns_guild_pairs_with_expiry_first(repo_db_path):
         DAY,
         1,
     )
+    repo.bind_message(reminder_due.challenge_id, GUILD_ID, 1001)
+    repo.bind_message(expiry_due.challenge_id, other_guild, 1002)
 
     assert repo.get_due_challenge_ids(NOW + DAY) == [
         (expiry_due.challenge_id, other_guild),
