@@ -758,13 +758,11 @@ async def test_setup_restores_one_view_for_every_pending_challenge(
 ):
     duel_service.list_pending_all.return_value = [
         make_challenge(challenge_id=7, message_id=300),
-        make_challenge(challenge_id=8, message_id=None),
     ]
 
     await setup(bot)
 
     bot.add_cog.assert_awaited_once()
-    duel_service.mark_delivery_failed.assert_called_once_with(8, GUILD_ID, CHALLENGER_ID)
     assert bot.add_view.call_count == 1
     first = bot.add_view.call_args
     assert isinstance(first.args[0], DuelChallengeView)
@@ -776,15 +774,70 @@ async def test_setup_restores_one_view_for_every_pending_challenge(
 
 
 @pytest.mark.asyncio
-async def test_setup_ignores_unbound_refund_race(bot, duel_service):
+async def test_setup_posts_and_binds_replacement_for_unbound_challenge(
+    bot, duel_service, flavor_service, interaction
+):
+    replacement = SimpleNamespace(id=301, edit=AsyncMock())
+    interaction.channel.send.return_value = replacement
     duel_service.list_pending_all.return_value = [
         make_challenge(challenge_id=8, message_id=None),
     ]
-    duel_service.mark_delivery_failed.side_effect = ValueError("already answered")
 
     await setup(bot)
 
-    duel_service.mark_delivery_failed.assert_called_once_with(8, GUILD_ID, CHALLENGER_ID)
+    flavor_service.generate.assert_awaited_once_with(
+        DuelFlavorEvent.ISSUED,
+        GUILD_ID,
+        ANY,
+    )
+    sent = interaction.channel.send.await_args.kwargs
+    assert sent["content"] == f"<@{RECIPIENT_ID}>"
+    assert sent.get("view") is None
+    assert sent["allowed_mentions"].everyone is False
+    assert sent["allowed_mentions"].roles is False
+    assert [user.id for user in sent["allowed_mentions"].users] == [RECIPIENT_ID]
+    assert sent["allowed_mentions"].replied_user is False
+    duel_service.bind_message.assert_called_once_with(8, GUILD_ID, 301)
+    duel_service.mark_delivery_failed.assert_not_called()
+    assert bot.add_view.call_args.kwargs == {"message_id": 301}
+    assert isinstance(bot.add_view.call_args.args[0], DuelChallengeView)
+    replacement.edit.assert_awaited_once()
+    assert isinstance(replacement.edit.await_args.kwargs["view"], DuelChallengeView)
+
+
+@pytest.mark.asyncio
+async def test_setup_refunds_when_replacement_delivery_fails(
+    bot, duel_service, interaction
+):
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=8, message_id=None),
+    ]
+    interaction.channel.send.side_effect = discord.DiscordException("no delivery")
+
+    await setup(bot)
+
+    duel_service.mark_delivery_failed.assert_called_once_with(
+        8, GUILD_ID, CHALLENGER_ID
+    )
+    duel_service.bind_message.assert_not_called()
+    bot.add_view.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_setup_discards_replacement_when_another_process_binds_first(
+    bot, duel_service, interaction
+):
+    replacement = SimpleNamespace(id=301, edit=AsyncMock(), delete=AsyncMock())
+    interaction.channel.send.return_value = replacement
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=8, message_id=None),
+    ]
+    duel_service.bind_message.side_effect = ValueError("already bound")
+
+    await setup(bot)
+
+    replacement.delete.assert_awaited_once()
+    duel_service.mark_delivery_failed.assert_not_called()
     bot.add_view.assert_not_called()
 
 

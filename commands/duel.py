@@ -539,6 +539,100 @@ class DuelCommands(commands.Cog):
             )
         return embed
 
+    async def restore_unbound_challenge(self, challenge: DuelChallenge) -> None:
+        """Post and bind the replacement announcement for an interrupted issue."""
+        flavor = await self.flavor_service.generate(
+            DuelFlavorEvent.ISSUED,
+            challenge.guild_id,
+            self._flavor_details(challenge),
+        )
+        channel = await self._get_channel(challenge.channel_id)
+        if channel is None:
+            self._mark_recovery_delivery_failed(challenge)
+            return
+
+        allowed_mentions = discord.AllowedMentions(
+            everyone=False,
+            roles=False,
+            users=[discord.Object(id=challenge.recipient_id)],
+            replied_user=False,
+        )
+        try:
+            message = await channel.send(
+                content=f"<@{challenge.recipient_id}>",
+                embed=self.build_challenge_embed(challenge, flavor),
+                allowed_mentions=allowed_mentions,
+            )
+            if message is None:
+                raise discord.DiscordException(
+                    "Replacement duel message was not delivered."
+                )
+        except discord.DiscordException:
+            logger.exception(
+                "Unable to deliver replacement for duel challenge %s in guild %s "
+                "channel %s",
+                challenge.challenge_id,
+                challenge.guild_id,
+                challenge.channel_id,
+            )
+            self._mark_recovery_delivery_failed(challenge)
+            return
+
+        try:
+            self.duel_service.bind_message(
+                challenge.challenge_id,
+                challenge.guild_id,
+                message.id,
+            )
+        except ValueError:
+            logger.info(
+                "Duel challenge %s changed before replacement message binding",
+                challenge.challenge_id,
+            )
+            await self._delete_unbound_replacement(message, challenge)
+            return
+        except Exception:
+            logger.exception(
+                "Unable to bind replacement for duel challenge %s in guild %s",
+                challenge.challenge_id,
+                challenge.guild_id,
+            )
+            await self._delete_unbound_replacement(message, challenge)
+            return
+
+        view = DuelChallengeView(self, challenge.challenge_id)
+        self.bot.add_view(view, message_id=message.id)
+        try:
+            await message.edit(view=view, allowed_mentions=allowed_mentions)
+        except discord.DiscordException:
+            logger.exception(
+                "Unable to attach controls to replacement for duel challenge %s",
+                challenge.challenge_id,
+            )
+
+    def _mark_recovery_delivery_failed(self, challenge: DuelChallenge) -> None:
+        try:
+            self.duel_service.mark_delivery_failed(
+                challenge.challenge_id,
+                challenge.guild_id,
+                challenge.challenger_id,
+            )
+        except ValueError:
+            logger.info(
+                "Duel challenge %s changed before recovery delivery refund",
+                challenge.challenge_id,
+            )
+
+    @staticmethod
+    async def _delete_unbound_replacement(message, challenge: DuelChallenge) -> None:
+        try:
+            await message.delete()
+        except discord.DiscordException:
+            logger.exception(
+                "Unable to delete unbound replacement for duel challenge %s",
+                challenge.challenge_id,
+            )
+
     async def _edit_original(self, challenge: DuelChallenge, flavor: str) -> None:
         if challenge.message_id is None:
             return
@@ -665,17 +759,7 @@ async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(cog)
     for challenge in duel_service.list_pending_all():
         if challenge.message_id is None:
-            try:
-                duel_service.mark_delivery_failed(
-                    challenge.challenge_id,
-                    challenge.guild_id,
-                    challenge.challenger_id,
-                )
-            except ValueError:
-                logger.info(
-                    "Duel challenge %s changed before startup refund",
-                    challenge.challenge_id,
-                )
+            await cog.restore_unbound_challenge(challenge)
             continue
 
         view = DuelChallengeView(cog, challenge.challenge_id)
