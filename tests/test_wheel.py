@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from commands.betting import BettingCommands
+from commands.betting_helpers.messages import WHEEL_EXPLOSION_REWARD
 from commands.betting_helpers.wheel_outcomes import (
     WheelOutcomeContext,
     WheelOutcomeProcessor,
@@ -1749,6 +1750,129 @@ def _make_wheel_player_service(spinner_balance: int = 100):
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.adjust_balance = MagicMock()
     return player_service
+
+
+@pytest.mark.asyncio
+async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.buff_service = None
+    bot.curse_service = None
+    bot.gambling_stats_service = None
+    bot.garnishment_service = None
+    bot.mana_effects_service = None
+    bot.player_repo = None
+    bot.reminder_service = MagicMock()
+
+    player_service = _make_wheel_player_service(spinner_balance=50)
+    previous_spin = 1_700_000_000 - 300
+    concurrent_spin = 1_700_000_000 - 10
+    current_last_spin = {"value": previous_spin}
+    player_service.get_last_wheel_spin.side_effect = (
+        lambda _user_id, _guild_id: current_last_spin["value"]
+    )
+
+    async def advance_animation(*_args, **_kwargs):
+        current_last_spin["value"] = concurrent_spin
+
+    interaction = _make_wheel_interaction(1001)
+    interaction.channel.name = "dig"
+    interaction.response.is_done.return_value = True
+
+    commands = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 4)
+
+    with patch("commands.betting.require_gamba_channel", new_callable=AsyncMock) as channel_check:
+        with patch("commands.betting.time.time", return_value=1_700_000_000):
+            with patch("commands.betting.random.randint", return_value=target_idx):
+                with patch("commands.betting.random.random", return_value=1.0):
+                    with patch(
+                        "commands.betting.asyncio.sleep",
+                        new_callable=AsyncMock,
+                        side_effect=advance_animation,
+                    ):
+                        with patch.object(
+                            commands, "_create_wheel_gif_file", return_value=MagicMock(),
+                        ):
+                            await commands._gamba_action(interaction, bonus_spin=True)
+
+    channel_check.assert_not_awaited()
+    player_service.try_claim_wheel_spin.assert_not_called()
+    player_service.set_last_wheel_spin.assert_not_called()
+    bot.reminder_service.schedule_wheel_reminder.assert_not_called()
+    player_service.log_wheel_spin.assert_called_once()
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 4)
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_awaited_once()
+
+    result_embed = interaction.followup.send.return_value.edit.call_args.kwargs["embed"]
+    assert any(
+        field.name == "Dig Bonus" and "cooldown unchanged" in field.value
+        for field in result_embed.fields
+    )
+    next_spin_field = next(
+        field for field in result_embed.fields if field.name == "Next Spin"
+    )
+    assert next_spin_field.value == (
+        f"<t:{concurrent_spin + WHEEL_COOLDOWN_SECONDS}:R>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.buff_service = None
+    bot.curse_service = None
+    bot.gambling_stats_service = None
+    bot.garnishment_service = None
+    bot.mana_effects_service = None
+    bot.player_repo = None
+    bot.reminder_service = MagicMock()
+
+    player_service = _make_wheel_player_service(spinner_balance=50)
+    previous_spin = 1_700_000_000 - 300
+    player_service.get_last_wheel_spin.return_value = previous_spin
+
+    interaction = _make_wheel_interaction(1001)
+    interaction.channel.name = "dig"
+    interaction.user.name = "Digger"
+
+    commands = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
+
+    with patch("commands.betting.require_gamba_channel", new_callable=AsyncMock) as channel_check:
+        with patch("commands.betting.time.time", return_value=1_700_000_000):
+            with patch("commands.betting.random.random", return_value=0.0):
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    with patch.object(
+                        commands, "_create_explosion_gif_file", return_value=MagicMock(),
+                    ):
+                        await commands._gamba_action(interaction, bonus_spin=True)
+
+    channel_check.assert_not_awaited()
+    player_service.try_claim_wheel_spin.assert_not_called()
+    player_service.set_last_wheel_spin.assert_not_called()
+    bot.reminder_service.schedule_wheel_reminder.assert_not_called()
+    player_service.log_wheel_spin.assert_called_once()
+    _assert_gamba_adjust_call(
+        player_service.adjust_balance,
+        1001,
+        123,
+        WHEEL_EXPLOSION_REWARD,
+    )
+    interaction.response.defer.assert_not_awaited()
+
+    result_embed = interaction.followup.send.return_value.edit.call_args.kwargs["embed"]
+    assert any(
+        field.name == "Dig Bonus" and "cooldown unchanged" in field.value
+        for field in result_embed.fields
+    )
+    next_spin_field = next(
+        field for field in result_embed.fields if field.name == "Next Spin"
+    )
+    assert next_spin_field.value == (
+        f"<t:{previous_spin + WHEEL_COOLDOWN_SECONDS}:R>"
+    )
 
 
 def _make_wheel_protection_service():

@@ -502,6 +502,14 @@ class PlayerService:
         """
         return self.player_repo.get_leaderboard(guild_id, limit, offset)
 
+    def get_all_registered_players_for_lottery(
+        self, guild_id: int, activity_days: int = 14,
+    ) -> list[dict]:
+        """Return registered players active in the recent package-choice window."""
+        return self.player_repo.get_all_registered_players_for_lottery(
+            guild_id, activity_days,
+        )
+
     def get_player_above(
         self,
         discord_id: int,

@@ -37,6 +37,7 @@ from commands.dig_helpers._shared import (
     _tip,
     _wrap,
 )
+from commands.dig_helpers.bonus_events import maybe_send_dig_bonus
 from commands.dig_helpers.boss_views import (
     BossDuelView,
     BossEncounterView,
@@ -495,31 +496,43 @@ class DigCommands(commands.Cog):
             # Rare animated dig moment (relic unearthed / catastrophic cave-in).
             await self._maybe_send_dig_neon(interaction, result, guild_id)
 
-        # Dispatch by result shape. Each branch handles its own reply + reactions.
+        await self._dispatch_dig_result(interaction, guild_id, result)
+
+    async def _dispatch_dig_result(
+        self, interaction: discord.Interaction, guild_id: int, result,
+    ) -> None:
+        """Send the existing dig UI, then offer any rare cross-system bonus."""
         if getattr(result, "is_first_dig", False):
             await self._send_first_dig_welcome(interaction)
-            return
-        if getattr(result, "boss_encounter", False):
+        elif getattr(result, "boss_encounter", False):
             await self._handle_boss_encounter(interaction, guild_id, result)
-            return
-        if getattr(result, "paid_dig_available", False):
+        elif getattr(result, "paid_dig_available", False):
             await self._handle_paid_dig_confirmation(interaction, guild_id, result)
-            return
+        else:
+            event = getattr(result, "event", None)
+            event_data = None
+            if event is not None:
+                event_data = (
+                    event
+                    if isinstance(event, dict)
+                    else (event._d if hasattr(event, "_d") else None)
+                )
+            if (
+                isinstance(event_data, dict)
+                and event_data.get("complexity", "choice") == "boon"
+                and event_data.get("boon_options")
+            ):
+                await self._handle_boon_encounter(
+                    interaction, guild_id, result, event_data,
+                )
+            elif isinstance(event_data, dict) and event_data.get("safe_option"):
+                await self._handle_choice_encounter(
+                    interaction, guild_id, result, event_data,
+                )
+            else:
+                await self._send_normal_dig_result(interaction, result)
 
-        event = getattr(result, "event", None)
-        event_data = None
-        if event is not None:
-            event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
-        if isinstance(event_data, dict):
-            complexity = event_data.get("complexity", "choice")
-            if complexity == "boon" and event_data.get("boon_options"):
-                await self._handle_boon_encounter(interaction, guild_id, result, event_data)
-                return
-            if event_data.get("safe_option"):
-                await self._handle_choice_encounter(interaction, guild_id, result, event_data)
-                return
-
-        await self._send_normal_dig_result(interaction, result)
+        await maybe_send_dig_bonus(self.bot, interaction, result)
 
     # ── dig_go helpers (one per result shape) ───────────────────────────
 
@@ -658,6 +671,8 @@ class DigCommands(commands.Cog):
                     await self._send_boon_event_ui(interaction, guild_id, paid_result, event_data)
                 elif event_data.get("safe_option"):
                     await self._send_choice_event_ui(interaction, guild_id, paid_result, event_data)
+
+        await maybe_send_dig_bonus(self.bot, interaction, paid_result)
 
     async def _resolve_event_art(self, event_id: str, result) -> discord.File | None:
         """Attempt to load the event art attachment, returning ``None`` on failure."""

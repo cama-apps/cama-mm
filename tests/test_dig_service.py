@@ -170,6 +170,7 @@ class TestCoreDig:
         result = dig_service.dig(10001, guild_id)
         assert result["success"]
         assert result["is_first_dig"] is True
+        assert result["dig_consumed"] is False
         assert result["tunnel_name"]  # non-empty name
         assert FIRST_DIG_ADVANCE_MIN <= result["advance"] <= FIRST_DIG_ADVANCE_MAX
         assert FIRST_DIG_JC_MIN <= result["jc_earned"] <= FIRST_DIG_JC_MAX
@@ -201,6 +202,7 @@ class TestCoreDig:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         result2 = dig_service.dig(10001, guild_id)
         assert result2["success"]
+        assert result2["dig_consumed"] is True
         assert result2["depth"] > depth_after_first
 
     def test_dig_earns_jc(self, dig_service, player_repository, guild_id, monkeypatch):
@@ -1068,6 +1070,7 @@ class TestCaveIn:
         monkeypatch.setattr(random, "random", lambda: 0.001)  # force cave-in (below 5%)
         result = dig_service.dig(10001, guild_id)
         assert result.get("cave_in")
+        assert result["dig_consumed"] is True
         detail = result.get("cave_in_detail") or {}
         block_loss = int(detail.get("block_loss", -1))
         # Tunnel was set to depth=20 (shallow band).
@@ -2853,9 +2856,28 @@ class TestBossErrors:
         result = dig_service.dig(10001, guild_id)
         assert result["success"]
         assert result.get("boss_encounter") is True
+        assert result["dig_consumed"] is False
 
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["last_dig_at"] == original_last_dig_at
+
+    def test_newly_reached_boss_marks_dig_consumed(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=23)
+
+        monkeypatch.setattr(
+            time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        monkeypatch.setattr(random, "randint", lambda low, high: high)
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["boss_encounter"] is True
+        assert result["dig_consumed"] is True
 
     def test_boss_boundary_returns_full_info(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Boss encounter from dig includes dialogue and ascii_art."""
@@ -2895,6 +2917,7 @@ class TestBossErrors:
         result = dig_service.dig(10001, guild_id)
         assert result["success"] is True
         assert result.get("boss_encounter") is True
+        assert result["dig_consumed"] is False
         assert result.get("boss_info", {}).get("boundary") == 25
         assert not result.get("paid_dig_available")
         # No JC awarded for re-opening the view.
