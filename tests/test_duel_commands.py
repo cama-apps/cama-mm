@@ -37,6 +37,7 @@ def make_challenge(**overrides) -> DuelChallenge:
         "challenger_id": CHALLENGER_ID,
         "recipient_id": RECIPIENT_ID,
         "wager": 500,
+        "issuance_fee": 50,
         "status": DuelStatus.PENDING,
         "trial_type": None,
         "challenger_glicko": 1400.0,
@@ -210,6 +211,7 @@ async def test_issue_posts_scoped_ping_and_binds_message(
         recipient_is_bot=False,
     )
     flavor_service.generate.assert_awaited_once()
+    assert flavor_service.generate.await_args.args[2]["issuance_fee"] == 50
     sent = interaction.followup.send.await_args
     assert sent.kwargs["content"] == recipient.mention
     assert isinstance(sent.kwargs["view"], DuelChallengeView)
@@ -476,7 +478,7 @@ async def test_due_expiry_edits_original_and_posts_without_mentions(
             ),
             "Voided",
             "Refund",
-            "500 JC to each player",
+            "500 JC stake to each player; issuance fee remains nonrefundable",
         ),
     ],
 )
@@ -490,8 +492,28 @@ def test_challenge_embed_has_lifecycle_fields(
     assert fields["Challenger"] == f"<@{CHALLENGER_ID}>"
     assert fields["Recipient"] == f"<@{RECIPIENT_ID}>"
     assert fields["Wager"] == "500 JC"
+    assert fields["Issuance Fee"] == "50 JC — nonrefundable after delivery"
     assert fields["Status"] == expected_status
     assert fields[extra_field] == extra_value
+
+
+@pytest.mark.asyncio
+async def test_void_copy_says_only_stakes_are_refunded(
+    cog, interaction, duel_service, monkeypatch
+):
+    monkeypatch.setattr("commands.duel.has_admin_permission", lambda _: True)
+    duel_service.resolve.return_value = make_challenge(
+        status=DuelStatus.VOIDED,
+        trial_type=DuelTrial.TRIAL_BY_COMBAT,
+        resolved_at=1_700_000_200,
+        next_reminder_at=None,
+    )
+
+    await DuelCommands.resolve.callback(cog, interaction, 7, "void")
+
+    detail = interaction.followup.send.await_args.kwargs["content"].lower()
+    assert "stakes" in detail
+    assert "issuance fee was not refunded" in detail
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 
 from domain.models.duel import (
+    DUEL_ISSUANCE_FEE,
     DuelChallenge,
     DuelDueKind,
     DuelDueResult,
@@ -129,6 +130,7 @@ class DuelChallengeRepository(BaseRepository):
                 raise ValueError("The wager must be a whole number of jopacoin.")
             if not 500 <= wager <= 1000:
                 raise ValueError("The wager must be between 500 and 1000 jopacoin.")
+            upfront_cost = wager + DUEL_ISSUANCE_FEE
 
             players = {}
             for player_id in (challenger_id, recipient_id):
@@ -201,17 +203,20 @@ class DuelChallengeRepository(BaseRepository):
             if recipient_history is not None:
                 raise ValueError("That player was recently challenged and has weekly protection.")
 
-            if int(challenger["balance"]) < wager:
-                raise ValueError("Your jopacoin balance cannot cover that wager.")
+            if int(challenger["balance"]) < upfront_cost:
+                raise ValueError(
+                    "Your jopacoin balance cannot cover the wager and issuance fee."
+                )
 
             expires_at = now + response_seconds
             cursor.execute(
                 """
                 INSERT INTO duel_challenges (
                     guild_id, channel_id, challenger_id, recipient_id, wager,
-                    status, challenger_glicko, challenger_rd, recipient_glicko,
-                    recipient_rd, created_at, expires_at, next_reminder_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+                    issuance_fee, status, challenger_glicko, challenger_rd,
+                    recipient_glicko, recipient_rd, created_at, expires_at,
+                    next_reminder_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     guild_id,
@@ -219,6 +224,7 @@ class DuelChallengeRepository(BaseRepository):
                     challenger_id,
                     recipient_id,
                     wager,
+                    DUEL_ISSUANCE_FEE,
                     float(challenger["glicko_rating"]),
                     float(challenger["glicko_rd"]),
                     float(recipient["glicko_rating"]),
@@ -237,7 +243,12 @@ class DuelChallengeRepository(BaseRepository):
                 related_type="duel_challenge",
                 related_id=challenge_id,
                 reason="challenger_escrow",
-                metadata={"wager": wager, "recipient_id": recipient_id},
+                metadata={
+                    "wager": wager,
+                    "issuance_fee": DUEL_ISSUANCE_FEE,
+                    "total_debit": upfront_cost,
+                    "recipient_id": recipient_id,
+                },
             )
             try:
                 cursor.execute(
@@ -246,10 +257,12 @@ class DuelChallengeRepository(BaseRepository):
                     SET jopacoin_balance = jopacoin_balance - ?
                     WHERE discord_id = ? AND guild_id = ? AND jopacoin_balance >= ?
                     """,
-                    (wager, challenger_id, guild_id, wager),
+                    (upfront_cost, challenger_id, guild_id, upfront_cost),
                 )
                 if cursor.rowcount != 1:
-                    raise ValueError("Your jopacoin balance cannot cover that wager.")
+                    raise ValueError(
+                        "Your jopacoin balance cannot cover the wager and issuance fee."
+                    )
             finally:
                 self._clear_economy_ledger_context(cursor)
 
@@ -304,6 +317,7 @@ class DuelChallengeRepository(BaseRepository):
             challenge = self._challenge_from_row(row)
             if challenge is None:
                 raise ValueError("Only a pending duel can fail initial delivery.")
+            total_refund = challenge.wager + challenge.issuance_fee
 
             self._set_economy_ledger_context(
                 cursor,
@@ -312,7 +326,11 @@ class DuelChallengeRepository(BaseRepository):
                 related_type="duel_challenge",
                 related_id=challenge_id,
                 reason="initial_delivery_refund",
-                metadata={"wager": challenge.wager},
+                metadata={
+                    "wager": challenge.wager,
+                    "issuance_fee": challenge.issuance_fee,
+                    "total_refund": total_refund,
+                },
             )
             try:
                 cursor.execute(
@@ -321,7 +339,7 @@ class DuelChallengeRepository(BaseRepository):
                     SET jopacoin_balance = jopacoin_balance + ?
                     WHERE discord_id = ? AND guild_id = ?
                     """,
-                    (challenge.wager, challenge.challenger_id, guild_id),
+                    (total_refund, challenge.challenger_id, guild_id),
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("Duel escrow refund recipient was not found.")
