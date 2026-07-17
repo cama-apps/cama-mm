@@ -621,6 +621,9 @@ async def test_wheel_lose_turn_no_change():
 
     # Should NOT call adjust_balance at all
     player_service.adjust_balance.assert_not_called()
+    log_kwargs = player_service.log_wheel_spin.call_args.kwargs
+    assert log_kwargs["outcome_code"] == "LOSE"
+    assert log_kwargs["is_bonus"] is False
 
 
 @pytest.mark.asyncio
@@ -668,6 +671,8 @@ async def test_wheel_jackpot_result():
 
     # Should add scaled jackpot.
     _assert_gamba_adjust_call(player_service.adjust_balance, 1007, 123, 80)
+    log_kwargs = player_service.log_wheel_spin.call_args.kwargs
+    assert log_kwargs["outcome_code"] == "NUMERIC_80"
 
 
 def test_wheel_wedges_has_correct_count():
@@ -1305,6 +1310,10 @@ async def test_wheel_lightning_bolt_taxes_all_players():
     loan_service.add_to_nonprofit_fund.assert_called_once()
     assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 26)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
+    log_kwargs = player_service.log_wheel_spin.call_args.kwargs
+    assert log_kwargs["outcome_code"] == "LIGHTNING_BOLT"
+    assert log_kwargs["outcome_metadata"]["lightning_total"] == 26
+    assert log_kwargs["outcome_metadata"]["lightning_count"] == 3
 
 
 @pytest.mark.asyncio
@@ -1801,6 +1810,9 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     player_service.set_last_wheel_spin.assert_not_called()
     bot.reminder_service.schedule_wheel_reminder.assert_not_called()
     player_service.log_wheel_spin.assert_called_once()
+    log_kwargs = player_service.log_wheel_spin.call_args.kwargs
+    assert log_kwargs["outcome_code"] == "NUMERIC_4"
+    assert log_kwargs["is_bonus"] is True
     _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 4)
     interaction.response.defer.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
@@ -1831,10 +1843,14 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
     bot.reminder_service = MagicMock()
 
     player_service = _make_wheel_player_service(spinner_balance=50)
+    player_service.get_leaderboard.return_value = [
+        SimpleNamespace(discord_id=1001),
+    ]
     previous_spin = 1_700_000_000 - 300
     player_service.get_last_wheel_spin.return_value = previous_spin
 
     interaction = _make_wheel_interaction(1001)
+    interaction.id = 987654
     interaction.channel.name = "dig"
     interaction.user.name = "Digger"
 
@@ -1854,6 +1870,13 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
     player_service.set_last_wheel_spin.assert_not_called()
     bot.reminder_service.schedule_wheel_reminder.assert_not_called()
     player_service.log_wheel_spin.assert_called_once()
+    log_kwargs = player_service.log_wheel_spin.call_args.kwargs
+    assert log_kwargs["outcome_code"] == "EXPLOSION"
+    assert log_kwargs["is_bonus"] is True
+    assert log_kwargs["is_bankrupt"] is False
+    assert log_kwargs["is_golden"] is True
+    assert log_kwargs["event_id"] == "987654"
+    assert log_kwargs["outcome_metadata"]["gross_reward"] == WHEEL_EXPLOSION_REWARD
     _assert_gamba_adjust_call(
         player_service.adjust_balance,
         1001,

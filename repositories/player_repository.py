@@ -2598,6 +2598,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
     def log_wheel_spin(
         self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
         is_bankrupt: bool = False, is_golden: bool = False,
+        *,
+        outcome_code: str | None = None,
+        is_bonus: bool = False,
+        event_id: str | None = None,
+        outcome_metadata: dict | None = None,
     ) -> int:
         """
         Log a wheel spin result for gambling history tracking.
@@ -2609,19 +2614,42 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             spin_time: Unix timestamp of the spin
             is_bankrupt: True if this spin was on the bankruptcy wheel
             is_golden: True if this spin was on the golden wheel
+            outcome_code: Canonical resolved wedge code for exact history
+            is_bonus: True if this was a bonus spin that did not consume cooldown
+            event_id: Stable interaction/event identifier for related effects
+            outcome_metadata: JSON-safe resolved outcome details
 
         Returns:
             The spin_id of the created record
         """
         guild_id = self.normalize_guild_id(guild_id)
+        metadata_json = (
+            json.dumps(outcome_metadata, sort_keys=True, separators=(",", ":"))
+            if outcome_metadata is not None
+            else None
+        )
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time, is_bankrupt, is_golden)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO wheel_spins (
+                    guild_id, discord_id, result, spin_time, is_bankrupt,
+                    is_golden, outcome_code, is_bonus, event_id, outcome_metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (guild_id, discord_id, result, spin_time, 1 if is_bankrupt else 0, 1 if is_golden else 0),
+                (
+                    guild_id,
+                    discord_id,
+                    result,
+                    spin_time,
+                    1 if is_bankrupt else 0,
+                    1 if is_golden else 0,
+                    outcome_code,
+                    1 if is_bonus else 0,
+                    event_id,
+                    metadata_json,
+                ),
             )
             return cursor.lastrowid
 

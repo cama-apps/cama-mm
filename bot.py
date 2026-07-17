@@ -439,6 +439,7 @@ EXTENSIONS = [
     "commands.scout",
     "commands.wrapped",
     "commands.trivia",
+    "commands.player_trivia",
     "commands.mana",
     "commands.dig",
     "commands.mafia",

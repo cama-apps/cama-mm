@@ -427,6 +427,11 @@ class PlayerService:
     def log_wheel_spin(
         self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
         is_bankrupt: bool = False, is_golden: bool = False,
+        *,
+        outcome_code: str | None = None,
+        is_bonus: bool = False,
+        event_id: str | None = None,
+        outcome_metadata: dict | None = None,
     ) -> int:
         """
         Log a wheel spin result for gambling history tracking.
@@ -438,11 +443,26 @@ class PlayerService:
             spin_time: Unix timestamp of the spin
             is_bankrupt: True if this was a bankrupt wheel spin
             is_golden: True if this was a golden wheel spin
+            outcome_code: Canonical resolved wedge code for exact history
+            is_bonus: True if this was a bonus spin that did not consume cooldown
+            event_id: Stable interaction/event identifier for related effects
+            outcome_metadata: JSON-safe resolved outcome details
 
         Returns:
             The spin log ID
         """
-        return self.player_repo.log_wheel_spin(discord_id, guild_id, result, spin_time, is_bankrupt, is_golden)
+        return self.player_repo.log_wheel_spin(
+            discord_id,
+            guild_id,
+            result,
+            spin_time,
+            is_bankrupt,
+            is_golden,
+            outcome_code=outcome_code,
+            is_bonus=is_bonus,
+            event_id=event_id,
+            outcome_metadata=outcome_metadata,
+        )
 
     def get_last_normal_wheel_spin(self, guild_id: int | None) -> dict | None:
         """

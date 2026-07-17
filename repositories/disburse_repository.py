@@ -16,6 +16,35 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
     Handles CRUD operations for disburse_proposals and disburse_votes tables.
     """
 
+    @staticmethod
+    def _archive_final_votes(
+        cursor,
+        *,
+        guild_id: int,
+        proposal_id: int,
+        proposal_outcome: str,
+        finalized_at: int,
+    ) -> None:
+        """Persist the proposal's final latest ballot once per voter.
+
+        ``disburse_votes`` already stores only each voter's latest choice. An
+        INSERT OR REPLACE ... SELECT makes retries idempotent while preserving
+        the original vote timestamp and applying one common finalization time.
+        """
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO disburse_vote_history (
+                guild_id, proposal_id, discord_id, vote_method, voted_at,
+                proposal_outcome, finalized_at
+            )
+            SELECT guild_id, proposal_id, discord_id, vote_method, voted_at,
+                   ?, ?
+            FROM disburse_votes
+            WHERE guild_id = ? AND proposal_id = ?
+            """,
+            (proposal_outcome, finalized_at, guild_id, proposal_id),
+        )
+
     def get_active_proposal(self, guild_id: int | None) -> dict | None:
         """
         Get the active proposal for a guild, if any.
@@ -188,12 +217,30 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
         now = int(time.time())
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute(
+            proposal_row = cursor.execute(
                 """
-                UPDATE disburse_proposals SET status = 'completed'
+                SELECT proposal_id
+                FROM disburse_proposals
                 WHERE guild_id = ? AND status = 'active'
                 """,
                 (normalized_guild,),
+            ).fetchone()
+            if proposal_row is None:
+                return False
+            proposal_id = int(proposal_row["proposal_id"])
+            self._archive_final_votes(
+                cursor,
+                guild_id=normalized_guild,
+                proposal_id=proposal_id,
+                proposal_outcome=method,
+                finalized_at=now,
+            )
+            cursor.execute(
+                """
+                UPDATE disburse_proposals SET status = 'completed'
+                WHERE guild_id = ? AND proposal_id = ? AND status = 'active'
+                """,
+                (normalized_guild, proposal_id),
             )
             if cursor.rowcount != 1:
                 return False
@@ -310,6 +357,24 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+
+            proposal_row = cursor.execute(
+                """
+                SELECT proposal_id
+                FROM disburse_proposals
+                WHERE guild_id = ? AND status = 'active'
+                """,
+                (normalized_guild,),
+            ).fetchone()
+            if proposal_row is not None:
+                proposal_id = int(proposal_row["proposal_id"])
+                self._archive_final_votes(
+                    cursor,
+                    guild_id=normalized_guild,
+                    proposal_id=proposal_id,
+                    proposal_outcome=method,
+                    finalized_at=now,
+                )
 
             # 1) Mark the proposal completed so a concurrent/rerun caller can't
             #    re-execute it — even cross-process.
@@ -448,10 +513,18 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
         Returns:
             True if a proposal was reset, False if no active proposal
         """
-        return self._reset_proposal_atomic(guild_id, fund_amount_to_return=0) is not None
+        return self._reset_proposal_atomic(
+            guild_id,
+            fund_amount_to_return=0,
+            proposal_outcome="reset",
+        ) is not None
 
     def reset_and_return_fund_atomic(
-        self, guild_id: int | None, fund_amount_to_return: int
+        self,
+        guild_id: int | None,
+        fund_amount_to_return: int,
+        *,
+        proposal_outcome: str = "reset",
     ) -> bool:
         """Atomically mark the active proposal 'reset' and return its reserve.
 
@@ -460,10 +533,18 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
         leak the reserve (old flow: ``reset_proposal`` then
         ``add_to_nonprofit_fund`` as separate txns).
         """
-        return self._reset_proposal_atomic(guild_id, fund_amount_to_return) is not None
+        return self._reset_proposal_atomic(
+            guild_id,
+            fund_amount_to_return,
+            proposal_outcome=proposal_outcome,
+        ) is not None
 
     def _reset_proposal_atomic(
-        self, guild_id: int | None, fund_amount_to_return: int
+        self,
+        guild_id: int | None,
+        fund_amount_to_return: int,
+        *,
+        proposal_outcome: str,
     ) -> int | None:
         """Shared impl for reset_proposal and reset_and_return_fund_atomic.
 
@@ -481,6 +562,14 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 return None
 
             proposal_id = row["proposal_id"]
+
+            self._archive_final_votes(
+                cursor,
+                guild_id=normalized_guild,
+                proposal_id=proposal_id,
+                proposal_outcome=proposal_outcome,
+                finalized_at=int(time.time()),
+            )
 
             cursor.execute(
                 """

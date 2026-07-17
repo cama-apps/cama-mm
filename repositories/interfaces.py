@@ -1465,7 +1465,11 @@ class IDisburseRepository(ABC):
 
     @abstractmethod
     def reset_and_return_fund_atomic(
-        self, guild_id: int | None, fund_amount_to_return: int
+        self,
+        guild_id: int | None,
+        fund_amount_to_return: int,
+        *,
+        proposal_outcome: str = "reset",
     ) -> bool:
         """Atomically reset the active proposal and return its reserve."""
         ...
