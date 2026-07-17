@@ -551,7 +551,7 @@ def test_due_expiry_takes_precedence_over_reminder(duel_fixture):
 
     due = repo.get_due_challenge_ids(challenge.expires_at)
 
-    assert due == [challenge.challenge_id]
+    assert due == [(challenge.challenge_id, GUILD_ID)]
     assert (
         repo.claim_reminder_atomic(
             challenge.challenge_id, GUILD_ID, challenge.expires_at
@@ -562,6 +562,32 @@ def test_due_expiry_takes_precedence_over_reminder(duel_fixture):
         repo.expire_atomic(challenge.challenge_id, GUILD_ID, challenge.expires_at).status
         is DuelStatus.EXPIRED
     )
+
+
+def test_due_scan_returns_guild_pairs_with_expiry_first(repo_db_path):
+    other_guild = GUILD_ID + 1
+    for guild_id in (GUILD_ID, other_guild):
+        seed_player(repo_db_path, 1, 1400.0, 500, guild_id=guild_id)
+        seed_player(repo_db_path, 2, 1500.0, 0, guild_id=guild_id)
+    repo = DuelChallengeRepository(repo_db_path)
+    reminder_due = create_challenge(repo)
+    expiry_due = repo.create_challenge_atomic(
+        other_guild,
+        77,
+        1,
+        2,
+        500,
+        NOW,
+        30 * DAY,
+        7 * DAY,
+        DAY,
+        1,
+    )
+
+    assert repo.get_due_challenge_ids(NOW + DAY) == [
+        (expiry_due.challenge_id, other_guild),
+        (reminder_due.challenge_id, GUILD_ID),
+    ]
 
 
 def test_reminder_claim_catches_up_to_next_daily_boundary(duel_fixture):

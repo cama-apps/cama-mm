@@ -636,11 +636,11 @@ class DuelChallengeRepository(BaseRepository):
                 raise RuntimeError("Resolved duel challenge could not be read.")
             return resolved
 
-    def get_due_challenge_ids(self, now: int) -> list[int]:
+    def get_due_challenge_ids(self, now: int) -> list[tuple[int, int]]:
         with self.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT challenge_id
+                SELECT challenge_id, guild_id
                 FROM duel_challenges
                 WHERE status = 'pending'
                   AND (
@@ -656,7 +656,9 @@ class DuelChallengeRepository(BaseRepository):
                 """,
                 (now, now, now, now),
             ).fetchall()
-        return [int(row["challenge_id"]) for row in rows]
+        return [
+            (int(row["challenge_id"]), int(row["guild_id"])) for row in rows
+        ]
 
     def claim_reminder_atomic(
         self, challenge_id: int, guild_id: int, now: int
