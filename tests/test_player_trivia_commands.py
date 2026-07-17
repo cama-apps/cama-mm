@@ -129,8 +129,10 @@ class FakePlayerTriviaService:
     def get_last_session_started(self, user_id, guild_id):
         return self.last_started
 
-    def try_start_session(self, user_id, guild_id, questions, now, cooldown):
-        self.started.append((user_id, guild_id, questions, now, cooldown))
+    def try_start_session(
+        self, user_id, guild_id, questions, now, cooldown, *, bypass=False
+    ):
+        self.started.append((user_id, guild_id, questions, now, cooldown, bypass))
         return 42
 
     def settle_answer(self, session_id, question_number, selected_index, reward, answered_at):
@@ -183,6 +185,60 @@ async def test_command_starts_frozen_daily_set_with_spicy_disabled(monkeypatch):
     assert embed.fields[1].value == (
         "Each player gets an independently generated set; some questions may overlap."
     )
+
+
+@pytest.mark.asyncio
+async def test_admin_bypasses_player_trivia_cooldown(monkeypatch):
+    import commands.player_trivia as module
+
+    now = 1_700_000_000
+    service = FakePlayerTriviaService()
+    service.last_started = now - 60
+    cog = _cog(service)
+    interaction = _interaction()
+    followup = AsyncMock(return_value=SimpleNamespace(edit=AsyncMock()))
+    monkeypatch.setattr(module, "require_gamba_channel", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "has_admin_permission", MagicMock(return_value=True))
+    monkeypatch.setattr(module.time, "time", lambda: now)
+    monkeypatch.setattr(module, "safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "safe_followup", followup)
+
+    await cog.player_trivia.callback(cog, interaction)
+
+    interaction.response.send_message.assert_not_awaited()
+    assert len(service.started) == 1
+    assert service.started[0][3:] == (
+        now,
+        module.PLAYER_TRIVIA_COOLDOWN_SECONDS,
+        True,
+    )
+    assert (interaction.user.id, TEST_GUILD_ID) in cog._sessions
+
+
+@pytest.mark.asyncio
+async def test_non_admin_remains_subject_to_player_trivia_cooldown(monkeypatch):
+    import commands.player_trivia as module
+
+    now = 1_700_000_000
+    service = FakePlayerTriviaService()
+    service.last_started = now - 60
+    service.generate_questions = MagicMock(wraps=service.generate_questions)
+    cog = _cog(service)
+    interaction = _interaction()
+    monkeypatch.setattr(module, "require_gamba_channel", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "has_admin_permission", MagicMock(return_value=False))
+    monkeypatch.setattr(module.time, "time", lambda: now)
+
+    await cog.player_trivia.callback(cog, interaction)
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "Player trivia is on cooldown! Your next set unlocks "
+        f"<t:{service.last_started + module.PLAYER_TRIVIA_COOLDOWN_SECONDS}:R>.",
+        ephemeral=True,
+    )
+    service.generate_questions.assert_not_called()
+    assert service.started == []
+    assert cog._sessions == {}
 
 
 @pytest.mark.asyncio

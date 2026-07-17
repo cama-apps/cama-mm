@@ -20,6 +20,7 @@ from config import (
     PLAYER_TRIVIA_RECENT_DAYS,
     PLAYER_TRIVIA_REWARD_PER_CORRECT,
 )
+from services.permissions import has_admin_permission
 from services.player_trivia_service import PlayerTriviaQuestion
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
@@ -347,13 +348,18 @@ class PlayerTriviaCog(commands.Cog):
             )
             return
 
+        is_admin = has_admin_permission(interaction)
         now = int(time.time())
         last_started = await asyncio.to_thread(
             self.bot.player_trivia_service.get_last_session_started,
             user_id,
             guild_id,
         )
-        if last_started is not None and now - int(last_started) < PLAYER_TRIVIA_COOLDOWN_SECONDS:
+        if (
+            not is_admin
+            and last_started is not None
+            and now - int(last_started) < PLAYER_TRIVIA_COOLDOWN_SECONDS
+        ):
             await interaction.response.send_message(
                 "Player trivia is on cooldown! Your next set unlocks "
                 f"<t:{int(last_started) + PLAYER_TRIVIA_COOLDOWN_SECONDS}:R>.",
@@ -415,6 +421,7 @@ class PlayerTriviaCog(commands.Cog):
                 questions,
                 now,
                 PLAYER_TRIVIA_COOLDOWN_SECONDS,
+                bypass=is_admin,
             )
         except Exception:
             logger.exception("Failed to persist player-trivia session")
