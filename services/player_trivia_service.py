@@ -27,6 +27,8 @@ _LANE_NAMES = {
 }
 _TOWN_MAFIA_ROLES = {"TOWNIE", "DOCTOR", "DETECTIVE", "VIGILANTE"}
 _MARKDOWN_RE = re.compile(r"[\\*_`~|>\[\]()]")
+_OPTION_MARKDOWN_RE = re.compile(r"[\\*_`~|>\[\]]")
+_DISCORD_MENTION_RE = re.compile(r"<@[1-9]\d*>")
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,21 @@ def _safe_name(value: Any) -> str:
     text = " ".join(str(value or "").replace("@", "＠").split())
     text = _MARKDOWN_RE.sub("", text).strip()
     return text[:72]
+
+
+def _safe_option(value: Any) -> str:
+    """Render an inert, single-line option while preserving generated mentions."""
+    text = " ".join(str(value or "").split())
+    if _DISCORD_MENTION_RE.fullmatch(text):
+        return text
+    text = text.replace("@", "＠")
+    text = _OPTION_MARKDOWN_RE.sub("", text).strip()
+    return text[:220]
+
+
+def _player_label(discord_id: int) -> str:
+    """Let Discord resolve the player's current guild display name."""
+    return f"<@{discord_id}>"
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -299,28 +316,16 @@ class PlayerTriviaService:
         allowed: set[int] | None,
     ) -> tuple[dict[int, str], dict[int, dict[str, Any]]]:
         pending: list[tuple[int, str, dict[str, Any]]] = []
-        name_counts: Counter[str] = Counter()
         for row in sorted(rows, key=lambda item: _as_int(item.get("discord_id"))):
             discord_id = _as_int(row.get("discord_id"))
             if discord_id <= 0 or (allowed is not None and discord_id not in allowed):
                 continue
-            name = _safe_name(
-                row.get("username")
-                or row.get("discord_username")
-                or row.get("display_name")
-                or row.get("name")
-            )
-            if not name:
-                continue
+            name = _player_label(discord_id)
             pending.append((discord_id, name, row))
-            name_counts[name.casefold()] += 1
 
         names: dict[int, str] = {}
         player_rows: dict[int, dict[str, Any]] = {}
         for discord_id, name, row in pending:
-            # Ambiguous button labels cannot have a unique correct answer.
-            if name_counts[name.casefold()] != 1:
-                continue
             names[discord_id] = name
             player_rows[discord_id] = row
         return names, player_rows
@@ -328,12 +333,12 @@ class PlayerTriviaService:
     def _four_options(
         self, correct: str, distractors: Iterable[str]
     ) -> tuple[tuple[str, str, str, str], int] | None:
-        correct = _safe_name(correct)
+        correct = _safe_option(correct)
         if not correct:
             return None
         unique: dict[str, str] = {}
         for value in distractors:
-            safe = _safe_name(value)
+            safe = _safe_option(value)
             if safe and safe.casefold() != correct.casefold():
                 unique.setdefault(safe.casefold(), safe)
         if len(unique) < 3:
@@ -1497,10 +1502,12 @@ class PlayerTriviaService:
             )
             penalty = _as_int(row.get("bankruptcy_penalty"))
             pnl = winning_contracts * PREDICTION_CONTRACT_VALUE - cost - penalty
-            # Prediction prompts are user-authored free text and intentionally
-            # absent from the safe read model. Stable numeric labels let us ask
-            # about a resolved market without exposing its creator or wording.
-            name = f"Market #{prediction_id}"
+            descriptor = _safe_option(row.get("question"))[:190]
+            name = (
+                f"Market #{prediction_id} — {descriptor}"
+                if descriptor
+                else f"Market #{prediction_id}"
+            )
             enriched = dict(row)
             enriched["_pnl"] = pnl
             enriched["_market_name"] = name

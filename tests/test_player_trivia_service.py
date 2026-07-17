@@ -209,7 +209,7 @@ def test_current_member_filter_removes_departed_players_before_aggregation():
         current_member_ids=range(1, 8),
     )
     question = _by_key(questions)["tips:most_jc_sent"]
-    assert _answer(question) == "P07"
+    assert _answer(question) == "<@7>"
     rendered = " ".join(
         [
             *(item.text for item in questions),
@@ -217,7 +217,7 @@ def test_current_member_filter_removes_departed_players_before_aggregation():
             *(option for item in questions for option in item.options),
         ]
     )
-    assert "P08" not in rendered
+    assert "<@8>" not in rendered
 
 
 def test_displayed_win_rate_ties_are_rejected():
@@ -256,7 +256,7 @@ def test_glicko_openskill_display_and_rank_discrepancies_use_same_scale():
         recent=["ratings:glicko_leader", "ratings:openskill_leader"],
     )
     display = _by_key(display_questions)["ratings:largest_display_gap"]
-    assert _answer(display) == "P01"
+    assert _answer(display) == "<@1>"
     assert "2500 points" in display.explanation
 
     rank_questions, _ = _generate(
@@ -269,7 +269,7 @@ def test_glicko_openskill_display_and_rank_discrepancies_use_same_scale():
         ],
     )
     rank = _by_key(rank_questions)["ratings:largest_rank_gap"]
-    assert _answer(rank) == "P01"
+    assert _answer(rank) == "<@1>"
     assert "3 places" in rank.explanation
 
 
@@ -293,7 +293,7 @@ def test_spicy_questions_are_opt_in_but_neutral_loss_history_is_not_spicy():
     assert "economy:lowest_balance" not in _by_key(normal)
     assert _by_key(spicy)["economy:lowest_balance"].spicy is True
     assert "economy:deepest_historical_debt" not in _by_key(normal)
-    assert _answer(_by_key(deep_spicy)["economy:deepest_historical_debt"]) == "P04"
+    assert _answer(_by_key(deep_spicy)["economy:deepest_historical_debt"]) == "<@4>"
 
     participants = []
     hero_sets = {
@@ -317,7 +317,7 @@ def test_spicy_questions_are_opt_in_but_neutral_loss_history_is_not_spicy():
             match_id += 1
     hero_questions, _ = _generate({"players": _players(4), "participants": participants})
     lost = _by_key(hero_questions)["heroes:most_distinct_lost"]
-    assert _answer(lost) == "P01"
+    assert _answer(lost) == "<@1>"
     assert lost.spicy is False
 
 
@@ -329,8 +329,8 @@ def test_tip_amount_and_transaction_leaders_are_separate_statistics():
         )
     questions, _ = _generate({"players": _players(6), "tips": tips})
     keyed = _by_key(questions)
-    assert _answer(keyed["tips:most_jc_sent"]) == "P01"
-    assert _answer(keyed["tips:most_transactions_sent"]) == "P02"
+    assert _answer(keyed["tips:most_jc_sent"]) == "<@1>"
+    assert _answer(keyed["tips:most_transactions_sent"]) == "<@2>"
 
 
 def test_exact_wheel_outcome_supports_lightning_frequency_and_ignores_null_codes():
@@ -368,7 +368,7 @@ def test_exact_wheel_outcome_supports_lightning_frequency_and_ignores_null_codes
     keyed = _by_key(questions)
     leader = keyed["wheel:exact_outcome_leader:lightning"]
     count = keyed["wheel:exact_outcome_count:lightning:1"]
-    assert _answer(leader) == "P01"
+    assert _answer(leader) == "<@1>"
     assert _answer(count) == "100 times"
     assert "Lightning" in count.text
     assert all("none" not in question.key.casefold() for question in questions)
@@ -413,7 +413,7 @@ def test_finalized_disbursement_history_can_ask_about_burn():
     assert "finalized" in question.text.casefold()
 
 
-def test_prediction_questions_exclude_creator_and_raw_prompt_but_keep_named_loss_neutral():
+def test_prediction_questions_include_market_descriptor_without_creator_metadata():
     positions = []
     pnl_signs = {
         1: [-1, 1, 1],
@@ -434,7 +434,7 @@ def test_prediction_questions_exclude_creator_and_raw_prompt_but_keep_named_loss
                     "no_contracts": 0,
                     "no_cost_basis_total": 0,
                     "creator_id": 6,
-                    "question": "SECRET RAW CREATOR PROMPT",
+                    "question": f"Will market {player_id * 10 + offset} resolve YES?",
                     "metadata": "SECRET META",
                 }
             )
@@ -443,7 +443,8 @@ def test_prediction_questions_exclude_creator_and_raw_prompt_but_keep_named_loss
         recent=["predictions:most_wins", "predictions:best_total_pnl"],
     )
     loss = _by_key(questions)["predictions:loss_market:1:11"]
-    assert _answer(loss) == "Market #11"
+    assert _answer(loss) == "Market #11 — Will market 11 resolve YES?"
+    assert "<@1>" in loss.text
     assert loss.spicy is False
     rendered = " ".join(
         [
@@ -452,8 +453,8 @@ def test_prediction_questions_exclude_creator_and_raw_prompt_but_keep_named_loss
             *(option for question in questions for option in question.options),
         ]
     ).casefold()
-    assert "secret" not in rendered
     assert "creator" not in rendered
+    assert "secret meta" not in rendered
 
 
 def test_mafia_questions_use_only_resolved_non_cancelled_games():
@@ -506,5 +507,5 @@ def test_mafia_questions_use_only_resolved_non_cancelled_games():
         }
     )
     question = _by_key(questions)["mafia:most_games"]
-    assert _answer(question) == "P01"
+    assert _answer(question) == "<@1>"
     assert "resolved" in question.text.casefold()

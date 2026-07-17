@@ -17,10 +17,12 @@ class PlayerTriviaRepository(BaseRepository):
     def load_snapshot(self, guild_id: int | None) -> dict[str, list[dict]]:
         """Load deterministic, guild-scoped rows used to generate trivia.
 
-        The snapshot deliberately omits user-authored/free-text fields such as
-        match notes, prediction questions, miner backstories, action details,
-        and enrichment JSON. Filtering to current Discord guild members is a
-        service-layer concern because repositories do not have Discord state.
+        The snapshot deliberately omits private/free-text fields such as match
+        notes, miner backstories, action details, and enrichment JSON. Resolved
+        prediction questions are included so trivia choices can identify their
+        market without exposing creator IDs. Filtering to current Discord guild
+        members is a service-layer concern because repositories do not have
+        Discord state.
         """
         guild_id = self.normalize_guild_id(guild_id)
 
@@ -256,6 +258,7 @@ class PlayerTriviaRepository(BaseRepository):
                 SELECT
                     p.guild_id,
                     pp.prediction_id,
+                    CASE WHEN p.status = 'resolved' THEN p.question END AS question,
                     pp.discord_id,
                     COALESCE(pp.yes_contracts, 0) AS yes_contracts,
                     COALESCE(pp.yes_cost_basis_total, 0) AS yes_cost_basis_total,

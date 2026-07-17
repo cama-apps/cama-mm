@@ -616,11 +616,11 @@ def test_load_snapshot_is_complete_deterministic_private_and_guild_scoped(trivia
     ]
     assert snapshot["participants"][0]["match_id"] == ids["match_id"]
     assert snapshot["prediction_positions"][0]["prediction_id"] == ids["prediction_id"]
+    assert snapshot["prediction_positions"][0]["question"] == "private market text"
     assert snapshot["mafia_players"][0]["game_id"] == ids["game_id"]
 
     assert "notes" not in snapshot["participants"][0]
     assert "enrichment_data" not in snapshot["participants"][0]
-    assert "question" not in snapshot["prediction_positions"][0]
     assert "question" not in snapshot["prediction_trades"][0]
     assert "tunnel_name" not in snapshot["tunnels"][0]
     assert "miner_about" not in snapshot["tunnels"][0]

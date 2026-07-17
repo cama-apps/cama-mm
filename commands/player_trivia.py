@@ -66,8 +66,6 @@ def _question_embed(
         description=question.text,
         color=0x5865F2,
     )
-    if previous_result:
-        embed.add_field(name="Previous answer", value=previous_result, inline=False)
     embed.add_field(
         name="Choose one",
         value="\n".join(
@@ -75,6 +73,17 @@ def _question_embed(
         ),
         inline=False,
     )
+    if previous_result:
+        embed.add_field(name="Previous question result", value=previous_result, inline=False)
+    elif number == 1:
+        embed.add_field(
+            name="Your daily set",
+            value=(
+                "Each player gets an independently generated set; "
+                "some questions may overlap."
+            ),
+            inline=False,
+        )
     _author(embed, session.user)
     embed.set_footer(
         text=(
@@ -137,9 +146,9 @@ class PlayerTriviaView(discord.ui.View):
         self.answered = False
 
         question = session.questions[self.question_index]
-        for index, option in enumerate(question.options):
+        for index, _option in enumerate(question.options):
             button = discord.ui.Button(
-                label=f"{OPTION_LABELS[index]}. {option}"[:80],
+                label=OPTION_LABELS[index],
                 style=discord.ButtonStyle.primary,
                 custom_id=(f"player_trivia:{session.session_id}:{self.question_index + 1}:{index}"),
                 row=index // 2,

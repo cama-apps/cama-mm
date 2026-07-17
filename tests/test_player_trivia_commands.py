@@ -50,6 +50,47 @@ def _interaction(user_id: int = 101):
     )
 
 
+@pytest.mark.asyncio
+async def test_long_and_mention_options_remain_in_embed_not_button_labels():
+    from commands.player_trivia import (
+        PlayerTriviaSession,
+        PlayerTriviaView,
+        _question_embed,
+    )
+    from services.player_trivia_service import PlayerTriviaQuestion
+
+    options = (
+        "Market #8 — Will Team Radiant win the next inhouse match?",
+        "Market #14 — Will the game last longer than 45 minutes?",
+        "<@202> — Trivia Player's server profile",
+        "<@303> — Another Player's server profile",
+    )
+    question = PlayerTriviaQuestion(
+        key="predictions:profit:101",
+        category="predictions",
+        text="Which resolved market did <@101> finish with a profit on?",
+        options=options,
+        correct_index=0,
+        explanation="Computed from resolved prediction markets.",
+    )
+    service = FakePlayerTriviaService(questions=[question])
+    cog = _cog(service)
+    session = PlayerTriviaSession(
+        session_id=42,
+        user_id=101,
+        guild_id=TEST_GUILD_ID,
+        user=_user(),
+        questions=[question],
+    )
+
+    embed = _question_embed(session)
+    view = PlayerTriviaView(session, cog)
+
+    choose_field = next(field for field in embed.fields if field.name == "Choose one")
+    assert all(option in choose_field.value for option in options)
+    assert [button.label for button in view.children] == ["A", "B", "C", "D"]
+
+
 class FakePlayerTriviaService:
     def __init__(self, questions=None):
         self.questions = questions if questions is not None else [_question(i) for i in range(10)]
@@ -136,6 +177,51 @@ async def test_command_starts_frozen_daily_set_with_spicy_disabled(monkeypatch):
     assert len(service.started[0][2]) == module.PLAYER_TRIVIA_QUESTION_COUNT
     assert (interaction.user.id, TEST_GUILD_ID) in cog._sessions
     assert cog._sessions[(interaction.user.id, TEST_GUILD_ID)].message is message
+    embed = followup.await_args.kwargs["embed"]
+    assert embed.fields[0].name == "Choose one"
+    assert embed.fields[1].name == "Your daily set"
+    assert embed.fields[1].value == (
+        "Each player gets an independently generated set; some questions may overlap."
+    )
+
+
+@pytest.mark.asyncio
+async def test_command_generates_and_tracks_separate_sets_per_player(monkeypatch):
+    import commands.player_trivia as module
+
+    service = FakePlayerTriviaService()
+    service.generate_questions = MagicMock(
+        side_effect=lambda user_id, *_args: [
+            _question(user_id * 100 + index) for index in range(module.PLAYER_TRIVIA_QUESTION_COUNT)
+        ]
+    )
+    service.try_start_session = MagicMock(side_effect=[42, 43])
+    cog = _cog(service)
+    first_interaction = _interaction(user_id=101)
+    second_interaction = _interaction(user_id=202)
+    monkeypatch.setattr(module, "require_gamba_channel", AsyncMock(return_value=True))
+    monkeypatch.setattr(module, "safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        module,
+        "safe_followup",
+        AsyncMock(
+            side_effect=[
+                SimpleNamespace(edit=AsyncMock()),
+                SimpleNamespace(edit=AsyncMock()),
+            ]
+        ),
+    )
+
+    await cog.player_trivia.callback(cog, first_interaction)
+    await cog.player_trivia.callback(cog, second_interaction)
+
+    assert [call.args[0] for call in service.generate_questions.call_args_list] == [101, 202]
+    first_session = cog._sessions[(101, TEST_GUILD_ID)]
+    second_session = cog._sessions[(202, TEST_GUILD_ID)]
+    assert first_session.session_id == 42
+    assert second_session.session_id == 43
+    assert first_session.questions[0].key != second_session.questions[0].key
+    assert first_session.questions is not second_session.questions
 
 
 @pytest.mark.asyncio
@@ -207,8 +293,18 @@ async def test_wrong_answer_continues_to_next_question():
     assert session.current_index == 1
     assert service.finished == []
     assert service.settlements[0][1:4] == (1, 0, 1)
-    edited_view = interaction.response.edit_message.await_args.kwargs["view"]
+    edit_kwargs = interaction.response.edit_message.await_args.kwargs
+    edited_view = edit_kwargs["view"]
     assert isinstance(edited_view, PlayerTriviaView)
+    assert [button.label for button in edited_view.children] == ["A", "B", "C", "D"]
+    embed = edit_kwargs["embed"]
+    assert embed.description == service.questions[1].text
+    assert [field.name for field in embed.fields] == [
+        "Choose one",
+        "Previous question result",
+    ]
+    assert "Bravo" in embed.fields[1].value
+    assert service.questions[0].text not in embed.description
 
 
 @pytest.mark.asyncio
