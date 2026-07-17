@@ -6,8 +6,10 @@ Tests for bot.py background-task plumbing: ``_supervised_loop`` and
 
 import asyncio
 import datetime as dt
+import inspect
 import logging
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -17,10 +19,11 @@ def bot_module():
     import bot as bot_module
 
     bot_module._reminder_recovery_task = None
+    bot_module._duel_challenge_task = None
     with patch.object(bot_module.bot, "is_closed", return_value=False):
         yield bot_module
 
-    for attr in ("_reminder_recovery_task",):
+    for attr in ("_reminder_recovery_task", "_duel_challenge_task"):
         task = getattr(bot_module, attr)
         if task is not None:
             if task.done() and not task.cancelled():
@@ -130,6 +133,82 @@ async def test_log_task_exit_silent_on_cancel(bot_module, caplog):
     with caplog.at_level(logging.ERROR, logger="cama_bot"):
         cb(task)
     assert not any("exited unexpectedly" in rec.message for rec in caplog.records)
+
+
+async def test_duel_loop_catches_up_immediately_and_isolates_delivery_failures(
+    bot_module, caplog
+):
+    """One failed due delivery cannot prevent later durable claims."""
+    service = MagicMock()
+    service.get_due_challenge_ids.return_value = [(7, 42), (8, 42)]
+    cog = SimpleNamespace(
+        process_due_challenge=AsyncMock(side_effect=[RuntimeError("boom"), None])
+    )
+
+    with (
+        patch.object(bot_module.time, "time", return_value=1_700_000_000),
+        patch.object(bot_module.bot, "duel_service", service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+        caplog.at_level(logging.ERROR, logger="cama_bot"),
+    ):
+        await bot_module._duel_challenge_loop()
+
+    service.get_due_challenge_ids.assert_called_once_with(1_700_000_000)
+    assert cog.process_due_challenge.await_args_list == [
+        call(7, 42, 1_700_000_000),
+        call(8, 42, 1_700_000_000),
+    ]
+    sleep.assert_awaited_once_with(bot_module.DUEL_WORKER_WAKE_SECONDS)
+    assert any("duel due delivery failed challenge=7" in rec.message for rec in caplog.records)
+
+
+async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
+    """Reconnect-ready events reuse the live duel worker and observe its exit."""
+    running = MagicMock()
+    running.done.return_value = False
+    bot_module._prediction_refresh_task = running
+    bot_module._prediction_digest_task = running
+    bot_module._manashop_debt_task = running
+    bot_module._duel_challenge_task = None
+
+    duel_task = MagicMock()
+    duel_task.done.return_value = False
+    warm_tasks: list[MagicMock] = []
+
+    def create_task(awaitable):
+        if inspect.iscoroutine(awaitable):
+            awaitable.close()
+        if awaitable is supervised_result:
+            return duel_task
+        task = MagicMock()
+        warm_tasks.append(task)
+        return task
+
+    supervised_result = object()
+    supervisor = MagicMock(return_value=supervised_result)
+    exit_callback = object()
+    fake_loop = SimpleNamespace(create_task=MagicMock(side_effect=create_task))
+
+    with (
+        patch.object(bot_module.bot.tree, "walk_commands", return_value=[]),
+        patch.object(bot_module.bot.tree, "sync", AsyncMock()),
+        patch.object(bot_module.bot, "loop", fake_loop, create=True),
+        patch.object(type(bot_module.bot), "guilds", new_callable=lambda: property(lambda _self: [])),
+        patch.object(bot_module.bot, "player_service", None, create=True),
+        patch.object(bot_module.bot, "reminder_service", None, create=True),
+        patch.object(bot_module, "_supervised_loop", supervisor),
+        patch.object(bot_module, "_log_task_exit", return_value=exit_callback) as log_exit,
+    ):
+        await bot_module.on_ready()
+        await bot_module.on_ready()
+
+    supervisor.assert_called_once_with("duel_challenges", bot_module._duel_challenge_loop)
+    log_exit.assert_called_once_with("duel_challenges")
+    duel_task.add_done_callback.assert_called_once_with(exit_callback)
+    assert bot_module._duel_challenge_task is duel_task
 
 # --------------------------------------------------------------------------- #
 # reconnect recovery sweeps — retained single-flight lifecycle
