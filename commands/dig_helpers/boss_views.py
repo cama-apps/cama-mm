@@ -190,10 +190,13 @@ class BossWagerModal(discord.ui.Modal):
                 self.on_boss_resolved, self.user_id, self.guild_id,
             )
 
-            # Phase 2 incoming — survival flavor + auto-engage next phase.
+            # Next phase incoming — survival flavor + auto-engage it.
             # The wager rides forward (carried on boss_progress), so the new
             # encounter view will skip the wager modal on Fight.
-            if getattr(self.result, "phase2_incoming", False):
+            if (
+                getattr(self.result, "phase2_incoming", False)
+                or getattr(self.result, "phase3_incoming", False)
+            ):
                 boss_name = getattr(self.result, "boss_name", "the boss")
                 victory_embed = discord.Embed(
                     title="Phase Cleared",
@@ -390,8 +393,9 @@ async def _post_phase_transition_followup(
     ``interaction.channel`` or ``view.message.channel``) so the helper can
     be invoked from both interaction and view contexts uniformly.
     """
-    phase2_name = getattr(result, "phase2_name", "???")
-    phase2_title = getattr(result, "phase2_title", "")
+    next_phase_title = getattr(result, "next_phase_title", "")
+    phase2_name = getattr(result, "phase2_name", "") or next_phase_title or "???"
+    phase2_title = getattr(result, "phase2_title", "") or next_phase_title
     p2_dialogue = getattr(result, "dialogue", "...")
     boss_name = getattr(result, "boss_name", "the boss")
     wager = getattr(result, "wager", 0)
@@ -960,9 +964,10 @@ class BossDuelView(discord.ui.View):
 
         # Multi-phase transition through a mid-fight prompt: clean up the
         # active duel message and post the auto-continue follow-up.
-        if (getattr(result, "phase2_incoming", False)
-                or getattr(result, "phase3_incoming", False)) \
-                and not getattr(result, "is_pinnacle", False):
+        if (
+            getattr(result, "phase2_incoming", False)
+            or getattr(result, "phase3_incoming", False)
+        ):
             cleared_embed = discord.Embed(
                 title="Phase Cleared",
                 description=(
