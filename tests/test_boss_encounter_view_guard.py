@@ -242,6 +242,40 @@ def test_phase_transition_forwards_callback_to_replacement_encounter(monkeypatch
     asyncio.run(scenario())
 
 
+def test_pinnacle_phase_transition_uses_next_phase_title(monkeypatch):
+    monkeypatch.setattr(bv, "BossEncounterView", MagicMock(return_value=MagicMock()))
+
+    async def scenario():
+        service = MagicMock()
+        service.build_next_boss_encounter.return_value = {
+            "name": "The Digger Eternal",
+            "dialogue": "Last shift. Last dig. Last.",
+        }
+        service.has_scout_lantern.return_value = False
+        channel = SimpleNamespace(send=AsyncMock(return_value=MagicMock()))
+
+        await bv._post_phase_transition_followup(
+            channel,
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            result=SimpleNamespace(
+                phase3_incoming=True,
+                next_phase_title="The Digger Eternal",
+                dialogue="Eternal. The tunnel is me. I am the tunnel.",
+                boss_name="The Digger Unbound",
+                wager=0,
+            ),
+        )
+
+        transition_embed = channel.send.await_args_list[0].kwargs["embed"]
+        assert transition_embed.title == "The Digger Eternal Emerges!"
+        assert "**The Digger Eternal**" in transition_embed.description
+        assert "???" not in transition_embed.description
+
+    asyncio.run(scenario())
+
+
 def test_duel_prompt_surfaces_stale_cleanup_break_notification():
     result = _result(
         pending_prompt={
@@ -407,6 +441,7 @@ def test_carried_and_no_wager_start_shapes_notify_once(monkeypatch, shape):
 )
 def test_modal_start_shapes_notify_before_render(monkeypatch, shape):
     events = []
+    transition = AsyncMock()
 
     async def callback(user_id, guild_id):
         events.append(("callback", user_id, guild_id))
@@ -416,7 +451,7 @@ def test_modal_start_shapes_notify_before_render(monkeypatch, shape):
         return MagicMock()
 
     monkeypatch.setattr(bv.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(bv, "_post_phase_transition_followup", AsyncMock())
+    monkeypatch.setattr(bv, "_post_phase_transition_followup", transition)
     monkeypatch.setattr(bv, "_send_boss_victory_neon", AsyncMock())
 
     async def scenario():
@@ -441,6 +476,9 @@ def test_modal_start_shapes_notify_before_render(monkeypatch, shape):
         assert events[0] == ("callback", 42, 7)
         assert sum(event[0] == "callback" for event in events) == 1
         assert any(event[0] == "render" for event in events)
+        if shape.get("phase2_incoming") or shape.get("phase3_incoming"):
+            transition.assert_awaited_once()
+            assert transition.call_args.kwargs["on_boss_resolved"] is callback
 
     asyncio.run(scenario())
 
@@ -617,6 +655,38 @@ def test_resume_shapes_notify_once_before_render(shape):
         assert sum(event[0] == "callback" for event in events) == 1
         assert sum(event[0] == "render" for event in events) == 1
         service.resume_boss_duel.assert_called_once_with(42, 7, 1)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase_flag", ["phase2_incoming", "phase3_incoming"])
+def test_prompted_pinnacle_phase_clear_posts_next_encounter(monkeypatch, phase_flag):
+    transition = AsyncMock()
+    monkeypatch.setattr(bv, "_post_phase_transition_followup", transition)
+
+    async def scenario():
+        view = bv.BossDuelView(
+            dig_service=MagicMock(),
+            user_id=42,
+            guild_id=7,
+            initial_result={"pending_prompt": {"options": []}},
+            risk_tier="bold",
+            wager=12,
+        )
+        view.message = SimpleNamespace(edit=AsyncMock(), channel=SimpleNamespace())
+        result = SimpleNamespace(**_result(
+            **{phase_flag: True},
+            is_pinnacle=True,
+            boss_name="The Digger Unbound",
+            payout=0,
+            jc_delta=0,
+        ))
+
+        await view._render_resolution(result)
+
+        transition.assert_awaited_once()
+        cleared_embed = view.message.edit.await_args.kwargs["embed"]
+        assert cleared_embed.title == "Phase Cleared"
 
     asyncio.run(scenario())
 
