@@ -91,10 +91,13 @@ from commands.betting_helpers.wheel_embeds import (
     wedge_ev as _wedge_ev,
 )
 from commands.betting_helpers.wheel_outcomes import (
+    ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT,
     WheelOutcomeContext,
     WheelOutcomeProcessor,
     WheelOutcomeState,
     eruption_reward,
+    filter_visible_leaderboard,
+    has_guild_member_snapshot,
 )
 from commands.betting_helpers.wheel_views import (
     DiscoverView,
@@ -294,6 +297,28 @@ class BettingCommands(commands.Cog):
     def _get_neon_service(self):
         """Get the NeonDegenService from the bot, or None if unavailable."""
         return get_neon_service(self.bot)
+
+    async def _get_visible_balance_leaderboard(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        *,
+        limit: int,
+    ) -> list:
+        """Return balance leaders using the same membership rule as `/leaderboard`."""
+        query_limit = (
+            ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT
+            if has_guild_member_snapshot(interaction.guild)
+            else limit
+        )
+        players = await asyncio.to_thread(
+            functools.partial(
+                self.player_service.get_leaderboard,
+                guild_id,
+                limit=query_limit,
+            )
+        )
+        return filter_visible_leaderboard(players, interaction.guild, limit=limit)
 
     def _adjust_gamba_balance(
         self,
@@ -747,12 +772,10 @@ class BettingCommands(commands.Cog):
             explosion_is_bankrupt = new_balance < 0
             explosion_is_golden = False
             if not explosion_is_bankrupt:
-                top_n = await asyncio.to_thread(
-                    functools.partial(
-                        self.player_service.get_leaderboard,
-                        guild_id,
-                        limit=WHEEL_GOLDEN_TOP_N,
-                    )
+                top_n = await self._get_visible_balance_leaderboard(
+                    interaction,
+                    guild_id,
+                    limit=WHEEL_GOLDEN_TOP_N,
                 )
                 explosion_is_golden = user_id in {p.discord_id for p in top_n}
 
@@ -845,17 +868,26 @@ class BettingCommands(commands.Cog):
         # Golden Wheel eligibility: top-N balance holders get the golden wheel
         # Bankrupt/penalty wheel always takes priority — golden wheel only for non-bad-gamba
         is_golden = False
+        visible_players = []
+        top_n = []
         if not is_eligible_for_bad_gamba:
-            top_n = await asyncio.to_thread(
-                functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N)
+            visible_players = await self._get_visible_balance_leaderboard(
+                interaction,
+                guild_id,
+                limit=(
+                    ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT
+                    if has_guild_member_snapshot(interaction.guild)
+                    else WHEEL_GOLDEN_TOP_N
+                ),
             )
+            top_n = visible_players[:WHEEL_GOLDEN_TOP_N]
             top_n_ids = {p.discord_id for p in top_n}
             is_golden = user_id in top_n_ids
 
         # Public announcement when a top-N player spins the golden wheel
         if is_golden and interaction.channel:
             top_3_lines = "\n".join(
-                f"**#{i+1}** {p.name} — {p.jopacoin_balance} {JOPACOIN_EMOTE}"
+                f"**#{i+1}** <@{p.discord_id}> — {p.jopacoin_balance} {JOPACOIN_EMOTE}"
                 for i, p in enumerate(top_n)
             )
             announce_embed = discord.Embed(
@@ -876,20 +908,40 @@ class BettingCommands(commands.Cog):
         if is_golden:
             # Fetch live data to compute OVEREXTENDED dynamically so EV stays pinned to target
             # as server wealth changes (TRICKLE_DOWN, DIVIDEND, COMPOUND all scale with balances)
-            top_n_extended = await asyncio.to_thread(
-                functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N + 1)
-            )
+            if has_guild_member_snapshot(interaction.guild):
+                top_n_extended = visible_players[:WHEEL_GOLDEN_TOP_N + 1]
+                total_positive_live = sum(
+                    max(0, player.jopacoin_balance)
+                    for player in visible_players
+                )
+                bottom_players_live = [
+                    player
+                    for player in reversed(visible_players)
+                    if player.jopacoin_balance >= 1
+                ][:30]
+            else:
+                top_n_extended = await self._get_visible_balance_leaderboard(
+                    interaction,
+                    guild_id,
+                    limit=WHEEL_GOLDEN_TOP_N + 1,
+                )
+                total_positive_live = await asyncio.to_thread(
+                    self.player_service.get_total_positive_balance,
+                    guild_id,
+                )
+                bottom_players_live = await asyncio.to_thread(
+                    functools.partial(
+                        self.player_service.get_leaderboard_bottom,
+                        guild_id,
+                        limit=30,
+                        min_balance=1,
+                    )
+                )
             rank_next_live = top_n_extended[WHEEL_GOLDEN_TOP_N] if len(top_n_extended) > WHEEL_GOLDEN_TOP_N else None
             rank_next_balance_live = (
                 rank_next_live.jopacoin_balance
                 if rank_next_live and rank_next_live.jopacoin_balance > 0
                 else None
-            )
-            total_positive_live = await asyncio.to_thread(
-                self.player_service.get_total_positive_balance, guild_id
-            )
-            bottom_players_live = await asyncio.to_thread(
-                functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=30, min_balance=1)
             )
             bottom_balances_live = [p.jopacoin_balance for p in bottom_players_live if p.discord_id != user_id]
             other_top_balances_live = [

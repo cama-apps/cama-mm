@@ -13,6 +13,9 @@ Covers:
   TRICKLE_DOWN, DIVIDEND, HOSTILE_TAKEOVER, CROWN JEWEL (scaled 200 JC)
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from tests.conftest import TEST_GUILD_ID
@@ -359,6 +362,129 @@ class TestGoldenWheelEligibilityLogic:
             # This block never executes
             is_golden = True
         assert is_golden is False
+
+
+class TestGoldenWheelVisibleLeaderboard:
+    """Golden ranks must match the member-filtered balance leaderboard."""
+
+    @staticmethod
+    def _player(discord_id: int, balance: int):
+        from domain.models.player import Player
+
+        return Player(
+            name=f"Player {discord_id}",
+            mmr=None,
+            jopacoin_balance=balance,
+            discord_id=discord_id,
+        )
+
+    def test_departed_players_do_not_displace_visible_top_three(self):
+        from commands.betting_helpers.wheel_outcomes import (
+            filter_visible_leaderboard,
+        )
+
+        raw_leaders = [
+            self._player(99, 10_000),  # Registered, but no longer in the guild.
+            self._player(1, 900),
+            self._player(2, 800),
+            self._player(3, 700),
+        ]
+        guild = SimpleNamespace(
+            members=[
+                SimpleNamespace(id=1),
+                SimpleNamespace(id=2),
+                SimpleNamespace(id=3),
+            ]
+        )
+
+        visible = filter_visible_leaderboard(raw_leaders, guild, limit=3)
+
+        assert [player.discord_id for player in visible] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_golden_lookup_fetches_past_raw_top_three_before_filtering(self):
+        from commands.betting import BettingCommands
+        from commands.betting_helpers.wheel_outcomes import (
+            ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT,
+        )
+
+        raw_leaders = [
+            self._player(99, 10_000),
+            self._player(98, 9_000),
+            self._player(1, 900),
+            self._player(2, 800),
+            self._player(3, 700),
+        ]
+        player_service = MagicMock()
+        player_service.get_leaderboard.return_value = raw_leaders
+        command = object.__new__(BettingCommands)
+        command.player_service = player_service
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(
+                members=[
+                    SimpleNamespace(id=1),
+                    SimpleNamespace(id=2),
+                    SimpleNamespace(id=3),
+                ]
+            )
+        )
+
+        visible = await command._get_visible_balance_leaderboard(
+            interaction,
+            TEST_GUILD_ID,
+            limit=3,
+        )
+
+        assert [player.discord_id for player in visible] == [1, 2, 3]
+        player_service.get_leaderboard.assert_called_once_with(
+            TEST_GUILD_ID,
+            limit=ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT,
+        )
+
+    @pytest.mark.asyncio
+    async def test_dividend_uses_visible_guild_wealth(self):
+        from commands.betting_helpers.wheel_outcomes import (
+            WheelOutcomeContext,
+            WheelOutcomeProcessor,
+            WheelOutcomeState,
+        )
+
+        player_service = MagicMock()
+        player_service.get_leaderboard.return_value = [
+            self._player(99, 100_000),  # Departed wealth must not affect payout.
+            self._player(1, 2_500),
+            self._player(2, 1_500),
+        ]
+        command = MagicMock()
+        command.player_service = player_service
+        command._credit_gamba_outcome = AsyncMock(return_value=(2_516, 0))
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(
+                members=[SimpleNamespace(id=1), SimpleNamespace(id=2)]
+            )
+        )
+        context = WheelOutcomeContext(
+            command=command,
+            interaction=interaction,
+            user_id=1,
+            guild_id=TEST_GUILD_ID,
+            bankruptcy_service=None,
+            penalty_games_remaining=0,
+            effects=None,
+            mana_effects_service=None,
+            is_bad_gamba=False,
+            hostile_event_prefix="golden:test",
+        )
+        state = WheelOutcomeState(
+            ("DIVIDEND", "DIVIDEND", "#ffd700"),
+            new_balance=2_500,
+        )
+
+        await WheelOutcomeProcessor(context, state).process()
+
+        call = command._credit_gamba_outcome.await_args
+        assert call.args[3] == scale_minigame_jc_delta(20)
+        assert call.args[6] == {"total_positive_balance": 4_000}
 
 
 # ---------------------------------------------------------------------------
