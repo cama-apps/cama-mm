@@ -502,6 +502,7 @@ class SchemaManager:
                 "create_disburse_vote_history",
                 self._migration_create_disburse_vote_history,
             ),
+            ("create_duel_challenges_table", self._migration_create_duel_challenges_table),
         ]
 
     # --- Migrations ---
@@ -619,6 +620,60 @@ class SchemaManager:
             CREATE INDEX IF NOT EXISTS idx_disburse_vote_history_proposal
             ON disburse_vote_history(guild_id, proposal_id, finalized_at)
             """
+        )
+
+    def _migration_create_duel_challenges_table(self, cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS duel_challenges (
+                challenge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER,
+                challenger_id INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                wager INTEGER NOT NULL CHECK (wager BETWEEN 500 AND 1000),
+                status TEXT NOT NULL CHECK (status IN (
+                    'pending', 'accepted', 'declined', 'expired',
+                    'resolved', 'voided', 'delivery_failed'
+                )),
+                trial_type TEXT CHECK (
+                    trial_type IS NULL OR trial_type IN ('trial_by_combat', 'trial_of_five')
+                ),
+                challenger_glicko REAL NOT NULL,
+                challenger_rd REAL NOT NULL,
+                recipient_glicko REAL NOT NULL,
+                recipient_rd REAL NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                next_reminder_at INTEGER,
+                responded_at INTEGER,
+                resolved_at INTEGER,
+                winner_id INTEGER,
+                resolution_actor_id INTEGER,
+                CHECK (challenger_id != recipient_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_duel_guild_status "
+            "ON duel_challenges(guild_id, status, created_at DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_duel_challenger_history "
+            "ON duel_challenges(guild_id, challenger_id, created_at DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_duel_recipient_history "
+            "ON duel_challenges(guild_id, recipient_id, created_at DESC)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_duel_due_expiry "
+            "ON duel_challenges(status, expires_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_duel_due_reminder "
+            "ON duel_challenges(status, next_reminder_at)"
         )
 
     def _migration_add_glicko_columns(self, cursor) -> None:
