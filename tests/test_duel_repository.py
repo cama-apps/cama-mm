@@ -121,6 +121,7 @@ def test_create_challenge_escrows_and_snapshots(repo_db_path):
         (1300.0, 500, 500, "punching down"),
         (1500.0, 499, 500, "500"),
         (1500.0, 1001, 1001, "1000"),
+        (1500.0, 500.5, 1000, "whole"),
         (1500.0, 500, 499, "balance"),
     ],
 )
