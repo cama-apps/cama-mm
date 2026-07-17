@@ -36,6 +36,10 @@ logger = logging.getLogger("cama_bot.commands.info")
 # Page sizes differ by tab type due to Discord embed field limits (1024 chars)
 SINGLE_SECTION_PAGE_SIZE = 20  # Balance, Glicko, OpenSkill (single list)
 MULTI_SECTION_PAGE_SIZE = 8  # Gambling (4 sections)
+# Guild-member filtering happens in this view because Discord membership is not
+# available to repositories.  Fetch the complete ranked candidate set first so
+# departed members do not consume the caller's requested display limit.
+ALL_LEADERBOARD_ENTRIES_LIMIT = 2**31 - 1
 
 
 class LeaderboardTab(Enum):
@@ -133,6 +137,12 @@ class UnifiedLeaderboardView(discord.ui.View):
         """
         return self.interaction.guild is not None
 
+    def _candidate_limit(self) -> int:
+        """Return the pre-membership-filter query limit for leaderboard data."""
+        if self._should_filter_by_guild():
+            return ALL_LEADERBOARD_ENTRIES_LIMIT
+        return self.limit
+
     async def _load_tab_data(self, tab: LeaderboardTab) -> None:
         """Load data for a tab if not already loaded."""
         state = self._tab_states[tab]
@@ -158,7 +168,11 @@ class UnifiedLeaderboardView(discord.ui.View):
         """Fetch balance leaderboard data."""
         rating_system = CamaRatingSystem()
         players = await asyncio.to_thread(
-            functools.partial(self.cog.player_service.get_leaderboard, self.guild_id, limit=self.limit)
+            functools.partial(
+                self.cog.player_service.get_leaderboard,
+                self.guild_id,
+                limit=self._candidate_limit(),
+            )
         )
         total_count = await asyncio.to_thread(self.cog.player_service.get_player_count, self.guild_id)
         debtors = await asyncio.to_thread(self.cog.player_service.get_players_with_negative_balance, self.guild_id)
@@ -196,6 +210,10 @@ class UnifiedLeaderboardView(discord.ui.View):
         if should_filter:
             debtors = [d for d in debtors if d["discord_id"] in guild_members]
 
+        if should_filter:
+            total_count = len(players_with_stats)
+        players_with_stats = players_with_stats[:self.limit]
+
         state.data = {
             "players": players_with_stats,
             "total_count": total_count,
@@ -210,7 +228,11 @@ class UnifiedLeaderboardView(discord.ui.View):
             return
 
         leaderboard = await asyncio.to_thread(
-            functools.partial(self.cog.gambling_stats_service.get_leaderboard, self.guild_id, limit=self.limit)
+            functools.partial(
+                self.cog.gambling_stats_service.get_leaderboard,
+                self.guild_id,
+                limit=self._candidate_limit(),
+            )
         )
 
         guild_members = self._get_guild_members()
@@ -221,6 +243,11 @@ class UnifiedLeaderboardView(discord.ui.View):
             leaderboard.down_bad = [e for e in leaderboard.down_bad if e.discord_id in guild_members]
             leaderboard.hall_of_degen = [e for e in leaderboard.hall_of_degen if e.discord_id in guild_members]
             leaderboard.biggest_gamblers = [e for e in leaderboard.biggest_gamblers if e.discord_id in guild_members]
+
+        leaderboard.top_earners = leaderboard.top_earners[:self.limit]
+        leaderboard.down_bad = leaderboard.down_bad[:self.limit]
+        leaderboard.hall_of_degen = leaderboard.hall_of_degen[:self.limit]
+        leaderboard.biggest_gamblers = leaderboard.biggest_gamblers[:self.limit]
 
         # Collect all unique discord_ids (after filtering)
         all_discord_ids = set()
@@ -255,7 +282,11 @@ class UnifiedLeaderboardView(discord.ui.View):
         """Fetch Glicko-2 rating leaderboard data."""
         rating_system = CamaRatingSystem()
         players = await asyncio.to_thread(
-            functools.partial(self.cog.player_service.get_leaderboard_by_glicko, self.guild_id, limit=self.limit)
+            functools.partial(
+                self.cog.player_service.get_leaderboard_by_glicko,
+                self.guild_id,
+                limit=self._candidate_limit(),
+            )
         )
         total_rated = await asyncio.to_thread(
             functools.partial(self.cog.player_service.get_rated_player_count, self.guild_id, rating_type="glicko")
@@ -282,6 +313,10 @@ class UnifiedLeaderboardView(discord.ui.View):
                 "losses": player.losses or 0,
             })
 
+        if should_filter:
+            total_rated = len(players_with_stats)
+        players_with_stats = players_with_stats[:self.limit]
+
         state.data = {
             "players": players_with_stats,
             "total_rated": total_rated,
@@ -292,7 +327,11 @@ class UnifiedLeaderboardView(discord.ui.View):
         """Fetch OpenSkill rating leaderboard data."""
         os_system = CamaOpenSkillSystem()
         players = await asyncio.to_thread(
-            functools.partial(self.cog.player_service.get_leaderboard_by_openskill, self.guild_id, limit=self.limit)
+            functools.partial(
+                self.cog.player_service.get_leaderboard_by_openskill,
+                self.guild_id,
+                limit=self._candidate_limit(),
+            )
         )
         total_rated = await asyncio.to_thread(
             functools.partial(self.cog.player_service.get_rated_player_count, self.guild_id, rating_type="openskill")
@@ -319,6 +358,10 @@ class UnifiedLeaderboardView(discord.ui.View):
                 "losses": player.losses or 0,
             })
 
+        if should_filter:
+            total_rated = len(players_with_stats)
+        players_with_stats = players_with_stats[:self.limit]
+
         state.data = {
             "players": players_with_stats,
             "total_rated": total_rated,
@@ -333,10 +376,18 @@ class UnifiedLeaderboardView(discord.ui.View):
             return
 
         top_senders = await asyncio.to_thread(
-            functools.partial(tip_service.get_top_senders, self.guild_id, limit=self.limit)
+            functools.partial(
+                tip_service.get_top_senders,
+                self.guild_id,
+                limit=self._candidate_limit(),
+            )
         )
         top_receivers = await asyncio.to_thread(
-            functools.partial(tip_service.get_top_receivers, self.guild_id, limit=self.limit)
+            functools.partial(
+                tip_service.get_top_receivers,
+                self.guild_id,
+                limit=self._candidate_limit(),
+            )
         )
         total_volume = await asyncio.to_thread(tip_service.get_total_tip_volume, self.guild_id)
 
@@ -346,6 +397,9 @@ class UnifiedLeaderboardView(discord.ui.View):
         if self._should_filter_by_guild():
             top_senders = [e for e in top_senders if e["discord_id"] in guild_members]
             top_receivers = [e for e in top_receivers if e["discord_id"] in guild_members]
+
+        top_senders = top_senders[:self.limit]
+        top_receivers = top_receivers[:self.limit]
 
         state.data = {
             "top_senders": top_senders,
@@ -365,7 +419,7 @@ class UnifiedLeaderboardView(discord.ui.View):
         """Fetch trivia leaderboard data (best streaks, 7-day rolling window)."""
         entries = await asyncio.to_thread(
             self.cog.player_service.get_trivia_leaderboard, self.guild_id,
-            7, self.limit,
+            7, self._candidate_limit(),
         )
 
         guild_members = self._get_guild_members()
@@ -373,6 +427,8 @@ class UnifiedLeaderboardView(discord.ui.View):
         # Filter out users who have left the server (only in guild context)
         if self._should_filter_by_guild():
             entries = [e for e in entries if e["discord_id"] in guild_members]
+
+        entries = entries[:self.limit]
 
         state.data = entries
         state.max_page = max(0, (len(entries) - 1) // SINGLE_SECTION_PAGE_SIZE)
