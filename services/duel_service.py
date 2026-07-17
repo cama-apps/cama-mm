@@ -112,7 +112,11 @@ class DuelService:
         return self.repo.get_due_challenge_ids(now)
 
     def process_due(self, challenge_id, guild_id, now):
-        expired = self.repo.expire_atomic(challenge_id, guild_id, now)
-        if expired is not None:
-            return DuelDueResult(DuelDueKind.EXPIRED, expired)
-        return self.repo.claim_reminder_atomic(challenge_id, guild_id, now)
+        reminder = self.repo.claim_reminder_atomic(challenge_id, guild_id, now)
+        if reminder is not None:
+            return reminder
+        try:
+            expired = self.repo.expire_atomic(challenge_id, guild_id, now)
+        except ValueError:
+            return None
+        return DuelDueResult(DuelDueKind.EXPIRED, expired)

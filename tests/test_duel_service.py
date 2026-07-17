@@ -1,11 +1,13 @@
 """Tests for the duel challenge service facade."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from domain.models.duel import DuelDueKind, DuelResolution, DuelTrial
+from repositories.duel_challenge_repository import DuelChallengeRepository
+from repositories.player_repository import PlayerRepository
 from services.duel_service import (
     CHALLENGER_COOLDOWN_SECONDS,
     RECIPIENT_COOLDOWN_SECONDS,
@@ -14,6 +16,8 @@ from services.duel_service import (
 )
 
 GUILD_ID = 123
+NOW = 1_000_000
+DAY = 86400
 
 
 @pytest.fixture
@@ -24,6 +28,24 @@ def duel_repo_mock():
     repo.get_pending_for_recipient.return_value = repo.pending
     repo.get_challenge.return_value = repo.challenge
     return repo
+
+
+def create_real_pending_duel(repo_db_path):
+    players = PlayerRepository(repo_db_path)
+    for player_id, rating in ((1, 1400.0), (2, 1500.0)):
+        players.add(
+            discord_id=player_id,
+            discord_username=f"Player {player_id}",
+            guild_id=GUILD_ID,
+            glicko_rating=rating,
+            glicko_rd=80.0,
+            glicko_volatility=0.06,
+        )
+    players.update_balance(1, GUILD_ID, 500)
+    repo = DuelChallengeRepository(repo_db_path)
+    service = DuelService(repo, clock=lambda: NOW)
+    challenge = service.issue(GUILD_ID, 77, 1, 2, 500)
+    return service, challenge
 
 
 def test_service_issue_routes_policy_and_integer_clock(duel_repo_mock):
@@ -182,8 +204,9 @@ def test_service_get_due_challenge_ids_is_thin_wrapper(duel_repo_mock):
     duel_repo_mock.get_due_challenge_ids.assert_called_once_with(1_000_000)
 
 
-def test_service_process_due_returns_expiry_before_reminder(duel_repo_mock):
+def test_service_process_due_returns_expiry_after_reminder_declines(duel_repo_mock):
     expired = object()
+    duel_repo_mock.claim_reminder_atomic.return_value = None
     duel_repo_mock.expire_atomic.return_value = expired
     service = DuelService(duel_repo_mock)
 
@@ -191,18 +214,60 @@ def test_service_process_due_returns_expiry_before_reminder(duel_repo_mock):
 
     assert result.kind is DuelDueKind.EXPIRED
     assert result.challenge is expired
-    duel_repo_mock.expire_atomic.assert_called_once_with(7, GUILD_ID, 1_000_000)
-    duel_repo_mock.claim_reminder_atomic.assert_not_called()
+    assert duel_repo_mock.method_calls == [
+        call.claim_reminder_atomic(7, GUILD_ID, 1_000_000),
+        call.expire_atomic(7, GUILD_ID, 1_000_000),
+    ]
 
 
-def test_service_process_due_claims_reminder_when_not_expired(duel_repo_mock):
+def test_service_process_due_returns_claimed_reminder(duel_repo_mock):
     reminder = object()
-    duel_repo_mock.expire_atomic.return_value = None
     duel_repo_mock.claim_reminder_atomic.return_value = reminder
     service = DuelService(duel_repo_mock)
 
     assert service.process_due(7, GUILD_ID, 1_000_000) is reminder
-    duel_repo_mock.expire_atomic.assert_called_once_with(7, GUILD_ID, 1_000_000)
     duel_repo_mock.claim_reminder_atomic.assert_called_once_with(
         7, GUILD_ID, 1_000_000
     )
+    duel_repo_mock.expire_atomic.assert_not_called()
+
+
+def test_service_process_due_returns_none_for_stale_challenge(duel_repo_mock):
+    duel_repo_mock.claim_reminder_atomic.return_value = None
+    duel_repo_mock.expire_atomic.side_effect = ValueError("stale")
+    service = DuelService(duel_repo_mock)
+
+    assert service.process_due(7, GUILD_ID, 1_000_000) is None
+
+
+def test_service_process_due_real_repository_returns_reminder(repo_db_path):
+    service, challenge = create_real_pending_duel(repo_db_path)
+
+    result = service.process_due(challenge.challenge_id, GUILD_ID, NOW + DAY)
+
+    assert result is not None
+    assert result.kind is DuelDueKind.REMINDER
+    assert result.challenge.challenge_id == challenge.challenge_id
+    assert result.challenge.next_reminder_at == NOW + 2 * DAY
+
+
+def test_service_process_due_real_repository_returns_expiry(repo_db_path):
+    service, challenge = create_real_pending_duel(repo_db_path)
+
+    result = service.process_due(
+        challenge.challenge_id,
+        GUILD_ID,
+        NOW + RESPONSE_SECONDS,
+    )
+
+    assert result is not None
+    assert result.kind is DuelDueKind.EXPIRED
+    assert result.challenge.challenge_id == challenge.challenge_id
+
+
+def test_service_process_due_real_repository_returns_none_when_not_due(repo_db_path):
+    service, challenge = create_real_pending_duel(repo_db_path)
+
+    result = service.process_due(challenge.challenge_id, GUILD_ID, NOW + DAY - 1)
+
+    assert result is None
