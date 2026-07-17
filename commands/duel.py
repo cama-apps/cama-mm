@@ -170,8 +170,16 @@ class DuelCommands(commands.Cog):
                 guild_id,
                 message.id,
             )
+        except ValueError:
+            logger.info(
+                "Duel challenge %s changed before initial message binding",
+                challenge.challenge_id,
+            )
+            await self._delete_unbound_replacement(message, challenge)
+            return
         except Exception:
             logger.exception("Unable to bind delivered duel challenge message")
+            await self._delete_unbound_replacement(message, challenge)
             await self._refund_failed_delivery(
                 interaction,
                 challenge,
@@ -333,17 +341,15 @@ class DuelCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         if challenge_id is not None:
-            pending = next(
-                (
-                    challenge
-                    for challenge in self.duel_service.list_outstanding(guild_id)
-                    if challenge.guild_id == guild_id
-                    and challenge.status is DuelStatus.PENDING
-                    and challenge.recipient_id == interaction.user.id
-                ),
-                None,
-            )
-            if pending is None or pending.challenge_id != challenge_id:
+            pending = self.duel_service.get_challenge(challenge_id, guild_id)
+            if (
+                pending is None
+                or pending.challenge_id != challenge_id
+                or pending.guild_id != guild_id
+                or pending.status is not DuelStatus.PENDING
+                or pending.message_id is None
+                or pending.recipient_id != interaction.user.id
+            ):
                 await self._send_immediate_error(
                     interaction,
                     "This duel challenge is unavailable or is not yours to answer.",
@@ -375,7 +381,12 @@ class DuelCommands(commands.Cog):
                 f"The {challenge.decline_penalty} JC penalty was paid to the challenger."
             )
         else:
-            detail = TRIAL_DETAILS[challenge.trial_type]
+            detail = (
+                f"Challenge #{challenge.challenge_id}: "
+                f"<@{challenge.challenger_id}> vs <@{challenge.recipient_id}>. "
+                f"Both {challenge.wager} JC stakes are locked. "
+                f"{TRIAL_DETAILS[challenge.trial_type]}"
+            )
         await safe_followup(
             interaction,
             content=f"{flavor}\n{detail}",
@@ -408,7 +419,8 @@ class DuelCommands(commands.Cog):
         if result.kind is DuelDueKind.EXPIRED:
             await self._edit_original(challenge, flavor)
             content = (
-                f"{flavor}\nChallenge #{challenge.challenge_id} expired unanswered. "
+                f"{flavor}\nChallenge #{challenge.challenge_id} was declined in "
+                "cowardice by silence. "
                 f"The {challenge.decline_penalty} JC penalty was paid to the challenger."
             )
             allowed_mentions = discord.AllowedMentions.none()
@@ -598,6 +610,7 @@ class DuelCommands(commands.Cog):
                 challenge.guild_id,
             )
             await self._delete_unbound_replacement(message, challenge)
+            self._mark_recovery_delivery_failed(challenge)
             return
 
         view = DuelChallengeView(self, challenge.challenge_id)
@@ -689,11 +702,18 @@ class DuelCommands(commands.Cog):
         guild_id: int,
         actor_id: int,
     ) -> None:
-        self.duel_service.mark_delivery_failed(
-            challenge.challenge_id,
-            guild_id,
-            actor_id,
-        )
+        try:
+            self.duel_service.mark_delivery_failed(
+                challenge.challenge_id,
+                guild_id,
+                actor_id,
+            )
+        except ValueError:
+            logger.info(
+                "Duel challenge %s changed before initial delivery refund",
+                challenge.challenge_id,
+            )
+            return
         try:
             await interaction.followup.send(
                 content=(

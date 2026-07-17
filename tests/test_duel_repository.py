@@ -484,6 +484,26 @@ def test_delivery_failure_refunds_and_does_not_block_retry(repo_db_path):
     assert retry.status is DuelStatus.PENDING
 
 
+def test_delivery_failure_cannot_refund_a_bound_challenge(repo_db_path):
+    players = seed_player(repo_db_path, 1, 1400.0, 550)
+    seed_player(repo_db_path, 2, 1500.0, 0)
+    repo = DuelChallengeRepository(repo_db_path)
+    challenge = create_challenge(repo)
+    bound = repo.bind_message(challenge.challenge_id, GUILD_ID, 1234)
+
+    with pytest.raises(ValueError, match="unbound pending"):
+        repo.mark_delivery_failed_atomic(bound.challenge_id, GUILD_ID, NOW + 1, 1)
+
+    stored = repo.get_challenge(bound.challenge_id, GUILD_ID)
+    assert stored.status is DuelStatus.PENDING
+    assert stored.message_id == 1234
+    assert players.get_balance(1, GUILD_ID) == 0
+    assert not any(
+        row["reason"] == "initial_delivery_refund"
+        for row in ledger_rows(repo_db_path, bound.challenge_id)
+    )
+
+
 def test_decline_uses_ceiling_half_and_allows_debt(duel_fixture):
     repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
     declined = repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, 1_000_100, 2)

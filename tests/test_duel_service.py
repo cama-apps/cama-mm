@@ -168,6 +168,15 @@ def test_service_bind_message_is_thin_wrapper(duel_repo_mock):
     duel_repo_mock.bind_message.assert_called_once_with(7, GUILD_ID, 44)
 
 
+def test_service_get_challenge_is_thin_wrapper(duel_repo_mock):
+    expected = object()
+    duel_repo_mock.get_challenge.return_value = expected
+    service = DuelService(duel_repo_mock)
+
+    assert service.get_challenge(7, GUILD_ID) is expected
+    duel_repo_mock.get_challenge.assert_called_once_with(7, GUILD_ID)
+
+
 def test_service_mark_delivery_failed_uses_integer_clock(duel_repo_mock):
     expected = object()
     duel_repo_mock.mark_delivery_failed_atomic.return_value = expected

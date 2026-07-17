@@ -71,6 +71,7 @@ def recipient():
 def message():
     message = SimpleNamespace(id=300)
     message.edit = AsyncMock()
+    message.delete = AsyncMock()
     return message
 
 
@@ -113,6 +114,7 @@ def duel_service():
         resolved_at=1_700_000_200,
         next_reminder_at=None,
     )
+    service.get_challenge.return_value = make_challenge()
     service.list_outstanding.return_value = [make_challenge()]
     service.list_pending_all.return_value = []
     return service
@@ -308,7 +310,7 @@ async def test_issue_refunds_escrow_when_initial_delivery_fails(
 
 
 @pytest.mark.asyncio
-async def test_issue_bind_failure_refunds_and_leaves_posted_message_inert(
+async def test_issue_bind_race_discards_duplicate_without_cancelling_challenge(
     cog, interaction, recipient, duel_service, message
 ):
     duel_service.bind_message.side_effect = ValueError("bind race")
@@ -317,10 +319,44 @@ async def test_issue_bind_failure_refunds_and_leaves_posted_message_inert(
 
     initial = interaction.followup.send.await_args_list[0]
     assert "view" not in initial.kwargs
-    duel_service.mark_delivery_failed.assert_called_once_with(7, GUILD_ID, RECIPIENT_ID)
+    message.delete.assert_awaited_once()
+    duel_service.mark_delivery_failed.assert_not_called()
     message.edit.assert_not_awaited()
+    assert interaction.followup.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_issue_bind_error_deletes_inert_post_before_refund(
+    cog, interaction, recipient, duel_service, message
+):
+    duel_service.bind_message.side_effect = RuntimeError("database unavailable")
+
+    await DuelCommands.issue.callback(cog, interaction, recipient, 500)
+
+    message.delete.assert_awaited_once()
+    duel_service.mark_delivery_failed.assert_called_once_with(
+        7, GUILD_ID, RECIPIENT_ID
+    )
     feedback = interaction.followup.send.await_args_list[-1].kwargs["content"]
     assert "wager and 50 JC issuance fee were refunded" in feedback
+
+
+@pytest.mark.asyncio
+async def test_issue_delivery_failure_does_not_refund_a_concurrently_bound_challenge(
+    cog, interaction, recipient, duel_service, monkeypatch
+):
+    monkeypatch.setattr(
+        "commands.duel.safe_followup",
+        AsyncMock(side_effect=discord.DiscordException("delivery failed")),
+    )
+    duel_service.mark_delivery_failed.side_effect = ValueError("already bound")
+
+    await DuelCommands.issue.callback(cog, interaction, recipient, 500)
+
+    duel_service.mark_delivery_failed.assert_called_once_with(
+        7, GUILD_ID, RECIPIENT_ID
+    )
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -356,21 +392,25 @@ async def test_recipient_button_and_command_share_handler(cog, interaction, duel
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outstanding", "challenge_id"),
+    ("challenge", "challenge_id"),
     [
-        ([], 7),
-        ([make_challenge(recipient_id=99)], 7),
-        ([make_challenge(challenge_id=8)], 7),
-        ([make_challenge(guild_id=999)], 7),
+        (None, 7),
+        (make_challenge(recipient_id=99), 7),
+        (make_challenge(challenge_id=8), 7),
+        (make_challenge(guild_id=999), 7),
+        (make_challenge(status=DuelStatus.ACCEPTED), 7),
+        (make_challenge(message_id=None), 7),
     ],
 )
 async def test_button_rejects_stale_unauthorized_or_cross_guild_challenge(
-    cog, interaction, duel_service, outstanding, challenge_id
+    cog, interaction, duel_service, challenge, challenge_id
 ):
-    duel_service.list_outstanding.return_value = outstanding
+    duel_service.get_challenge.return_value = challenge
 
     await cog.handle_response(interaction, challenge_id, "decline")
 
+    duel_service.get_challenge.assert_called_once_with(challenge_id, GUILD_ID)
+    duel_service.list_outstanding.assert_not_called()
     duel_service.respond.assert_not_called()
     interaction.response.send_message.assert_awaited_once()
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
@@ -413,7 +453,11 @@ async def test_acceptance_edits_original_and_posts_approved_trial_detail(
         ANY,
     )
     announcement = interaction.followup.send.await_args
-    assert detail in announcement.kwargs["content"]
+    content = announcement.kwargs["content"]
+    assert detail in content
+    assert "Challenge #7" in content
+    assert f"<@{CHALLENGER_ID}> vs <@{RECIPIENT_ID}>" in content
+    assert "500 JC" in content
     _assert_mentions_disabled(announcement.kwargs["allowed_mentions"])
 
 
@@ -592,7 +636,7 @@ async def test_due_expiry_edits_original_and_posts_without_mentions(
     assert _fields(message.edit.await_args.kwargs["embed"])["Status"] == "Expired"
     assert message.edit.await_args.kwargs["view"] is None
     sent = channel.send.await_args
-    assert "expired unanswered" in sent.kwargs["content"]
+    assert "declined in cowardice by silence" in sent.kwargs["content"]
     _assert_mentions_disabled(sent.kwargs["allowed_mentions"])
 
 
@@ -838,6 +882,26 @@ async def test_setup_discards_replacement_when_another_process_binds_first(
 
     replacement.delete.assert_awaited_once()
     duel_service.mark_delivery_failed.assert_not_called()
+    bot.add_view.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_setup_bind_error_deletes_replacement_and_refunds_unbound_challenge(
+    bot, duel_service, interaction
+):
+    replacement = SimpleNamespace(id=301, edit=AsyncMock(), delete=AsyncMock())
+    interaction.channel.send.return_value = replacement
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=8, message_id=None),
+    ]
+    duel_service.bind_message.side_effect = RuntimeError("database unavailable")
+
+    await setup(bot)
+
+    replacement.delete.assert_awaited_once()
+    duel_service.mark_delivery_failed.assert_called_once_with(
+        8, GUILD_ID, CHALLENGER_ID
+    )
     bot.add_view.assert_not_called()
 
 
