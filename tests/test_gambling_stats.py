@@ -345,6 +345,163 @@ class TestLeaderboard:
         assert len(leaderboard.top_earners) == 1
         assert leaderboard.top_earners[0].discord_id == discord_id2
 
+    def test_server_stats_include_bettors_below_minimum(
+        self, gambling_stats_service, repositories
+    ):
+        """The ranking threshold must not filter server-wide footer totals."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+        bankruptcy_repo = repositories["bankruptcy_repo"]
+
+        eligible_id = _setup_player(player_repo, discord_id=1001, balance=200)
+        for _ in range(3):
+            _place_and_settle_bet(
+                bet_repo,
+                match_repo,
+                player_repo,
+                eligible_id,
+                10,
+                "radiant",
+                "radiant",
+            )
+
+        ineligible_id = _setup_player(player_repo, discord_id=1002, balance=200)
+        for _ in range(2):
+            _place_and_settle_bet(
+                bet_repo,
+                match_repo,
+                player_repo,
+                ineligible_id,
+                20,
+                "radiant",
+                "dire",
+            )
+        bankruptcy_repo.upsert_state(ineligible_id, 0, 1, 0)
+
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, min_bets=3)
+
+        assert [entry.discord_id for entry in leaderboard.top_earners] == [eligible_id]
+        assert all(
+            entry.discord_id != ineligible_id
+            for section in (
+                leaderboard.top_earners,
+                leaderboard.down_bad,
+                leaderboard.hall_of_degen,
+                leaderboard.biggest_gamblers,
+            )
+            for entry in section
+        )
+        assert leaderboard.total_bets == 5
+        assert leaderboard.total_wagered == 70
+        assert leaderboard.total_bankruptcies == 1
+        assert leaderboard.server_stats == {
+            "total_bets": 5,
+            "total_wagered": 70,
+            "unique_gamblers": 2,
+            "avg_bet_size": 14,
+            "total_bankruptcies": 1,
+        }
+
+    def test_leaderboard_with_only_ineligible_bettors_keeps_server_stats(
+        self, gambling_stats_service, repositories
+    ):
+        """Footer totals remain populated when no bettor qualifies to rank."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+
+        discord_id = _setup_player(player_repo, discord_id=1001, balance=100)
+        _place_and_settle_bet(
+            bet_repo,
+            match_repo,
+            player_repo,
+            discord_id,
+            25,
+            "radiant",
+            "radiant",
+        )
+
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, min_bets=3)
+
+        assert leaderboard.top_earners == []
+        assert leaderboard.down_bad == []
+        assert leaderboard.hall_of_degen == []
+        assert leaderboard.biggest_gamblers == []
+        assert leaderboard.server_stats["total_bets"] == 1
+        assert leaderboard.server_stats["total_wagered"] == 25
+        assert leaderboard.server_stats["unique_gamblers"] == 1
+
+    def test_leaderboard_section_ties_use_discord_id(
+        self, gambling_stats_service, repositories
+    ):
+        """All section rankings have a stable discord-id tie breaker."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+
+        for discord_id, winning_team in (
+            (1002, "radiant"),
+            (2002, "dire"),
+            (1001, "radiant"),
+            (2001, "dire"),
+        ):
+            _setup_player(player_repo, discord_id=discord_id, balance=200)
+            for _ in range(3):
+                _place_and_settle_bet(
+                    bet_repo,
+                    match_repo,
+                    player_repo,
+                    discord_id,
+                    10,
+                    "radiant",
+                    winning_team,
+                )
+
+        leaderboard = gambling_stats_service.get_leaderboard(
+            guild_id=0, min_bets=3, limit=10
+        )
+
+        assert [entry.discord_id for entry in leaderboard.top_earners] == [1001, 1002]
+        assert [entry.discord_id for entry in leaderboard.down_bad] == [2001, 2002]
+        assert [entry.discord_id for entry in leaderboard.hall_of_degen] == [
+            1001,
+            1002,
+            2001,
+            2002,
+        ]
+        assert [entry.discord_id for entry in leaderboard.biggest_gamblers] == [
+            1001,
+            1002,
+            2001,
+            2002,
+        ]
+
+    def test_top_earners_excludes_negative_pnl(
+        self, gambling_stats_service, repositories
+    ):
+        """Losing bettors belong in Down Bad, not Top Earners."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+
+        discord_id = _setup_player(player_repo, discord_id=1001, balance=200)
+        for _ in range(3):
+            _place_and_settle_bet(
+                bet_repo,
+                match_repo,
+                player_repo,
+                discord_id,
+                10,
+                "radiant",
+                "dire",
+            )
+
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, min_bets=3)
+
+        assert leaderboard.top_earners == []
+        assert [entry.discord_id for entry in leaderboard.down_bad] == [discord_id]
+
     def test_leaderboard_sections(self, gambling_stats_service, repositories):
         """Test that leaderboard correctly categorizes players."""
         bet_repo = repositories["bet_repo"]

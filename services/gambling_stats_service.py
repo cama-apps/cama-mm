@@ -432,36 +432,22 @@ class GamblingStatsService:
 
         Uses batch queries to avoid N+1 pattern for degen score calculation.
         """
-        summaries = self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=min_bets)
+        # Server stats cover every settled bettor. The minimum only controls
+        # eligibility for the ranked sections.
+        all_summaries = self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=1)
+        summaries = [s for s in all_summaries if s["total_bets"] >= min_bets]
 
-        if not summaries:
-            empty_stats: ServerStats = {
-                "total_bets": 0,
-                "total_wagered": 0,
-                "unique_gamblers": 0,
-                "avg_bet_size": 0,
-                "total_bankruptcies": 0,
-            }
-            return Leaderboard(
-                top_earners=[],
-                down_bad=[],
-                hall_of_degen=[],
-                biggest_gamblers=[],
-                total_wagered=0,
-                total_bets=0,
-                avg_degen_score=0,
-                total_bankruptcies=0,
-                total_loans=0,
-                server_stats=empty_stats,
-            )
-
-        # Get all discord_ids for batch queries
+        # Get discord_ids for leaderboard degen calculations and the wider set
+        # needed for server-wide bankruptcy totals.
         discord_ids = [s["discord_id"] for s in summaries]
+        all_discord_ids = [s["discord_id"] for s in all_summaries]
 
         # Batch fetch all data needed for degen score calculation
         bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, discord_ids)
         bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, discord_ids)
-        bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(discord_ids, guild_id)
+        bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(
+            all_discord_ids, guild_id
+        )
         bulk_unique_matches = self.bet_repo.get_bulk_unique_matches_bet_on(guild_id, discord_ids)
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
@@ -505,24 +491,32 @@ class GamblingStatsService:
             )
 
         # Top earners (sorted by net P&L descending)
-        top_earners = sorted(entries, key=lambda e: e.net_pnl, reverse=True)[:limit]
+        top_earners = sorted(
+            (e for e in entries if e.net_pnl >= 0),
+            key=lambda e: (-e.net_pnl, e.discord_id),
+        )[:limit]
 
         # Down bad (sorted by net P&L ascending, only negative)
-        down_bad = sorted([e for e in entries if e.net_pnl < 0], key=lambda e: e.net_pnl)[:limit]
+        down_bad = sorted(
+            (e for e in entries if e.net_pnl < 0),
+            key=lambda e: (e.net_pnl, e.discord_id),
+        )[:limit]
 
         # Hall of degen (sorted by degen score descending)
         hall_of_degen = sorted(
-            entries, key=lambda e: e.degen_score or 0, reverse=True
+            entries,
+            key=lambda e: (-(e.degen_score or 0), e.discord_id),
         )[:limit]
 
         # Biggest gamblers (sorted by total_wagered descending)
         biggest_gamblers = sorted(
-            entries, key=lambda e: e.total_wagered, reverse=True
+            entries,
+            key=lambda e: (-e.total_wagered, e.discord_id),
         )[:limit]
 
         # Server totals
-        total_wagered = sum(s["total_wagered"] for s in summaries)
-        total_bets_count = sum(s["total_bets"] for s in summaries)
+        total_wagered = sum(s["total_wagered"] for s in all_summaries)
+        total_bets_count = sum(s["total_bets"] for s in all_summaries)
         avg_degen = (
             sum(e.degen_score or 0 for e in entries) / len(entries)
             if entries
@@ -536,7 +530,7 @@ class GamblingStatsService:
         total_loans = self.loan_repo.get_total_loans_taken(guild_id) if self.loan_repo else 0
 
         # Build server stats
-        unique_gamblers = len(summaries)
+        unique_gamblers = len(all_summaries)
         avg_bet_size = int(total_wagered / total_bets_count) if total_bets_count > 0 else 0
         server_stats: ServerStats = {
             "total_bets": total_bets_count,

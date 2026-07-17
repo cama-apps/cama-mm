@@ -506,9 +506,10 @@ class TestGamblingLeaderboardIntegration:
 
         leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
-        # All entries should have total_wagered
-        assert leaderboard.top_earners, "seed data should populate top_earners"
-        entry = leaderboard.top_earners[0]
+        # Every qualifying bettor appears in biggest_gamblers even when nobody
+        # has positive P&L for the Top Earners section.
+        assert leaderboard.biggest_gamblers, "seed data should populate biggest_gamblers"
+        entry = leaderboard.biggest_gamblers[0]
         assert hasattr(entry, "total_wagered"), "LeaderboardEntry missing total_wagered field"
         assert isinstance(entry.total_wagered, int)
 
@@ -529,8 +530,8 @@ class TestGamblingLeaderboardIntegration:
         leaderboard = gambling_stats_service.get_leaderboard(guild_id=TEST_GUILD_ID, limit=5)
 
         # Verify attribute access works (not dict access)
-        assert leaderboard.top_earners, "seed data should populate top_earners"
-        entry = leaderboard.top_earners[0]
+        assert leaderboard.biggest_gamblers, "seed data should populate biggest_gamblers"
+        entry = leaderboard.biggest_gamblers[0]
         # These should NOT raise AttributeError
         _ = entry.discord_id
         _ = entry.net_pnl
