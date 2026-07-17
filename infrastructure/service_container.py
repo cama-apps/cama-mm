@@ -97,8 +97,6 @@ class ServiceContainer:
         self._components["database_runtime"] = Database(db_path=self.db_path)
 
     def _init_repositories(self) -> None:
-        from repositories.player_trivia_repository import PlayerTriviaRepository
-
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
         from repositories.buff_repository import BuffRepository
@@ -119,6 +117,7 @@ class ServiceContainer:
         from repositories.package_deal_repository import PackageDealRepository
         from repositories.pairings_repository import PairingsRepository
         from repositories.player_repository import PlayerRepository
+        from repositories.player_trivia_repository import PlayerTriviaRepository
         from repositories.prediction_repository import PredictionRepository
         from repositories.protection_repository import ProtectionRepository
         from repositories.recalibration_repository import RecalibrationRepository
@@ -488,9 +487,8 @@ class ServiceContainer:
 
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
-        from services.player_trivia_service import PlayerTriviaService
-
         from services.neon_degen_service import NeonDegenService
+        from services.player_trivia_service import PlayerTriviaService
         from services.wrapped_service import WrappedService
 
         c = self._components
