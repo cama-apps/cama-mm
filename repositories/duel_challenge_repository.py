@@ -75,6 +75,7 @@ class DuelChallengeRepository(BaseRepository):
                 SELECT *
                 FROM duel_challenges
                 WHERE guild_id = ? AND recipient_id = ? AND status = 'pending'
+                  AND message_id IS NOT NULL
                 ORDER BY created_at DESC, challenge_id DESC
                 LIMIT 1
                 """,
@@ -89,7 +90,11 @@ class DuelChallengeRepository(BaseRepository):
                 """
                 SELECT *
                 FROM duel_challenges
-                WHERE guild_id = ? AND status IN ('pending', 'accepted')
+                WHERE guild_id = ?
+                  AND (
+                      status = 'accepted'
+                      OR (status = 'pending' AND message_id IS NOT NULL)
+                  )
                 ORDER BY created_at DESC, challenge_id DESC
                 """,
                 (guild_id,),
@@ -661,6 +666,7 @@ class DuelChallengeRepository(BaseRepository):
                 SELECT challenge_id, guild_id
                 FROM duel_challenges
                 WHERE status = 'pending'
+                  AND message_id IS NOT NULL
                   AND (
                       expires_at <= ?
                       OR (next_reminder_at IS NOT NULL AND next_reminder_at <= ?)
@@ -686,11 +692,15 @@ class DuelChallengeRepository(BaseRepository):
             cursor = conn.cursor()
             challenge = self._challenge_from_row(
                 cursor.execute(
-                    "SELECT * FROM duel_challenges WHERE challenge_id = ? AND guild_id = ?",
+                    """
+                    SELECT * FROM duel_challenges
+                    WHERE challenge_id = ? AND guild_id = ?
+                      AND status = 'pending' AND message_id IS NOT NULL
+                    """,
                     (challenge_id, guild_id),
                 ).fetchone()
             )
-            if challenge is None or challenge.status is not DuelStatus.PENDING:
+            if challenge is None:
                 return None
             if challenge.expires_at <= now:
                 return None
@@ -707,6 +717,7 @@ class DuelChallengeRepository(BaseRepository):
                 UPDATE duel_challenges
                 SET next_reminder_at = ?
                 WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
+                  AND message_id IS NOT NULL
                   AND expires_at > ? AND next_reminder_at IS NOT NULL
                   AND next_reminder_at <= ?
                 """,

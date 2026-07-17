@@ -197,8 +197,24 @@ async def test_button_calls_shared_response_handler(cog, interaction):
 
 @pytest.mark.asyncio
 async def test_issue_posts_scoped_ping_and_binds_message(
-    cog, interaction, recipient, duel_service, flavor_service
+    cog, interaction, recipient, duel_service, flavor_service, message
 ):
+    events = []
+
+    async def send_initial(**kwargs):
+        events.append(("send", kwargs.get("view")))
+        return message
+
+    def bind_message(*_args):
+        events.append(("bind", None))
+
+    async def attach_view(**kwargs):
+        events.append(("edit", kwargs.get("view")))
+
+    interaction.followup.send.side_effect = send_initial
+    duel_service.bind_message.side_effect = bind_message
+    message.edit.side_effect = attach_view
+
     await DuelCommands.issue.callback(cog, interaction, recipient, 500)
 
     interaction.response.defer.assert_awaited_once()
@@ -214,13 +230,17 @@ async def test_issue_posts_scoped_ping_and_binds_message(
     assert flavor_service.generate.await_args.args[2]["issuance_fee"] == 50
     sent = interaction.followup.send.await_args
     assert sent.kwargs["content"] == recipient.mention
-    assert isinstance(sent.kwargs["view"], DuelChallengeView)
+    assert "view" not in sent.kwargs
     allowed = sent.kwargs["allowed_mentions"]
     assert allowed.everyone is False
     assert allowed.roles is False
     assert allowed.replied_user is False
     assert allowed.users == [recipient]
     duel_service.bind_message.assert_called_once_with(7, GUILD_ID, 300)
+    message.edit.assert_awaited_once()
+    assert isinstance(message.edit.await_args.kwargs["view"], DuelChallengeView)
+    assert message.edit.await_args.kwargs["allowed_mentions"] == allowed
+    assert [event[0] for event in events] == ["send", "bind", "edit"]
 
 
 @pytest.mark.asyncio
@@ -282,6 +302,40 @@ async def test_issue_refunds_escrow_when_initial_delivery_fails(
 
     duel_service.mark_delivery_failed.assert_called_once_with(7, GUILD_ID, RECIPIENT_ID)
     duel_service.bind_message.assert_not_called()
+    feedback = interaction.followup.send.await_args.kwargs["content"]
+    assert "wager and 50 JC issuance fee were refunded" in feedback
+
+
+@pytest.mark.asyncio
+async def test_issue_bind_failure_refunds_and_leaves_posted_message_inert(
+    cog, interaction, recipient, duel_service, message
+):
+    duel_service.bind_message.side_effect = ValueError("bind race")
+
+    await DuelCommands.issue.callback(cog, interaction, recipient, 500)
+
+    initial = interaction.followup.send.await_args_list[0]
+    assert "view" not in initial.kwargs
+    duel_service.mark_delivery_failed.assert_called_once_with(7, GUILD_ID, RECIPIENT_ID)
+    message.edit.assert_not_awaited()
+    feedback = interaction.followup.send.await_args_list[-1].kwargs["content"]
+    assert "wager and 50 JC issuance fee were refunded" in feedback
+
+
+@pytest.mark.asyncio
+async def test_issue_view_edit_failure_does_not_refund_bound_challenge(
+    cog, interaction, recipient, duel_service, message
+):
+    message.edit.side_effect = discord.HTTPException(
+        SimpleNamespace(status=500, reason="error"),
+        "component edit failed",
+    )
+
+    await DuelCommands.issue.callback(cog, interaction, recipient, 500)
+
+    duel_service.bind_message.assert_called_once_with(7, GUILD_ID, 300)
+    message.edit.assert_awaited_once()
+    duel_service.mark_delivery_failed.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -594,7 +648,7 @@ async def test_admin_resolve_supports_two_winners_and_void(
 
 @pytest.mark.asyncio
 async def test_setup_restores_one_view_for_every_pending_challenge(
-    bot, duel_service
+    bot, duel_service, message
 ):
     duel_service.list_pending_all.return_value = [
         make_challenge(challenge_id=7, message_id=300),
@@ -604,14 +658,28 @@ async def test_setup_restores_one_view_for_every_pending_challenge(
     await setup(bot)
 
     bot.add_cog.assert_awaited_once()
-    assert bot.add_view.call_count == 2
-    first, second = bot.add_view.call_args_list
+    duel_service.mark_delivery_failed.assert_called_once_with(8, GUILD_ID, CHALLENGER_ID)
+    assert bot.add_view.call_count == 1
+    first = bot.add_view.call_args
     assert isinstance(first.args[0], DuelChallengeView)
     assert first.args[0].children[0].custom_id == "duel:7:decline"
     assert first.kwargs == {"message_id": 300}
-    assert isinstance(second.args[0], DuelChallengeView)
-    assert second.args[0].children[0].custom_id == "duel:8:decline"
-    assert second.kwargs == {}
+    message.edit.assert_awaited_once()
+    assert isinstance(message.edit.await_args.kwargs["view"], DuelChallengeView)
+    _assert_mentions_disabled(message.edit.await_args.kwargs["allowed_mentions"])
+
+
+@pytest.mark.asyncio
+async def test_setup_ignores_unbound_refund_race(bot, duel_service):
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=8, message_id=None),
+    ]
+    duel_service.mark_delivery_failed.side_effect = ValueError("already answered")
+
+    await setup(bot)
+
+    duel_service.mark_delivery_failed.assert_called_once_with(8, GUILD_ID, CHALLENGER_ID)
+    bot.add_view.assert_not_called()
 
 
 @pytest.mark.asyncio
