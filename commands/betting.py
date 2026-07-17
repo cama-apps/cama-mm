@@ -524,8 +524,10 @@ class BettingCommands(commands.Cog):
     async def gamba(self, interaction: discord.Interaction):
         await self._gamba_action(interaction)
 
-    async def _gamba_action(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+    async def _gamba_action(
+        self, interaction: discord.Interaction, *, bonus_spin: bool = False,
+    ):
+        if not bonus_spin and not await require_gamba_channel(interaction):
             return
 
         user_id = interaction.user.id
@@ -541,9 +543,18 @@ class BettingCommands(commands.Cog):
             )
             return
 
+        async def regular_next_spin_time() -> int:
+            last_regular_spin = await asyncio.to_thread(
+                self.player_service.get_last_wheel_spin, user_id, guild_id
+            )
+            if last_regular_spin is None:
+                return int(now)
+            return max(
+                int(now), int(last_regular_spin) + WHEEL_COOLDOWN_SECONDS,
+            )
+
         # Check cooldown (persisted in database) - admins bypass cooldown
-        is_admin = has_admin_permission(interaction)
-        if not is_admin:
+        if not bonus_spin and not has_admin_permission(interaction):
             # Atomic check-and-claim: prevents race condition where concurrent
             # requests could both pass the cooldown check
             claimed = await asyncio.to_thread(
@@ -574,7 +585,7 @@ class BettingCommands(commands.Cog):
                     except Exception as e:
                         logger.debug("Failed to send gamba cooldown neon result: %s", e)
                 return
-        else:
+        elif not bonus_spin:
             # Admin bypass - still set the timestamp for consistency
             await asyncio.to_thread(
                 self.player_service.set_last_wheel_spin, user_id, guild_id, int(now)
@@ -585,7 +596,8 @@ class BettingCommands(commands.Cog):
 
         if is_explosion:
             # THE WHEEL EXPLODES!
-            await interaction.response.defer()
+            if not bonus_spin:
+                await interaction.response.defer()
 
             # Generate explosion animation
             user_display = interaction.user.name
@@ -623,9 +635,13 @@ class BettingCommands(commands.Cog):
                 },
             )
 
-            next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
+            next_spin_time = (
+                await regular_next_spin_time()
+                if bonus_spin
+                else int(now) + WHEEL_COOLDOWN_SECONDS
+            )
             reminder_svc = getattr(self.bot, "reminder_service", None)
-            if reminder_svc:
+            if reminder_svc and not bonus_spin:
                 reminder_svc.schedule_wheel_reminder(self.bot, user_id, guild_id, next_spin_time)
 
             # Log the explosion as a special result
@@ -647,6 +663,12 @@ class BettingCommands(commands.Cog):
                 new_balance, garnished_amount, next_spin_time,
                 reward=explosion_reward, bankruptcy_penalty=explosion_penalty,
             )
+            if bonus_spin:
+                result_embed.add_field(
+                    name="Dig Bonus",
+                    value="Free spin — regular `/gamba` cooldown unchanged.",
+                    inline=False,
+                )
             await message.edit(embed=result_embed)
             return
 
@@ -781,7 +803,8 @@ class BettingCommands(commands.Cog):
             wedge_b = wedges[idx_b]
 
             # Defer and present choice
-            await interaction.response.defer()
+            if not bonus_spin:
+                await interaction.response.defer()
 
             def _wedge_display(w):
                 label, val, _ = w
@@ -856,7 +879,7 @@ class BettingCommands(commands.Cog):
                     logger.debug("Failed to claim Green insurance", exc_info=True)
 
         # Defer first - GIF generation can take a few seconds
-        if not _scrying_deferred:
+        if not _scrying_deferred and not bonus_spin:
             await interaction.response.defer()
 
         # Blue mana: bankrupt-wheel peek — surface 3 random wedges before the spin
@@ -1096,7 +1119,9 @@ class BettingCommands(commands.Cog):
         new_balance = outcome_state.new_balance
         garnished_amount = outcome_state.garnished_amount
         # result_value == 0: "Lose a Turn" - no balance change, but extended cooldown
-        if result_value == 0:
+        if bonus_spin:
+            next_spin_time = await regular_next_spin_time()
+        elif result_value == 0:
             # Apply the 1-week penalty cooldown for "Lose a Turn"
             # Set the spin time forward so the effective cooldown is the penalty duration
             penalty_spin_time = int(now) + (WHEEL_LOSE_PENALTY_COOLDOWN - WHEEL_COOLDOWN_SECONDS)
@@ -1107,7 +1132,7 @@ class BettingCommands(commands.Cog):
         else:
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
         reminder_svc = getattr(self.bot, "reminder_service", None)
-        if reminder_svc:
+        if reminder_svc and not bonus_spin:
             reminder_svc.schedule_wheel_reminder(self.bot, user_id, guild_id, next_spin_time)
 
         # Log the wheel spin for history tracking.
@@ -1185,6 +1210,12 @@ class BettingCommands(commands.Cog):
             is_golden=is_golden,
             **outcome_state.embed_kwargs(),
         )
+        if bonus_spin:
+            result_embed.add_field(
+                name="Dig Bonus",
+                value="Free spin — regular `/gamba` cooldown unchanged.",
+                inline=False,
+            )
 
         # Add Green insurance notification if it triggered
         if _insurance_activated:
