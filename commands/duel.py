@@ -14,6 +14,7 @@ from domain.models.duel import (
     DuelChallenge,
     DuelDueKind,
     DuelDueResult,
+    DuelRecipientFundingError,
     DuelStatus,
     DuelTrial,
 )
@@ -130,6 +131,16 @@ class DuelCommands(commands.Cog):
                 wager,
                 recipient_is_bot=player.bot,
             )
+        except DuelRecipientFundingError as exc:
+            await safe_followup(
+                interaction,
+                content=(
+                    f"The duel from <@{actor_id}> to <@{player.id}> failed because "
+                    f"the challenged player cannot cover the {exc.wager} JC wager."
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         except ValueError as exc:
             await self._send_deferred_error(interaction, str(exc))
             return
@@ -380,6 +391,14 @@ class DuelCommands(commands.Cog):
                 f"Challenge #{challenge.challenge_id} was declined. "
                 f"The {challenge.decline_penalty} JC penalty was paid to the challenger."
             )
+        elif challenge.status is DuelStatus.VOIDED:
+            detail = (
+                f"Challenge #{challenge.challenge_id} was voided because the recipient "
+                f"could not fund the {challenge.wager} JC wager. "
+                f"The challenger's {challenge.wager} JC stake was refunded; the "
+                f"{challenge.issuance_fee} JC issuance fee remains nonrefundable "
+                "after delivery."
+            )
         else:
             detail = (
                 f"Challenge #{challenge.challenge_id}: "
@@ -542,13 +561,25 @@ class DuelCommands(commands.Cog):
         if challenge.status is DuelStatus.RESOLVED:
             embed.add_field(name="Winner", value=f"<@{challenge.winner_id}>")
         if challenge.status is DuelStatus.VOIDED:
-            embed.add_field(
-                name="Refund",
-                value=(
+            if challenge.trial_type is None:
+                embed.add_field(
+                    name="Funding Failure",
+                    value=(
+                        f"The recipient could not fund the {challenge.wager} JC wager."
+                    ),
+                    inline=False,
+                )
+                refund = (
+                    f"{challenge.wager} JC challenger stake refunded; "
+                    f"{challenge.issuance_fee} JC issuance fee remains "
+                    "nonrefundable after delivery"
+                )
+            else:
+                refund = (
                     f"{challenge.wager} JC stake to each player; "
                     "issuance fee remains nonrefundable"
-                ),
-            )
+                )
+            embed.add_field(name="Refund", value=refund)
         return embed
 
     async def restore_unbound_challenge(self, challenge: DuelChallenge) -> None:
@@ -730,6 +761,8 @@ class DuelCommands(commands.Cog):
     def _response_event(challenge: DuelChallenge) -> DuelFlavorEvent:
         if challenge.status is DuelStatus.DECLINED:
             return DuelFlavorEvent.DECLINED
+        if challenge.status is DuelStatus.VOIDED:
+            return DuelFlavorEvent.VOIDED
         if challenge.trial_type is DuelTrial.TRIAL_BY_COMBAT:
             return DuelFlavorEvent.ACCEPTED_COMBAT
         return DuelFlavorEvent.ACCEPTED_FIVE

@@ -18,6 +18,7 @@ from domain.models.duel import (
     DuelChallenge,
     DuelDueKind,
     DuelDueResult,
+    DuelRecipientFundingError,
     DuelStatus,
     DuelTrial,
 )
@@ -258,6 +259,26 @@ async def test_issue_rejects_dms_ephemerally(cog, interaction, recipient, duel_s
 
 
 @pytest.mark.asyncio
+async def test_issue_reports_recipient_funding_failure_publicly_without_creating_post(
+    cog, interaction, challenger, recipient, duel_service, flavor_service
+):
+    interaction.user = challenger
+    duel_service.issue.side_effect = DuelRecipientFundingError(RECIPIENT_ID, 500)
+
+    await DuelCommands.issue.callback(cog, interaction, recipient, 500)
+
+    sent = interaction.followup.send.await_args
+    assert sent.kwargs["content"] == (
+        f"The duel from <@{CHALLENGER_ID}> to <@{RECIPIENT_ID}> failed because "
+        "the challenged player cannot cover the 500 JC wager."
+    )
+    assert sent.kwargs["ephemeral"] is False
+    _assert_mentions_disabled(sent.kwargs["allowed_mentions"])
+    flavor_service.generate.assert_not_awaited()
+    duel_service.bind_message.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("recipient_id", "recipient_is_bot", "message"),
     [
@@ -480,6 +501,72 @@ async def test_decline_edits_original_disables_buttons_and_posts_detail(
     sent = interaction.followup.send.await_args
     assert "250 JC" in sent.kwargs["content"]
     _assert_mentions_disabled(sent.kwargs["allowed_mentions"])
+
+
+@pytest.mark.asyncio
+async def test_acceptance_funding_failure_voids_post_and_explains_refund(
+    cog, interaction, duel_service, flavor_service
+):
+    duel_service.respond.return_value = make_challenge(
+        status=DuelStatus.VOIDED,
+        responded_at=1_700_000_100,
+        next_reminder_at=None,
+    )
+
+    await cog.handle_response(interaction, 7, "trial_by_combat")
+
+    original = await interaction.channel.fetch_message(300)
+    original.edit.assert_awaited_once()
+    edit = original.edit.await_args.kwargs
+    assert edit["view"] is None
+    fields = _fields(edit["embed"])
+    assert fields["Status"] == "Voided"
+    assert fields["Funding Failure"] == (
+        "The recipient could not fund the 500 JC wager."
+    )
+    assert fields["Refund"] == (
+        "500 JC challenger stake refunded; "
+        "50 JC issuance fee remains nonrefundable after delivery"
+    )
+    flavor_service.generate.assert_awaited_once_with(
+        DuelFlavorEvent.VOIDED,
+        GUILD_ID,
+        ANY,
+    )
+    sent = interaction.followup.send.await_args
+    assert sent.kwargs["ephemeral"] is False
+    assert "recipient could not fund the 500 JC wager" in sent.kwargs["content"]
+    assert "challenger's 500 JC stake was refunded" in sent.kwargs["content"]
+    assert "50 JC issuance fee remains nonrefundable after delivery" in sent.kwargs[
+        "content"
+    ]
+    _assert_mentions_disabled(sent.kwargs["allowed_mentions"])
+
+
+@pytest.mark.asyncio
+async def test_acceptance_funding_failure_still_announces_when_original_was_deleted(
+    cog, interaction, duel_service, flavor_service
+):
+    duel_service.respond.return_value = make_challenge(
+        status=DuelStatus.VOIDED,
+        responded_at=1_700_000_100,
+        next_reminder_at=None,
+    )
+    interaction.channel.fetch_message.side_effect = discord.NotFound(
+        MagicMock(status=404),
+        "message deleted",
+    )
+
+    await cog.handle_response(interaction, 7, "trial_by_combat")
+
+    flavor_service.generate.assert_awaited_once_with(
+        DuelFlavorEvent.VOIDED,
+        GUILD_ID,
+        ANY,
+    )
+    sent = interaction.followup.send.await_args
+    assert "recipient could not fund the 500 JC wager" in sent.kwargs["content"]
+    assert sent.kwargs["ephemeral"] is False
 
 
 @pytest.mark.asyncio
