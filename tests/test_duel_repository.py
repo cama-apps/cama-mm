@@ -1,8 +1,9 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from domain.models.duel import DuelChallenge, DuelStatus
+from domain.models.duel import DuelChallenge, DuelDueKind, DuelStatus, DuelTrial
 from repositories.duel_challenge_repository import DuelChallengeRepository
 from repositories.player_repository import PlayerRepository
 
@@ -38,6 +39,50 @@ def create_challenge(repo, challenger_id=1, recipient_id=2, *, guild_id=GUILD_ID
         7 * DAY,
         challenger_id,
     )
+
+
+@pytest.fixture
+def duel_fixture(repo_db_path):
+    def make(*, wager=500, recipient_balance=0):
+        players = seed_player(repo_db_path, 1, 1400.0, wager)
+        seed_player(repo_db_path, 2, 1500.0, recipient_balance)
+        repo = DuelChallengeRepository(repo_db_path)
+        challenge = repo.create_challenge_atomic(
+            GUILD_ID,
+            77,
+            1,
+            2,
+            wager,
+            NOW,
+            30 * DAY,
+            7 * DAY,
+            7 * DAY,
+            1,
+        )
+        # Keep a constant 500-coin pre-escrow baseline for the exact odd-wager
+        # accounting assertion below, including its existing one-coin debt.
+        players.update_balance(1, GUILD_ID, 500 - wager)
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.execute("DELETE FROM economy_ledger_entries")
+        return repo, players, challenge
+
+    return make
+
+
+def ledger_rows(db_path, challenge_id):
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT account_id, delta, source, actor_id, related_type,
+                   related_id, reason
+            FROM economy_ledger_entries
+            WHERE related_type = 'duel_challenge' AND related_id = ?
+            ORDER BY ledger_id
+            """,
+            (str(challenge_id),),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def test_duel_model_reads_sqlite_row(repo_db_path):
@@ -317,3 +362,241 @@ def test_delivery_failure_refunds_and_does_not_block_retry(repo_db_path):
     assert players.get_balance(1, GUILD_ID) == 500
     retry = create_challenge(repo, now=NOW + 2)
     assert retry.status is DuelStatus.PENDING
+
+
+def test_decline_uses_ceiling_half_and_allows_debt(duel_fixture):
+    repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
+    declined = repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, 1_000_100, 2)
+    assert declined.status is DuelStatus.DECLINED
+    assert players.get_balance(1, GUILD_ID) == 751
+    assert players.get_balance(2, GUILD_ID) == -251
+    assert declined.next_reminder_at is None
+
+
+def test_expiry_uses_ceiling_half_and_allows_debt(duel_fixture):
+    repo, players, challenge = duel_fixture(wager=501, recipient_balance=0)
+    expired = repo.expire_atomic(challenge.challenge_id, GUILD_ID, challenge.expires_at)
+    assert expired.status is DuelStatus.EXPIRED
+    assert players.get_balance(1, GUILD_ID) == 751
+    assert players.get_balance(2, GUILD_ID) == -251
+    assert expired.next_reminder_at is None
+
+
+def test_accept_then_winner_receives_double_pot(duel_fixture):
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=0)
+    accepted = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        2,
+        DuelTrial.TRIAL_BY_COMBAT,
+        1_000_100,
+        2,
+    )
+    assert players.get_balance(2, GUILD_ID) == -500
+    resolved = repo.resolve_atomic(
+        accepted.challenge_id, GUILD_ID, winner_id=2, now=1_000_200, actor_id=99
+    )
+    assert resolved.status is DuelStatus.RESOLVED
+    assert players.get_balance(2, GUILD_ID) == 500
+
+
+def test_void_refunds_both_stakes(duel_fixture):
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=0)
+    accepted = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        2,
+        DuelTrial.TRIAL_OF_FIVE,
+        1_000_100,
+        2,
+    )
+    voided = repo.resolve_atomic(
+        accepted.challenge_id,
+        GUILD_ID,
+        winner_id=None,
+        now=1_000_200,
+        actor_id=99,
+    )
+    assert voided.status is DuelStatus.VOIDED
+    assert players.get_balance(1, GUILD_ID) == 500
+    assert players.get_balance(2, GUILD_ID) == 0
+
+
+def test_accept_rejects_wrong_recipient(duel_fixture):
+    repo, players, challenge = duel_fixture()
+
+    with pytest.raises(ValueError, match="recipient"):
+        repo.accept_atomic(
+            challenge.challenge_id,
+            GUILD_ID,
+            3,
+            DuelTrial.TRIAL_BY_COMBAT,
+            NOW + 100,
+            3,
+        )
+
+    assert players.get_balance(2, GUILD_ID) == 0
+    assert repo.get_challenge(challenge.challenge_id, GUILD_ID).status is DuelStatus.PENDING
+
+
+def test_expiry_rejects_before_deadline(duel_fixture):
+    repo, players, challenge = duel_fixture()
+
+    with pytest.raises(ValueError, match="expired"):
+        repo.expire_atomic(challenge.challenge_id, GUILD_ID, challenge.expires_at - 1)
+
+    assert players.get_balance(1, GUILD_ID) == 0
+    assert players.get_balance(2, GUILD_ID) == 0
+
+
+def test_resolution_rejects_invalid_winner_and_cross_guild(duel_fixture):
+    repo, players, challenge = duel_fixture()
+    accepted = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        2,
+        DuelTrial.TRIAL_BY_COMBAT,
+        NOW + 100,
+        2,
+    )
+
+    with pytest.raises(ValueError, match="winner"):
+        repo.resolve_atomic(accepted.challenge_id, GUILD_ID, 3, NOW + 200, 99)
+    with pytest.raises(ValueError, match="accepted"):
+        repo.resolve_atomic(accepted.challenge_id, GUILD_ID + 1, 1, NOW + 200, 99)
+
+    assert players.get_balance(1, GUILD_ID) == 0
+    assert players.get_balance(2, GUILD_ID) == -500
+
+
+def test_repeated_transitions_cannot_double_pay(duel_fixture):
+    repo, players, challenge = duel_fixture()
+    declined = repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, NOW + 100, 2)
+
+    with pytest.raises(ValueError, match="pending"):
+        repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, NOW + 101, 2)
+    with pytest.raises(ValueError, match="pending"):
+        repo.accept_atomic(
+            challenge.challenge_id,
+            GUILD_ID,
+            2,
+            DuelTrial.TRIAL_OF_FIVE,
+            NOW + 101,
+            2,
+        )
+
+    assert declined.status is DuelStatus.DECLINED
+    assert players.get_balance(1, GUILD_ID) == 750
+    assert players.get_balance(2, GUILD_ID) == -250
+
+
+def test_accept_and_decline_race_has_exactly_one_success(duel_fixture):
+    repo, players, challenge = duel_fixture()
+
+    def accept():
+        return DuelChallengeRepository(repo.db_path).accept_atomic(
+            challenge.challenge_id,
+            GUILD_ID,
+            2,
+            DuelTrial.TRIAL_BY_COMBAT,
+            NOW + 100,
+            2,
+        )
+
+    def decline():
+        return DuelChallengeRepository(repo.db_path).decline_atomic(
+            challenge.challenge_id, GUILD_ID, 2, NOW + 100, 2
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(accept), executor.submit(decline)]
+    outcomes = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except ValueError:
+            pass
+
+    assert len(outcomes) == 1
+    assert outcomes[0].status in {DuelStatus.ACCEPTED, DuelStatus.DECLINED}
+    balances = (
+        players.get_balance(1, GUILD_ID),
+        players.get_balance(2, GUILD_ID),
+    )
+    assert balances in {(0, -500), (750, -250)}
+
+
+def test_decline_ledger_context_has_actor_challenge_and_distinct_reasons(
+    duel_fixture, repo_db_path
+):
+    repo, _, challenge = duel_fixture()
+
+    repo.decline_atomic(challenge.challenge_id, GUILD_ID, 2, NOW + 100, 2)
+
+    rows = ledger_rows(repo_db_path, challenge.challenge_id)
+    assert [(row["account_id"], row["delta"]) for row in rows] == [
+        (1, 500),
+        (1, 250),
+        (2, -250),
+    ]
+    assert {row["source"] for row in rows} == {"duel_challenge"}
+    assert {row["actor_id"] for row in rows} == {2}
+    assert {row["related_type"] for row in rows} == {"duel_challenge"}
+    assert {row["related_id"] for row in rows} == {str(challenge.challenge_id)}
+    assert len({row["reason"] for row in rows}) == 3
+
+
+def test_due_expiry_takes_precedence_over_reminder(duel_fixture):
+    repo, _, challenge = duel_fixture()
+
+    due = repo.get_due_challenge_ids(challenge.expires_at)
+
+    assert due == [challenge.challenge_id]
+    assert (
+        repo.claim_reminder_atomic(
+            challenge.challenge_id, GUILD_ID, challenge.expires_at
+        )
+        is None
+    )
+    assert (
+        repo.expire_atomic(challenge.challenge_id, GUILD_ID, challenge.expires_at).status
+        is DuelStatus.EXPIRED
+    )
+
+
+def test_reminder_claim_catches_up_to_next_daily_boundary(duel_fixture):
+    repo, _, challenge = duel_fixture()
+    now = challenge.created_at + 3 * DAY
+
+    claimed = repo.claim_reminder_atomic(challenge.challenge_id, GUILD_ID, now)
+
+    assert claimed.kind is DuelDueKind.REMINDER
+    assert claimed.remaining_seconds == challenge.expires_at - now
+    assert claimed.challenge.next_reminder_at == challenge.created_at + 4 * DAY
+    assert not claimed.ping_recipient
+
+
+def test_only_one_concurrent_reminder_claim_succeeds(duel_fixture):
+    repo, _, challenge = duel_fixture()
+    now = challenge.created_at + DAY
+
+    def claim():
+        return DuelChallengeRepository(repo.db_path).claim_reminder_atomic(
+            challenge.challenge_id, GUILD_ID, now
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: claim(), range(2)))
+
+    assert sum(result is not None for result in results) == 1
+
+
+def test_reminder_pings_recipient_in_final_48_hours(duel_fixture):
+    repo, _, challenge = duel_fixture()
+    now = challenge.expires_at - 48 * 3600
+
+    claimed = repo.claim_reminder_atomic(challenge.challenge_id, GUILD_ID, now)
+
+    assert claimed is not None
+    assert claimed.remaining_seconds == 48 * 3600
+    assert claimed.ping_recipient
