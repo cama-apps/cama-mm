@@ -397,6 +397,12 @@ class DuelCommands(commands.Cog):
         )
         channel = await self._get_channel(challenge.channel_id)
         if channel is None:
+            logger.warning(
+                "duel lifecycle channel unavailable challenge=%s guild=%s channel=%s",
+                challenge.challenge_id,
+                challenge.guild_id,
+                challenge.channel_id,
+            )
             return
 
         if result.kind is DuelDueKind.EXPIRED:
@@ -428,7 +434,12 @@ class DuelCommands(commands.Cog):
                 allowed_mentions=allowed_mentions,
             )
         except discord.DiscordException:
-            logger.exception("Unable to deliver duel lifecycle message")
+            logger.exception(
+                "Unable to deliver duel lifecycle message challenge=%s guild=%s channel=%s",
+                challenge.challenge_id,
+                challenge.guild_id,
+                challenge.channel_id,
+            )
 
     async def process_due_challenge(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock
@@ -497,6 +498,49 @@ async def test_due_delivery_fetches_channel_after_cache_miss(cog, bot, interacti
 
     bot.fetch_channel.assert_awaited_once_with(CHANNEL_ID)
     interaction.channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_due_channel_fetch_failure_logs_challenge_guild_and_channel(
+    cog, bot, caplog
+):
+    bot.get_channel.return_value = None
+    bot.fetch_channel.side_effect = discord.DiscordException("forbidden")
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cama_bot.commands.duel"):
+        await cog.deliver_due_result(result)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "challenge=7" in messages
+    assert f"guild={GUILD_ID}" in messages
+    assert f"channel={CHANNEL_ID}" in messages
+
+
+@pytest.mark.asyncio
+async def test_due_channel_send_failure_logs_challenge_guild_and_channel(
+    cog, bot, caplog
+):
+    bot.get_channel.return_value.send.side_effect = discord.DiscordException("forbidden")
+    result = DuelDueResult(
+        kind=DuelDueKind.REMINDER,
+        challenge=make_challenge(),
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="cama_bot.commands.duel"):
+        await cog.deliver_due_result(result)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "challenge=7" in messages
+    assert f"guild={GUILD_ID}" in messages
+    assert f"channel={CHANNEL_ID}" in messages
 
 
 @pytest.mark.asyncio
