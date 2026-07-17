@@ -77,6 +77,7 @@ class ServiceContainer:
         self._init_match_services()
         self._init_advanced_services()
         self._init_ai_services()
+        self._init_duel_flavor_service()
         self._init_curse_service()
         self._init_mana_service()
         self._init_dig_service()
@@ -105,6 +106,7 @@ class ServiceContainer:
         from repositories.dig_quest_repository import DigQuestRepository
         from repositories.dig_repository import DigRepository
         from repositories.disburse_repository import DisburseRepository
+        from repositories.duel_challenge_repository import DuelChallengeRepository
         from repositories.economy_ledger_repository import EconomyLedgerRepository
         from repositories.guild_config_repository import GuildConfigRepository
         from repositories.loan_repository import LoanRepository
@@ -139,6 +141,7 @@ class ServiceContainer:
             "prediction_repo": PredictionRepository(p),
             "protection_repo": ProtectionRepository(p),
             "disburse_repo": DisburseRepository(p),
+            "duel_repo": DuelChallengeRepository(p),
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
             "economy_ledger_repo": EconomyLedgerRepository(p),
@@ -163,6 +166,7 @@ class ServiceContainer:
     def _init_core_services(self) -> None:
         """Services with no dependencies on other services."""
         from services.bankruptcy_service import BankruptcyService
+        from services.duel_service import DuelService
         from services.garnishment_service import GarnishmentService
         from services.guild_config_service import GuildConfigService
         from services.loan_service import LoanService
@@ -175,6 +179,7 @@ class ServiceContainer:
         from services.tip_service import TipService
 
         c = self._components
+        c["duel_service"] = DuelService(c["duel_repo"])
         c["guild_config_service"] = GuildConfigService(c["guild_config_repo"])
         c["garnishment_service"] = GarnishmentService(
             c["player_repo"], self.garnishment_percentage
@@ -345,6 +350,16 @@ class ServiceContainer:
         c["ai_service"] = ai_service
         c["sql_query_service"] = sql_query_service
         c["flavor_text_service"] = flavor_text_service
+
+    def _init_duel_flavor_service(self) -> None:
+        """Duel herald narration with optional AI and static fallbacks."""
+        from services.duel_flavor_service import DuelFlavorService
+
+        c = self._components
+        c["duel_flavor_service"] = DuelFlavorService(
+            c.get("ai_service"),
+            c["guild_config_repo"],
+        )
 
     def _init_curse_service(self) -> None:
         """Witch's Curse service. Depends on flavor_text_service (optional)."""
@@ -573,6 +588,8 @@ class ServiceContainer:
         bot.buff_service = c["buff_service"]
         bot.dig_service = c["dig_service"]
         bot.dig_flavor_service = c.get("dig_flavor_service")
+        bot.duel_service = c["duel_service"]
+        bot.duel_flavor_service = c["duel_flavor_service"]
         bot.reminder_service = c["reminder_service"]
         bot.curse_service = c["curse_service"]
         bot.mafia_service = c["mafia_service"]
