@@ -545,7 +545,7 @@ def test_expiry_rejects_unbound_pending_without_moving_balances(repo_db_path):
 
 
 def test_accept_then_winner_receives_double_pot(duel_fixture):
-    repo, players, challenge = duel_fixture(wager=500, recipient_balance=0)
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
     accepted = repo.accept_atomic(
         challenge.challenge_id,
         GUILD_ID,
@@ -554,16 +554,16 @@ def test_accept_then_winner_receives_double_pot(duel_fixture):
         1_000_100,
         2,
     )
-    assert players.get_balance(2, GUILD_ID) == -500
+    assert players.get_balance(2, GUILD_ID) == 0
     resolved = repo.resolve_atomic(
         accepted.challenge_id, GUILD_ID, winner_id=2, now=1_000_200, actor_id=99
     )
     assert resolved.status is DuelStatus.RESOLVED
-    assert players.get_balance(2, GUILD_ID) == 500
+    assert players.get_balance(2, GUILD_ID) == 1000
 
 
 def test_void_refunds_both_stakes(duel_fixture):
-    repo, players, challenge = duel_fixture(wager=500, recipient_balance=0)
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
     accepted = repo.accept_atomic(
         challenge.challenge_id,
         GUILD_ID,
@@ -581,6 +581,41 @@ def test_void_refunds_both_stakes(duel_fixture):
     )
     assert voided.status is DuelStatus.VOIDED
     assert players.get_balance(1, GUILD_ID) == 500
+    assert players.get_balance(2, GUILD_ID) == 500
+
+
+def test_accept_requires_recipient_current_balance(duel_fixture, repo_db_path):
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
+    players.update_balance(2, GUILD_ID, 499)
+
+    with pytest.raises(ValueError, match="cannot cover the duel wager"):
+        repo.accept_atomic(
+            challenge.challenge_id,
+            GUILD_ID,
+            2,
+            DuelTrial.TRIAL_BY_COMBAT,
+            NOW + 100,
+            2,
+        )
+
+    assert players.get_balance(2, GUILD_ID) == 499
+    assert repo.get_challenge(challenge.challenge_id, GUILD_ID).status is DuelStatus.PENDING
+    assert ledger_rows(repo_db_path, challenge.challenge_id) == []
+
+
+def test_accept_allows_exact_recipient_balance(duel_fixture):
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
+
+    accepted = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        2,
+        DuelTrial.TRIAL_OF_FIVE,
+        NOW + 100,
+        2,
+    )
+
+    assert accepted.status is DuelStatus.ACCEPTED
     assert players.get_balance(2, GUILD_ID) == 0
 
 
@@ -612,7 +647,7 @@ def test_expiry_rejects_before_deadline(duel_fixture):
 
 
 def test_resolution_rejects_invalid_winner_and_cross_guild(duel_fixture):
-    repo, players, challenge = duel_fixture()
+    repo, players, challenge = duel_fixture(recipient_balance=500)
     accepted = repo.accept_atomic(
         challenge.challenge_id,
         GUILD_ID,
@@ -628,7 +663,7 @@ def test_resolution_rejects_invalid_winner_and_cross_guild(duel_fixture):
         repo.resolve_atomic(accepted.challenge_id, GUILD_ID + 1, 1, NOW + 200, 99)
 
     assert players.get_balance(1, GUILD_ID) == 0
-    assert players.get_balance(2, GUILD_ID) == -500
+    assert players.get_balance(2, GUILD_ID) == 0
 
 
 def test_repeated_transitions_cannot_double_pay(duel_fixture):
@@ -653,7 +688,7 @@ def test_repeated_transitions_cannot_double_pay(duel_fixture):
 
 
 def test_accept_and_decline_race_has_exactly_one_success(duel_fixture):
-    repo, players, challenge = duel_fixture()
+    repo, players, challenge = duel_fixture(recipient_balance=500)
 
     def accept():
         return DuelChallengeRepository(repo.db_path).accept_atomic(
@@ -685,7 +720,7 @@ def test_accept_and_decline_race_has_exactly_one_success(duel_fixture):
         players.get_balance(1, GUILD_ID),
         players.get_balance(2, GUILD_ID),
     )
-    assert balances in {(0, -500), (750, -250)}
+    assert balances in {(0, 0), (750, 250)}
 
 
 def test_decline_ledger_context_has_actor_challenge_and_distinct_reasons(

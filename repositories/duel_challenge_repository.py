@@ -32,6 +32,7 @@ class DuelChallengeRepository(BaseRepository):
         challenge: DuelChallenge,
         actor_id: int | None,
         reason: str,
+        require_nonnegative: bool = False,
     ) -> None:
         self._set_economy_ledger_context(
             cursor,
@@ -43,15 +44,30 @@ class DuelChallengeRepository(BaseRepository):
             metadata={"wager": challenge.wager},
         )
         try:
-            cursor.execute(
-                """
-                UPDATE players
-                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (delta, player_id, guild_id),
-            )
+            if require_nonnegative:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND COALESCE(jopacoin_balance, 0) + ? >= 0
+                    """,
+                    (delta, player_id, guild_id, delta),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (delta, player_id, guild_id),
+                )
             if cursor.rowcount != 1:
+                if require_nonnegative:
+                    raise ValueError(
+                        "Your jopacoin balance cannot cover the duel wager."
+                    )
                 raise RuntimeError("A duel participant balance could not be updated.")
         finally:
             self._clear_economy_ledger_context(cursor)
@@ -409,6 +425,7 @@ class DuelChallengeRepository(BaseRepository):
                 challenge=challenge,
                 actor_id=actor_id,
                 reason="recipient escrow debit",
+                require_nonnegative=True,
             )
             cursor.execute(
                 """
