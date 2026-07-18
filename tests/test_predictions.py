@@ -1189,6 +1189,8 @@ async def test_resolve_announces_all_winners_and_losers(
     prediction_service.buy_contracts(prediction_id=pid, discord_id=102, side="yes", contracts=1)
     prediction_service.buy_contracts(prediction_id=pid, discord_id=201, side="no", contracts=3)
     prediction_service.buy_contracts(prediction_id=pid, discord_id=202, side="no", contracts=1)
+    winner_101_spent = prediction_repo.get_position(pid, 101)["yes_cost_basis_total"]
+    winner_102_spent = prediction_repo.get_position(pid, 102)["yes_cost_basis_total"]
     loser_201_loss = prediction_repo.get_position(pid, 201)["no_cost_basis_total"]
     loser_202_loss = prediction_repo.get_position(pid, 202)["no_cost_basis_total"]
 
@@ -1203,10 +1205,28 @@ async def test_resolve_announces_all_winners_and_losers(
     )
 
     announce = "\n".join((m.get("content") or "") for m in interaction.followup.messages)
-    assert f"<@101> +{2 * PREDICTION_CONTRACT_VALUE} JC (2 contracts)" in announce
-    assert f"<@102> +{1 * PREDICTION_CONTRACT_VALUE} JC (1 contracts)" in announce
-    assert f"<@201> -{loser_201_loss} JC (3 contracts)" in announce
-    assert f"<@202> -{loser_202_loss} JC (1 contracts)" in announce
+    # Each participant appears exactly once with spent, contract split, won, net.
+    won_101 = 2 * PREDICTION_CONTRACT_VALUE
+    won_102 = 1 * PREDICTION_CONTRACT_VALUE
+    assert (
+        f"<@101> spent {winner_101_spent} (2 yes / 0 no) → "
+        f"won {won_101} JC (net {won_101 - winner_101_spent:+d})"
+    ) in announce
+    assert (
+        f"<@102> spent {winner_102_spent} (1 yes / 0 no) → "
+        f"won {won_102} JC (net {won_102 - winner_102_spent:+d})"
+    ) in announce
+    assert (
+        f"<@201> spent {loser_201_loss} (0 yes / 3 no) → "
+        f"won 0 JC (net {-loser_201_loss:+d})"
+    ) in announce
+    assert (
+        f"<@202> spent {loser_202_loss} (0 yes / 1 no) → "
+        f"won 0 JC (net {-loser_202_loss:+d})"
+    ) in announce
+    # No participant is double-listed (the old winners/losers split is gone).
+    assert announce.count("<@101>") == 1
+    assert announce.count("<@201>") == 1
 
 
 async def test_rollback_admin_only(patched_cog_helpers):
@@ -1288,17 +1308,34 @@ async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):
     patched_cog_helpers.setattr(pmod, "get_neon_service", lambda _bot: None)
 
     winners = [
-        {"discord_id": 10_000 + i, "payout": 1_000 - i, "contracts": 1}
+        {
+            "discord_id": 10_000 + i,
+            "yes_contracts": 1,
+            "no_contracts": 0,
+            "winning_contracts": 1,
+            "cost_basis": 700,
+            "payout": 1_000 - i,
+            "profit": (1_000 - i) - 700,
+        }
         for i in range(80)
     ]
     losers = [
-        {"discord_id": 20_000 + i, "loss": 900 - i, "contracts": 1}
+        {
+            "discord_id": 20_000 + i,
+            "yes_contracts": 0,
+            "no_contracts": 1,
+            "winning_contracts": 0,
+            "cost_basis": 900 - i,
+            "payout": 0,
+            "profit": -(900 - i),
+        }
         for i in range(80)
     ]
     prediction_service = MagicMock()
     prediction_service.resolve_orderbook.return_value = {
         "winners": winners,
         "losers": losers,
+        "participants": winners + losers,
     }
     prediction_service.get_prediction.return_value = {
         "guild_id": TEST_GUILD_ID,
@@ -1321,10 +1358,10 @@ async def test_resolve_chunks_large_winner_and_loser_lists(patched_cog_helpers):
     assert all(len(content) <= pmod.DISCORD_MESSAGE_MAX_CHARS for content in gamba.messages)
 
     full_followup = "\n".join(followup_contents)
-    assert "<@10000> +1000 JC (1 contracts)" in full_followup
-    assert "<@10079> +921 JC (1 contracts)" in full_followup
-    assert "<@20000> -900 JC (1 contracts)" in full_followup
-    assert "<@20079> -821 JC (1 contracts)" in full_followup
+    assert "<@10000> spent 700 (1 yes / 0 no) → won 1000 JC (net +300)" in full_followup
+    assert "<@10079> spent 700 (1 yes / 0 no) → won 921 JC (net +221)" in full_followup
+    assert "<@20000> spent 900 (0 yes / 1 no) → won 0 JC (net -900)" in full_followup
+    assert "<@20079> spent 821 (0 yes / 1 no) → won 0 JC (net -821)" in full_followup
 
 
 async def test_resolve_rejects_cross_guild_market(

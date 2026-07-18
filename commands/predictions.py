@@ -105,25 +105,23 @@ def _chunk_message_lines(
 def _build_resolution_announcement_chunks(
     prediction_id: int,
     outcome: str,
-    winners: list[dict],
-    losers: list[dict],
+    participants: list[dict],
     bankruptcy_total: int,
 ) -> list[str]:
-    winner_lines = [
-        f"<@{w['discord_id']}> +{w['payout']} JC ({w['contracts']} contracts)"
-        for w in winners
+    # One consolidated line per participant showing what they spent (cost basis
+    # across both sides), the yes/no contract split, what they won, and the net.
+    body = [
+        f"<@{p['discord_id']}> spent {p['cost_basis']} "
+        f"({p['yes_contracts']} yes / {p['no_contracts']} no) → "
+        f"won {p['payout']} JC (net {p['profit']:+d})"
+        for p in participants
     ]
-    loser_lines = [
-        f"<@{loser['discord_id']}> -{loser['loss']} JC ({loser['contracts']} contracts)"
-        for loser in losers
-    ]
+    n_up = sum(1 for p in participants if p["profit"] > 0)
+    n_down = sum(1 for p in participants if p["profit"] < 0)
     lines = [
         f"📈 Market #{prediction_id} resolved **{outcome.upper()}** — "
-        f"{len(winners)} winners, {len(losers)} losers.",
-        "**Winners:**",
-        *(winner_lines or ["none"]),
-        "**Losers:**",
-        *(loser_lines or ["none"]),
+        f"{n_up} up, {n_down} down.",
+        *(body or ["No participants."]),
     ]
     if bankruptcy_total > 0:
         lines.append(f"({bankruptcy_total} JC withheld from bankrupt winners.)")
@@ -1146,16 +1144,17 @@ class PredictionCommands(commands.Cog):
             await safe_followup(interaction, content=f"❌ {e}")
             return
 
-        winners = sorted(
-            result.get("winners", []), key=lambda w: w["payout"], reverse=True
+        participants = sorted(
+            result.get("participants", []), key=lambda p: p["profit"], reverse=True
         )
-        losers = sorted(
-            result.get("losers", []), key=lambda loser: loser["loss"], reverse=True
+        biggest = max(
+            (p for p in participants if p["payout"] > 0),
+            key=lambda p: p["payout"],
+            default=None,
         )
-        biggest = winners[0] if winners else None
-        bankruptcy_total = sum(w.get("bankruptcy_penalty", 0) for w in winners)
+        bankruptcy_total = sum(p.get("bankruptcy_penalty", 0) for p in participants)
         announce_chunks = _build_resolution_announcement_chunks(
-            prediction_id, outcome.value, winners, losers, bankruptcy_total
+            prediction_id, outcome.value, participants, bankruptcy_total
         )
         for chunk in announce_chunks:
             await safe_followup(interaction, content=chunk)

@@ -162,6 +162,39 @@ def test_resolve_orderbook_two_sided_holder_profit_nets_both_bases(
     # Profit nets BOTH cost bases, not just the winning side's.
     assert winner["profit"] == payout - yes_cost - no_cost
 
+    # The consolidated participant record folds both sides into one entry.
+    participants = [p for p in result["participants"] if p["discord_id"] == 1]
+    assert len(participants) == 1  # a hedger is not double-listed
+    p = participants[0]
+    assert p["yes_contracts"] == 5
+    assert p["no_contracts"] == 3
+    assert p["cost_basis"] == yes_cost + no_cost
+    assert p["payout"] == payout
+    assert p["profit"] == p["payout"] - p["cost_basis"]
+
+
+def test_resolve_orderbook_participant_pure_loser_reports_full_loss(
+    prediction_service, prediction_repo, player_repository
+):
+    """A pure loser's participant record: payout 0, profit == -cost_basis."""
+    _add_player(player_repository, 1, balance=1000)
+    _add_player(player_repository, 2, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="pure loser?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=2, side="no", contracts=4)
+    no_cost = prediction_repo.get_position(pid, 2)["no_cost_basis_total"]
+
+    result = prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+
+    loser = next(p for p in result["participants"] if p["discord_id"] == 2)
+    assert loser["yes_contracts"] == 0
+    assert loser["no_contracts"] == 4
+    assert loser["cost_basis"] == no_cost
+    assert loser["payout"] == 0
+    assert loser["profit"] == -no_cost
+
 
 def test_resolve_orderbook_bankruptcy_penalty_is_netted_in_txn(
     repo_db_path, player_repository

@@ -1226,6 +1226,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             winners: list[dict] = []
             losers: list[dict] = []
+            participants: list[dict] = []
             total_payout = 0
 
             for p in positions:
@@ -1244,6 +1245,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     winning_qty = no_c
                     losing_qty = yes_c
 
+                # Penalty is 0 unless a still-penalized winner is credited below;
+                # hoisted so the per-participant record can net it out uniformly.
+                penalty = 0
                 if payout > 0:
                     winning_basis = yes_t if outcome == "yes" else no_t
                     # Net profit subtracts BOTH sides' cost basis. A hedger who
@@ -1255,7 +1259,6 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     profit = payout - winning_basis - losing_basis
                     # Bankruptcy debuff folded into the txn: withhold the penalty
                     # share of profit from a still-penalized winner's credit.
-                    penalty = 0
                     if bankruptcy_penalty_rate is not None and profit > 0:
                         cursor.execute(
                             "SELECT COALESCE(penalty_games_remaining, 0) AS pg "
@@ -1317,6 +1320,25 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         "loss": losing_basis,
                     })
 
+                # One consolidated record per participant, covering BOTH sides.
+                # cost_basis = total spent; net_payout is 0 for a pure loser, so
+                # profit == net_payout - cost_basis holds for winners and losers
+                # alike (winning_basis + losing_basis always == yes_t + no_t).
+                cost_basis = yes_t + no_t
+                net_payout = (payout - penalty) if payout > 0 else 0
+                participant = {
+                    "discord_id": int(p["discord_id"]),
+                    "yes_contracts": yes_c,
+                    "no_contracts": no_c,
+                    "winning_contracts": winning_qty,
+                    "cost_basis": cost_basis,
+                    "payout": net_payout,
+                    "profit": net_payout - cost_basis,
+                }
+                if penalty:
+                    participant["bankruptcy_penalty"] = penalty
+                participants.append(participant)
+
             cursor.execute(
                 "UPDATE predictions SET lp_pnl = COALESCE(lp_pnl, 0) - ? WHERE prediction_id = ?",
                 (total_payout, prediction_id),
@@ -1343,6 +1365,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 "guild_id": guild_id,
                 "winners": winners,
                 "losers": losers,
+                "participants": participants,
                 "total_payout": total_payout,
                 "lp_pnl": lp_pnl,
             }
