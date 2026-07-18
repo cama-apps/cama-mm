@@ -37,6 +37,9 @@ from commands.dig_helpers._shared import (
     _tip,
     _wrap,
 )
+from commands.dig_helpers.artifact_embeds import (
+    build_artifact_catalog_embeds as _build_artifact_catalog_embeds,
+)
 from commands.dig_helpers.bonus_events import maybe_send_dig_bonus
 from commands.dig_helpers.boss_views import (
     BossDuelView,
@@ -143,6 +146,7 @@ __all__ = [
     "_build_boss_fight_result_embed",
     "_build_gear_embed",
     "_append_sabotage_prediction_steal_line",
+    "_build_artifact_catalog_embeds",
     "_splash_aftermath_lines",
     "_reading_the_stone_hint",
     "_READING_HINTS",
@@ -2123,6 +2127,44 @@ class DigCommands(commands.Cog):
             embed.set_footer(text=f"0/{MAX_INVENTORY_SLOTS} slots used")
 
         await send_public_or_ephemeral(interaction, embed=embed, file=inv_pickaxe_file)
+
+    # ------------------------------------------------------------------
+    # 16. /dig artifacts — View the artifact catalog and your collection
+    # ------------------------------------------------------------------
+
+    @dig.command(name="artifacts", description="View all artifacts and the ones you own")
+    @app_commands.checks.cooldown(1, 10)
+    @require_guild
+    async def dig_artifacts(self, interaction: discord.Interaction):
+        if not await require_dig_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        if not await safe_defer(interaction):
+            return
+
+        guild_id = interaction.guild.id
+        try:
+            owned_rows = await asyncio.to_thread(
+                self.dig_service.get_artifacts_for_catalog,
+                interaction.user.id,
+                guild_id,
+            )
+            embeds = _build_artifact_catalog_embeds(owned_rows)
+        except Exception as e:
+            logger.error("Artifact catalog error: %s", e)
+            await safe_followup(
+                interaction,
+                content="Artifact catalog unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        for embed in embeds:
+            await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
     # 16a. /dig gear — Manage boss-combat gear loadout

@@ -1039,6 +1039,10 @@ class GearMixin:
         """Return all artifacts grouped by layer and rarity."""
         return self.leaderboard_service.get_collection(discord_id, guild_id)
 
+    def get_artifacts_for_catalog(self, discord_id: int, guild_id) -> list[dict]:
+        """Return every owned artifact row for the artifact catalog display."""
+        return self.dig_repo.get_artifacts(discord_id, guild_id)
+
     # ------------------------------------------------------------------
     # Events
     # ------------------------------------------------------------------
