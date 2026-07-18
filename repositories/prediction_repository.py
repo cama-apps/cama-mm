@@ -580,6 +580,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     """,
                     (total_proceeds, discord_id, guild_id),
                 )
+                if cursor.rowcount != 1:
+                    raise ValueError("Player not found. Use /player register first.")
             finally:
                 self._clear_economy_ledger_context(cursor)
 
@@ -782,11 +784,21 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT status FROM predictions WHERE prediction_id = ?",
+                "SELECT status, guild_id FROM predictions WHERE prediction_id = ?",
                 (prediction_id,),
             )
             prediction = cursor.fetchone()
             if not prediction or prediction["status"] != "open":
+                return None
+
+            # A recipient without a player row in the market's guild could
+            # never be credited at settlement — refuse to park contracts on
+            # an unregistered account.
+            cursor.execute(
+                "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
+                (to_discord_id, prediction["guild_id"]),
+            )
+            if cursor.fetchone() is None:
                 return None
 
             from_yes, from_yes_basis, from_no, from_no_basis = self._read_position(
@@ -1379,6 +1391,12 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                                 """,
                                 (credited, p["discord_id"], guild_id),
                             )
+                            # A silent no-op here (holder's player row deleted)
+                            # would skip the credit AND its ledger row while
+                            # lp_pnl still absorbs the payout, bricking any
+                            # later rollback. Fail the whole settlement instead.
+                            if cursor.rowcount != 1:
+                                raise ValueError("Winning player not found.")
                         finally:
                             self._clear_economy_ledger_context(cursor)
                     else:
