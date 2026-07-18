@@ -17,6 +17,7 @@ from services.dig_constants import (
     PINNACLE_DEPTH,
     PRESTIGE_PERK_STACK_CAP,
     PRESTIGE_PERKS,
+    scale_positive_dig_jc,
 )
 
 
@@ -66,8 +67,13 @@ class PrestigeMixin:
         if depth < 10:
             return self._error("Tunnel must be at least 10 blocks deep to abandon.")
 
-        refund = int(depth * 0.1)
-        return self._ok(refund=refund, current_depth=depth)
+        gross_refund = int(depth * 0.1)
+        refund = scale_positive_dig_jc(gross_refund)
+        return self._ok(
+            refund=refund,
+            gross_refund=gross_refund,
+            current_depth=depth,
+        )
 
     def can_prestige(self, discord_id: int, guild_id) -> dict:
         """Check if player can prestige."""
@@ -188,7 +194,8 @@ class PrestigeMixin:
         # Flat prestige grant: 1000 JC + one rare-or-better relic.
         from services.dig_constants import RELICS, TROPHY_RELIC_IDS
 
-        prestige_jc_grant = 1000
+        prestige_gross_jc = 1000
+        prestige_jc_grant = scale_positive_dig_jc(prestige_gross_jc)
         # Relics are unique and signature trophies are carve-only — exclude
         # owned relics and trophies from the grant pool.
         owned = {
@@ -257,9 +264,12 @@ class PrestigeMixin:
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="prestige",
+            jc_delta=prestige_jc_grant,
             details=json.dumps({
                 "level": prestige_level, "perk": perk_choice,
                 "run_score": run_score, "mutations": mutation_info,
+                "gross_jc": prestige_gross_jc,
+                "reward_multiplier": 0.65,
             }),
         )
 
@@ -307,7 +317,8 @@ class PrestigeMixin:
         if recent_abandons:
             return self._error("You can only abandon once every 24 hours.")
 
-        refund = int(depth * 0.1)
+        gross_refund = int(depth * 0.1)
+        refund = scale_positive_dig_jc(gross_refund)
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
 
         # Reset tunnel + refund + audit log commit together. The old flow
@@ -324,7 +335,12 @@ class PrestigeMixin:
                 "cheer_data": None,
                 "streak_days": 0,
             },
-            log_detail={"depth": depth, "refund": refund},
+            log_detail={
+                "depth": depth,
+                "refund": refund,
+                "gross_jc": gross_refund,
+                "reward_multiplier": 0.65,
+            },
             log_action_type="abandon",
         )
 

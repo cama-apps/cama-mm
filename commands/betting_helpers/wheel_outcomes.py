@@ -33,6 +33,7 @@ from config import (
     WHEEL_GREEN_SHELL_STEAL_MAX,
     WHEEL_GREEN_SHELL_STEAL_MIN,
 )
+from services.dig_data.balance import scale_positive_dig_jc
 from utils.economy_scaling import scale_minigame_jc_delta
 
 logger = logging.getLogger("cama_bot.commands.betting.wheel_outcomes")
@@ -252,6 +253,7 @@ class WheelOutcomeContext:
     hostile_event_prefix: str
     gamba_win_multiplier: float = 1.0
     gamba_loss_multiplier: float = 1.0
+    is_dig_bonus: bool = False
 
 
 class WheelOutcomeProcessor:
@@ -306,11 +308,14 @@ class WheelOutcomeProcessor:
         """
         if amount <= 0:
             return amount
-        return apply_gamba_event_multiplier(
+        reward = apply_gamba_event_multiplier(
             amount,
             win_multiplier=self.context.gamba_win_multiplier,
             loss_multiplier=self.context.gamba_loss_multiplier,
         )
+        if self.context.is_dig_bonus:
+            return scale_positive_dig_jc(reward)
+        return reward
 
     async def _jailbreak(self) -> None:
         if self.context.bankruptcy_service:
@@ -1117,6 +1122,11 @@ class WheelOutcomeProcessor:
     async def _numeric_result(self) -> None:
         value = self.state.result_value
         if value > 0:
+            if self.context.is_dig_bonus:
+                value = scale_positive_dig_jc(value)
+                self.state.replace_result(
+                    (str(value), value, self.state.result_wedge[2])
+                )
             if self.context.effects and self.context.effects.blue_gamba_reduction > 0:
                 value -= int(value * self.context.effects.blue_gamba_reduction)
                 self.state.replace_result(

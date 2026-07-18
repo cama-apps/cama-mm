@@ -212,7 +212,7 @@ def _trivia_question() -> TriviaQuestion:
 
 
 @pytest.mark.asyncio
-async def test_dig_trivia_correct_answer_awards_fifteen_jc_with_audit_context():
+async def test_dig_trivia_correct_answer_applies_dig_reward_policy_with_audit_context():
     from commands.dig_helpers.bonus_events import DigTriviaView
 
     player_service = SimpleNamespace(adjust_balance=MagicMock(return_value=115))
@@ -232,16 +232,21 @@ async def test_dig_trivia_correct_answer_awards_fifteen_jc_with_audit_context():
     player_service.adjust_balance.assert_called_once_with(
         1,
         99,
-        15,
+        10,
         source="dig",
         actor_id=1,
         related_type="dig_bonus_trivia",
         related_id="hero_quote",
         reason="dig bonus trivia correct answer",
-        metadata={"correct": True, "timed_out": False},
+        metadata={
+            "correct": True,
+            "timed_out": False,
+            "gross_jc": 15,
+            "reward_multiplier": 0.65,
+        },
     )
     result_embed = interaction.response.edit_message.call_args.kwargs["embed"]
-    assert "+15 JC" in result_embed.title
+    assert "+10 JC" in result_embed.title
 
 
 @pytest.mark.asyncio
@@ -284,13 +289,18 @@ async def test_dig_trivia_persists_its_economy_ledger_context(repo_db_path):
         ).fetchone()
 
     assert dict(row) | {"metadata": json.loads(row["metadata"])} == {
-        "delta": 15,
+        "delta": 10,
         "source": "dig",
         "actor_id": 1,
         "related_type": "dig_bonus_trivia",
         "related_id": "hero_quote",
         "reason": "dig bonus trivia correct answer",
-        "metadata": {"correct": True, "timed_out": False},
+        "metadata": {
+            "correct": True,
+            "timed_out": False,
+            "gross_jc": 15,
+            "reward_multiplier": 0.65,
+        },
     }
 
 
@@ -593,7 +603,7 @@ async def test_send_dig_bonus_posts_one_standalone_trivia_question():
     assert isinstance(sent_view, DigTriviaView)
     assert sent_view.message is sent_message
     assert sent_embed.description == question.text
-    assert "+15 JC" in sent_embed.footer.text
+    assert "+10 JC" in sent_embed.footer.text
     assert "-5 JC" in sent_embed.footer.text
 
 

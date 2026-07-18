@@ -35,6 +35,7 @@ from services.dig_constants import (
     format_relic_label,
     is_ordinary_relic,
     relic_rarity_for_roll,
+    scale_positive_dig_jc,
 )
 
 
@@ -209,13 +210,18 @@ class GearMixin:
             if elapsed_min <= 0:
                 return 0
             cap_remaining = 100 - already
-            credit = min(int(elapsed_min // 2), cap_remaining)  # 0.5/min ≈ 1 per 2 min
-            if credit <= 0:
+            gross_credit = min(
+                int(elapsed_min // 2), cap_remaining
+            )  # 0.5/min ≈ 1 per 2 min
+            if gross_credit <= 0:
                 return 0
+            credit = scale_positive_dig_jc(gross_credit)
             # Record the claim before crediting: if the credit write fails, the
             # daily cap is already consumed (player just misses out) rather than
             # leaving the claim unrecorded and re-claimable.
-            self.slow_drip_repo.add_claim(discord_id, guild_id, today, credit)
+            self.slow_drip_repo.add_claim(
+                discord_id, guild_id, today, gross_credit
+            )
             self.player_repo.add_balance(
                 discord_id,
                 guild_id,
@@ -223,7 +229,13 @@ class GearMixin:
                 source="dig",
                 related_type="slow_drip",
                 reason="dig slow drip credit",
-                metadata={"today": today, "claimed_today": already, "credit": credit},
+                metadata={
+                    "today": today,
+                    "claimed_today": already,
+                    "credit": credit,
+                    "gross_jc": gross_credit,
+                    "reward_multiplier": 0.65,
+                },
             )
             return credit
         except Exception:
@@ -620,40 +632,37 @@ class GearMixin:
         if tier < 0 or tier >= len(table):
             return self._error("Invalid gear tier.")
         td = table[tier]
-        # Top tiers (Obsidian+) are drop-only; shop carries Wooden..Diamond (0..3).
-        if tier > 3:
-            return self._error(f"{td.name} doesn't drop in the shop — it comes from boss kills.")
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return self._error("You don't have a tunnel.")
-        depth = int(tunnel.get("depth", 0) or 0)
+        depth = max(
+            int(tunnel.get("depth", 0) or 0),
+            int(tunnel.get("max_depth", 0) or 0),
+        )
         prestige = int(tunnel.get("prestige_level", 0) or 0)
         if depth < td.depth_required:
             return self._error(f"{td.name} requires depth {td.depth_required}.")
         if prestige < td.prestige_required:
             return self._error(f"{td.name} requires prestige {td.prestige_required}.")
-        if td.shop_price > 0 and not self.player_repo.try_debit(
+        gear_id = self.dig_repo.atomic_purchase_gear(
             discord_id,
             guild_id,
-            td.shop_price,
-            source="dig",
-            related_type="gear_purchase",
-            related_id=f"{slot_enum.value}:{tier}",
-            reason="dig gear purchase",
+            cost=td.shop_price,
+            slot=slot_enum.value,
+            tier=tier,
+            source="shop",
             metadata={
                 "slot": slot_enum.value,
                 "tier": tier,
                 "name": td.name,
                 "cost": td.shop_price,
             },
-        ):
+        )
+        if gear_id is None:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             return self._error(
                 f"{td.name} costs {td.shop_price} JC; you have {balance}.",
             )
-        gear_id = self.dig_repo.add_gear(
-            discord_id, guild_id, slot_enum.value, tier, source="shop",
-        )
         return self._ok(gear_id=gear_id, name=td.name, cost=td.shop_price)
 
     def _relic_slot_cap(self, prestige: int) -> int:

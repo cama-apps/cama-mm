@@ -156,9 +156,12 @@ def test_new_relics_in_catalog_with_lore_and_effect():
 
 
 def test_total_artifact_count():
-    # 37 existing relics plus the 8 ordinary relics added with rarity progression.
-    assert len(ALL_ARTIFACTS) == 45
-    assert all(a.is_relic for a in ALL_ARTIFACTS)
+    # Existing relics, rarity-progression relics, and two statless curios.
+    assert len(ALL_ARTIFACTS) == 47
+    assert sum(a.is_relic for a in ALL_ARTIFACTS) == 45
+    assert {
+        artifact.id for artifact in ALL_ARTIFACTS if not artifact.is_relic
+    } == {"miner_s_lullaby", "map_of_the_first_descent"}
 
 
 # --------------------------------------------------------------------------

@@ -320,11 +320,11 @@ def test_finale_jc_plus_modifier_grants_jc_and_sets_modifier(
     result = svc.advance_on_desperate_success(1, TEST_GUILD_ID, "agh_s5")
     assert result is not None
     assert result["finale_kind"] == "jc_plus_guild_modifier"
-    assert result["personal_jc"] == 75
+    assert result["personal_jc"] == 49
     assert result["modifier_id"] == "reagent_spill"
 
     # Balance credited
-    assert player_repository.get_balance(1, TEST_GUILD_ID) == 100 + 75
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == 100 + 49
 
     # Guild modifier active
     assert guild_modifier_repo.is_active(TEST_GUILD_ID, "reagent_spill")

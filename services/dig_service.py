@@ -50,6 +50,7 @@ from services.dig_constants import (
     WIN_CHANCE_CAP,
     cave_in_band,
     roll_catastrophic_cave_in,
+    scale_positive_dig_jc,
 )
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -766,12 +767,14 @@ class DigService(
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
             # Relic: Gambler's Charm — bonus JC equal to 50% of would-have-lost depth
-            gamblers_charm_bonus = 0
+            gamblers_charm_gross_bonus = 0
             if (
                 block_loss_pre_save > 0
                 and self._has_relic(discord_id, guild_id, "gamblers_charm")
             ):
-                gamblers_charm_bonus = max(1, int(block_loss_pre_save * 0.5))
+                gamblers_charm_gross_bonus = max(
+                    1, int(block_loss_pre_save * 0.5)
+                )
 
             # Accumulate all cave-in writes into one atomic commit:
             # thick_skin_date, second_wind buff, injury_state, depth delta,
@@ -790,17 +793,17 @@ class DigService(
 
             # Mutation: cave_in_loot — chance to drop JC on cave-in
             cave_in_jc = 0
+            cave_in_gross_jc = 0
             loot_chance = mutation_fx.get("cave_in_loot_chance", 0)
             if loot_chance > 0 and random.random() < loot_chance:
                 loot_min = int(mutation_fx.get("cave_in_loot_min", 1))
                 loot_max = int(mutation_fx.get("cave_in_loot_max", 3))
-                cave_in_jc = random.randint(loot_min, loot_max)
-                cave_in_balance_delta += cave_in_jc
+                cave_in_gross_jc = random.randint(loot_min, loot_max)
 
             # Relic: Gambler's Charm — bonus JC for surviving the cave-in
-            if gamblers_charm_bonus > 0:
-                cave_in_balance_delta += gamblers_charm_bonus
-                cave_in_jc += gamblers_charm_bonus
+            cave_in_gross_jc += gamblers_charm_gross_bonus
+            cave_in_jc = scale_positive_dig_jc(cave_in_gross_jc)
+            cave_in_balance_delta += cave_in_jc
 
             # Mutation: second_wind — flag for next dig advance bonus
             if mutation_fx.get("post_cave_in_advance"):
@@ -851,6 +854,12 @@ class DigService(
                     "cave_in": True, "block_loss": block_loss,
                     "detail": cave_in_detail,
                     "depth_before": depth_before, "depth_after": new_depth,
+                    "gross_jc": cave_in_gross_jc,
+                    "reward_multiplier": (
+                        0.65
+                        if cave_in_gross_jc > 0
+                        else None
+                    ),
                 },
                 log_action_type="dig",
             )
@@ -1054,6 +1063,8 @@ class DigService(
         jc_earned += streak_bonus
 
         jc_earned = scale_minigame_jc_delta(jc_earned)
+        gross_jc = jc_earned
+        jc_earned = scale_positive_dig_jc(gross_jc)
 
         # Plains tithe / Blue tax apply to the scaled full payout (base +
         # milestone + streak) so the transferred/burned amounts are scaled too.
@@ -1210,6 +1221,7 @@ class DigService(
             consume_inventory_item_ids=consumed_item_row_ids,
             log_detail={
                 "advance": advance, "jc": jc_earned,
+                "gross_jc": gross_jc, "reward_multiplier": 0.65,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter,
                 "cave_in": False,
@@ -1236,6 +1248,7 @@ class DigService(
             depth_after=new_depth,
             advance=advance,
             jc_earned=jc_earned,
+            gross_jc=gross_jc,
             nonstreak_jc=nonstreak_jc,
             nonstreak_cap=base_cap,
             bankruptcy_penalty=dig_bankruptcy_penalty,

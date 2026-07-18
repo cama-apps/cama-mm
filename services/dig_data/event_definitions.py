@@ -4688,6 +4688,328 @@ RANDOM_EVENTS: list[RandomEvent] = [
         social=True,
         splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=22, trigger="success", mode="burn"),
     ),
+    RandomEvent(
+        id="abandoned_forge",
+        name="Abandoned Forge",
+        description=(
+            "A forge still holds a dull red heat. Three tools rest where their smith left them.",
+            "Hammer marks lead to a workbench that should have rotted decades ago.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Temper one edge and leave",
+            success=EventOutcome(
+                "You restore a careful edge for the next hard fight.",
+                1, 0, False,
+                consumable_reward_pool=("tempered_whetstone",),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Wake the whole forge",
+            success=EventOutcome(
+                "The forge roars awake and yields one intact preparation kit.",
+                2, 0, False,
+                consumable_reward_pool=(
+                    "tempered_whetstone", "warding_salts", "rescue_line",
+                ),
+            ),
+            failure=EventOutcome(
+                "The bellows rupture and bury the bench under hot stone.",
+                -3, -4, True,
+            ),
+            success_chance=0.58,
+        ),
+        rarity="common",
+    ),
+    RandomEvent(
+        id="salted_threshold",
+        name="Salted Threshold",
+        description=(
+            "A precise circle of black salt surrounds a doorway with no room behind it.",
+            "Someone warded this seam from the inside.",
+        ),
+        min_depth=35, max_depth=None,
+        safe_option=EventChoice(
+            "Gather the untouched salt",
+            success=EventOutcome(
+                "You bottle the clean edge of the ward without crossing it.",
+                0, 0, False,
+                consumable_reward_pool=("warding_salts",),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Step through the circle",
+            success=EventOutcome(
+                "The false doorway folds away, leaving a cache of warding supplies.",
+                2, 0, False,
+                consumable_reward_pool=("warding_salts", "rescue_line"),
+            ),
+            failure=EventOutcome(
+                "The circle closes behind your shadow and takes the light with it.",
+                -2, 0, False,
+                curse=TempCurse(
+                    "hex_salted_shadow", "Salted Shadow", 3,
+                    {"luminosity_drain": 12},
+                ),
+            ),
+            success_chance=0.55,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="frayed_lifeline",
+        name="Frayed Lifeline",
+        description=(
+            "A rescue cache hangs over a shaft whose bottom refuses your lantern light.",
+            "A line is still tied off here, though its owner is long gone.",
+        ),
+        min_depth=50, max_depth=None,
+        safe_option=EventChoice(
+            "Cut down the spare line",
+            success=EventOutcome(
+                "The old rope is sound enough to soften one bad retreat.",
+                0, 0, False,
+                consumable_reward_pool=("rescue_line",),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Descend to the hanging cache",
+            success=EventOutcome(
+                "You return with a sealed kit and a much better knot.",
+                3, 0, False,
+                consumable_reward_pool=("rescue_line", "tempered_whetstone"),
+            ),
+            failure=EventOutcome(
+                "The anchor tears loose. The shaft keeps what falls past you.",
+                -5, -3, True,
+            ),
+            success_chance=0.52,
+        ),
+        rarity="common",
+    ),
+    RandomEvent(
+        id="quartermaster_s_niche",
+        name="Quartermaster's Niche",
+        description=(
+            "A numbered niche contains supplies for a crew that never checked back in.",
+            "Three waxed parcels wait beneath a tally of unfinished shifts.",
+        ),
+        min_depth=75, max_depth=None,
+        safe_option=EventChoice(
+            "Take the plainly marked parcel",
+            success=EventOutcome(
+                "The label was honest: one useful preparation, still dry.",
+                1, 0, False,
+                consumable_reward_pool=(
+                    "tempered_whetstone", "warding_salts", "rescue_line",
+                ),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Open the sealed locker",
+            success=EventOutcome(
+                "The lock gives before the ceiling does. The best parcel is yours.",
+                4, 0, False,
+                consumable_reward_pool=(
+                    "tempered_whetstone", "warding_salts", "rescue_line",
+                ),
+            ),
+            failure=EventOutcome(
+                "The locker was holding the wall together. It is not anymore.",
+                -4, -5, True,
+            ),
+            success_chance=0.48,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="collapsed_armory_cache",
+        name="Collapsed Armory Cache",
+        description=(
+            "A crushed rack shows the outlines of tools made for very particular miners.",
+            "Bent lockers surround one compartment the collapse failed to open.",
+        ),
+        min_depth=90, max_depth=None,
+        safe_option=EventChoice(
+            "Salvage the field kit",
+            success=EventOutcome(
+                "You leave the strange metal alone and recover a practical kit.",
+                1, 0, False,
+                consumable_reward_pool=("tempered_whetstone", "rescue_line"),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Free the sealed compartment",
+            success=EventOutcome(
+                "Inside waits a tool built around a dangerous idea.",
+                2, 0, False,
+                gear_reward_pool=(
+                    "glassbreaker_pick", "needle_pick", "briarplate",
+                    "nullweave_mantle", "springheel_boots", "anchor_boots",
+                    "loaded_die", "blood_locket",
+                ),
+                consumable_reward_pool=("warding_salts",),
+            ),
+            failure=EventOutcome(
+                "The compartment opens downward. So does the floor.",
+                -6, -5, True,
+            ),
+            success_chance=0.34,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="relic_bearing_strata",
+        name="Relic-Bearing Strata",
+        description=(
+            "A narrow band of stone has grown around several objects that do not belong here.",
+            "The seam hums around the outline of something old and useful.",
+        ),
+        min_depth=110, max_depth=None,
+        safe_option=EventChoice(
+            "Chip out the loose supplies",
+            success=EventOutcome(
+                "You avoid the humming core and recover what the stone released freely.",
+                1, 0, False,
+                consumable_reward_pool=("warding_salts", "rescue_line"),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Split the humming seam",
+            success=EventOutcome(
+                "The stone parts around a relic that seems relieved to be found.",
+                2, 0, False,
+                artifact_reward_pool=(
+                    "mole_claws", "crystal_compass", "root_network",
+                    "echo_stone", "spore_cloak", "frozen_clock",
+                ),
+                gear_reward_pool=("briarplate", "anchor_boots"),
+            ),
+            failure=EventOutcome(
+                "The seam answers with a resonance that empties your hands and your memory.",
+                -4, -6, False,
+                curse=TempCurse(
+                    "hex_resonant_hands", "Resonant Hands", 4,
+                    {"advance_bonus": -1},
+                ),
+            ),
+            success_chance=0.30,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="prospector_s_last_pack",
+        name="Prospector's Last Pack",
+        description=(
+            "A pack sits neatly beneath a name carved out of the wall.",
+            "Someone cached their finest equipment beside a route they chose not to return from.",
+        ),
+        min_depth=140, max_depth=None,
+        safe_option=EventChoice(
+            "Take only the emergency bundle",
+            success=EventOutcome(
+                "You honor the arrangement and take what was meant for a stranger in trouble.",
+                0, 0, False,
+                consumable_reward_pool=("rescue_line", "tempered_whetstone"),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Open the wrapped heirloom",
+            success=EventOutcome(
+                "The wrapping falls away from a keepsake that still remembers its owner.",
+                3, 0, False,
+                gear_reward_pool=("needle_pick", "nullweave_mantle", "loaded_die"),
+                artifact_reward_pool=("echo_stone", "hollow_eye"),
+            ),
+            failure=EventOutcome(
+                "The pack's last knot was a warning. The tunnel collects its due.",
+                -7, -8, True,
+            ),
+            success_chance=0.26,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="song_below_stone",
+        name="Song Below Stone",
+        description=(
+            "A melody passes through solid stone, pausing whenever you breathe.",
+            "The mine sings a tune no living crew should know.",
+        ),
+        min_depth=175, max_depth=None,
+        safe_option=EventChoice(
+            "Record only the refrain",
+            success=EventOutcome(
+                "You copy enough of the rhythm to steady one future encounter.",
+                0, 0, False,
+                consumable_reward_pool=("warding_salts",),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sing the missing final verse",
+            success=EventOutcome(
+                "The mountain answers. When the echo fades, a slate of music rests at your feet.",
+                1, 0, False,
+                artifact_reward_pool=("miner_s_lullaby",),
+                consumable_reward_pool=("warding_salts",),
+            ),
+            failure=EventOutcome(
+                "Something sings your name back in the wrong voice.",
+                -5, 0, False,
+                curse=TempCurse(
+                    "hex_stolen_voice", "Stolen Voice", 5,
+                    {"luminosity_drain": 18, "jc_bonus": -2},
+                ),
+            ),
+            success_chance=0.18,
+        ),
+        rarity="legendary",
+    ),
+    RandomEvent(
+        id="first_descent_cartography",
+        name="First Descent Cartography",
+        description=(
+            "A survey station is pinned beneath ice that predates every tunnel record.",
+            "A brass map case bears the seal of an expedition nobody remembers sending.",
+        ),
+        min_depth=220, max_depth=None,
+        safe_option=EventChoice(
+            "Copy the nearest route",
+            success=EventOutcome(
+                "The practical markings lead you to a sealed rescue cache.",
+                1, 0, False,
+                consumable_reward_pool=("rescue_line",),
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Trace the route with no destination",
+            success=EventOutcome(
+                "The blank route inks itself toward a chamber behind you. The original map remains.",
+                2, 0, False,
+                artifact_reward_pool=("map_of_the_first_descent",),
+                consumable_reward_pool=("rescue_line",),
+            ),
+            failure=EventOutcome(
+                "The route folds. You emerge far above the station with frost in your purse.",
+                -9, -10, False,
+                curse=TempCurse(
+                    "hex_false_route", "False Route", 6,
+                    {"advance_bonus": -2, "luminosity_drain": 20},
+                ),
+            ),
+            success_chance=0.14,
+        ),
+        rarity="legendary",
+    ),
 ]
 
 

@@ -9,6 +9,15 @@ from __future__ import annotations
 import math
 import random
 
+DIG_POSITIVE_JC_MULTIPLIER: float = 0.65
+
+
+def scale_positive_dig_jc(amount: int) -> int:
+    """Scale newly minted positive dig JC, using half-up integer rounding."""
+    if amount <= 0:
+        return amount
+    return max(1, math.floor(amount * DIG_POSITIVE_JC_MULTIPLIER + 0.5))
+
 # ---------------------------------------------------------------------------
 # Sabotage / Defense Constants
 # ---------------------------------------------------------------------------
@@ -117,12 +126,15 @@ CAVE_IN_CATASTROPHIC_MILESTONE_STEP: int = 25  # roll back to floor((depth-1)/st
 
 # Negative-event tuning: central scalars so risky/desperate failures bite a bit
 # harder without editing every authored event. Applied at resolution time in
-# events_mixin. Only negative JC and negative curse effects are scaled —
-# positive payouts and cave-in medical bills are untouched.
+# events_mixin. These helpers strengthen negative JC, curse effects, and depth
+# setbacks. Positive payouts use ``scale_positive_dig_jc`` above; cave-in
+# medical bills remain untouched.
 NEGATIVE_EVENT_JC_MULTIPLIER: float = 1.3   # scales flat JC *losses* on failures
-CURSE_STRENGTH_MULT: float = 1.3            # scales negative curse effect magnitudes
-CURSE_DURATION_BONUS_DIGS: int = 1          # +N digs on every applied curse
-DIG_EVENT_DEFLATION_MULTIPLIER: float = 1.10
+CURSE_STRENGTH_MULT: float = 1.5            # scales negative curse effect magnitudes
+CURSE_DURATION_BONUS_DIGS: int = 2          # +N digs on every applied curse
+DIG_EVENT_DEFLATION_MULTIPLIER: float = 1.375
+DIG_EVENT_DEPTH_SETBACK_MULTIPLIER: float = 1.25
+DIG_EVENT_HARMFUL_WEIGHT_MULTIPLIER: float = 1.25
 
 
 def strengthen_dig_event_penalty(amount: int) -> int:

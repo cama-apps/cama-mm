@@ -502,7 +502,35 @@ def is_ordinary_relic(relic: ArtifactDef) -> bool:
 TROPHY_CARVE_RATE: float = 0.25
 
 
-ALL_ARTIFACTS: list[ArtifactDef] = list(RELICS)
+CURIOS: list[ArtifactDef] = [
+    ArtifactDef(
+        id="miner_s_lullaby",
+        name="The Miner's Lullaby",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text=(
+            "A melody scratched into slate. The final bar has no notes, only "
+            "a warning to leave room for the mountain to answer."
+        ),
+        is_relic=False,
+        effect=None,
+    ),
+    ArtifactDef(
+        id="map_of_the_first_descent",
+        name="Map of the First Descent",
+        layer="Frozen Core",
+        rarity="Legendary",
+        lore_text=(
+            "Every route ends at the same unmarked chamber. Someone later "
+            "added a single line: we were not the first."
+        ),
+        is_relic=False,
+        effect=None,
+    ),
+]
+
+
+ALL_ARTIFACTS: list[ArtifactDef] = [*RELICS, *CURIOS]
 
 ARTIFACT_BY_ID: dict[str, ArtifactDef] = {a.id: a for a in ALL_ARTIFACTS}
 

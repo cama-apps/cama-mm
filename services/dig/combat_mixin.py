@@ -8,6 +8,7 @@ carries no state of its own and is composed into ``DigService``.
 """
 
 import json
+import math
 import random
 import time
 
@@ -32,6 +33,7 @@ from services.dig_constants import (
     BOSS_PHASE2,
     BOSS_PHASE3,
     BOSS_PHASES,
+    BOSS_PREP_ITEM_IDS,
     BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
@@ -48,6 +50,7 @@ from services.dig_constants import (
     WIN_CHANCE_CAP,
     get_phase2_for,
     get_phase3_for,
+    scale_positive_dig_jc,
 )
 
 
@@ -57,6 +60,83 @@ class BossCombatMixin:
     Composed into :class:`~services.dig_service.DigService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
+    def _activate_boss_prep(
+        self,
+        discord_id: int,
+        guild_id,
+        boss_progress: dict,
+        at_boss: int | str,
+    ) -> dict | None:
+        """Consume one queued prep and persist it on the full boss attempt."""
+        key = str(at_boss)
+        raw_entry = boss_progress.get(key)
+        entry = dict(raw_entry) if isinstance(raw_entry, dict) else {
+            "status": raw_entry or "active",
+        }
+        active = entry.get("active_prep")
+        if isinstance(active, dict) and active.get("item_type") in BOSS_PREP_ITEM_IDS:
+            return active
+
+        queued = self.dig_repo.get_queued_items(discord_id, guild_id)
+        selected = next(
+            (
+                row for row in queued
+                if row.get("item_type") in BOSS_PREP_ITEM_IDS
+            ),
+            None,
+        )
+        if selected is None:
+            return None
+
+        active = {
+            "item_type": selected["item_type"],
+            "used": False,
+        }
+        entry["active_prep"] = active
+        boss_progress[key] = entry
+        self.dig_repo.atomic_tunnel_balance_update(
+            discord_id,
+            guild_id,
+            tunnel_updates={"boss_progress": json.dumps(boss_progress)},
+            consume_inventory_item_ids=[int(selected["id"])],
+        )
+        return active
+
+    @staticmethod
+    def _apply_boss_prep_damage(player_dmg: int, prep: dict | None) -> int:
+        if prep and prep.get("item_type") == "tempered_whetstone":
+            return player_dmg + 1
+        return player_dmg
+
+    @staticmethod
+    def _apply_boss_prep_loss(
+        knockback: int,
+        prep: dict | None,
+    ) -> tuple[int, bool]:
+        if prep and prep.get("item_type") == "rescue_line":
+            return math.ceil(knockback / 2), True
+        return knockback, False
+
+    @staticmethod
+    def _consume_warding_salts(prep: dict | None) -> bool:
+        if (
+            prep
+            and prep.get("item_type") == "warding_salts"
+            and not prep.get("used", False)
+        ):
+            prep["used"] = True
+            return True
+        return False
+
+    @staticmethod
+    def _clear_active_boss_prep(
+        boss_progress: dict,
+        at_boss: int | str,
+    ) -> None:
+        entry = boss_progress.get(str(at_boss))
+        if isinstance(entry, dict):
+            entry.pop("active_prep", None)
+
     def _boss_base_reward(self, boundary: int, *, prestige_level: int) -> int:
         """Return the regular boss-clear reward after ascension bonuses."""
         base_reward = BOSS_VICTORY_BASE_JC.get(boundary, 15)
@@ -606,6 +686,16 @@ class BossCombatMixin:
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
 
+        active_prep = self._activate_boss_prep(
+            discord_id,
+            guild_id,
+            boss_progress,
+            at_boss,
+        )
+        if active_prep is not None:
+            # Pinnacle dispatch reparses progress from this local tunnel copy.
+            tunnel["boss_progress"] = json.dumps(boss_progress)
+
         # Pinnacle has its own 3-phase resolver — different boss data
         # structure and "always 3 phases regardless of prestige" rules.
         if self._is_pinnacle_depth(at_boss):
@@ -785,6 +875,10 @@ class BossCombatMixin:
             player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
             _phase_entry.pop("pending_phase_event_id", None)
             boss_progress[str(at_boss)] = _phase_entry
+
+        # This consumable promises a flat per-hit bonus, so apply it after
+        # every multiplier and phase delta has settled.
+        player_dmg = self._apply_boss_prep_damage(player_dmg, active_prep)
 
         player_hp, player_hit, crit_chance, _shifting_idol_bonus = (
             self._apply_shifting_idol_stats(
@@ -1040,7 +1134,10 @@ class BossCombatMixin:
                 )
             else:
                 wager_profit = 0
-            payout_delta = base_reward + wager_profit
+            gross_base_reward = base_reward
+            scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
+            gross_payout = gross_base_reward + wager_profit
+            payout_delta = scaled_base_reward + wager_profit
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
@@ -1056,6 +1153,12 @@ class BossCombatMixin:
                 log_detail={
                     "boundary": at_boss, "won": True, "risk": risk_tier,
                     "wager": wager, "jc_delta": payout_delta,
+                    "gross_jc": gross_base_reward,
+                    "gross_payout": gross_payout,
+                    "reward_multiplier": 0.65,
+                    "gross_base_jc": gross_base_reward,
+                    "scaled_base_jc": scaled_base_reward,
+                    "wager_profit": wager_profit,
                     "stat_point_awarded": stat_point_awarded,
                     "echo_applied": echo_applied,
                     "rounds": round_log,
@@ -1087,6 +1190,7 @@ class BossCombatMixin:
                 win_chance=round(win_chance, 2),
                 jc_delta=payout_delta,
                 payout=payout_delta,
+                gross_payout=gross_payout,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 stat_point_awarded=stat_point_awarded,
@@ -1100,6 +1204,10 @@ class BossCombatMixin:
             )
         else:
             knockback = random.randint(BOSS_LOSS_KNOCKBACK_MIN, BOSS_LOSS_KNOCKBACK_MAX)
+            knockback, rescue_line_used = self._apply_boss_prep_loss(
+                knockback,
+                active_prep,
+            )
             new_depth = max(0, depth - knockback)
             # A loss always costs something when the player elected a wager/free
             # fight. Forced no-wager phase fights should not pay the free-fight
@@ -1117,9 +1225,10 @@ class BossCombatMixin:
                 for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                 if p is not None
             }
-            for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
-                for i in self.dig_repo.tick_gear_durability(discord_id, guild_id):
-                    gear_broken_names.append(name_by_id.get(i, "a piece of gear"))
+            if not rescue_line_used:
+                for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+                    for i in self.dig_repo.tick_gear_durability(discord_id, guild_id):
+                        gear_broken_names.append(name_by_id.get(i, "a piece of gear"))
 
             # Persist post-fight boss HP so soften-and-retreat strategies work.
             # Mutates boss_progress in place to a dict with hp_remaining/last_engaged_at.
@@ -1131,6 +1240,7 @@ class BossCombatMixin:
             # Loss forfeits the carried wager; drop the markers so the next
             # encounter starts fresh.
             self._clear_carried_wager(boss_progress, at_boss)
+            self._clear_active_boss_prep(boss_progress, at_boss)
 
             # Tunnel knockback + wager forfeit + audit log commit together.
             # The old flow could forfeit the wager without recording the
@@ -1180,6 +1290,8 @@ class BossCombatMixin:
                 echo_applied=echo_applied,
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 gear_broken=gear_broken_names,
+                boss_prep=(active_prep or {}).get("item_type"),
+                rescue_line_used=rescue_line_used,
                 gear_drop=None,
                 luminosity_display=self._luminosity_combat_display(tunnel),
             )
@@ -1252,6 +1364,16 @@ class BossCombatMixin:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
+
+        active_prep = self._activate_boss_prep(
+            discord_id,
+            guild_id,
+            boss_progress,
+            at_boss,
+        )
+        if active_prep is not None:
+            # Pinnacle dispatch reparses progress from this local tunnel copy.
+            tunnel["boss_progress"] = json.dumps(boss_progress)
 
         # Apply the deferred durability tick from an abandoned paused duel.
         # Capture transitions now because later ticks only report each newly
@@ -1433,6 +1555,9 @@ class BossCombatMixin:
                 discord_id, guild_id, boss_progress=json.dumps(boss_progress),
             )
 
+        # Keep the bonus exactly +1 even when a phase event modifies damage.
+        player_dmg = self._apply_boss_prep_damage(player_dmg, active_prep)
+
         player_hp, player_hit, crit_chance, shifting_idol_bonus = (
             self._apply_shifting_idol_stats(
                 discord_id,
@@ -1467,6 +1592,8 @@ class BossCombatMixin:
         status_effects: dict = self._trophy_status_seed(
             discord_id, guild_id, player_start_hp=player_hp,
         )
+        if active_prep is not None:
+            status_effects["boss_prep"] = dict(active_prep)
         if shifting_idol_bonus:
             status_effects["shifting_idol_bonus"] = shifting_idol_bonus
         won: bool | None = None
@@ -1637,20 +1764,26 @@ class BossCombatMixin:
         boss_hp = int(state_row["boss_hp"])
         round_num = int(state_row["round_num"])
 
-        narrative, player_hp, boss_hp, status_effects = (
-            self._apply_option_outcome_to_state(
-                option=option,
-                player_hp=player_hp,
-                boss_hp=boss_hp,
-                status_effects=status_effects,
+        active_prep = status_effects.get("boss_prep")
+        warding_blocked = self._consume_warding_salts(active_prep)
+        if warding_blocked:
+            narrative = "The warding salts flare and swallow the boss mechanic."
+        else:
+            narrative, player_hp, boss_hp, status_effects = (
+                self._apply_option_outcome_to_state(
+                    option=option,
+                    player_hp=player_hp,
+                    boss_hp=boss_hp,
+                    status_effects=status_effects,
+                )
             )
-        )
         round_log.append({
             "round": round_num,
             "mechanic_id": state_row["mechanic_id"],
             "option_idx": option_idx,
             "option_label": option.label,
             "narrative": narrative,
+            "warding_salts_blocked": warding_blocked,
             "player_hp": max(0, player_hp),
             "boss_hp": max(0, boss_hp),
         })
@@ -1670,6 +1803,18 @@ class BossCombatMixin:
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
         depth = tunnel.get("depth", 0)
+        if warding_blocked:
+            prep_progress = self._get_boss_progress_entries(tunnel)
+            prep_entry = prep_progress.get(str(state_row["tier"]))
+            if isinstance(prep_entry, dict):
+                prep_entry["active_prep"] = active_prep
+                encoded_progress = json.dumps(prep_progress)
+                self.dig_repo.update_tunnel(
+                    discord_id,
+                    guild_id,
+                    boss_progress=encoded_progress,
+                )
+                tunnel["boss_progress"] = encoded_progress
 
         player_hit = float(state_row["player_hit"])
         player_dmg = int(state_row["player_dmg"])
@@ -2114,6 +2259,12 @@ class BossCombatMixin:
         self.dig_repo.clear_active_duel(discord_id, guild_id)
         now = int(time.time())
         boss_name = boss.name if boss is not None else BOSS_NAMES.get(at_boss, "Unknown Boss")
+        prep_entry = boss_progress.get(str(at_boss))
+        active_prep = (
+            prep_entry.get("active_prep")
+            if isinstance(prep_entry, dict)
+            else None
+        )
 
         # Wear-and-tear: tick durability for the gear that actually fought
         # this fight. When resume_boss_duel forwards a ``gear_snapshot_ids``
@@ -2269,6 +2420,7 @@ class BossCombatMixin:
                 }
             # Carried wager is settled by the payout below; drop the markers.
             self._clear_carried_wager(boss_progress, at_boss)
+            self._clear_active_boss_prep(boss_progress, at_boss)
             prev_max_depth = tunnel.get("max_depth", 0) or 0
             tunnel_updates = {
                 "depth": new_depth,
@@ -2304,8 +2456,12 @@ class BossCombatMixin:
                 )
             else:
                 wager_profit = 0
-            net_payout = base_reward + wager_profit
-            net_payout = self._apply_daily_economy_reward(guild_id, net_payout)
+            gross_base_reward = self._apply_daily_economy_reward(
+                guild_id, base_reward
+            )
+            scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
+            gross_payout = gross_base_reward + wager_profit
+            net_payout = scaled_base_reward + wager_profit
             # Bankruptcy debuff: a penalized player keeps only the configured
             # fraction of the boss-victory winnings; withheld share is a sink.
             net_payout, boss_bankruptcy_penalty = self._penalize_jc(
@@ -2326,6 +2482,12 @@ class BossCombatMixin:
                 log_detail={
                     "boundary": at_boss, "won": True, "risk": risk_tier,
                     "wager": wager, "jc_delta": net_payout,
+                    "gross_jc": gross_base_reward,
+                    "gross_payout": gross_payout,
+                    "reward_multiplier": 0.65,
+                    "gross_base_jc": gross_base_reward,
+                    "scaled_base_jc": scaled_base_reward,
+                    "wager_profit": wager_profit,
                     "stat_point_awarded": stat_point_awarded,
                     "echo_applied": echo_applied,
                     "rounds": round_log,
@@ -2355,6 +2517,7 @@ class BossCombatMixin:
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
                 jc_delta=net_payout, payout=net_payout,
+                gross_payout=gross_payout,
                 bankruptcy_penalty=boss_bankruptcy_penalty,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
@@ -2378,6 +2541,10 @@ class BossCombatMixin:
             discord_id, guild_id, tunnel, boss,
         )
         knockback += extra_kb
+        knockback, rescue_line_used = self._apply_boss_prep_loss(
+            knockback,
+            active_prep,
+        )
         new_depth = max(0, depth - knockback)
         # A loss always costs something when the player elected a wager/free
         # fight. Forced no-wager phase fights should not pay the free-fight
@@ -2403,16 +2570,17 @@ class BossCombatMixin:
 
         # Loss is harsher on gear — an extra durability tick beyond the
         # per-fight tick above, on the same pieces that fought.
-        for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
-            if gear_snapshot_ids:
-                extra_broken = self.dig_repo.tick_gear_durability_ids(
-                    [int(g) for g in gear_snapshot_ids]
+        if not rescue_line_used:
+            for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+                if gear_snapshot_ids:
+                    extra_broken = self.dig_repo.tick_gear_durability_ids(
+                        [int(g) for g in gear_snapshot_ids]
+                    )
+                else:
+                    extra_broken = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+                gear_broken_names.extend(
+                    name_by_id.get(i, "a piece of gear") for i in extra_broken
                 )
-            else:
-                extra_broken = self.dig_repo.tick_gear_durability(discord_id, guild_id)
-            gear_broken_names.extend(
-                name_by_id.get(i, "a piece of gear") for i in extra_broken
-            )
 
         # Persist remaining boss HP so soften-and-retreat works for the
         # state-machine path. ending_boss_hp / boss_hp_max are forwarded
@@ -2436,6 +2604,7 @@ class BossCombatMixin:
             )
         # Loss forfeits the carried wager; drop the markers.
         self._clear_carried_wager(bp_for_persist, at_boss)
+        self._clear_active_boss_prep(bp_for_persist, at_boss)
         # Debit wager and write tunnel state atomically so a crash can't
         # leave depth knocked back without the matching balance change.
         self.dig_repo.atomic_tunnel_balance_update(
@@ -2502,6 +2671,8 @@ class BossCombatMixin:
                 if echo_applied and active_echo else None
             ),
             gear_broken=gear_broken_names,
+            boss_prep=(active_prep or {}).get("item_type"),
+            rescue_line_used=rescue_line_used,
             gear_drop=None,
             luminosity_display=self._luminosity_combat_display(tunnel),
         )

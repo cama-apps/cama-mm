@@ -9,6 +9,7 @@ import pytest
 from domain.models.boss_mechanics import MechanicOption, OutcomeRoll
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
+from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_service import DigService
 
 
@@ -78,6 +79,7 @@ def test_black_wax_seal_boosts_cursed_risky_success_and_spends_duration(
     }
     monkeypatch.setattr("services.dig_service.EVENT_POOL", [event])
     monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.54)
+    relic_effect_service.dig_repo.update_tunnel(701, 17, luminosity=100)
 
     result = relic_effect_service.resolve_event(701, 17, "seal_test", "risky")
 
@@ -123,8 +125,8 @@ def test_burning_ledger_increases_event_gains_and_strengthened_losses(
     gain_result = relic_effect_service.resolve_event(701, 17, "ledger_gain", "safe")
     loss_result = relic_effect_service.resolve_event(701, 17, "ledger_loss", "risky")
 
-    assert gain_result["jc_delta"] == 115
-    assert loss_result["jc_delta"] == -179
+    assert gain_result["jc_delta"] == scale_positive_dig_jc(115)
+    assert loss_result["jc_delta"] == -224
 
 
 def test_lantern_stub_restores_five_on_first_daily_dig(relic_effect_service):

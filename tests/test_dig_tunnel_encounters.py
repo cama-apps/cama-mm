@@ -13,7 +13,10 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from services.dig_constants import EVENT_POOL
-from services.dig_data.balance import strengthen_dig_event_penalty
+from services.dig_data.balance import (
+    scale_positive_dig_jc,
+    strengthen_dig_event_penalty,
+)
 from services.dig_service import DigService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -168,7 +171,7 @@ class TestEncounterEndToEnd:
         # Outcome wiring.
         assert result["success"] is True
         assert result["succeeded"] is True
-        payout = scale_minigame_jc_delta(5)
+        payout = scale_positive_dig_jc(scale_minigame_jc_delta(5))
         burn = scale_deflationary_minigame_jc_delta(
             strengthen_dig_event_penalty(5)
         )
@@ -288,7 +291,7 @@ class TestEncounterEndToEnd:
 
         result = dig_service.resolve_event(digger, guild_id, "turf_war", "risky")
         assert result["succeeded"] is True
-        payout = scale_minigame_jc_delta(8)
+        payout = scale_positive_dig_jc(scale_minigame_jc_delta(8))
         burn = scale_deflationary_minigame_jc_delta(
             strengthen_dig_event_penalty(6)
         )
@@ -330,7 +333,7 @@ class TestEncounterEndToEnd:
 
         result = dig_service.resolve_event(digger, guild_id, "the_tear", "risky")
         assert result["succeeded"] is True
-        payout = scale_minigame_jc_delta(10)
+        payout = scale_positive_dig_jc(scale_minigame_jc_delta(10))
         burn = scale_deflationary_minigame_jc_delta(
             strengthen_dig_event_penalty(8)
         )

@@ -194,6 +194,28 @@ class EventEncounterView(discord.ui.View):
                     inline=False,
                 )
 
+        consumable_drop = getattr(result, "consumable_drop", None)
+        consumable_d = getattr(consumable_drop, "_d", consumable_drop)
+        if isinstance(consumable_d, dict):
+            embed.add_field(
+                name="Supply Found",
+                value=f"**{consumable_d.get('name', 'Consumable')}**",
+                inline=False,
+            )
+
+        artifact_drop = getattr(result, "artifact_drop", None)
+        artifact_d = getattr(artifact_drop, "_d", artifact_drop)
+        if isinstance(artifact_d, dict):
+            kind = "Relic Found" if artifact_d.get("is_relic") else "Curio Found"
+            embed.add_field(
+                name=kind,
+                value=(
+                    f"**{artifact_d.get('name', 'Artifact')}**"
+                    f"\n{artifact_d.get('lore_text', '')}"
+                ),
+                inline=False,
+            )
+
         # Fail loud — the player must see what a failed risky pick cost.
         # Curse: surface the hex name + how many digs it lingers.
         if curse_applied:

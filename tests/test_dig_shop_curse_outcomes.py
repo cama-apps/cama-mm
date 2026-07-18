@@ -90,8 +90,8 @@ def test_shop_curse_weights_events_with_negative_branches_more_heavily(
 
     weights_by_id = dict(zip((event["id"] for event in captured["events"]), captured["weights"]))
     assert weights_by_id["safe_only"] == 70
-    assert weights_by_id["negative_branch"] == 105
-    assert weights_by_id["curse_only_branch"] == 105
+    assert weights_by_id["negative_branch"] == 131.25
+    assert weights_by_id["curse_only_branch"] == 131.25
 
 
 def test_shop_curse_reduces_risky_event_success(

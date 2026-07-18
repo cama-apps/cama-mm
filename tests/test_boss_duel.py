@@ -27,6 +27,7 @@ from services.dig_constants import (
     FREE_DIG_COOLDOWN_SECONDS,
     PHASE_TRANSITION_EVENTS,
 )
+from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_service import DigService, _approx_duel_win_prob
 from tests.conftest import TEST_GUILD_ID
 
@@ -279,6 +280,30 @@ class TestDuelScaling:
 class TestDuelPayout:
     """Win pays wager * BOSS_PAYOUTS[depth][tier]; loss forfeits wager + cave-in."""
 
+    def test_positive_boss_payout_uses_dig_reward_policy(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+
+        result = dig_service.fight_boss(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert result["won"] is True
+        assert result["gross_payout"] == BOSS_VICTORY_BASE_JC[25]
+        assert result["payout"] == 10
+        assert player_repository.get_balance(
+            10001, TEST_GUILD_ID,
+        ) == balance_before + 10
+        action = dig_repo.get_recent_actions(
+            10001, TEST_GUILD_ID, limit=1, action_type="boss_fight",
+        )[0]
+        detail = json.loads(action["detail"])
+        assert detail["gross_jc"] == BOSS_VICTORY_BASE_JC[25]
+        assert detail["reward_multiplier"] == 0.65
+
     @pytest.mark.parametrize("entrypoint", ["legacy", "state_machine"])
     def test_p4_ascension_scales_regular_boss_base_reward(
         self,
@@ -319,7 +344,7 @@ class TestDuelPayout:
             )
 
         assert result["won"] is True
-        assert result["payout"] == 22
+        assert result["payout"] == scale_positive_dig_jc(22)
 
     def test_win_pays_from_payout_table(self, dig_service, dig_repo, player_repository, monkeypatch):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
@@ -336,10 +361,12 @@ class TestDuelPayout:
         expected_multiplier = BOSS_PAYOUTS[25][0]
         expected_profit = int(10 * (expected_multiplier - 1))
         # Every victory pays the flat base reward on top of the wager profit.
-        expected_payout = BOSS_VICTORY_BASE_JC[25] + expected_profit
-        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + expected_payout
+        expected_credit = (
+            scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25]) + expected_profit
+        )
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + expected_credit
         # Reported payout is the real net credited, not the gross return.
-        assert result["payout"] == expected_payout
+        assert result["payout"] == expected_credit
 
     def test_audit_log_jc_delta_matches_real_payout(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -625,8 +652,11 @@ class TestBossEchoWeakening:
         # reward is still paid on top.
         base_multiplier = BOSS_PAYOUTS[25][0]
         expected_profit = int(10 * (base_multiplier * 0.7 - 1))
-        expected_payout = BOSS_VICTORY_BASE_JC[25] + expected_profit
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == balance_before + expected_payout
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == (
+            balance_before
+            + scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25])
+            + expected_profit
+        )
 
     def test_killer_reruns_get_no_discount(self, dig_service, dig_repo, player_repository, monkeypatch):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
@@ -1059,7 +1089,8 @@ class TestWagerTaper:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
 
         assert result["won"] is True
-        expected = BOSS_VICTORY_BASE_JC[25] + int(100 * (BOSS_PAYOUTS[25][0] - 1))
+        wager_profit = int(100 * (BOSS_PAYOUTS[25][0] - 1))
+        expected = scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25]) + wager_profit
         assert (player_repository.get_balance(10001, TEST_GUILD_ID)
                 == balance_before + expected)
 
@@ -1079,9 +1110,10 @@ class TestWagerTaper:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=100)
 
         assert result["won"] is True
+        expected = scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25]) + 5
         assert (player_repository.get_balance(10001, TEST_GUILD_ID)
-                == balance_before + BOSS_VICTORY_BASE_JC[25] + 5)
-        assert result["payout"] == BOSS_VICTORY_BASE_JC[25] + 5
+                == balance_before + expected)
+        assert result["payout"] == expected
 
     def test_won_wager_at_high_win_chance_never_loses_money(
         self, dig_service, dig_repo, player_repository, monkeypatch,

@@ -43,6 +43,7 @@ from services.dig_constants import (
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     pinnacle_suffix_from_stats,
+    scale_positive_dig_jc,
 )
 
 
@@ -326,6 +327,7 @@ class PinnacleMixin:
         # Look up any pending phase event left over from the previous
         # phase transition (one-shot, consumed at end of this fight).
         pin_entry_now = self._read_boss_progress_entry(boss_progress, PINNACLE_DEPTH)
+        active_prep = pin_entry_now.get("active_prep")
         pending_event_id = pin_entry_now.get("pending_phase_event_id")
         phase_event_obj = None
         if pending_event_id:
@@ -387,7 +389,6 @@ class PinnacleMixin:
             player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
         # Pinnacle relic stat: dmg per 100 depth (300 → +3 per stack).
         player_dmg += self._pinnacle_dmg_per_100_count(loadout) * (PINNACLE_DEPTH // 100)
-
         # Silent mana variance modifier (parity with fight_boss).
         if self.mana_effects_service is not None:
             try:
@@ -402,6 +403,9 @@ class PinnacleMixin:
                     boss_dmg = max(1, int(boss_dmg * _pin_scale))
             except Exception:
                 pass
+
+        # Keep the consumable's damage increase flat after variance rounding.
+        player_dmg = self._apply_boss_prep_damage(player_dmg, active_prep)
 
         # Consume the pending phase event (one-shot) so it doesn't fire again.
         if phase_event_obj is not None:
@@ -477,6 +481,7 @@ class PinnacleMixin:
                     "rng_state": "",
                     "status_effects": json.dumps({
                         **relic_status,
+                        **({"boss_prep": dict(active_prep)} if active_prep else {}),
                         "attempts_this_fight": attempts,
                         "initial_win_chance": win_chance,
                         "pinnacle_state": {
@@ -632,20 +637,26 @@ class PinnacleMixin:
         boss_hp = int(state_row["boss_hp"])
         round_num = int(state_row["round_num"])
 
-        narrative, player_hp, boss_hp, status_effects = (
-            self._apply_option_outcome_to_state(
-                option=option,
-                player_hp=player_hp,
-                boss_hp=boss_hp,
-                status_effects=status_effects,
+        active_prep = status_effects.get("boss_prep")
+        warding_blocked = self._consume_warding_salts(active_prep)
+        if warding_blocked:
+            narrative = "The warding salts flare and swallow the boss mechanic."
+        else:
+            narrative, player_hp, boss_hp, status_effects = (
+                self._apply_option_outcome_to_state(
+                    option=option,
+                    player_hp=player_hp,
+                    boss_hp=boss_hp,
+                    status_effects=status_effects,
+                )
             )
-        )
         round_log.append({
             "round": round_num,
             "mechanic_id": state_row["mechanic_id"],
             "option_idx": option_idx,
             "option_label": option.label,
             "narrative": narrative,
+            "warding_salts_blocked": warding_blocked,
             "player_hp": max(0, player_hp),
             "boss_hp": max(0, boss_hp),
         })
@@ -662,6 +673,18 @@ class PinnacleMixin:
             return self._error("Tunnel disappeared during pinnacle duel.")
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
+        if warding_blocked:
+            prep_progress = self._get_boss_progress_entries(tunnel)
+            prep_entry = prep_progress.get(str(PINNACLE_DEPTH))
+            if isinstance(prep_entry, dict):
+                prep_entry["active_prep"] = active_prep
+                encoded_progress = json.dumps(prep_progress)
+                self.dig_repo.update_tunnel(
+                    discord_id,
+                    guild_id,
+                    boss_progress=encoded_progress,
+                )
+                tunnel["boss_progress"] = encoded_progress
 
         player_hit = float(state_row["player_hit"])
         player_dmg = int(state_row["player_dmg"])
@@ -792,6 +815,12 @@ class PinnacleMixin:
         """Shared end-of-pinnacle-fight resolution used by both
         ``_fight_pinnacle`` and ``_resume_pinnacle_duel``."""
         boss_name = phase_def.title
+        prep_entry = boss_progress.get(str(PINNACLE_DEPTH))
+        active_prep = (
+            prep_entry.get("active_prep")
+            if isinstance(prep_entry, dict)
+            else None
+        )
 
         if won:
             if phase_idx < 3:
@@ -885,8 +914,12 @@ class PinnacleMixin:
                 base_mult = BOSS_PAYOUTS.get(PINNACLE_DEPTH, (2.0, 3.0, 6.0))[tier_index]
                 eff_mult = self._effective_wager_multiplier(base_mult, win_chance)
                 wager_payout = int(wager * (eff_mult - 1))
-            total_reward = jc_reward + wager_payout
-            total_reward = self._apply_daily_economy_reward(guild_id, total_reward)
+            gross_base_reward = self._apply_daily_economy_reward(
+                guild_id, jc_reward
+            )
+            scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
+            gross_payout = gross_base_reward + wager_payout
+            total_reward = scaled_base_reward + wager_payout
             relic_drop = self._roll_pinnacle_relic(tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
             boss_progress[str(PINNACLE_DEPTH)] = {
@@ -923,6 +956,11 @@ class PinnacleMixin:
                     "pinnacle_id": pinnacle_id,
                     "phase": 3, "won": True,
                     "jc_delta": total_reward,
+                    "gross_jc": gross_base_reward,
+                    "gross_payout": gross_payout,
+                    "reward_multiplier": 0.65,
+                    "gross_base_jc": gross_base_reward,
+                    "scaled_base_jc": scaled_base_reward,
                     "wager_payout": wager_payout,
                     "relic_id": relic_drop["artifact_id"],
                 }),
@@ -936,6 +974,7 @@ class PinnacleMixin:
                 win_chance=round(win_chance, 2),
                 jc_delta=total_reward,
                 payout=total_reward,
+                gross_payout=gross_payout,
                 base_reward=jc_reward,
                 wager_payout=wager_payout,
                 new_depth=new_depth,
@@ -951,6 +990,10 @@ class PinnacleMixin:
 
         # Loss
         knockback = random.randint(8, 16)
+        knockback, rescue_line_used = self._apply_boss_prep_loss(
+            knockback,
+            active_prep,
+        )
         new_depth = max(0, depth - knockback)
         jc_delta = -wager if wager > 0 else 0
         self._persist_boss_hp_after_fight(
@@ -965,6 +1008,7 @@ class PinnacleMixin:
         boss_progress[str(PINNACLE_DEPTH)] = pin_entry
         # Forfeited on a loss — drop the carry markers so a retry starts fresh.
         self._clear_carried_wager(boss_progress, PINNACLE_DEPTH)
+        self._clear_active_boss_prep(boss_progress, PINNACLE_DEPTH)
 
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
@@ -1013,6 +1057,8 @@ class PinnacleMixin:
             round_log=round_log,
             is_pinnacle=True,
             gear_broken=gear_broken_names,
+            boss_prep=(active_prep or {}).get("item_type"),
+            rescue_line_used=rescue_line_used,
             gear_drop=None,
             luminosity_display=self._luminosity_combat_display(tunnel),
         )

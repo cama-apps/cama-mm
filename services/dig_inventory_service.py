@@ -16,6 +16,7 @@ import time
 from typing import TYPE_CHECKING
 
 from services.dig_constants import (
+    BOSS_PREP_ITEM_IDS,
     CONSUMABLE_ITEMS,
     ITEM_PRICES,
     MAX_INVENTORY_SIZE,
@@ -93,6 +94,11 @@ class DigInventoryService:
 
         # Check not already queued
         queued = _get_queued_items_for_tunnel(self.dig_repo, discord_id, guild_id)
+        if (
+            item_type in BOSS_PREP_ITEM_IDS
+            and any(q.get("type") in BOSS_PREP_ITEM_IDS for q in queued)
+        ):
+            return _error("Only one boss preparation item can be queued at a time.")
         if any(q.get("type") == item_type for q in queued):
             return _error(f"{CONSUMABLE_ITEMS[item_type]['name']} is already queued.")
 
@@ -109,6 +115,24 @@ class DigInventoryService:
 
     def queue_item(self, discord_id: int, guild_id, item_id: int) -> dict:
         """Queue a specific inventory item by its database id."""
+        inventory = self.dig_repo.get_inventory(discord_id, guild_id)
+        target = next(
+            (row for row in inventory if int(row.get("id", 0)) == int(item_id)),
+            None,
+        )
+        if target is None:
+            return _error("That item is not in your inventory.")
+        item_type = target.get("item_type")
+        queued = _get_queued_items_for_tunnel(
+            self.dig_repo,
+            discord_id,
+            guild_id,
+        )
+        if (
+            item_type in BOSS_PREP_ITEM_IDS
+            and any(q.get("type") in BOSS_PREP_ITEM_IDS for q in queued)
+        ):
+            return _error("Only one boss preparation item can be queued at a time.")
         self.dig_repo.queue_item(item_id)
         return _ok(queued=True)
 

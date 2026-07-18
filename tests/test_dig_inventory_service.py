@@ -78,6 +78,32 @@ class TestBuyItem:
         # The returned item_id must point at the row that was actually inserted.
         assert result["item_id"] == inventory[0]["id"]
 
+    @pytest.mark.parametrize(
+        ("item_type", "cost"),
+        [
+            ("tempered_whetstone", 60),
+            ("warding_salts", 50),
+            ("rescue_line", 40),
+        ],
+    )
+    def test_buy_boss_preparation_item(
+        self,
+        inv_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+        item_type,
+        cost,
+    ):
+        _register_player(player_repository, balance=200)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        result = inv_service.buy_item(10001, guild_id, item_type)
+
+        assert result["success"], result
+        assert result["cost"] == cost
+        assert result["queued"] is False
+
     def test_buy_hard_hat_auto_queues(
         self, inv_service, dig_repo, player_repository, guild_id
     ):
@@ -304,6 +330,28 @@ class TestUseItem:
         assert result["success"]
         # Only one of the two duplicate rows should be queued.
         assert len(dig_repo.get_queued_items(10001, guild_id)) == 1
+
+    def test_only_one_boss_preparation_item_can_be_queued(
+        self,
+        inv_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+    ):
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.add_item(10001, guild_id, "tempered_whetstone")
+        dig_repo.add_item(10001, guild_id, "rescue_line")
+        assert inv_service.use_item(
+            10001,
+            guild_id,
+            "tempered_whetstone",
+        )["success"]
+
+        result = inv_service.use_item(10001, guild_id, "rescue_line")
+
+        assert not result["success"]
+        assert "one boss preparation" in result["error"].lower()
 
     def test_queue_item_by_id_sets_flag(
         self, inv_service, dig_repo, player_repository, guild_id

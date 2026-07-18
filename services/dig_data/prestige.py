@@ -43,19 +43,24 @@ PINNACLE_REPROC_DEPTH: int = 450
 
 # Thresholds and their gameplay effects
 LUMINOSITY_BRIGHT: int = 76       # 76-100: normal
-LUMINOSITY_DIM: int = 26          # 26-75: +5% cave-in, 1.5x event chance
-LUMINOSITY_DARK: int = 1          # 1-25: +15% cave-in, forced events, risky -10%, JC +25%
-LUMINOSITY_PITCH_BLACK: int = 0   # 0: +25% cave-in, forced risky, JC +50%, darkness events
+LUMINOSITY_DIM: int = 26          # 26-75: cave +8%, risky -5%, harmful +10%
+LUMINOSITY_DARK: int = 1          # 1-25: cave +20%, risky -15%, harmful +25%
+LUMINOSITY_PITCH_BLACK: int = 0   # 0: cave +35%, risky -25%, harmful +50%, no safe choice
 
-LUMINOSITY_DIM_CAVE_IN_BONUS: float = 0.05
+LUMINOSITY_DIM_CAVE_IN_BONUS: float = 0.08
 LUMINOSITY_DIM_EVENT_MULTIPLIER: float = 1.5
-LUMINOSITY_DARK_CAVE_IN_BONUS: float = 0.15
+LUMINOSITY_DIM_RISKY_PENALTY: float = 0.05
+LUMINOSITY_DIM_HARMFUL_EVENT_WEIGHT: float = 1.10
+LUMINOSITY_DARK_CAVE_IN_BONUS: float = 0.20
 LUMINOSITY_DARK_EVENT_MULTIPLIER: float = 2.5
-LUMINOSITY_DARK_RISKY_PENALTY: float = 0.10   # subtracted from risky success chance
+LUMINOSITY_DARK_RISKY_PENALTY: float = 0.15
+LUMINOSITY_DARK_HARMFUL_EVENT_WEIGHT: float = 1.25
 LUMINOSITY_DARK_JC_MULTIPLIER: float = 1.25
-LUMINOSITY_PITCH_CAVE_IN_BONUS: float = 0.25
+LUMINOSITY_PITCH_CAVE_IN_BONUS: float = 0.35
 LUMINOSITY_PITCH_EVENT_MULTIPLIER: float = 3.0
 LUMINOSITY_PITCH_FORCE_RISKY: bool = True      # safe option removed at pitch black
+LUMINOSITY_PITCH_RISKY_PENALTY: float = 0.25
+LUMINOSITY_PITCH_HARMFUL_EVENT_WEIGHT: float = 1.50
 LUMINOSITY_PITCH_JC_MULTIPLIER: float = 1.50
 
 # Boss combat penalties from low luminosity (boss revamp)

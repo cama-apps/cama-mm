@@ -36,6 +36,7 @@ from domain.models.hostile_loss import (
     HostileLossResult,
 )
 from domain.models.mana_effects import ManaEffects
+from services.dig_data.balance import scale_positive_dig_jc
 from utils.economy_scaling import scale_minigame_jc_delta
 from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
@@ -1813,9 +1814,10 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     bot.reminder_service.schedule_wheel_reminder.assert_not_called()
     player_service.log_wheel_spin.assert_called_once()
     log_kwargs = player_service.log_wheel_spin.call_args.kwargs
-    assert log_kwargs["outcome_code"] == "NUMERIC_5"
+    assert log_kwargs["outcome_code"] == "NUMERIC_3"
     assert log_kwargs["is_bonus"] is True
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 5)
+    assert log_kwargs["outcome_metadata"]["dig_reward_multiplier"] == 0.65
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 3)
     interaction.response.defer.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
 
@@ -1879,11 +1881,12 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
     assert log_kwargs["is_golden"] is True
     assert log_kwargs["event_id"] == "987654"
     assert log_kwargs["outcome_metadata"]["gross_reward"] == WHEEL_EXPLOSION_REWARD
+    assert log_kwargs["outcome_metadata"]["dig_reward_multiplier"] == 0.65
     _assert_gamba_adjust_call(
         player_service.adjust_balance,
         1001,
         123,
-        scale_minigame_jc_delta(WHEEL_EXPLOSION_REWARD),
+        scale_positive_dig_jc(scale_minigame_jc_delta(WHEEL_EXPLOSION_REWARD)),
     )
     interaction.response.defer.assert_not_awaited()
 

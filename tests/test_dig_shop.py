@@ -96,6 +96,32 @@ def test_get_shop_without_tunnel_still_succeeds(dig_service, player_repository, 
     assert len(shop["consumables"]) > 0
 
 
+def test_shop_lists_existing_upper_tier_gear(
+    dig_service,
+    dig_repo,
+    player_repository,
+    guild_id,
+):
+    _register(player_repository, 4100, guild_id)
+    dig_repo.create_tunnel(4100, guild_id, "T")
+    dig_repo.update_tunnel(
+        4100,
+        guild_id,
+        depth=0,
+        max_depth=275,
+        prestige_level=5,
+    )
+
+    shop = dig_service.get_shop(4100, guild_id)
+
+    for slot in ("armor", "boots", "amulet"):
+        assert {
+            row["tier"]
+            for row in shop["gear_for_sale"]
+            if row["slot"] == slot
+        } == set(range(1, 8))
+
+
 # ---------------------------------------------------------------------------
 # Handler: the user always gets the shop, even when the public send is rejected
 # ---------------------------------------------------------------------------

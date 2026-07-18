@@ -10,7 +10,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from repositories.dig_repository import DigRepository
-from services.dig_data.balance import strengthen_dig_event_penalty
+from services.dig_data.balance import (
+    scale_positive_dig_jc,
+    strengthen_dig_event_penalty,
+)
 from services.dig_service import DigService
 from services.dig_splash import (
     ACTIVE_DIGGERS_LOOKBACK_DAYS,
@@ -179,7 +182,9 @@ class TestResolveSplashBurns:
             victim_count=2,
             penalty_jc=20,
         )
-        expected_burn = 2 * scale_deflationary_minigame_jc_delta(22)
+        expected_burn = 2 * scale_deflationary_minigame_jc_delta(
+            strengthen_dig_event_penalty(20)
+        )
         assert result.total_burned == expected_burn
         total_after = (
             player_repository.get_balance(10001, TEST_GUILD_ID)
@@ -329,7 +334,9 @@ class TestSplashGrantMode:
         assert len(result.victims) == 1
         vid, amount = result.victims[0]
         assert vid == 10002
-        assert amount == scale_minigame_jc_delta(10)
+        assert amount == scale_positive_dig_jc(
+            scale_minigame_jc_delta(10)
+        )
         # Recipient balance goes UP.
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == 100 + amount
 
@@ -351,7 +358,7 @@ class TestSplashGrantMode:
             penalty_jc=10,
             mode="grant",
         )
-        amount = scale_minigame_jc_delta(10)
+        amount = scale_positive_dig_jc(scale_minigame_jc_delta(10))
         assert result.victims == [(10002, amount)]
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == -25 + amount
 

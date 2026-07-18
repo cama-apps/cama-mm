@@ -1,123 +1,76 @@
-"""Regression + contract tests for the `/dig buy` slash command's item choices.
+"""The `/dig buy` autocomplete stays aligned with live shop data."""
 
-Bug guarded: amulets were listed in `/dig shop` but the `/dig buy` command had
-no amulet option to select, so players could not buy them. TEST 1 pins the
-three amulet choices directly. TEST 2 ties the shop's amulet inventory to the
-buy command's choices, proving the user-facing contract that anything shown in
-the shop is selectable in buy.
-"""
+from types import SimpleNamespace
 
-import re
+import pytest
 
-import commands.dig as m
-from domain.models.dig_gear import GearSlot
+from commands.dig import DigCommands
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
-from services.dig_constants import GEAR_TIER_TABLES
 from services.dig_service import DigService
 
 
-def _buy_choice_values() -> set[str]:
-    """Pull the set of `item` choice values from the `/dig buy` command."""
-    grp = m.DigCommands.dig  # an app_commands.Group
-    buy = next(c for c in grp.walk_commands() if c.name == "buy")
-    item_param = next(p for p in buy.parameters if p.name == "item")
-    return {ch.value for ch in item_param.choices}
+def _service(repo_db_path):
+    dig_repo = DigRepository(repo_db_path)
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=111, discord_username="pf", guild_id=0)
+    player_repo.add_balance(111, 0, 10_000)
+    dig_repo.create_tunnel(111, 0, "T")
+    dig_repo.update_tunnel(
+        111,
+        0,
+        depth=0,
+        max_depth=275,
+        prestige_level=5,
+    )
+    return DigService(dig_repo, player_repo)
 
 
-def _buy_item_param():
-    grp = m.DigCommands.dig
-    buy = next(c for c in grp.walk_commands() if c.name == "buy")
-    return next(p for p in buy.parameters if p.name == "item")
+async def _choices(service, query: str):
+    command = SimpleNamespace(dig_service=service)
+    interaction = SimpleNamespace(
+        guild=SimpleNamespace(id=0),
+        user=SimpleNamespace(id=111),
+    )
+    return await DigCommands.buy_autocomplete(command, interaction, query)
 
 
-def test_buy_command_offers_amulet_choices():
-    """The buy command must expose amulet tiers 1-3 as selectable choices.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("whetstone", {"tempered_whetstone"}),
+        ("warding", {"warding_salts"}),
+        ("rescue", {"rescue_line"}),
+        ("amulet", {f"amulet:{tier}" for tier in range(4, 8)}),
+        ("boots", {f"boots:{tier}" for tier in range(4, 8)}),
+    ],
+)
+async def test_buy_autocomplete_exposes_new_sinks(
+    repo_db_path,
+    query,
+    expected,
+):
+    choices = await _choices(_service(repo_db_path), query)
+    values = {choice.value for choice in choices}
 
-    This is the direct regression guard: the bug was that these values were
-    absent from the `@app_commands.choices(item=[...])` list.
-    """
-    item_param = _buy_item_param()
-    values = {ch.value for ch in item_param.choices}
-
-    assert "amulet:1" in values
-    assert "amulet:2" in values
-    assert "amulet:3" in values
-
-    # Labels (Stone Pendant / Iron Talisman / Diamond Charm) must be real,
-    # non-empty strings so the Discord choice renders sensibly.
-    amulet_labels = {
-        ch.name for ch in item_param.choices if ch.value.startswith("amulet:")
-    }
-    assert len(amulet_labels) == 3
-    for label in amulet_labels:
-        assert isinstance(label, str)
-        assert label.strip()
-
-
-def test_shop_amulets_are_buyable(repo_db_path):
-    """Contract: every amulet tier the shop sells is selectable in buy.
-
-    Builds a funded, registered player with an advanced tunnel, reads the live
-    shop, then asserts the shop sells amulet tiers 1-3 and that each one has a
-    matching `amulet:<tier>` choice in the buy command. This couples the two
-    surfaces so a future divergence (shop adds/removes a tier without updating
-    buy) fails loudly.
-    """
-    drepo = DigRepository(repo_db_path)
-    prepo = PlayerRepository(repo_db_path)
-    svc = DigService(drepo, prepo)
-
-    prepo.add(discord_id=111, discord_username="pf", guild_id=0)
-    prepo.add_balance(111, 0, 5000)
-    drepo.create_tunnel(111, 0, "T")
-    drepo.update_tunnel(111, 0, depth=100, prestige_level=1)
-
-    shop = svc.get_shop(111, 0)
-    gear = shop["gear_for_sale"]
-    amulet_tiers = {g["tier"] for g in gear if g["slot"] == "amulet"}
-
-    # The shop sells amulet tiers 1-3 (Stone/Iron/Diamond); tier 0 is the free
-    # starter and Obsidian+ are drop-only.
-    assert amulet_tiers == {1, 2, 3}
-
-    buy_values = _buy_choice_values()
-    for tier in amulet_tiers:
-        assert f"amulet:{tier}" in buy_values
+    assert expected <= values
+    assert all(choice.name.strip() for choice in choices)
 
 
-def test_buy_labels_match_gear_data():
-    """Every gear buy choice's label must match its source-of-truth tier_def.
+@pytest.mark.asyncio
+async def test_every_shop_row_is_reachable_through_filtered_autocomplete(repo_db_path):
+    service = _service(repo_db_path)
+    shop = service.get_shop(111, 0)
 
-    The `/dig buy` choice labels in commands/dig.py are hand-written strings
-    that duplicate the name and shop_price from GEAR_TIER_TABLES. This couples
-    the two so a rename or price retune in items.py that forgets the buy label
-    (or vice-versa) fails loudly instead of silently showing players the wrong
-    name or price. Covers all four gear slots, not just amulets.
-    """
-    item_param = _buy_item_param()
-    gear_slots = {s.value for s in GearSlot}
-    gear_choices = [
-        ch for ch in item_param.choices
-        if ":" in ch.value and ch.value.split(":", 1)[0] in gear_slots
-    ]
-
-    # All four gear slots must be represented — also guards the original bug
-    # (a slot's tiers silently missing from the buy command).
-    slots_seen = {ch.value.split(":", 1)[0] for ch in gear_choices}
-    assert slots_seen == {"weapon", "armor", "boots", "amulet"}
-
-    for ch in gear_choices:
-        slot, tier = ch.value.split(":", 1)
-        td = GEAR_TIER_TABLES[GearSlot(slot)][int(tier)]
-        assert ch.name.startswith(td.name), (
-            f"buy label {ch.name!r} (value {ch.value}) must start with the "
-            f"canonical name {td.name!r} from GEAR_TIER_TABLES"
-        )
-        # Match the price as a delimited token so e.g. shop_price 50 does not
-        # spuriously match "150 JC". Handles both label formats: "(20 JC)"
-        # for armor/boots/amulet and "— 15 JC" for weapons.
-        assert re.search(rf"\b{td.shop_price} JC", ch.name), (
-            f"buy label {ch.name!r} (value {ch.value}) must advertise "
-            f"shop_price={td.shop_price} JC from GEAR_TIER_TABLES"
-        )
+    for item in shop["consumables"]:
+        choices = await _choices(service, item["name"])
+        assert item["id"] in {choice.value for choice in choices}
+    for item in shop["pickaxe_upgrades"]:
+        choices = await _choices(service, item["name"])
+        assert f"weapon:{item['tier']}" in {choice.value for choice in choices}
+    for item in shop["gear_for_sale"]:
+        choices = await _choices(service, item["name"])
+        assert f"{item['slot']}:{item['tier']}" in {
+            choice.value for choice in choices
+        }

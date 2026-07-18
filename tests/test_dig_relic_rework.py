@@ -50,8 +50,9 @@ def test_new_relics_have_lore_and_effects():
 
 
 def test_total_artifact_count_matches_expected():
-    # Relics-only catalog: 37 existing relics plus 8 rarity-progression relics.
-    assert len(ALL_ARTIFACTS) == 45
+    # The relic catalog plus two statless legendary curios.
+    assert len(RELICS) == 45
+    assert len(ALL_ARTIFACTS) == 47
 
 
 def test_post_pinnacle_decay_factor_root_network_slows_decay():

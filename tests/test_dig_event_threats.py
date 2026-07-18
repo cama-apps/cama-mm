@@ -24,7 +24,10 @@ from commands.dig import EventEncounterView
 from repositories.dig_repository import DigRepository
 from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
 from services.dig_data import event_types
-from services.dig_data.balance import strengthen_dig_event_penalty
+from services.dig_data.balance import (
+    scale_positive_dig_jc,
+    strengthen_dig_event_penalty,
+)
 from services.dig_data.event_types import TempCurse
 from services.dig_service import DigService
 from utils.economy_scaling import (
@@ -414,9 +417,9 @@ class TestCurseThreat:
         curse = dig_service._get_active_curse(dict(tunnel))
         assert curse is not None
         assert curse["id"] == "test_slow_hex"
-        # Curse strengthening: duration gains CURSE_DURATION_BONUS_DIGS (+1) and
+        # Curse strengthening: duration gains CURSE_DURATION_BONUS_DIGS (+2) and
         # the effect magnitude scales by CURSE_STRENGTH_MULT (-3 -> -4).
-        assert curse["digs_remaining"] == 3
+        assert curse["digs_remaining"] == 4
         assert curse["effect"] == {"advance_bonus": -4}
 
     def test_curse_does_not_clobber_active_buff(
@@ -611,8 +614,8 @@ class TestCurseThreat:
         curse = dig_service._get_active_curse(dict(tunnel))
         assert curse is not None
         assert curse["id"] == "test_slow_hex"
-        # Curse strengthening adds CURSE_DURATION_BONUS_DIGS (+1) to the duration.
-        assert curse["digs_remaining"] == 3
+        # Curse strengthening adds CURSE_DURATION_BONUS_DIGS (+2) to the duration.
+        assert curse["digs_remaining"] == 4
 
     def test_desperate_failure_applies_streak_loss(
         self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
@@ -708,9 +711,9 @@ class TestCurseThreat:
         active = dig_service._get_active_curse(dict(dig_repo.get_tunnel(10001, 12345)))
         assert active is not None
         assert active["id"] == "short_hex"
-        # Curse strengthening: short_hex duration 1 -> 2 (+1), jc_bonus -5 -> -6.
-        assert active["digs_remaining"] == 2
-        assert active["effect"] == {"jc_bonus": -6}
+        # Curse strengthening: short_hex duration 1 -> 3 (+2), jc_bonus -5 -> -8.
+        assert active["digs_remaining"] == 3
+        assert active["effect"] == {"jc_bonus": -8}
 
 
 # ---------------------------------------------------------------------------
@@ -777,7 +780,7 @@ class TestJcThreat:
 
         result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
         assert result["success"]
-        expected_gain = scale_minigame_jc_delta(40)
+        expected_gain = scale_positive_dig_jc(scale_minigame_jc_delta(40))
         assert result["jc_delta"] == expected_gain
         assert player_repository.get_balance(10001, 12345) == balance_before + expected_gain
         # No debt surfaced on a positive outcome.

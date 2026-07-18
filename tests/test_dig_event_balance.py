@@ -21,7 +21,12 @@ import pytest
 import services.dig_service as dig_service_module
 from repositories.dig_repository import DigRepository
 from services.dig_data.aliases import EVENT_POOL
-from services.dig_data.balance import strengthen_dig_event_penalty
+from services.dig_data.balance import (
+    CURSE_DURATION_BONUS_DIGS,
+    CURSE_STRENGTH_MULT,
+    scale_positive_dig_jc,
+    strengthen_dig_event_penalty,
+)
 from services.dig_service import DigService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -81,7 +86,7 @@ def _two_branch_events():
         yield e
 
 
-@pytest.mark.parametrize(("authored", "strengthened"), [(-5, -6), (-10, -11)])
+@pytest.mark.parametrize(("authored", "strengthened"), [(-5, -7), (-10, -14)])
 def test_authored_event_penalties_round_away_from_zero(
     authored: int,
     strengthened: int,
@@ -100,8 +105,102 @@ def test_negative_actor_event_is_strengthened_before_economy_scaling(
     result = dig_service.resolve_event(10001, 12345, "hungering_dark", "risky")
 
     assert result["success"] and not result["succeeded"], result
-    # Authored -5 -> existing 1.3 tuning/jitter -6 -> event deflation -7.
-    assert result["jc_delta"] == scale_deflationary_minigame_jc_delta(-7)
+    # Authored -5 -> existing 1.3 tuning/jitter -6 -> stronger event loss -9.
+    assert result["jc_delta"] == scale_deflationary_minigame_jc_delta(-9)
+
+
+def test_event_curses_are_half_again_as_strong_and_last_two_extra_digs() -> None:
+    assert CURSE_STRENGTH_MULT == 1.5
+    assert CURSE_DURATION_BONUS_DIGS == 2
+
+
+@pytest.mark.parametrize(
+    ("luminosity", "expected_multiplier", "expected_success_penalty"),
+    [
+        (100, 1.25, 0.0),
+        (50, 1.25 * 1.10, 0.05),
+        (10, 1.25 * 1.25, 0.15),
+        (0, 1.25 * 1.50, 0.25),
+    ],
+)
+def test_low_light_biases_harmful_events_and_risky_success(
+    dig_service,
+    monkeypatch,
+    luminosity: int,
+    expected_multiplier: float,
+    expected_success_penalty: float,
+) -> None:
+    safe_event = {
+        "id": "safe_weight_probe",
+        "name": "Safe",
+        "description": "Safe",
+        "rarity": "common",
+        "safe_option": {"success": {"advance": 1, "jc": 0}},
+    }
+    harmful_event = {
+        "id": "harmful_weight_probe",
+        "name": "Harmful",
+        "description": "Harmful",
+        "rarity": "common",
+        "risky_option": {
+            "success": {"advance": 1, "jc": 0},
+            "failure": {"advance": -1, "jc": -1},
+        },
+    }
+    monkeypatch.setattr(
+        dig_service_module,
+        "EVENT_POOL",
+        [safe_event, harmful_event],
+    )
+    captured = {}
+
+    def choose(events, *, weights, k):
+        captured["weights"] = weights
+        return [events[0]]
+
+    monkeypatch.setattr("services.dig.events_mixin.random.choices", choose)
+
+    dig_service.roll_event(30, luminosity=luminosity)
+
+    safe_weight, harmful_weight = captured["weights"]
+    assert harmful_weight / safe_weight == pytest.approx(expected_multiplier)
+    assert dig_service._luminosity_risky_penalty(luminosity) == (
+        expected_success_penalty
+    )
+
+
+def test_negative_depth_event_setback_is_quarter_harsher(
+    dig_service,
+    dig_repo,
+    player_repository,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 1_000_000)
+    _seed_tunnel(dig_service, dig_repo, player_repository, depth=30)
+    event = {
+        "id": "depth_setback_probe",
+        "name": "Depth setback",
+        "description": "Depth setback",
+        "rarity": "common",
+        "risky_option": {
+            "label": "Risk it",
+            "success_chance": 0.0,
+            "success": {"description": "No", "advance": 1, "jc": 0},
+            "failure": {"description": "Back", "advance": -4, "jc": 0},
+        },
+    }
+    monkeypatch.setattr(dig_service_module, "EVENT_POOL", [event])
+    monkeypatch.setattr("services.dig.events_mixin.random.randint", lambda a, b: 0)
+    monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 1.0)
+
+    result = dig_service.resolve_event(
+        10001,
+        12345,
+        "depth_setback_probe",
+        "risky",
+    )
+
+    assert result["depth_delta"] == -5
 
 
 def test_burn_payout_ratio_uses_strengthened_nominal_amount(
@@ -145,7 +244,9 @@ def test_burn_payout_ratio_uses_strengthened_nominal_amount(
         strengthen_dig_event_penalty(5)
     )
     nominal_burn = 2 * per_victim
-    expected_payout = scale_minigame_jc_delta(round(10 * 6 / nominal_burn))
+    expected_payout = scale_positive_dig_jc(
+        scale_minigame_jc_delta(round(10 * 6 / nominal_burn))
+    )
     assert result["jc_delta"] == expected_payout
 
 
@@ -174,8 +275,18 @@ def test_every_risky_branch_outrewards_safe():
         f"{e['id']}: risky success jc={e['risky_option']['success'].get('jc', 0)} "
         f"<= safe jc={e['safe_option']['success'].get('jc', 0)}"
         for e in _two_branch_events()
-        if e["risky_option"]["success"].get("jc", 0)
-        <= e["safe_option"]["success"].get("jc", 0)
+        if (
+            e["risky_option"]["success"].get("jc", 0)
+            <= e["safe_option"]["success"].get("jc", 0)
+            and not any(
+                e["risky_option"]["success"].get(pool)
+                for pool in (
+                    "gear_reward_pool",
+                    "consumable_reward_pool",
+                    "artifact_reward_pool",
+                )
+            )
+        )
     ]
     assert not offenders, "risky reward must beat safe:\n" + "\n".join(offenders)
 
@@ -212,9 +323,18 @@ def test_high_p2_event_rewards_are_modestly_trimmed(
     monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.0)
 
     expected = {
-        "necro_s3": {"risky": scale_minigame_jc_delta(13), "desperate": scale_minigame_jc_delta(20)},
-        "necro_s4": {"risky": scale_minigame_jc_delta(13), "desperate": scale_minigame_jc_delta(20)},
-        "necro_s5": {"risky": scale_minigame_jc_delta(17), "desperate": scale_minigame_jc_delta(27)},
+        "necro_s3": {
+            "risky": scale_positive_dig_jc(scale_minigame_jc_delta(13)),
+            "desperate": scale_positive_dig_jc(scale_minigame_jc_delta(20)),
+        },
+        "necro_s4": {
+            "risky": scale_positive_dig_jc(scale_minigame_jc_delta(13)),
+            "desperate": scale_positive_dig_jc(scale_minigame_jc_delta(20)),
+        },
+        "necro_s5": {
+            "risky": scale_positive_dig_jc(scale_minigame_jc_delta(17)),
+            "desperate": scale_positive_dig_jc(scale_minigame_jc_delta(27)),
+        },
     }
     for event_id, payouts in expected.items():
         for branch, want in payouts.items():
