@@ -13,7 +13,10 @@ from typing import TYPE_CHECKING
 from config import HOSTILE_LOSS_MIN_BALANCE
 from domain.models.mana_effects import ManaEffects
 from services.mana_service import get_today_pst
-from utils.economy_scaling import scale_minigame_jc_delta
+from utils.economy_scaling import (
+    adjust_generated_jc_reward,
+    scale_minigame_jc_delta,
+)
 
 logger = logging.getLogger("cama_bot.services.mana_effects")
 
@@ -34,12 +37,14 @@ class ManaEffectsService:
         mana_repo: "ManaRepository",
         loan_service: "LoanService",
         protection_service=None,
+        economy_event_service=None,
     ):
         self.mana_service = mana_service
         self.player_repo = player_repo
         self.mana_repo = mana_repo
         self.loan_service = loan_service
         self.protection_service = protection_service
+        self.economy_event_service = economy_event_service
 
     def get_effects(self, discord_id: int, guild_id: int | None) -> ManaEffects:
         """Get active mana effects for a player.
@@ -250,15 +255,26 @@ class ManaEffectsService:
         effects = self.get_effects(discord_id, guild_id)
         if effects.blue_cashback_rate <= 0 or loss <= 0:
             return 0
-        cashback = max(1, int(abs(loss) * effects.blue_cashback_rate))
+        base_cashback = max(1, int(abs(loss) * effects.blue_cashback_rate))
+        cashback = adjust_generated_jc_reward(
+            base_cashback,
+            guild_id=guild_id,
+            economy_event_service=self.economy_event_service,
+        )
+        if cashback <= 0:
+            return 0
         self.player_repo.add_balance(
             discord_id,
             guild_id,
             cashback,
-            source="mana",
+            source="mana_reward",
             related_type="blue_cashback",
             reason="blue mana loss cashback",
-            metadata={"loss": loss, "cashback": cashback},
+            metadata={
+                "loss": loss,
+                "base_cashback": base_cashback,
+                "adjusted_cashback": cashback,
+            },
         )
         return cashback
 

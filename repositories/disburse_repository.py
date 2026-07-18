@@ -539,6 +539,94 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             proposal_outcome=proposal_outcome,
         ) is not None
 
+    def cancel_for_monetary_recovery_atomic(
+        self, guild_id: int | None
+    ) -> dict[str, int] | None:
+        """Atomically cancel the active ballot for monetary recovery.
+
+        The locked amount is read inside the write transaction, ballots are
+        archived with the distinct ``monetary_recovery`` outcome, and the funds
+        return to the available Jopacoin Reserve under an auditable ledger
+        context. With no active proposal this is an idempotent no-op.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                """
+                SELECT proposal_id, fund_amount
+                FROM disburse_proposals
+                WHERE guild_id = ? AND status = 'active'
+                """,
+                (normalized_guild,),
+            ).fetchone()
+            if row is None:
+                return None
+
+            proposal_id = int(row["proposal_id"])
+            fund_amount = int(row["fund_amount"])
+            self._archive_final_votes(
+                cursor,
+                guild_id=normalized_guild,
+                proposal_id=proposal_id,
+                proposal_outcome="monetary_recovery",
+                finalized_at=now,
+            )
+
+            cursor.execute(
+                """
+                UPDATE disburse_proposals
+                SET status = 'reset'
+                WHERE guild_id = ? AND proposal_id = ? AND status = 'active'
+                """,
+                (normalized_guild, proposal_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "Active Reserve proposal changed during monetary-recovery cancellation"
+                )
+
+            cursor.execute(
+                "DELETE FROM disburse_votes WHERE guild_id = ? AND proposal_id = ?",
+                (normalized_guild, proposal_id),
+            )
+
+            if fund_amount:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="disburse",
+                    related_type="disbursement",
+                    related_id=proposal_id,
+                    reason=(
+                        "Jopacoin Reserve proposal cancelled for monetary recovery; "
+                        "locked funds returned"
+                    ),
+                    metadata={
+                        "proposal_outcome": "monetary_recovery",
+                        "fund_amount": fund_amount,
+                    },
+                )
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO nonprofit_fund
+                            (guild_id, total_collected, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(guild_id) DO UPDATE SET
+                            total_collected = total_collected + excluded.total_collected,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (normalized_guild, fund_amount),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            return {
+                "proposal_id": proposal_id,
+                "fund_amount_returned": fund_amount,
+            }
+
     def _reset_proposal_atomic(
         self,
         guild_id: int | None,

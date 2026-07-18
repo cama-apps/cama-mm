@@ -503,6 +503,10 @@ class SchemaManager:
                 self._migration_create_disburse_vote_history,
             ),
             ("create_duel_challenges_table", self._migration_create_duel_challenges_table),
+            (
+                "create_economy_policy_tables",
+                self._migration_create_economy_policy_tables,
+            ),
         ]
 
     # --- Migrations ---
@@ -675,6 +679,84 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_duel_due_reminder "
             "ON duel_challenges(status, next_reminder_at)"
+        )
+
+    def _migration_create_economy_policy_tables(self, cursor) -> None:
+        """Persist monetary-policy state, daily snapshots, and event cards."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS economy_policy_state (
+                guild_id INTEGER PRIMARY KEY,
+                mode TEXT NOT NULL DEFAULT 'recovery'
+                    CHECK(mode IN ('recovery', 'normal', 'disabled')),
+                target_annual_rate REAL NOT NULL DEFAULT -0.035,
+                inflation_ceiling REAL NOT NULL DEFAULT 0.02,
+                recovery_started_at INTEGER,
+                stable_since INTEGER,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS economy_daily_snapshots (
+                guild_id INTEGER NOT NULL,
+                snapshot_date TEXT NOT NULL,
+                captured_at INTEGER NOT NULL,
+                player_wallets INTEGER NOT NULL,
+                positive_wallets INTEGER NOT NULL,
+                visible_debt INTEGER NOT NULL,
+                player_count INTEGER NOT NULL,
+                average_wallet REAL NOT NULL,
+                reserve_available INTEGER NOT NULL,
+                reserve_locked INTEGER NOT NULL,
+                reserve_next_match_pot INTEGER NOT NULL,
+                prediction_open_cash INTEGER NOT NULL,
+                wager_escrow INTEGER NOT NULL,
+                monetary_stock INTEGER NOT NULL,
+                annualized_30d REAL,
+                annualized_90d REAL,
+                PRIMARY KEY (guild_id, snapshot_date)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_economy_snapshots_guild_date
+            ON economy_daily_snapshots(guild_id, snapshot_date DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS economy_daily_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                name TEXT NOT NULL,
+                hero TEXT NOT NULL,
+                direction TEXT NOT NULL
+                    CHECK(direction IN ('deflationary', 'neutral', 'boon')),
+                severity INTEGER NOT NULL CHECK(severity BETWEEN 1 AND 3),
+                target_effect_jc INTEGER NOT NULL,
+                forecast_flow_jc INTEGER NOT NULL,
+                expected_effect_jc INTEGER NOT NULL,
+                direct_effect_jc INTEGER NOT NULL DEFAULT 0,
+                actual_stock_change_jc INTEGER,
+                monetary_stock_before INTEGER NOT NULL,
+                effects TEXT NOT NULL,
+                announcement TEXT NOT NULL,
+                starts_at INTEGER NOT NULL,
+                ends_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(guild_id, event_date)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_economy_events_active
+            ON economy_daily_events(guild_id, starts_at, ends_at)
+            """
         )
 
     def _migration_add_glicko_columns(self, cursor) -> None:

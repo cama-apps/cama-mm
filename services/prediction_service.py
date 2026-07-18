@@ -2,6 +2,7 @@
 Handles prediction market business logic.
 """
 
+import math
 import random
 import time
 from typing import Any
@@ -44,11 +45,83 @@ class PredictionService:
         player_repo: PlayerRepository,
         admin_user_ids: list[int] | None = None,
         bankruptcy_service=None,
+        economy_event_service=None,
     ):
         self.prediction_repo = prediction_repo
         self.player_repo = player_repo
         self.admin_user_ids = set(admin_user_ids or [])
         self.bankruptcy_service = bankruptcy_service
+        self.economy_event_service = economy_event_service
+
+    def _get_prediction_effects(self, guild_id: int) -> tuple[float, float, int]:
+        """Return payout/depth/spread modifiers for the guild's daily event.
+
+        Prediction markets are intentionally usable without the economy-event
+        subsystem.  Missing effects, malformed numeric values, and non-finite
+        floats all fall back to the neutral modifier so an event cannot leave a
+        market with a corrupt ladder.
+        """
+        if self.economy_event_service is None:
+            return 1.0, 1.0, 0
+        effects = self.economy_event_service.get_effects(guild_id)
+        if effects is None:
+            return 1.0, 1.0, 0
+
+        try:
+            payout = float(getattr(effects, "prediction_payout_multiplier", 1.0))
+            depth = float(getattr(effects, "prediction_depth_multiplier", 1.0))
+            spread_delta = int(getattr(effects, "prediction_spread_ticks_delta", 0))
+        except (TypeError, ValueError, OverflowError):
+            return 1.0, 1.0, 0
+        if not math.isfinite(payout):
+            payout = 1.0
+        if not math.isfinite(depth):
+            depth = 1.0
+        return max(0.0, payout), max(0.0, depth), spread_delta
+
+    def _build_event_levels(
+        self,
+        fair: int,
+        guild_id: int,
+        *,
+        levels_per_side: int | None = None,
+        size_per_level: int | None = None,
+        spread_ticks: int | None = None,
+    ) -> tuple[list[tuple[str, int, int]], dict[str, float | int]]:
+        """Build a ladder after applying the active daily market conditions."""
+        payout_multiplier, depth_multiplier, spread_delta = (
+            self._get_prediction_effects(guild_id)
+        )
+        base_size = (
+            PREDICTION_SIZE_PER_LEVEL if size_per_level is None else size_per_level
+        )
+        base_spread = (
+            PREDICTION_SPREAD_TICKS if spread_ticks is None else spread_ticks
+        )
+        adjusted_size = max(0, round(base_size * depth_multiplier))
+        # At least one tick keeps LP asks and bids from locking at fair. The
+        # upper clamp is the widest offset that can still yield a valid 1..99
+        # quote somewhere in the book; _build_initial_levels filters prices at
+        # a particular fair that fall outside those bounds.
+        max_spread_ticks = max(1, 98 // max(1, PREDICTION_TICK_SIZE))
+        adjusted_spread = max(1, min(max_spread_ticks, base_spread + spread_delta))
+        levels = (
+            self._build_initial_levels(
+                fair,
+                levels_per_side=levels_per_side,
+                size_per_level=adjusted_size,
+                spread_ticks=adjusted_spread,
+            )
+            if adjusted_size > 0
+            else []
+        )
+        return levels, {
+            "prediction_payout_multiplier": payout_multiplier,
+            "prediction_depth_multiplier": depth_multiplier,
+            "prediction_spread_ticks_delta": spread_delta,
+            "prediction_size_per_level": adjusted_size,
+            "prediction_spread_ticks": adjusted_spread,
+        }
 
     def is_admin(self, user_id: int) -> bool:
         """Check if user is an admin."""
@@ -209,7 +282,7 @@ class PredictionService:
                 f"initial_fair must be in [{PREDICTION_PRICE_LOW}, {PREDICTION_PRICE_HIGH}]."
             )
 
-        levels = self._build_initial_levels(initial_fair)
+        levels, modifiers = self._build_event_levels(initial_fair, guild_id)
         prediction_id = self.prediction_repo.create_orderbook_prediction(
             guild_id=guild_id,
             creator_id=creator_id,
@@ -225,6 +298,7 @@ class PredictionService:
             "creator_id": creator_id,
             "initial_fair": initial_fair,
             "current_price": initial_fair,
+            "economy_event_modifiers": modifiers,
         }
 
     def buy_contracts(
@@ -342,8 +416,9 @@ class PredictionService:
         # Daily refresh layers thinner / wider than the initial seed: fewer
         # levels, smaller per-level size, larger spread offset. Legacy quotes
         # inside the current minimum spread are pruned while crossing arb stays.
-        levels = self._build_initial_levels(
+        levels, modifiers = self._build_event_levels(
             new_price,
+            int(pred["guild_id"]),
             levels_per_side=PREDICTION_REFRESH_LEVELS_PER_SIDE,
             size_per_level=PREDICTION_REFRESH_SIZE_PER_LEVEL,
             spread_ticks=PREDICTION_REFRESH_SPREAD_TICKS,
@@ -354,7 +429,15 @@ class PredictionService:
             new_price,
             levels,
             now,
-            min_quote_offset=PREDICTION_SPREAD_TICKS * PREDICTION_TICK_SIZE,
+            min_quote_offset=max(
+                1,
+                min(
+                    98 // max(1, PREDICTION_TICK_SIZE),
+                    PREDICTION_SPREAD_TICKS
+                    + int(modifiers["prediction_spread_ticks_delta"]),
+                ),
+            )
+            * PREDICTION_TICK_SIZE,
         )
 
         summary = self.prediction_repo.get_trade_summary_since(
@@ -367,6 +450,7 @@ class PredictionService:
             "new_price": new_price,
             "drift": drift,
             "trade_summary": summary,
+            "economy_event_modifiers": modifiers,
         }
 
     def get_markets_due_for_refresh(self, now_ts: int | None = None) -> list[dict]:
@@ -381,11 +465,15 @@ class PredictionService:
     ) -> dict:
         """Atomic settle: cancel levels, pay contract holders, mark resolved.
 
-        Applies the bankruptcy debuff to each winner's profit as a follow-up
-        debit: the gross payout is credited inside the atomic settlement, then
-        the penalty share of profit (payout − cost basis) is docked here as a
-        coin sink. Stake (cost basis) is always returned whole.
+        The active daily event scales each holder's gross winning-contract
+        payout. The repository applies that modifier and any bankruptcy-profit
+        penalty together inside the settlement transaction.
         """
+        pred = self.prediction_repo.get_prediction(prediction_id)
+        if not pred:
+            raise ValueError("Prediction not found.")
+        payout_multiplier, _, _ = self._get_prediction_effects(int(pred["guild_id"]))
+
         # The bankruptcy debuff is folded into the settlement txn: the penalty
         # share of each penalized winner's profit is netted out of their credit
         # there (no follow-up debit with a crash window). Winners returned
@@ -395,6 +483,7 @@ class PredictionService:
             bankruptcy_penalty_rate=(
                 self.bankruptcy_service.penalty_rate if self.bankruptcy_service else None
             ),
+            payout_multiplier=payout_multiplier,
         )
 
     def rollback_orderbook(
@@ -409,7 +498,10 @@ class PredictionService:
             raise ValueError("Prediction not found.")
         if pred.get("current_price") is None:
             raise ValueError("Prediction has no current price.")
-        levels = self._build_initial_levels(int(pred["current_price"]))
+        effective_guild_id = int(pred["guild_id"])
+        levels, _ = self._build_event_levels(
+            int(pred["current_price"]), effective_guild_id
+        )
         return self.prediction_repo.rollback_prediction_orderbook(
             prediction_id,
             guild_id,
@@ -441,7 +533,9 @@ class PredictionService:
                 f"Cannot set fair on a {pred.get('status')} market."
             )
         old_price = int(pred.get("current_price") or PREDICTION_INITIAL_FAIR_DEFAULT)
-        levels = self._build_initial_levels(new_price)
+        levels, modifiers = self._build_event_levels(
+            new_price, int(pred["guild_id"])
+        )
         now = int(time.time())
         self.prediction_repo.apply_refresh(
             prediction_id,
@@ -449,12 +543,14 @@ class PredictionService:
             levels,
             now,
             reason="set_fair",
-            min_quote_offset=PREDICTION_SPREAD_TICKS * PREDICTION_TICK_SIZE,
+            min_quote_offset=int(modifiers["prediction_spread_ticks"])
+            * PREDICTION_TICK_SIZE,
         )
         return {
             "prediction_id": prediction_id,
             "old_price": old_price,
             "new_price": new_price,
+            "economy_event_modifiers": modifiers,
         }
 
     @staticmethod

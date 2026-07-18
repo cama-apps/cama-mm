@@ -46,6 +46,10 @@ from config import (
     AI_MODEL,
     AI_TIMEOUT_SECONDS,
     DB_PATH,
+    ECONOMY_EVENT_TRIGGER_HOUR_LOCAL,
+    ECONOMY_EVENT_WAKE_SECONDS,
+    ECONOMY_EVENTS_ENABLED,
+    ECONOMY_RECOVERY_MODE,
     GARNISHMENT_PERCENTAGE,
     LEVERAGE_TIERS,
     LLM_API_KEY,
@@ -97,6 +101,7 @@ _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 _manashop_debt_task: asyncio.Task | None = None
 _duel_challenge_task: asyncio.Task | None = None
+_economy_event_task: asyncio.Task | None = None
 
 DUEL_WORKER_WAKE_SECONDS = 60
 
@@ -223,6 +228,75 @@ async def _duel_challenge_loop() -> None:
         except Exception:  # noqa: BLE001
             logger.exception("duel challenge loop wake failed")
         await asyncio.sleep(DUEL_WORKER_WAKE_SECONDS)
+
+
+async def _announce_economy_event(guild: discord.Guild, event: dict) -> None:
+    """Post a newly activated monetary event in the guild's gamba channel."""
+    service = getattr(bot, "economy_event_service", None)
+    cog = bot.get_cog("BettingCommands")
+    if service is None or cog is None:
+        return
+    title, description = service.format_event(event)
+    direction = event.get("direction")
+    color = {
+        "deflationary": 0xD94B4B,
+        "neutral": 0x7F8C8D,
+        "boon": 0x43B581,
+    }.get(direction, 0x7F8C8D)
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.set_footer(
+        text="Server-wide daily Jopacoin event • Applies until the next 10 AM Pacific rollover"
+    )
+    await cog.announce_to_gamba(guild, embed=embed)
+
+
+async def _economy_event_loop() -> None:
+    """Enforce recovery governance and activate one idempotent event per day."""
+    await bot.wait_until_ready()
+    logger.info(
+        "economy event loop started (wake=%ss trigger=%02d:00 Pacific recovery=%s events=%s)",
+        ECONOMY_EVENT_WAKE_SECONDS,
+        ECONOMY_EVENT_TRIGGER_HOUR_LOCAL,
+        ECONOMY_RECOVERY_MODE,
+        ECONOMY_EVENTS_ENABLED,
+    )
+    while not bot.is_closed():
+        for guild in list(bot.guilds):
+            try:
+                if ECONOMY_RECOVERY_MODE:
+                    result = await asyncio.to_thread(
+                        bot.disburse_service.enforce_voting_moratorium,
+                        guild.id,
+                    )
+                    if result.get("cancelled"):
+                        logger.info(
+                            "recovery moratorium returned %s JC for guild=%s proposal=%s",
+                            result.get("fund_amount_returned"),
+                            guild.id,
+                            result.get("proposal_id"),
+                        )
+                event, created = await asyncio.to_thread(
+                    bot.economy_event_service.ensure_daily_event,
+                    guild.id,
+                )
+                if created and event:
+                    await _announce_economy_event(guild, event)
+            except Exception:  # noqa: BLE001
+                logger.exception("economy event wake failed for guild=%s", guild.id)
+        sleep_seconds = ECONOMY_EVENT_WAKE_SECONDS
+        try:
+            seconds_until_trigger = await asyncio.to_thread(
+                bot.economy_event_service.seconds_until_next_trigger
+            )
+            sleep_seconds = min(
+                ECONOMY_EVENT_WAKE_SECONDS,
+                max(0.0, float(seconds_until_trigger)),
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "economy event trigger scheduling failed; using configured wake interval"
+            )
+        await asyncio.sleep(sleep_seconds)
 
 
 async def _process_one_refresh(market: dict) -> None:
@@ -433,6 +507,8 @@ def _init_services():
         max_debt=MAX_DEBT,
         leverage_tiers=LEVERAGE_TIERS,
         garnishment_percentage=GARNISHMENT_PERCENTAGE,
+        economy_events_enabled=ECONOMY_EVENTS_ENABLED,
+        economy_recovery_mode=ECONOMY_RECOVERY_MODE,
         llm_api_key=LLM_API_KEY,
         ai_model=AI_MODEL,
         ai_timeout_seconds=AI_TIMEOUT_SECONDS,
@@ -802,7 +878,7 @@ async def on_ready():
     # crash, and a done-callback that surfaces an unexpected exit to the log
     # so we can never lose a feature to silent failure.
     global _prediction_refresh_task, _prediction_digest_task, _manashop_debt_task
-    global _duel_challenge_task
+    global _duel_challenge_task, _economy_event_task
     if _prediction_refresh_task is None or _prediction_refresh_task.done():
         _prediction_refresh_task = bot.loop.create_task(
             _supervised_loop("prediction_refresh", _prediction_refresh_loop)
@@ -825,6 +901,13 @@ async def on_ready():
         _duel_challenge_task.add_done_callback(
             _log_task_exit("duel_challenges")
         )
+    if (
+        ECONOMY_EVENTS_ENABLED or ECONOMY_RECOVERY_MODE
+    ) and (_economy_event_task is None or _economy_event_task.done()):
+        _economy_event_task = bot.loop.create_task(
+            _supervised_loop("economy_events", _economy_event_loop)
+        )
+        _economy_event_task.add_done_callback(_log_task_exit("economy_events"))
 
     reminder_svc = getattr(bot, "reminder_service", None)
     if reminder_svc:

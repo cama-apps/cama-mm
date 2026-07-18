@@ -878,10 +878,22 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
     buff_service.buff_repo.consume_and_credit_atomic.side_effect = fake_consume_and_credit
     buff_service.apply_blood_pact_skim.return_value = 0
     betting_service.buff_service = buff_service
+    event_service = MagicMock()
+    event_service.adjust_reward.return_value = 2
+    betting_service.economy_event_service = event_service
 
     results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
 
-    blessing_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.10))
+    from utils.economy_scaling import scale_minigame_jc_delta
+
+    base_blessing_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.10))
+    scaled_blessing_bonus = scale_minigame_jc_delta(base_blessing_bonus)
+    assert scaled_blessing_bonus == base_blessing_bonus
+    event_service.adjust_reward.assert_called_once_with(
+        TEST_GUILD_ID,
+        scaled_blessing_bonus,
+    )
+    blessing_bonus = 2
     assert buff_service.buff_repo.consume_and_credit_atomic.called, (
         "Precondition: the blessing charge must actually be consumed"
     )

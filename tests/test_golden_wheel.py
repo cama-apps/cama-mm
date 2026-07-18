@@ -10,7 +10,7 @@ Covers:
 - Golden wheel eligibility (top-N vs not top-N)
 - Bankrupt wheel priority over golden wheel
 - New outcome mechanics: HEIST, MARKET_CRASH, COMPOUND_INTEREST,
-  TRICKLE_DOWN, DIVIDEND, HOSTILE_TAKEOVER, CROWN JEWEL (scaled 200 JC)
+  TRICKLE_DOWN, DIVIDEND, HOSTILE_TAKEOVER, CROWN JEWEL (250 JC at neutral scale)
 """
 
 from types import SimpleNamespace
@@ -45,8 +45,8 @@ class TestGoldenWheelWedges:
         from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES
         crown = [w for w in GOLDEN_WHEEL_WEDGES if w[2] == "#fffacd"]
         assert len(crown) == 1
-        assert crown[0][0] == "200"
-        assert crown[0][1] == 200
+        assert crown[0][0] == "250"
+        assert crown[0][1] == 250
 
     def test_golden_wheel_contains_new_mechanics(self):
         from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES

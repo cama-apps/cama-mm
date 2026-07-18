@@ -137,6 +137,7 @@ class DigService(
         prediction_repo=None,
         protection_service=None,
         curse_repo=None,
+        economy_event_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -150,6 +151,7 @@ class DigService(
         self.prediction_repo = prediction_repo
         self.protection_service = protection_service
         self.curse_repo = curse_repo
+        self.economy_event_service = economy_event_service
         # Sub-services for focused concerns. Defaults wire local instances so
         # existing callers (and tests that construct DigService directly) keep
         # working without having to pass anything new.
@@ -176,6 +178,12 @@ class DigService(
         # cache each call would round-trip to ``dig_repo.get_equipped_relics``.
         # Invalidated on equip/unequip below.
         self._relic_cache: dict[tuple[int, int], frozenset[str]] = {}
+
+    def _apply_daily_economy_reward(self, guild_id: int | None, amount: int) -> int:
+        """Apply the active server-wide event to a positive dig reward."""
+        if self.economy_event_service is None or amount <= 0:
+            return amount
+        return self.economy_event_service.adjust_reward(guild_id, amount)
 
     def _penalize_jc(self, discord_id: int, guild_id, amount: int) -> tuple[int, int]:
         """Apply the bankruptcy debuff to earned dig JC.

@@ -182,6 +182,7 @@ class DigCoreMixin:
         advance = random.randint(3, 7)
         jc_earned = random.randint(1, 5)
         jc_earned = scale_minigame_jc_delta(jc_earned)
+        jc_earned = self._apply_daily_economy_reward(guild_id, jc_earned)
         new_depth = depth_before + advance
 
         # Tunnel advance + JC payout commit together so a crash can't

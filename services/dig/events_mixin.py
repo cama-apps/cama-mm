@@ -683,6 +683,8 @@ class EventsMixin:
             if jc < 0
             else scale_minigame_jc_delta(jc)
         )
+        if jc > 0:
+            jc = self._apply_daily_economy_reward(guild_id, jc)
 
         # Depth shift + JC credit/debit + optional buff + audit log commit
         # together, so the actor can't be paid without the depth/buff

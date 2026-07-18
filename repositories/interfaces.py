@@ -355,6 +355,7 @@ class IBetRepository(ABC):
         bet_seed_radiant: int = 0,
         bet_seed_dire: int = 0,
         bet_seed_bonus: int = 0,
+        payout_multiplier: float = 1.0,
     ) -> dict:
         """Atomically settle bets for the current match window."""
         ...
@@ -924,6 +925,7 @@ class IPredictionRepository(ABC):
     def settle_prediction_orderbook(
         self, prediction_id: int, outcome: str, resolved_by: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
+        payout_multiplier: float = 1.0,
     ) -> dict:
         """Settle by paying ``contracts × CONTRACT_VALUE`` per winning holder.
 

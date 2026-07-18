@@ -118,6 +118,7 @@ class TestServiceContainerBotExposure:
             "recalibration_service": "recalibration_service",
             "disburse_service": "disburse_service",
             "tax_service": "tax_service",
+            "economy_event_service": "economy_event_service",
             "match_enrichment_service": "match_enrichment_service",
             "match_discovery_service": "match_discovery_service",
             "pairings_service": "pairings_service",

@@ -58,6 +58,14 @@ def _jc_for_streak(streak: int) -> int:
     return TRIVIA_REWARD_PER_QUESTION + _streak_bonus_for_streak(streak)
 
 
+def _apply_daily_reward_event(bot, guild_id: int | None, amount: int) -> int:
+    """Apply the active daily event after central minigame scaling."""
+    event_service = getattr(bot, "economy_event_service", None)
+    if event_service is None or amount <= 0:
+        return amount
+    return event_service.adjust_reward(guild_id, amount)
+
+
 OPTION_LABELS = ["A", "B", "C", "D"]
 OPTION_STYLES = [
     discord.ButtonStyle.primary,
@@ -266,6 +274,11 @@ class TriviaView(discord.ui.View):
 
             jc += streak_bonus_jc
             jc = scale_minigame_jc_delta(jc)
+            jc = _apply_daily_reward_event(
+                self.cog.bot,
+                self.session.guild_id,
+                jc,
+            )
 
             if effects is not None:
                 # White: tithe to the nonprofit fund from the player's NET payout
@@ -308,6 +321,12 @@ class TriviaView(discord.ui.View):
                         self.session.user_id,
                         self.session.guild_id,
                         jc,
+                        source="trivia",
+                        actor_id=self.session.user_id,
+                        related_type="trivia_answer",
+                        related_id=self.question_num,
+                        reason="scaled trivia reward",
+                        metadata={"adjusted_reward": jc},
                     )
                 except Exception:
                     logger.exception("Failed to award trivia JC")

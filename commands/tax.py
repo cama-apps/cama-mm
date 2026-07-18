@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
-from config import BANKRUPTCY_PENALTY_GAMES
+from config import BANKRUPTCY_PENALTY_GAMES, MINIGAME_JC_DELTA_SCALE
 from services.permissions import has_tax_man_permission
 from services.tax_service import TaxService
 from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
@@ -269,6 +269,40 @@ class TaxCommands(commands.Cog):
 
         embed = _build_audit_embed(snapshot, source_totals)
         await safe_followup(interaction, embed=embed, ephemeral=True)
+
+    @tax.command(name="policy", description="View daily Jopacoin monetary policy")
+    @require_guild
+    async def policy(self, interaction: discord.Interaction):
+        if not await self._require_tax_man(interaction):
+            return
+        await safe_defer(interaction, ephemeral=True)
+        service = getattr(self.bot, "economy_event_service", None)
+        if service is None:
+            await safe_followup(
+                interaction,
+                content="The daily economy controller is not configured.",
+                ephemeral=True,
+            )
+            return
+        try:
+            status = await asyncio.to_thread(
+                service.get_policy_status, interaction.guild.id
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load economy policy for guild_id=%s", interaction.guild.id
+            )
+            await safe_followup(
+                interaction,
+                content="Couldn't load the monetary-policy status right now.",
+                ephemeral=True,
+            )
+            return
+        await safe_followup(
+            interaction,
+            embed=_build_policy_embed(status),
+            ephemeral=True,
+        )
 
     @tax.command(name="player", description="View one player's full monetary exposure")
     @app_commands.describe(user="Player to audit")
@@ -599,6 +633,63 @@ def _format_jc(amount: int) -> str:
 def _format_signed_jc(amount: int) -> str:
     prefix = "+" if amount > 0 else ""
     return f"{prefix}{amount:,} {JOPACOIN_EMOTE}"
+
+
+def _build_policy_embed(status: dict) -> discord.Embed:
+    policy = status["policy"]
+    sheet = status["balance_sheet"]
+    latest = status.get("latest_snapshot") or {}
+    event = status.get("event")
+    mode = str(policy.get("mode", "unknown")).replace("_", " ").title()
+    target = float(policy.get("target_annual_rate", 0.0)) * 100
+    ceiling = float(policy.get("inflation_ceiling", 0.0)) * 100
+    embed = discord.Embed(
+        title="Jopacoin Monetary Policy",
+        description=(
+            f"**Mode:** {mode}\n"
+            f"**Annual target:** {target:+.2f}%\n"
+            f"**Inflation ceiling:** {ceiling:.2f}%\n"
+            f"**Generated payout baseline:** {MINIGAME_JC_DELTA_SCALE:.0%}\n"
+            f"**Reserve voting:** {'Paused' if mode == 'Recovery' else 'Enabled'}"
+        ),
+        color=0xD94B4B if mode == "Recovery" else 0x43B581,
+    )
+    embed.add_field(
+        name="Reconciled stock",
+        value=(
+            f"Total: **{int(sheet['monetary_stock']):,} JC**\n"
+            f"Wallets: **{int(sheet['player_wallets']):,} JC** "
+            f"(avg **{float(sheet['average_wallet']):,.2f}**)\n"
+            f"Reserve: **{int(sheet['reserve_available']):,} available** + "
+            f"**{int(sheet['reserve_locked']):,} locked**\n"
+            f"Prediction cash: **{int(sheet['prediction_open_cash']):,} JC**\n"
+            f"Wager escrow: **{int(sheet['wager_escrow']):,} JC**"
+        ),
+        inline=False,
+    )
+    annualized_30d = latest.get("annualized_30d")
+    annualized_90d = latest.get("annualized_90d")
+    inflation_lines = [
+        "30-day annualized: "
+        + (f"**{float(annualized_30d) * 100:+.2f}%**" if annualized_30d is not None else "collecting data"),
+        "90-day annualized: "
+        + (f"**{float(annualized_90d) * 100:+.2f}%**" if annualized_90d is not None else "collecting data"),
+    ]
+    embed.add_field(name="Measured inflation", value="\n".join(inflation_lines), inline=False)
+    if event:
+        embed.add_field(
+            name=f"Active event: {event['name']} (Level {event['severity']})",
+            value=(
+                f"Forecast unmanaged flow: **{int(event['forecast_flow_jc']):+,} JC/day**\n"
+                f"Target event effect: **{int(event['target_effect_jc']):+,} JC**\n"
+                f"Expected effect: **{int(event['expected_effect_jc']):+,} JC**\n"
+                f"Direct effect: **{int(event['direct_effect_jc']):+,} JC**"
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="Active event", value="No event has activated today.", inline=False)
+    return embed
 
 
 def _format_tax_error(error: str) -> str:

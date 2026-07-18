@@ -194,7 +194,7 @@ async def test_wheel_cooldown_expired_allows_spin():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    five_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
+    five_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
         with patch("commands.betting.random.randint", return_value=five_idx):
@@ -303,7 +303,7 @@ async def test_wheel_positive_no_debt_adds_directly():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick the index of a +5 wedge so the test survives wheel reordering.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
@@ -312,7 +312,7 @@ async def test_wheel_positive_no_debt_adds_directly():
                     await commands.gamba.callback(commands, interaction)
 
     # Should add balance directly (user_id, guild_id, amount)
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1003, 123, 4)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1003, 123, 5)
 
 
 @pytest.mark.asyncio
@@ -353,7 +353,7 @@ async def test_wheel_white_mana_animation_uses_capped_wedges():
     interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
-    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 64)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 80)
 
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()) as mock_gif:
         with patch("commands.betting.random.randint", return_value=target_idx):
@@ -660,7 +660,7 @@ async def test_wheel_jackpot_result():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Find jackpot (100) wedge dynamically
-    jackpot_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 80)
+    jackpot_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 100)
 
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -669,10 +669,10 @@ async def test_wheel_jackpot_result():
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     await commands.gamba.callback(commands, interaction)
 
-    # Should add scaled jackpot.
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1007, 123, 80)
+    # The neutral baseline preserves the 100-JC jackpot.
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1007, 123, 100)
     log_kwargs = player_service.log_wheel_spin.call_args.kwargs
-    assert log_kwargs["outcome_code"] == "NUMERIC_80"
+    assert log_kwargs["outcome_code"] == "NUMERIC_100"
 
 
 def test_wheel_wedges_has_correct_count():
@@ -686,13 +686,13 @@ def test_wheel_wedges_distribution():
     bankrupt_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0)
     lose_turn_count = sum(1 for w in WHEEL_WEDGES if w[1] == 0)
     positive_values = sorted(w[1] for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0)
-    jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 80)
+    jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 100)
     special_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], str))
 
     assert bankrupt_count == 2, f"Expected 2 Bankrupt wedges, got {bankrupt_count}"
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
-    assert positive_values == [4, 8, 8, 12, 16, 20, 24, 32, 40, 40, 48, 56, 64, 80, 80]
-    assert jackpot_count == 2, f"Expected 2 scaled Jackpot wedges, got {jackpot_count}"
+    assert positive_values == [5, 10, 10, 15, 20, 25, 30, 40, 50, 50, 60, 70, 80, 100, 100]
+    assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
     assert special_count == 6, f"Expected 6 special wedges, got {special_count}"
 
 
@@ -809,7 +809,7 @@ async def test_wheel_animation_uses_gif():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=target_idx):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
@@ -860,7 +860,7 @@ async def test_wheel_updates_cooldown_in_database():
     _FROZEN_NOW = 1_700_000_000  # fixed epoch; avoids sub-second boundary flakiness
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
         with patch("commands.betting.random.randint", return_value=target_idx):
@@ -912,7 +912,7 @@ async def test_wheel_admin_bypasses_cooldown():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Pick a simple positive-int wedge so the spin path is straightforward.
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 4)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 5)
     # Mock admin check to return True
     with patch("commands.betting.time.time", return_value=_FROZEN_NOW):
         with patch("commands.betting.has_admin_permission", return_value=True):
@@ -1002,13 +1002,13 @@ async def test_wheel_red_shell_steals_from_player_above():
         min_balance=HOSTILE_LOSS_MIN_BALANCE,
     )
 
-    # Should call steal_atomic: max(pct=3, flat=2) scales to 2 JC
+    # Neutral scaling preserves max(pct=3, flat=2) at 3 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1010,
         victim_discord_id=2001,
         guild_id=123,
-        amount=2,
+        amount=3,
     )
 
 
@@ -1135,13 +1135,13 @@ async def test_wheel_blue_shell_steals_from_richest():
     # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
     player_service.get_leaderboard.assert_any_call(123, limit=1)
 
-    # Should call steal_atomic: max(pct=5, flat=4) scales to 4 JC
+    # Neutral scaling preserves max(pct=5, flat=4) at 5 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
-        amount=4,
+        amount=5,
     )
 
 
@@ -1218,12 +1218,12 @@ async def test_wheel_blue_shell_self_hit_when_richest():
                         await cmds.gamba.callback(cmds, interaction)
 
     # Self-hit uses adjust_balance (not steal_atomic since no victim)
-    # max(pct=10, flat=4) scales to 8 JC loss
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -8)
+    # Neutral scaling preserves max(pct=10, flat=4) at a 10-JC loss.
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -10)
 
     # Should credit nonprofit fund with the loss
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 8)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
@@ -1299,20 +1299,20 @@ async def test_wheel_lightning_bolt_taxes_all_players():
                         await cmds.gamba.callback(cmds, interaction)
 
     # Should call adjust_balance for each positive-balance player
-    # Alice: 20 -> 16, Bob: 10 -> 8, Carol: 2 -> 2 after scaling.
+    # Neutral scaling preserves Alice: 20, Bob: 10, Carol: 2.
     adjust_calls = player_service.adjust_balance.call_args_list
     assert len(adjust_calls) == 3
     # Check each call is negative (tax)
     for call in adjust_calls:
         assert call[0][2] < 0, "Tax should be negative"
 
-    # Should credit nonprofit fund with total scaled tax (16 + 8 + 2 = 26)
+    # The Reserve receives the neutral-scale total (20 + 10 + 2 = 32).
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 26)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 32)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
     log_kwargs = player_service.log_wheel_spin.call_args.kwargs
     assert log_kwargs["outcome_code"] == "LIGHTNING_BOLT"
-    assert log_kwargs["outcome_metadata"]["lightning_total"] == 26
+    assert log_kwargs["outcome_metadata"]["lightning_total"] == 32
     assert log_kwargs["outcome_metadata"]["lightning_count"] == 3
 
 
@@ -1393,11 +1393,11 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
     # Only Rich (500 JC) should be taxed; Low (49), Broke (0), and InDebt skipped.
     adjust_calls = player_service.adjust_balance.call_args_list
     assert len(adjust_calls) == 1
-    assert adjust_calls[0][0] == (3001, 123, -8)  # 2% of 500 = 10, scaled to 8
+    assert adjust_calls[0][0] == (3001, 123, -10)  # 2% of 500 = 10 at neutral scale
 
     # Nonprofit receives only the one tax
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 8)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
@@ -1719,11 +1719,13 @@ def test_wheels_in_rainbow_order():
 
 
 def test_bankrupt_wheel_jackpot_is_gold():
-    """Bankrupt wheel's scaled jackpot wedges should share the regular wheel's gold (#f1c40f)."""
+    """Bankrupt and regular 100-JC jackpots share the same gold color."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
-    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 80}
-    bankrupt_jackpot_colors = {w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 80}
+    regular_jackpot_colors = {w[2].lower() for w in WHEEL_WEDGES if w[1] == 100}
+    bankrupt_jackpot_colors = {
+        w[2].lower() for w in BANKRUPT_WHEEL_WEDGES if w[1] == 100
+    }
 
     assert bankrupt_jackpot_colors == regular_jackpot_colors, (
         f"Bankrupt jackpot colors {bankrupt_jackpot_colors} should match regular {regular_jackpot_colors}"
@@ -1789,7 +1791,7 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     interaction.response.is_done.return_value = True
 
     commands = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
-    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 4)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 5)
 
     with patch("commands.betting.require_gamba_channel", new_callable=AsyncMock) as channel_check:
         with patch("commands.betting.time.time", return_value=1_700_000_000):
@@ -1811,9 +1813,9 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     bot.reminder_service.schedule_wheel_reminder.assert_not_called()
     player_service.log_wheel_spin.assert_called_once()
     log_kwargs = player_service.log_wheel_spin.call_args.kwargs
-    assert log_kwargs["outcome_code"] == "NUMERIC_4"
+    assert log_kwargs["outcome_code"] == "NUMERIC_5"
     assert log_kwargs["is_bonus"] is True
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 4)
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 5)
     interaction.response.defer.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
 
@@ -1881,7 +1883,7 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
         player_service.adjust_balance,
         1001,
         123,
-        WHEEL_EXPLOSION_REWARD,
+        scale_minigame_jc_delta(WHEEL_EXPLOSION_REWARD),
     )
     interaction.response.defer.assert_not_awaited()
 
@@ -2009,7 +2011,7 @@ async def test_red_shell_partial_absorption_routes_only_applied_transfer():
 
     protection_service.apply_hostile_loss.assert_called_once()
     call = protection_service.apply_hostile_loss.call_args
-    assert call.args[:4] == (victim.discord_id, 123, 2, "red_shell")
+    assert call.args[:4] == (victim.discord_id, 123, 3, "red_shell")
     assert call.kwargs["actor_id"] == spinner_id
     assert call.kwargs["destination"] == "player"
     assert call.kwargs["recipient_id"] == spinner_id
@@ -2018,7 +2020,7 @@ async def test_red_shell_partial_absorption_routes_only_applied_transfer():
     player_service.adjust_balance.assert_not_called()
 
     embed = _edited_wheel_embed(interaction)
-    assert "stole **1**" in embed.description.lower()
+    assert "stole **2**" in embed.description.lower()
     shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
     assert "**1**" in shield_field.value
 
@@ -2093,8 +2095,8 @@ async def test_lightning_mixed_absorption_uses_actual_reserve_total_without_doub
     loan_service.add_to_nonprofit_fund.assert_not_called()
 
     embed = _edited_wheel_embed(interaction)
-    assert "total of **17**" in embed.description
-    assert "**2** players hit" in embed.description
+    assert "total of **23**" in embed.description
+    assert "**3** players hit" in embed.description
     shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
     assert "2 shield activation(s)" in shield_field.value
     assert "**9**" in shield_field.value
@@ -2164,8 +2166,8 @@ async def test_trickle_down_mixed_absorption_does_not_double_credit_spinner():
     player_service.adjust_balance.assert_not_called()
 
     embed = _edited_wheel_embed(interaction)
-    assert "Total received: **1**" in embed.description
-    assert "taxed **1** players" in embed.description
+    assert "Total received: **5**" in embed.description
+    assert "taxed **2** players" in embed.description
     shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
     assert "**17**" in shield_field.value
 
@@ -2218,10 +2220,10 @@ async def test_bomb_omb_mixed_absorption_burns_only_applied_amounts():
     player_service.adjust_balance.assert_not_called()
 
     embed = _edited_wheel_embed(interaction)
-    assert "Total burned: **19**" in embed.description
-    assert "**Full** lost" not in embed.description
-    assert "**Partial** lost **7**" in embed.description
-    assert "**Open** lost **12**" in embed.description
+    assert "Total burned: **28**" in embed.description
+    assert "**Full** lost **3**" in embed.description
+    assert "**Partial** lost **10**" in embed.description
+    assert "**Open** lost **15**" in embed.description
     shield_field = next(field for field in embed.fields if field.name == "🌾 White Mana Shields")
     assert "2 shield activation(s)" in shield_field.value
     assert "**17**" in shield_field.value
@@ -2278,11 +2280,11 @@ async def test_golden_trickle_down_skips_players_below_auto_blind_threshold():
     calls = [c.args for c in player_service.adjust_balance.call_args_list]
     victim_debits = [c for c in calls if c[2] < 0]
     assert victim_debits == [
-        (eligible_big.discord_id, 123, -16),
+        (eligible_big.discord_id, 123, -20),
         (eligible_edge.discord_id, 123, -1),
     ]
     assert not any(c[0] == below_threshold.discord_id for c in calls)
-    assert any(c == (spinner_id, 123, 17) for c in calls)
+    assert any(c == (spinner_id, 123, 21) for c in calls)
 
 
 @pytest.mark.asyncio
@@ -2429,7 +2431,7 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
         thief_discord_id=spinner_id,
         victim_discord_id=8003,
         guild_id=123,
-        amount=16,
+        amount=20,
     )
     # steal_atomic handles both sides; adjust_balance must NOT be used here
     player_service.adjust_balance.assert_not_called()

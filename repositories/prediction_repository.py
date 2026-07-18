@@ -4,9 +4,11 @@ Repository for managing prediction market data.
 
 from __future__ import annotations
 
+import json
+import math
 import time
 
-from repositories.base_repository import BaseRepository
+from repositories.base_repository import BaseRepository, safe_json_loads
 from repositories.interfaces import IPredictionRepository
 
 
@@ -835,12 +837,11 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
     ) -> dict:
         """Realized P&L and W/L over a user's resolved order-book markets.
 
-        Per resolved market: payout = winning-side contracts * PREDICTION_CONTRACT_VALUE,
-        cost = total cost basis (both sides), pnl = payout - cost - bankruptcy_penalty
-        (the penalty withheld at settlement, so the figure matches the JC actually
-        credited). Open and cancelled markets are excluded — cancelled markets
-        refund cost basis and delete their position rows, so they net to zero
-        either way.
+        Per resolved market, payout is the actual settlement-ledger credit,
+        including daily-event and bankruptcy modifiers. P&L is credited payout
+        minus total cost basis. Open and cancelled markets are excluded —
+        cancelled markets refund cost basis and delete their position rows, so
+        they net to zero either way.
         """
         from config import PREDICTION_CONTRACT_VALUE
 
@@ -853,7 +854,37 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                        pp.yes_contracts AS yes_contracts,
                        pp.no_contracts AS no_contracts,
                        pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
-                       COALESCE(pp.bankruptcy_penalty, 0) AS penalty
+                       COALESCE(pp.bankruptcy_penalty, 0) AS penalty,
+                       (SELECT COUNT(*)
+                        FROM economy_ledger_entries e
+                        WHERE e.guild_id = p.guild_id
+                          AND e.source = 'prediction_resolution'
+                          AND e.related_type = 'prediction'
+                          AND e.related_id = CAST(p.prediction_id AS TEXT)
+                          AND e.ledger_id > COALESCE((
+                              SELECT MAX(rb.ledger_id)
+                              FROM economy_ledger_entries rb
+                              WHERE rb.guild_id = p.guild_id
+                                AND rb.source = 'prediction_resolution_rollback'
+                                AND rb.related_type = 'prediction'
+                                AND rb.related_id = CAST(p.prediction_id AS TEXT)
+                          ), 0)) AS settlement_ledger_count,
+                       (SELECT COALESCE(SUM(e.delta), 0)
+                        FROM economy_ledger_entries e
+                        WHERE e.guild_id = p.guild_id
+                          AND e.account_type = 'player'
+                          AND e.account_id = pp.discord_id
+                          AND e.source = 'prediction_resolution'
+                          AND e.related_type = 'prediction'
+                          AND e.related_id = CAST(p.prediction_id AS TEXT)
+                          AND e.ledger_id > COALESCE((
+                              SELECT MAX(rb.ledger_id)
+                              FROM economy_ledger_entries rb
+                              WHERE rb.guild_id = p.guild_id
+                                AND rb.source = 'prediction_resolution_rollback'
+                                AND rb.related_type = 'prediction'
+                                AND rb.related_id = CAST(p.prediction_id AS TEXT)
+                          ), 0)) AS credited
                 FROM prediction_positions pp
                 JOIN predictions p ON pp.prediction_id = p.prediction_id
                 WHERE pp.discord_id = ? AND p.guild_id = ? AND p.status = 'resolved'
@@ -867,9 +898,15 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         losses = 0
         for row in rows:
             won = row["yes_contracts"] if row["outcome"] == "yes" else row["no_contracts"]
-            # Net out any bankruptcy penalty withheld at settlement so the
-            # reported P&L equals the JC actually credited, not the gross payout.
-            pnl = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"]) - int(row["penalty"])
+            if int(row["settlement_ledger_count"] or 0) > 0:
+                payout = int(row["credited"] or 0)
+            else:
+                # Legacy settlements predating the central ledger retain the
+                # original face-value calculation.
+                payout = (
+                    int(won) * PREDICTION_CONTRACT_VALUE - int(row["penalty"])
+                )
+            pnl = payout - int(row["cost"])
             realized_pnl += pnl
             if pnl > 0:
                 wins += 1
@@ -888,9 +925,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         """Per-resolved-market realized P&L for a player, oldest settlement first.
 
         One row per resolved order-book market the player held a position in:
-        ``{prediction_id, settle_time, delta}``, where delta = winning-side
-        payout - total cost basis - bankruptcy_penalty (netting the penalty
-        withheld at settlement so the chart matches the JC actually credited).
+        ``{prediction_id, settle_time, delta}``, where delta is the actual
+        settlement-ledger credit minus total cost basis (so daily-event and
+        bankruptcy modifiers both match the JC actually credited).
         Feeds the profile economy balance chart.
         """
         from config import PREDICTION_CONTRACT_VALUE
@@ -906,7 +943,37 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                        pp.yes_contracts AS yes_contracts,
                        pp.no_contracts AS no_contracts,
                        pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
-                       COALESCE(pp.bankruptcy_penalty, 0) AS penalty
+                       COALESCE(pp.bankruptcy_penalty, 0) AS penalty,
+                       (SELECT COUNT(*)
+                        FROM economy_ledger_entries e
+                        WHERE e.guild_id = p.guild_id
+                          AND e.source = 'prediction_resolution'
+                          AND e.related_type = 'prediction'
+                          AND e.related_id = CAST(p.prediction_id AS TEXT)
+                          AND e.ledger_id > COALESCE((
+                              SELECT MAX(rb.ledger_id)
+                              FROM economy_ledger_entries rb
+                              WHERE rb.guild_id = p.guild_id
+                                AND rb.source = 'prediction_resolution_rollback'
+                                AND rb.related_type = 'prediction'
+                                AND rb.related_id = CAST(p.prediction_id AS TEXT)
+                          ), 0)) AS settlement_ledger_count,
+                       (SELECT COALESCE(SUM(e.delta), 0)
+                        FROM economy_ledger_entries e
+                        WHERE e.guild_id = p.guild_id
+                          AND e.account_type = 'player'
+                          AND e.account_id = pp.discord_id
+                          AND e.source = 'prediction_resolution'
+                          AND e.related_type = 'prediction'
+                          AND e.related_id = CAST(p.prediction_id AS TEXT)
+                          AND e.ledger_id > COALESCE((
+                              SELECT MAX(rb.ledger_id)
+                              FROM economy_ledger_entries rb
+                              WHERE rb.guild_id = p.guild_id
+                                AND rb.source = 'prediction_resolution_rollback'
+                                AND rb.related_type = 'prediction'
+                                AND rb.related_id = CAST(p.prediction_id AS TEXT)
+                          ), 0)) AS credited
                 FROM prediction_positions pp
                 JOIN predictions p ON pp.prediction_id = p.prediction_id
                 WHERE pp.discord_id = ? AND p.guild_id = ? AND p.status = 'resolved'
@@ -919,9 +986,13 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         history = []
         for row in rows:
             won = row["yes_contracts"] if row["outcome"] == "yes" else row["no_contracts"]
-            # Net out the withheld bankruptcy penalty so the chart delta matches
-            # the JC actually credited at settlement.
-            delta = int(won) * PREDICTION_CONTRACT_VALUE - int(row["cost"]) - int(row["penalty"])
+            if int(row["settlement_ledger_count"] or 0) > 0:
+                payout = int(row["credited"] or 0)
+            else:
+                payout = (
+                    int(won) * PREDICTION_CONTRACT_VALUE - int(row["penalty"])
+                )
+            delta = payout - int(row["cost"])
             history.append(
                 {
                     "prediction_id": row["prediction_id"],
@@ -1177,18 +1248,26 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
     def settle_prediction_orderbook(
         self, prediction_id: int, outcome: str, resolved_by: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
+        payout_multiplier: float = 1.0,
     ) -> dict:
         """Atomic resolve: cancel levels, pay winners, mark resolved.
 
-        ``outcome`` is 'yes' or 'no'. Pays ``PREDICTION_CONTRACT_VALUE`` per
-        winning contract; losing contracts pay 0. Cost basis is irrelevant —
-        payout is purely a function of contract count. ``resolved_by`` is
+        ``outcome`` is 'yes' or 'no'. The gross contract payout is multiplied
+        by ``payout_multiplier`` and rounded to integer jopa per holder; losing
+        contracts pay 0. Cost basis is irrelevant to gross payout.
+        ``resolved_by`` is
         recorded for the audit trail. When ``bankruptcy_penalty_rate`` is set,
         a penalized winner's penalty share of profit is netted out of their
         credit inside this txn (no follow-up debit / crash window).
         """
         if outcome not in self.VALID_POSITIONS:
             raise ValueError(f"Invalid outcome: {outcome}")
+        try:
+            payout_multiplier = float(payout_multiplier)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("payout_multiplier must be a finite non-negative number.") from exc
+        if not math.isfinite(payout_multiplier) or payout_multiplier < 0:
+            raise ValueError("payout_multiplier must be a finite non-negative number.")
         from config import PREDICTION_CONTRACT_VALUE
 
         now = int(time.time())
@@ -1235,20 +1314,24 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 yes_t = int(p["yes_cost_basis_total"])
                 no_t = int(p["no_cost_basis_total"])
                 if outcome == "yes":
-                    payout = yes_c * PREDICTION_CONTRACT_VALUE
+                    base_payout = yes_c * PREDICTION_CONTRACT_VALUE
                     losing_basis = no_t
                     winning_qty = yes_c
                     losing_qty = no_c
                 else:
-                    payout = no_c * PREDICTION_CONTRACT_VALUE
+                    base_payout = no_c * PREDICTION_CONTRACT_VALUE
                     losing_basis = yes_t
                     winning_qty = no_c
                     losing_qty = yes_c
+                payout = round(base_payout * payout_multiplier)
 
                 # Penalty is 0 unless a still-penalized winner is credited below;
                 # hoisted so the per-participant record can net it out uniformly.
                 penalty = 0
-                if payout > 0:
+                # Use the unmodified contract payout to identify winners. An
+                # event may reduce their adjusted payout to zero, but they still
+                # need a durable settlement row for statistics and rollback.
+                if base_payout > 0:
                     winning_basis = yes_t if outcome == "yes" else no_t
                     # Net profit subtracts BOTH sides' cost basis. A hedger who
                     # held the losing side too already paid for it, so true
@@ -1268,31 +1351,70 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         st = cursor.fetchone()
                         if st is not None and int(st["pg"]) > 0:
                             penalty = int(profit * (1 - bankruptcy_penalty_rate))
-                    self._set_economy_ledger_context(
-                        cursor,
-                        source="prediction_resolution",
-                        related_type="prediction",
-                        related_id=prediction_id,
-                        reason="prediction resolution payout",
-                        metadata={
-                            "outcome": outcome,
-                            "gross_payout": payout,
-                            "bankruptcy_penalty": penalty,
-                            "winning_contracts": winning_qty,
-                        },
-                    )
-                    try:
+                    settlement_metadata = {
+                        "outcome": outcome,
+                        "base_gross_payout": base_payout,
+                        "gross_payout": payout,
+                        "payout_multiplier": payout_multiplier,
+                        "bankruptcy_penalty": penalty,
+                        "winning_contracts": winning_qty,
+                    }
+                    credited = payout - penalty
+                    if credited > 0:
+                        self._set_economy_ledger_context(
+                            cursor,
+                            source="prediction_resolution",
+                            related_type="prediction",
+                            related_id=prediction_id,
+                            reason="prediction resolution payout",
+                            metadata=settlement_metadata,
+                        )
+                        try:
+                            cursor.execute(
+                                """
+                                UPDATE players
+                                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE discord_id = ? AND guild_id = ?
+                                """,
+                                (credited, p["discord_id"], guild_id),
+                            )
+                        finally:
+                            self._clear_economy_ledger_context(cursor)
+                    else:
+                        # A zero-payout event still needs a durable settlement
+                        # marker for stats and rollback. Balance triggers quite
+                        # correctly ignore +0 updates, so write the no-op audit
+                        # row explicitly inside this settlement transaction.
+                        cursor.execute(
+                            "SELECT COALESCE(jopacoin_balance, 0) AS balance "
+                            "FROM players WHERE discord_id = ? AND guild_id = ?",
+                            (p["discord_id"], guild_id),
+                        )
+                        player = cursor.fetchone()
+                        if player is None:
+                            raise ValueError("Winning player not found.")
+                        balance = int(player["balance"])
                         cursor.execute(
                             """
-                            UPDATE players
-                            SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE discord_id = ? AND guild_id = ?
+                            INSERT INTO economy_ledger_entries (
+                                guild_id, account_type, account_id, delta,
+                                balance_before, balance_after, source,
+                                related_type, related_id, reason, metadata, created_at
+                            ) VALUES (?, 'player', ?, 0, ?, ?,
+                                      'prediction_resolution', 'prediction', ?,
+                                      'prediction resolution payout', ?, ?)
                             """,
-                            (payout - penalty, p["discord_id"], guild_id),
+                            (
+                                guild_id,
+                                p["discord_id"],
+                                balance,
+                                balance,
+                                str(prediction_id),
+                                json.dumps(settlement_metadata),
+                                now,
+                            ),
                         )
-                    finally:
-                        self._clear_economy_ledger_context(cursor)
                     # Persist the withheld penalty on the position row so the
                     # realized-P&L stats / balance-chart reads net it out and
                     # match the JC actually credited (payout - penalty).
@@ -1307,7 +1429,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     winner = {
                         "discord_id": int(p["discord_id"]),
                         "contracts": winning_qty,
-                        "payout": payout - penalty,
+                        "payout": credited,
                         "profit": profit - penalty,
                     }
                     if penalty:
@@ -1367,6 +1489,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 "losers": losers,
                 "participants": participants,
                 "total_payout": total_payout,
+                "payout_multiplier": payout_multiplier,
                 "lp_pnl": lp_pnl,
             }
 
@@ -1389,7 +1512,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT status, guild_id, outcome, current_price "
+                "SELECT status, guild_id, outcome, current_price, lp_pnl "
                 "FROM predictions WHERE prediction_id = ? AND guild_id = ?",
                 (prediction_id, normalized_guild),
             )
@@ -1417,25 +1540,31 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
             positions = cursor.fetchall()
 
-            total_gross_payout = 0
-            reversals: list[tuple[int, int, int]] = []
-            expected_credits: dict[int, int] = {}
-            for position in positions:
-                winning_contracts = int(position[f"{outcome}_contracts"])
-                gross_payout = winning_contracts * PREDICTION_CONTRACT_VALUE
-                penalty = int(position["bankruptcy_penalty"])
-                credited = gross_payout - penalty
-                total_gross_payout += gross_payout
-                if credited <= 0:
-                    continue
+            positions_by_account = {
+                int(position["discord_id"]): position for position in positions
+            }
 
-                discord_id = int(position["discord_id"])
-                expected_credits[discord_id] = credited
-                reversals.append((discord_id, gross_payout, penalty))
+            # lp_pnl equals signed trade cash flow minus settlement payouts. It
+            # gives us an independent expected gross total, so deleting or
+            # corrupting a settlement ledger row is still detected even though
+            # daily events can change payout away from contracts * face value.
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(
+                    CASE WHEN action IN ('buy_yes', 'buy_no')
+                         THEN jopacoins ELSE -jopacoins END
+                ), 0) AS trade_cash
+                FROM prediction_trades
+                WHERE prediction_id = ?
+                """,
+                (prediction_id,),
+            )
+            trade_cash = int(cursor.fetchone()["trade_cash"] or 0)
+            expected_total_gross = trade_cash - int(pred["lp_pnl"] or 0)
 
             cursor.execute(
                 """
-                SELECT ledger_id, account_type, account_id, delta
+                SELECT ledger_id, account_type, account_id, delta, metadata
                 FROM economy_ledger_entries
                 WHERE guild_id = ?
                   AND source = 'prediction_resolution'
@@ -1459,7 +1588,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 ),
             )
             settlement_rows = cursor.fetchall()
-            settlements_by_account = {}
+            settlements_by_account: dict[int, dict] = {}
+            reversals: list[dict] = []
+            total_gross_payout = 0
             for row in settlement_rows:
                 account_id = row["account_id"]
                 if row["account_type"] != "player" or account_id is None:
@@ -1467,16 +1598,50 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 account_id = int(account_id)
                 if account_id in settlements_by_account:
                     raise ValueError("Settlement ledger is inconsistent.")
-                expected_credit = expected_credits.get(account_id)
-                delta = int(row["delta"])
-                if expected_credit is None or delta <= 0 or delta != expected_credit:
+                position = positions_by_account.get(account_id)
+                if position is None or int(position[f"{outcome}_contracts"]) <= 0:
                     raise ValueError("Settlement ledger is inconsistent.")
-                settlements_by_account[account_id] = row
+                metadata = safe_json_loads(
+                    row["metadata"],
+                    {},
+                    context=f"prediction settlement {prediction_id}",
+                )
+                if not isinstance(metadata, dict):
+                    raise ValueError("Settlement ledger is inconsistent.")
+                fallback_gross = (
+                    int(position[f"{outcome}_contracts"])
+                    * PREDICTION_CONTRACT_VALUE
+                )
+                gross_payout = int(metadata.get("gross_payout", fallback_gross))
+                penalty = int(
+                    metadata.get(
+                        "bankruptcy_penalty", position["bankruptcy_penalty"]
+                    )
+                )
+                delta = int(row["delta"])
+                if gross_payout < 0 or penalty < 0 or delta != gross_payout - penalty:
+                    raise ValueError("Settlement ledger is inconsistent.")
+                settlement = dict(row)
+                settlement["metadata_dict"] = metadata
+                settlements_by_account[account_id] = settlement
+                total_gross_payout += gross_payout
+                reversals.append(
+                    {
+                        "discord_id": account_id,
+                        "gross_payout": gross_payout,
+                        "penalty": penalty,
+                        "payout_multiplier": metadata.get("payout_multiplier", 1.0),
+                        "base_gross_payout": metadata.get(
+                            "base_gross_payout", fallback_gross
+                        ),
+                    }
+                )
 
-            if set(settlements_by_account) != set(expected_credits):
+            if total_gross_payout != expected_total_gross:
                 raise ValueError("Settlement ledger is inconsistent.")
 
-            for discord_id, _, _ in reversals:
+            for reversal in reversals:
+                discord_id = reversal["discord_id"]
                 settlement = settlements_by_account[discord_id]
                 cursor.execute(
                     "SELECT 1 FROM players WHERE discord_id = ? AND guild_id = ?",
@@ -1504,8 +1669,51 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             total_reversed = 0
             affected_players = 0
-            for discord_id, gross_payout, penalty in reversals:
+            for reversal in reversals:
+                discord_id = reversal["discord_id"]
+                gross_payout = reversal["gross_payout"]
+                penalty = reversal["penalty"]
                 credited = int(settlements_by_account[discord_id]["delta"])
+                rollback_metadata = {
+                    "outcome": outcome,
+                    "base_gross_payout": reversal["base_gross_payout"],
+                    "gross_payout": gross_payout,
+                    "payout_multiplier": reversal["payout_multiplier"],
+                    "bankruptcy_penalty": penalty,
+                }
+                if credited == 0:
+                    cursor.execute(
+                        "SELECT COALESCE(jopacoin_balance, 0) AS balance "
+                        "FROM players WHERE discord_id = ? AND guild_id = ?",
+                        (discord_id, normalized_guild),
+                    )
+                    player = cursor.fetchone()
+                    if player is None:
+                        raise ValueError("Winning player no longer exists.")
+                    balance = int(player["balance"])
+                    cursor.execute(
+                        """
+                        INSERT INTO economy_ledger_entries (
+                            guild_id, account_type, account_id, delta,
+                            balance_before, balance_after, source, actor_id,
+                            related_type, related_id, reason, metadata, created_at
+                        ) VALUES (?, 'player', ?, 0, ?, ?,
+                                  'prediction_resolution_rollback', ?,
+                                  'prediction', ?, 'prediction resolution rollback',
+                                  ?, ?)
+                        """,
+                        (
+                            normalized_guild,
+                            discord_id,
+                            balance,
+                            balance,
+                            rolled_back_by,
+                            str(prediction_id),
+                            json.dumps(rollback_metadata),
+                            now,
+                        ),
+                    )
+                    continue
                 self._set_economy_ledger_context(
                     cursor,
                     source="prediction_resolution_rollback",
@@ -1513,11 +1721,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     related_type="prediction",
                     related_id=prediction_id,
                     reason="prediction resolution rollback",
-                    metadata={
-                        "outcome": outcome,
-                        "gross_payout": gross_payout,
-                        "bankruptcy_penalty": penalty,
-                    },
+                    metadata=rollback_metadata,
                 )
                 try:
                     cursor.execute(

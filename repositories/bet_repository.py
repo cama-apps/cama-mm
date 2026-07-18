@@ -717,6 +717,7 @@ class BetRepository(BaseRepository, IBetRepository):
         bet_seed_radiant: int = 0,
         bet_seed_dire: int = 0,
         bet_seed_bonus: int = 0,
+        payout_multiplier: float = 1.0,
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
@@ -732,9 +733,18 @@ class BetRepository(BaseRepository, IBetRepository):
                              penalty keep only this fraction of their profit; the
                              withheld share is netted out of the credit inside the
                              settlement txn (no follow-up debit / crash window).
+            payout_multiplier: Daily-event multiplier applied to each winner's
+                             gross integer payout. Stakes already placed are unchanged.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
+        try:
+            payout_multiplier = float(payout_multiplier)
+        except (TypeError, ValueError):
+            payout_multiplier = 1.0
+        if not math.isfinite(payout_multiplier):
+            payout_multiplier = 1.0
+        payout_multiplier = min(10.0, max(0.0, payout_multiplier))
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -792,6 +802,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     winning_team,
                     bet_seed_radiant=bet_seed_radiant,
                     bet_seed_dire=bet_seed_dire,
+                    payout_multiplier=payout_multiplier,
                 )
             else:
                 distributions, balance_deltas, payout_updates = self._calculate_house_payouts(
@@ -799,6 +810,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     winning_team,
                     house_payout_multiplier,
                     bet_seed_bonus=bet_seed_bonus,
+                    payout_multiplier=payout_multiplier,
                 )
 
             seed_return = sum(item["amount"] for item in distributions.get("seed_returned", []))
@@ -831,6 +843,7 @@ class BetRepository(BaseRepository, IBetRepository):
                         "winning_team": winning_team,
                         "betting_mode": betting_mode,
                         "payout_count": len(balance_deltas),
+                        "payout_multiplier": payout_multiplier,
                     },
                 )
                 try:
@@ -1014,6 +1027,7 @@ class BetRepository(BaseRepository, IBetRepository):
         house_payout_multiplier: float,
         *,
         bet_seed_bonus: int = 0,
+        payout_multiplier: float = 1.0,
     ) -> tuple:
         """Calculate house mode payouts (1:1) with leverage support."""
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
@@ -1082,7 +1096,13 @@ class BetRepository(BaseRepository, IBetRepository):
                     allocated_bonus += entry_bonus
                 else:
                     entry_bonus = 0
-                entry["payout"] += entry_bonus
+                # The daily event applies to the gross settlement payout, not
+                # the stake that was already debited when the bet was placed.
+                # Flooring keeps payouts integral and prevents fractional JC
+                # from being minted by rounding.
+                entry["payout"] = max(
+                    0, int((entry["payout"] + entry_bonus) * payout_multiplier)
+                )
                 balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + entry["payout"]
                 payout_updates.append((entry["payout"], entry["bet_id"]))
                 distributions["winners"].append(entry)
@@ -1096,6 +1116,7 @@ class BetRepository(BaseRepository, IBetRepository):
         *,
         bet_seed_radiant: int = 0,
         bet_seed_dire: int = 0,
+        payout_multiplier: float = 1.0,
     ) -> tuple:
         """Calculate pool mode payouts (proportional from total pool) with leverage support.
 
@@ -1182,7 +1203,10 @@ class BetRepository(BaseRepository, IBetRepository):
         # Second pass: apply ceiling once per user and distribute to individual bets
         for discord_id, bets in winning_bets_by_user.items():
             user_raw_total = raw_payout_by_user[discord_id]
-            user_final_payout = math.ceil(user_raw_total)
+            normal_payout = math.ceil(user_raw_total)
+            # Scale once per user so splitting a pool bet cannot change event
+            # rounding. At 1x this is behavior-identical to the old path.
+            user_final_payout = max(0, int(normal_payout * payout_multiplier))
             balance_deltas[discord_id] = user_final_payout
 
             # Distribute payout proportionally across user's bets

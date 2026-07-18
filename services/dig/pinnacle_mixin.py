@@ -886,6 +886,7 @@ class PinnacleMixin:
                 eff_mult = self._effective_wager_multiplier(base_mult, win_chance)
                 wager_payout = int(wager * (eff_mult - 1))
             total_reward = jc_reward + wager_payout
+            total_reward = self._apply_daily_economy_reward(guild_id, total_reward)
             relic_drop = self._roll_pinnacle_relic(tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
             boss_progress[str(PINNACLE_DEPTH)] = {

@@ -528,6 +528,127 @@ class TestResetProposal:
         assert not success
 
 
+class TestMonetaryRecoveryMoratorium:
+    """Reserve allocation voting is safely suspended during recovery mode."""
+
+    @staticmethod
+    def _disabled_service(disburse_repo, player_repo, loan_repo):
+        return DisburseService(
+            disburse_repo=disburse_repo,
+            player_repo=player_repo,
+            loan_repo=loan_repo,
+            min_fund=100,
+            quorum_percentage=0.40,
+            voting_enabled=False,
+        )
+
+    def test_disabled_mode_blocks_all_governance_mutations(
+        self,
+        disburse_service,
+        disburse_repo,
+        player_repo,
+        loan_repo,
+        setup_players,
+        setup_nonprofit_fund,
+    ):
+        proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        disabled = self._disabled_service(disburse_repo, player_repo, loan_repo)
+
+        assert disabled.can_propose(TEST_GUILD_ID) == (False, "monetary_recovery")
+        for operation in (
+            lambda: disabled.create_proposal(TEST_GUILD_ID),
+            lambda: disabled.add_vote(TEST_GUILD_ID, 1004, "even"),
+            lambda: disabled.execute_disbursement(TEST_GUILD_ID),
+            lambda: disabled.force_execute(TEST_GUILD_ID),
+        ):
+            with pytest.raises(ValueError, match="monetary recovery mode"):
+                operation()
+
+        # Read-only status remains available until startup enforcement cancels it.
+        assert disabled.get_proposal(TEST_GUILD_ID).proposal_id == proposal.proposal_id
+
+    def test_enforcement_is_atomic_auditable_and_idempotent(
+        self,
+        disburse_service,
+        disburse_repo,
+        player_repo,
+        loan_repo,
+        setup_players,
+        setup_nonprofit_fund,
+    ):
+        proposal = disburse_service.create_proposal(TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        disburse_service.add_vote(TEST_GUILD_ID, 1004, "stimulus")
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+        disabled = self._disabled_service(disburse_repo, player_repo, loan_repo)
+        result = disabled.enforce_voting_moratorium(TEST_GUILD_ID)
+
+        assert result == {
+            "cancelled": True,
+            "proposal_id": proposal.proposal_id,
+            "fund_amount_returned": 300,
+        }
+        assert disabled.get_proposal(TEST_GUILD_ID) is None
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 300
+
+        ballots = _archived_ballots(disburse_repo, proposal.proposal_id)
+        assert [row["discord_id"] for row in ballots] == [1003, 1004]
+        assert {row["proposal_outcome"] for row in ballots} == {
+            "monetary_recovery"
+        }
+
+        with sqlite3.connect(disburse_repo.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            active_votes = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM disburse_votes
+                WHERE guild_id = ? AND proposal_id = ?
+                """,
+                (TEST_GUILD_ID, proposal.proposal_id),
+            ).fetchone()["count"]
+            ledger_rows = conn.execute(
+                """
+                SELECT delta, source, related_id, reason, metadata
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND account_type = 'nonprofit'
+                  AND related_id = ?
+                  AND reason LIKE '%monetary recovery%'
+                """,
+                (TEST_GUILD_ID, proposal.proposal_id),
+            ).fetchall()
+
+        assert active_votes == 0
+        assert len(ledger_rows) == 1
+        assert ledger_rows[0]["delta"] == 300
+        assert ledger_rows[0]["source"] == "disburse"
+        assert '"proposal_outcome": "monetary_recovery"' in ledger_rows[0]["metadata"]
+
+        # A retry neither returns funds twice nor creates another ledger entry.
+        assert disabled.enforce_voting_moratorium(TEST_GUILD_ID) == {
+            "cancelled": False,
+            "proposal_id": None,
+            "fund_amount_returned": 0,
+        }
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 300
+        with sqlite3.connect(disburse_repo.db_path) as conn:
+            recovery_entries = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND account_type = 'nonprofit'
+                  AND related_id = ?
+                  AND reason LIKE '%monetary recovery%'
+                """,
+                (TEST_GUILD_ID, proposal.proposal_id),
+            ).fetchone()[0]
+        assert recovery_entries == 1
+
+
 class TestDisbursementHistory:
     """Test disbursement history tracking."""
 

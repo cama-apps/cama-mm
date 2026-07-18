@@ -339,14 +339,14 @@ class TestManaEffectsService:
     # -------------------------------------------------------------------------
 
     def test_execute_siphon(self, service):
-        """Swamp siphon steals a scaled 1-2 JC from an eligible player."""
+        """Neutral scaling preserves Swamp's generated 1-3 JC drain range."""
         _register_player(service["player_repo"], 20001, balance=50)
         _register_player(service["player_repo"], 20002, balance=100)
 
         result = service["effects_service"].execute_siphon(20001, GID)
         assert result is not None
         assert result["victim_id"] == 20002
-        assert 1 <= result["amount"] <= 2
+        assert 1 <= result["amount"] <= 3
         assert isinstance(result["anonymous"], bool)
 
     def test_execute_siphon_transfers_balance(self, service):
@@ -442,15 +442,32 @@ class TestManaEffectsService:
         assert bal == 101  # 100 + 1
 
     def test_apply_blue_cashback_larger_loss(self, service):
-        """Blue cashback on larger loss."""
+        """The neutral central lever preserves Blue's computed cashback."""
         _register_player(service["player_repo"], 40006, balance=100)
         today = get_today_pst()
         service["mana_repo"].set_mana(40006, GID, "Island", today)
 
         cashback = service["effects_service"].apply_blue_cashback(40006, GID, 100)
-        assert cashback == 5  # 5% of 100
+        assert cashback == 5  # 5% of 100; neutral central scale is 1.0
         bal = service["player_repo"].get_balance(40006, GID)
         assert bal == 105
+
+    def test_apply_blue_cashback_runs_daily_event_after_central_scale(self, service):
+        """A daily event sees the already-scaled cashback exactly once."""
+        _register_player(service["player_repo"], 40009, balance=100)
+        today = get_today_pst()
+        service["mana_repo"].set_mana(40009, GID, "Island", today)
+        event_service = MagicMock()
+        event_service.adjust_reward.return_value = 2
+        service["effects_service"].economy_event_service = event_service
+
+        cashback = service["effects_service"].apply_blue_cashback(40009, GID, 100)
+
+        # The central scale remains a live lever, but its neutral default sends
+        # the full 5-JC computed cashback into the daily event controller.
+        event_service.adjust_reward.assert_called_once_with(GID, 5)
+        assert cashback == 2
+        assert service["player_repo"].get_balance(40009, GID) == 102
 
     def test_apply_blue_cashback_zero_loss(self, service):
         """Blue cashback returns 0 for zero loss."""

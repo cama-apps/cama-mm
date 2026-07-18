@@ -12,6 +12,7 @@ from typing import Any
 
 import discord
 
+from commands.betting_helpers.economy_actions import apply_gamba_event_multiplier
 from config import (
     HOSTILE_LOSS_MIN_BALANCE,
     LIGHTNING_BOLT_MIN_TAX,
@@ -249,6 +250,8 @@ class WheelOutcomeContext:
     mana_effects_service: Any
     is_bad_gamba: bool
     hostile_event_prefix: str
+    gamba_win_multiplier: float = 1.0
+    gamba_loss_multiplier: float = 1.0
 
 
 class WheelOutcomeProcessor:
@@ -294,6 +297,21 @@ class WheelOutcomeProcessor:
             await self._numeric_result()
         return self.state
 
+    def _minted_reward(self, amount: int) -> int:
+        """Apply the daily event only to new JC created by this wheel result.
+
+        Callers must pass an amount after the normal minigame scaling. Player
+        transfers, Reserve transfers, refunds, and numeric wedges deliberately
+        bypass this helper so their already-settled value is not scaled twice.
+        """
+        if amount <= 0:
+            return amount
+        return apply_gamba_event_multiplier(
+            amount,
+            win_multiplier=self.context.gamba_win_multiplier,
+            loss_multiplier=self.context.gamba_loss_multiplier,
+        )
+
     async def _jailbreak(self) -> None:
         if self.context.bankruptcy_service:
             self.state.jailbreak_new_total = await asyncio.to_thread(
@@ -320,6 +338,9 @@ class WheelOutcomeProcessor:
             self.state.chain_username = f"<@{chained_uid}>"
 
         if isinstance(self.state.chain_value, int) and self.state.chain_value > 0:
+            # Copying a prior result creates a fresh reward. The prior spin's
+            # debit/credit stays untouched; only this newly minted copy is scaled.
+            self.state.chain_value = self._minted_reward(self.state.chain_value)
             self.state.new_balance, self.state.garnished_amount = (
                 await self.command._credit_gamba_outcome(
                     self.context.user_id,
@@ -412,7 +433,7 @@ class WheelOutcomeProcessor:
             self.player_service.get_last_normal_wheel_spin,
             self.context.guild_id,
         )
-        amount = eruption_reward(last_spin)
+        amount = self._minted_reward(eruption_reward(last_spin))
         self.state.new_balance, self.state.garnished_amount = (
             await self.command._credit_gamba_outcome(
                 self.context.user_id,
@@ -456,6 +477,7 @@ class WheelOutcomeProcessor:
                 amount,
             )
         amount = scale_minigame_jc_delta(amount)
+        amount = self._minted_reward(amount)
         self.state.new_balance, self.state.garnished_amount = (
             await self.command._credit_gamba_outcome(
                 self.context.user_id,
@@ -835,7 +857,9 @@ class WheelOutcomeProcessor:
                     exc,
                 )
         if not victims:
-            self.state.heist_total = scale_minigame_jc_delta(20)
+            self.state.heist_total = self._minted_reward(
+                scale_minigame_jc_delta(20)
+            )
             await self._adjust_spinner(
                 self.state.heist_total,
                 "gamba heist fallback credit",
@@ -872,7 +896,9 @@ class WheelOutcomeProcessor:
                     exc,
                 )
         if not victims:
-            self.state.market_crash_total = scale_minigame_jc_delta(25)
+            self.state.market_crash_total = self._minted_reward(
+                scale_minigame_jc_delta(25)
+            )
             await self._adjust_spinner(
                 self.state.market_crash_total,
                 "gamba market crash fallback credit",
@@ -881,7 +907,9 @@ class WheelOutcomeProcessor:
         await self._refresh_balance()
 
     async def _compound_interest(self) -> None:
-        self.state.compound_amount = scale_minigame_jc_delta(100)
+        self.state.compound_amount = self._minted_reward(
+            scale_minigame_jc_delta(100)
+        )
         self.state.new_balance, self.state.garnished_amount = (
             await self.command._credit_gamba_outcome(
                 self.context.user_id,
@@ -951,8 +979,8 @@ class WheelOutcomeProcessor:
                 self.player_service.get_total_positive_balance,
                 self.context.guild_id,
             )
-        self.state.dividend_amount = scale_minigame_jc_delta(
-            max(10, int(total_wealth * 0.005))
+        self.state.dividend_amount = self._minted_reward(
+            scale_minigame_jc_delta(max(10, int(total_wealth * 0.005)))
         )
         self.state.new_balance, self.state.garnished_amount = (
             await self.command._credit_gamba_outcome(
@@ -1002,7 +1030,9 @@ class WheelOutcomeProcessor:
         else:
             self.state.takeover_missed = True
 
-        self.state.takeover_amount = scale_minigame_jc_delta(40)
+        self.state.takeover_amount = self._minted_reward(
+            scale_minigame_jc_delta(40)
+        )
         await self._adjust_spinner(
             self.state.takeover_amount,
             "gamba hostile takeover fallback credit",

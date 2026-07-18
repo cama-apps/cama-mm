@@ -253,6 +253,8 @@ def test_init_services_passes_only_the_unified_llm_api_key(monkeypatch):
         "max_debt": bot_module.MAX_DEBT,
         "leverage_tiers": bot_module.LEVERAGE_TIERS,
         "garnishment_percentage": bot_module.GARNISHMENT_PERCENTAGE,
+        "economy_events_enabled": bot_module.ECONOMY_EVENTS_ENABLED,
+        "economy_recovery_mode": bot_module.ECONOMY_RECOVERY_MODE,
         "llm_api_key": bot_module.LLM_API_KEY,
         "ai_model": bot_module.AI_MODEL,
         "ai_timeout_seconds": bot_module.AI_TIMEOUT_SECONDS,

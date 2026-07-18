@@ -10,6 +10,77 @@ from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
 
 
+@pytest.mark.asyncio
+async def test_green_bet_reward_scales_before_daily_event(monkeypatch):
+    """The Green +1 is minted JC, unlike the placed stake, so it uses both
+    central reward controls before the player's balance is credited.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from commands.betting_helpers.bet_actions import bet_action
+    from utils.economy_scaling import scale_minigame_jc_delta
+
+    monkeypatch.setattr(
+        "commands.betting_helpers.bet_actions.safe_defer",
+        AsyncMock(return_value=True),
+    )
+    user_id = 987654
+    pending = SimpleNamespace(pending_match_id=77, betting_mode="house")
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(
+        match_bet_steady_bonus=1,
+        land="Forest",
+    )
+    economy_event_service = MagicMock()
+    economy_event_service.adjust_reward.return_value = 2
+    bot.economy_event_service = economy_event_service
+
+    cog = SimpleNamespace(
+        bot=bot,
+        betting_service=MagicMock(),
+        player_service=MagicMock(),
+        match_service=SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_all_pending_matches=MagicMock(return_value=[pending])
+            )
+        ),
+        _update_shuffle_message_wagers=AsyncMock(),
+        _get_neon_service=MagicMock(return_value=None),
+    )
+    interaction = MagicMock()
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID)
+    interaction.user = SimpleNamespace(id=user_id)
+    interaction.response = AsyncMock()
+    interaction.followup = SimpleNamespace(send=AsyncMock())
+
+    await bet_action(
+        cog,
+        interaction,
+        SimpleNamespace(value="radiant", name="Radiant"),
+        amount=5,
+        leverage=None,
+        match=None,
+    )
+
+    scaled_bonus = scale_minigame_jc_delta(1)
+    assert scaled_bonus == 1  # Neutral baseline still routes through the lever.
+    economy_event_service.adjust_reward.assert_called_once_with(
+        TEST_GUILD_ID, scaled_bonus
+    )
+    cog.player_service.adjust_balance.assert_called_once_with(
+        user_id,
+        TEST_GUILD_ID,
+        2,
+        source="mana_reward",
+        actor_id=user_id,
+        related_type="match_bet_steady_bonus",
+        related_id=77,
+        reason="scaled Green mana bet-placement reward",
+        metadata={"base_reward": 1, "adjusted_reward": 2},
+    )
+
+
 @pytest.fixture
 def services(repo_db_path):
     """Create test services using centralized fast fixture."""

@@ -12,6 +12,7 @@ from commands.betting_helpers.disburse_embeds import (
     build_disburse_embed,
     build_disburse_votes_embed,
 )
+from commands.betting_helpers.disburse_views import DisburseVoteView
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -51,6 +52,11 @@ class _Proposal:
 
 
 class _FakeDisburseService:
+    MONETARY_RECOVERY_REASON = (
+        "Jopacoin Reserve voting is temporarily disabled while the economy is "
+        "in monetary recovery mode."
+    )
+    MONETARY_RECOVERY_CODE = "monetary_recovery"
     METHODS = (
         "even",
         "proportional",
@@ -81,9 +87,11 @@ class _FakeDisburseService:
         *,
         proposal: _Proposal | None = None,
         individual_votes: list[dict] | None = None,
+        voting_enabled: bool = True,
     ):
         self.proposal = proposal
         self.individual_votes = individual_votes or []
+        self.voting_enabled = voting_enabled
         self.reset_called = False
         self.force_execute_called = False
 
@@ -269,3 +277,37 @@ async def test_disburse_execute_tax_man_can_force_execute(monkeypatch):
     assert interaction.followup.messages[0]["embed"].title == (
         "💝 Disbursement Complete (Tax Man)"
     )
+
+
+@pytest.mark.asyncio
+async def test_disburse_execute_rejects_during_monetary_recovery(monkeypatch):
+    monkeypatch.setattr(actions, "has_tax_man_permission", lambda _: True)
+    service = _FakeDisburseService(
+        proposal=_Proposal(votes={"even": 1}),
+        voting_enabled=False,
+    )
+    cog = SimpleNamespace(disburse_service=service)
+    interaction = _FakeInteraction()
+
+    await actions.disburse_execute(cog, interaction, TEST_GUILD_ID)
+
+    assert service.force_execute_called is False
+    message = interaction.response.messages[0]
+    assert "monetary recovery mode" in message["content"]
+    assert message["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_vote_button_rejects_clearly_during_monetary_recovery():
+    service = _FakeDisburseService(
+        proposal=_Proposal(),
+        voting_enabled=False,
+    )
+    view = DisburseVoteView(service, SimpleNamespace())
+    interaction = _FakeInteraction()
+
+    await view._handle_vote(interaction, "even", "Even Split")
+
+    message = interaction.response.messages[0]
+    assert "monetary recovery mode" in message["content"]
+    assert message["ephemeral"] is True
