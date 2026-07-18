@@ -203,6 +203,18 @@ def load_abilities() -> list[AbilityData]:
     return result
 
 
+@lru_cache(maxsize=256)
+def get_ability_icon_url_by_name(localized_name: str) -> str | None:
+    """Return the bundled Dotabase icon URL for a localized ability name."""
+    target = str(localized_name or "").strip().casefold()
+    if not target:
+        return None
+    for ability in load_abilities():
+        if ability.localized_name.casefold() == target:
+            return ability.icon_url
+    return None
+
+
 @lru_cache(maxsize=1)
 def load_items() -> list[ItemData]:
     session = dotabase_session()

@@ -61,7 +61,9 @@ from config import (
     USE_GLICKO,
 )
 from infrastructure.service_container import ServiceContainer
+from services import trivia_data
 from services.monitoring_service import MonitoringService, UsageMonitor, set_global_usage_monitor
+from utils.economy_event_display import build_public_economy_event_embed
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 from utils.thread_safety import ensure_thread_writable
 
@@ -232,20 +234,32 @@ async def _duel_challenge_loop() -> None:
 
 async def _announce_economy_event(guild: discord.Guild, event: dict) -> None:
     """Post a newly activated monetary event in the guild's gamba channel."""
-    service = getattr(bot, "economy_event_service", None)
-    cog = bot.get_cog("BettingCommands")
-    if service is None or cog is None:
+    cog = bot.get_cog("PredictionCommands")
+    if cog is None:
+        logger.warning(
+            "economy event announcement skipped for guild=%s: "
+            "PredictionCommands cog not loaded",
+            guild.id,
+        )
         return
-    title, description = service.format_event(event)
-    direction = event.get("direction")
-    color = {
-        "deflationary": 0xD94B4B,
-        "neutral": 0x7F8C8D,
-        "boon": 0x43B581,
-    }.get(direction, 0x7F8C8D)
-    embed = discord.Embed(title=title, description=description, color=color)
-    embed.set_footer(
-        text="Server-wide daily Jopacoin event • Applies until the next 10 AM Pacific rollover"
+    icon_url = None
+    event_name = event.get("name")
+    if event_name:
+        try:
+            icon_url = await asyncio.to_thread(
+                trivia_data.get_ability_icon_url_by_name,
+                event_name,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "economy event icon lookup failed for event=%s guild=%s",
+                event_name,
+                guild.id,
+                exc_info=True,
+            )
+    embed = build_public_economy_event_embed(
+        event,
+        icon_url=icon_url,
     )
     await cog.announce_to_gamba(guild, embed=embed)
 
