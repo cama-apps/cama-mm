@@ -400,6 +400,46 @@ class DigCommands(commands.Cog):
         except Exception:
             return []
 
+    async def buy_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete every item currently represented by the mining shop."""
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            shop = await asyncio.to_thread(
+                self.dig_service.get_shop,
+                interaction.user.id,
+                guild_id,
+            )
+        except Exception:
+            return []
+
+        candidates: list[tuple[str, str]] = []
+        for item in shop.get("consumables", []):
+            candidates.append((
+                f"{item['name']} ({item['price']} JC)",
+                item["id"],
+            ))
+        for item in shop.get("pickaxe_upgrades", []):
+            candidates.append((
+                f"{item['name']} ({item['price']} JC)",
+                f"weapon:{item['tier']}",
+            ))
+        for item in shop.get("gear_for_sale", []):
+            candidates.append((
+                f"{item['name']} ({item['price']} JC)",
+                f"{item['slot']}:{item['tier']}",
+            ))
+
+        needle = current.casefold()
+        return [
+            app_commands.Choice(name=label, value=value)
+            for label, value in candidates
+            if needle in label.casefold() or needle in value.casefold()
+        ][:25]
+
     # ------------------------------------------------------------------
     # 1. /dig — Main dig command
     # ------------------------------------------------------------------
@@ -1534,30 +1574,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="buy", description="Buy an item from the mining shop")
     @app_commands.describe(item="Item to buy")
-    @app_commands.choices(item=[
-        app_commands.Choice(name="Dynamite (5 JC)", value="dynamite"),
-        app_commands.Choice(name="Hard Hat (8 JC)", value="hard_hat"),
-        app_commands.Choice(name="Lantern (4 JC)", value="lantern"),
-        app_commands.Choice(name="Reinforcement (6 JC)", value="reinforcement"),
-        app_commands.Choice(name="Torch (6 JC)", value="torch"),
-        app_commands.Choice(name="Grappling Hook (10 JC)", value="grappling_hook"),
-        app_commands.Choice(name="Sonar Pulse (8 JC)", value="sonar_pulse"),
-        app_commands.Choice(name="Depth Charge (15 JC)", value="depth_charge"),
-        app_commands.Choice(name="Void Bait (20 JC)", value="void_bait"),
-        app_commands.Choice(name="Streak Charm (15 JC)", value="streak_charm"),
-        app_commands.Choice(name="Stone Cuirass (20 JC)",        value="armor:1"),
-        app_commands.Choice(name="Iron Hauberk (60 JC)",         value="armor:2"),
-        app_commands.Choice(name="Diamond Breastplate (180 JC)", value="armor:3"),
-        app_commands.Choice(name="Stone Galoshes (25 JC)",       value="boots:1"),
-        app_commands.Choice(name="Iron Sabatons (70 JC)",        value="boots:2"),
-        app_commands.Choice(name="Diamond Greaves (200 JC)",     value="boots:3"),
-        app_commands.Choice(name="Stone Pendant (25 JC)",   value="amulet:1"),
-        app_commands.Choice(name="Iron Talisman (70 JC)",   value="amulet:2"),
-        app_commands.Choice(name="Diamond Charm (200 JC)",  value="amulet:3"),
-        app_commands.Choice(name="Stone Pickaxe (Tier 1) — 15 JC",   value="weapon:1"),
-        app_commands.Choice(name="Iron Pickaxe (Tier 2) — 50 JC",    value="weapon:2"),
-        app_commands.Choice(name="Diamond Pickaxe (Tier 3) — 150 JC", value="weapon:3"),
-    ])
+    @app_commands.autocomplete(item=buy_autocomplete)
     @require_guild
     async def dig_buy(self, interaction: discord.Interaction, item: str):
         if not await require_dig_channel(interaction):

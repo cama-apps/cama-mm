@@ -161,3 +161,33 @@ class TestUpgradePickaxeToTier:
         _register(player_repository)
         result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 1)
         assert not result["success"]
+
+    def test_upper_tier_uses_all_time_depth_after_prestige_reset(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+    ):
+        _register(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "TestTunnel")
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=0,
+            max_depth=100,
+            prestige_level=1,
+            pickaxe_tier=3,
+        )
+        starter_id = dig_repo.get_equipped_gear(
+            10001,
+            guild_id,
+        )["weapon"]["id"]
+        dig_repo.unequip_gear(starter_id)
+        weapon_id = dig_repo.add_gear(10001, guild_id, "weapon", 3)
+        dig_repo.equip_gear(weapon_id, 10001, guild_id, "weapon")
+
+        result = dig_service.upgrade_pickaxe_to_tier(10001, guild_id, 4)
+
+        assert result["success"], result
+        assert result["tier"] == 4

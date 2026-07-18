@@ -117,6 +117,10 @@ from config import (
 )
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
+from services.dig_data.balance import (
+    DIG_POSITIVE_JC_MULTIPLIER,
+    scale_positive_dig_jc,
+)
 from services.disburse_service import DisburseService
 from services.gambling_stats_service import GamblingStatsService
 from services.loan_service import LoanService
@@ -795,6 +799,8 @@ class BettingCommands(commands.Cog):
                 win_multiplier=gamba_win_multiplier,
                 loss_multiplier=gamba_loss_multiplier,
             )
+            if bonus_spin:
+                explosion_reward = scale_positive_dig_jc(explosion_reward)
             explosion_penalty = 0
             bankruptcy_service = getattr(self.bot, "bankruptcy_service", None)
             if bankruptcy_service:
@@ -850,6 +856,15 @@ class BettingCommands(commands.Cog):
                         "credited_reward": explosion_reward,
                         "bankruptcy_penalty": explosion_penalty,
                         "garnished_amount": garnished_amount,
+                        **(
+                            {
+                                "dig_reward_multiplier": (
+                                    DIG_POSITIVE_JC_MULTIPLIER
+                                )
+                            }
+                            if bonus_spin
+                            else {}
+                        ),
                     },
                 )
             )
@@ -1352,6 +1367,7 @@ class BettingCommands(commands.Cog):
             hostile_event_prefix=hostile_event_prefix,
             gamba_win_multiplier=gamba_win_multiplier,
             gamba_loss_multiplier=gamba_loss_multiplier,
+            is_dig_bonus=bonus_spin,
         )
         outcome_state = await WheelOutcomeProcessor(
             outcome_context, outcome_state
@@ -1397,6 +1413,8 @@ class BettingCommands(commands.Cog):
             outcome_metadata["mana_reroll_used"] = True
         outcome_metadata["event_win_multiplier"] = gamba_win_multiplier
         outcome_metadata["event_loss_multiplier"] = gamba_loss_multiplier
+        if bonus_spin:
+            outcome_metadata["dig_reward_multiplier"] = DIG_POSITIVE_JC_MULTIPLIER
 
         await asyncio.to_thread(
             functools.partial(

@@ -788,10 +788,35 @@ class TestDigGearServiceBuyGear:
         owned = svc.dig_repo.get_gear(player, 0)
         assert any(g["slot"] == "armor" and g["tier"] == 1 for g in owned)
 
-    def test_buy_refuses_drop_only_tier(self, svc, player):
+    def test_buy_upper_tier_after_persistent_progression_gate(self, svc, player):
+        svc.dig_repo.update_tunnel(
+            player,
+            0,
+            depth=0,
+            max_depth=150,
+            prestige_level=2,
+        )
+        balance_before = svc.player_repo.get_balance(player, 0)
+
         r = svc.buy_gear(player, 0, "armor", 5)
+
+        assert r["success"], r
+        assert r["cost"] == 525
+        assert svc.player_repo.get_balance(player, 0) == balance_before - 525
+
+    def test_buy_upper_tier_still_requires_current_prestige(self, svc, player):
+        svc.dig_repo.update_tunnel(
+            player,
+            0,
+            depth=150,
+            max_depth=150,
+            prestige_level=1,
+        )
+
+        r = svc.buy_gear(player, 0, "armor", 5)
+
         assert not r["success"]
-        assert "boss kills" in r["error"]
+        assert "prestige 2" in r["error"].lower()
 
     def test_buy_refuses_when_underdepth(self, svc, player):
         svc.dig_repo.update_tunnel(player, 0, depth=10)  # below tier 2 req of 50
@@ -804,6 +829,30 @@ class TestDigGearServiceBuyGear:
         r = svc.buy_gear(player, 0, "armor", 1)
         assert not r["success"]
         assert "JC" in r["error"]
+
+    def test_buy_rolls_back_debit_when_gear_insert_fails(
+        self,
+        svc,
+        player,
+        repo_db_path,
+    ):
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.execute(
+                """
+                CREATE TRIGGER fail_shop_gear_insert
+                BEFORE INSERT ON dig_gear
+                WHEN NEW.source = 'shop'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced gear insert failure');
+                END
+                """
+            )
+        balance_before = svc.player_repo.get_balance(player, 0)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            svc.buy_gear(player, 0, "armor", 1)
+
+        assert svc.player_repo.get_balance(player, 0) == balance_before
 
 
 class TestDigGearServiceAtomicDebit:

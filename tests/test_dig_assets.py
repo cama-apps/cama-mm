@@ -202,6 +202,15 @@ ROGUELIKE_EVENT_ASSET_IDS = (
     "clockwork_toll",
     "collectors_roots",
     "hungry_beacon",
+    "abandoned_forge",
+    "salted_threshold",
+    "frayed_lifeline",
+    "quartermaster_s_niche",
+    "collapsed_armory_cache",
+    "relic_bearing_strata",
+    "prospector_s_last_pack",
+    "song_below_stone",
+    "first_descent_cartography",
 )
 
 

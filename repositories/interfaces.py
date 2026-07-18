@@ -1671,6 +1671,21 @@ class IDigRepository(ABC):
     ) -> int: ...
 
     @abstractmethod
+    def atomic_purchase_gear(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        slot: str,
+        tier: int,
+        source: str = "shop",
+        durability: int | None = None,
+        item_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> int | None: ...
+
+    @abstractmethod
     def get_gear(self, discord_id: int, guild_id: int) -> list[dict]: ...
 
     @abstractmethod
@@ -1705,6 +1720,8 @@ class IDigRepository(ABC):
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
         add_relic_artifact_id: str | None = None,
+        add_artifact_id: str | None = None,
+        add_artifact_is_relic: bool = False,
         add_gear: dict | None = None,
         consume_inventory_item_ids: list[int] | None = None,
         log_detail: dict | None = None,

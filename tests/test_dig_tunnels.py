@@ -17,6 +17,7 @@ from services.dig_constants import (
     PINNACLE_DEPTH,
     PRESTIGE_PERKS,
 )
+from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_service import DigService
 
 
@@ -107,7 +108,7 @@ class TestPrestige:
     def test_prestige_grants_jc_and_relic(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
-        """Prestige hands out 1000 JC + a rare-or-better relic."""
+        """Prestige scales the 1000 JC grant and adds a rare-or-better relic."""
         self._setup_prestige_ready(
             dig_service, dig_repo, player_repository, guild_id, monkeypatch,
         )
@@ -119,11 +120,12 @@ class TestPrestige:
 
         # JC payout
         balance_after = player_repository.get_balance(10001, guild_id)
-        assert balance_after - balance_before == 1000
+        expected_jc = scale_positive_dig_jc(1000)
+        assert balance_after - balance_before == expected_jc
 
         # Grant payload exposed
         grant = result["prestige_grant"]
-        assert grant["jc"] == 1000
+        assert grant["jc"] == expected_jc
         assert grant["relic"] is not None
         assert grant["relic"]["rarity"] in ("Rare", "Legendary")
 
@@ -147,7 +149,7 @@ class TestAbandon:
         result = dig_service.abandon_tunnel(10001, guild_id)
         assert result["success"]
         balance_after = player_repository.get_balance(10001, guild_id)
-        expected_refund = int(50 * ABANDON_REFUND_PCT)
+        expected_refund = scale_positive_dig_jc(int(50 * ABANDON_REFUND_PCT))
         assert balance_after - balance_before == expected_refund
 
     def test_abandon_min_depth_10(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):

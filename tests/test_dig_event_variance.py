@@ -17,6 +17,7 @@ import pytest
 
 import services.dig_service as dig_service_module
 from repositories.dig_repository import DigRepository
+from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_service import DigService
 from utils.economy_scaling import scale_minigame_jc_delta
 
@@ -127,10 +128,14 @@ class TestEventVariance:
             assert r["success"]
             rolls.append(r.get("jc_delta", 0))
 
-        assert min(rolls) >= scale_minigame_jc_delta(2)
-        assert max(rolls) <= scale_minigame_jc_delta(4)
+        assert min(rolls) >= scale_positive_dig_jc(
+            scale_minigame_jc_delta(2)
+        )
+        assert max(rolls) <= scale_positive_dig_jc(
+            scale_minigame_jc_delta(4)
+        )
         mean = sum(rolls) / len(rolls)
-        assert 2.8 <= mean <= 3.2, f"mean {mean} not within neutral base-3 range"
+        assert 1.8 <= mean <= 2.2, f"mean {mean} not within scaled base-3 range"
         assert len({*rolls}) >= 2, "no jitter visible across 200 rolls"
 
     def test_zero_jc_outcome_stays_zero(self):
@@ -297,7 +302,7 @@ class TestThreatPayloadUnjittered:
             tunnel = dig_repo.get_tunnel(10001, 12345)
             active = dig_service._get_active_curse(dict(tunnel))
             assert active is not None
-            # Deterministic curse strengthening (not jitter): -3 -> -4, dur 2 -> 3.
+            # Deterministic curse strengthening (not jitter): -3 -> -4, dur 2 -> 4.
             assert active["effect"] == {"advance_bonus": -4}, "curse effect jittered"
             durations.add(active["digs_remaining"])
-        assert durations == {3}, f"curse duration was jittered — saw {sorted(durations)}"
+        assert durations == {4}, f"curse duration was jittered — saw {sorted(durations)}"

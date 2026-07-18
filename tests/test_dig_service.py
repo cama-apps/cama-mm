@@ -43,6 +43,7 @@ from services.dig_constants import (
     SABOTAGE_SUCCESS_CHANCE,
     STREAKS,
 )
+from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_data.bosses import (
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
@@ -205,7 +206,7 @@ class TestCoreDig:
         # The neutral structural lever passes the rolled 5 JC through once;
         # the active daily event then supplies the only reduction.
         event_service.adjust_reward.assert_called_once_with(guild_id, 5)
-        assert result["jc_earned"] == 2
+        assert result["jc_earned"] == scale_positive_dig_jc(2)
 
     def test_dig_advances_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Normal dig increases depth within layer advance range."""
@@ -248,7 +249,9 @@ class TestCoreDig:
         assert result["success"]
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == 0
-        assert result["jc_earned"] == scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        assert result["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
 
     def test_dig_scales_generated_jc_before_mana_taxes(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -270,7 +273,9 @@ class TestCoreDig:
 
         result = dig_service.dig(10001, guild_id)
 
-        expected = scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        expected = scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
         assert seen_tax_inputs == [expected]
         assert result["jc_earned"] == expected
 
@@ -300,7 +305,9 @@ class TestCoreDig:
         assert result["success"]
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == 0
-        assert result["jc_earned"] == scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        assert result["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
 
     def test_precondition_base_dig_range_is_capped_after_modifiers(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -347,7 +354,9 @@ class TestCoreDig:
         assert result["success"]
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == 0
-        assert result["jc_earned"] == scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        assert result["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
 
     def test_prospectors_streak_relic_is_included_in_base_payout_cap(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -379,7 +388,9 @@ class TestCoreDig:
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == 0
         # 15 base + 20 relic folded, capped at 20, then economy-scaled.
-        assert result["jc_earned"] == scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        assert result["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
 
     def test_streak_bonus_is_capped_after_perk_multiplier(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -403,7 +414,9 @@ class TestCoreDig:
         assert result["success"]
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == STREAKS[30]
-        assert result["jc_earned"] == scale_minigame_jc_delta(1 + STREAKS[30])
+        assert result["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(1 + STREAKS[30])
+        )
 
     def test_dynamite_cache_yield_buff_boosts_loot_and_lifts_cap(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -428,7 +441,9 @@ class TestCoreDig:
         res_a = dig_service.dig(20001, guild_id)
         assert res_a["success"]
         assert res_a["milestone_bonus"] == 0 and res_a["streak_bonus"] == 0
-        assert res_a["jc_earned"] == scale_minigame_jc_delta(12)
+        assert res_a["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(12)
+        )
 
         # Player B: Dynamite Cache (+75%) -> 12*1.75 = 21, cap lifted to 35 -> 21.
         _register_player(player_repository, discord_id=20002)
@@ -443,8 +458,12 @@ class TestCoreDig:
         assert res_b["success"]
         assert res_b["milestone_bonus"] == 0 and res_b["streak_bonus"] == 0
         # Buff both scaled the loot (12->21) and let it exceed the normal 20 cap before economy scaling.
-        assert res_b["jc_earned"] == scale_minigame_jc_delta(21)
-        assert res_b["jc_earned"] > scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        assert res_b["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(21)
+        )
+        assert res_b["jc_earned"] > scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
 
     def test_dynamite_cache_buff_respects_lifted_cap_on_huge_loot(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -467,7 +486,9 @@ class TestCoreDig:
         res = dig_service.dig(20003, guild_id)
         assert res["success"]
         assert res["milestone_bonus"] == 0 and res["streak_bonus"] == 0
-        assert res["jc_earned"] == scale_minigame_jc_delta(int(BASE_DIG_JC_PAYOUT_CAP * 1.75))
+        assert res["jc_earned"] == scale_positive_dig_jc(
+            scale_minigame_jc_delta(int(BASE_DIG_JC_PAYOUT_CAP * 1.75))
+        )
 
     def test_dig_increments_total_digs(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """total_digs counter increases."""
@@ -1298,8 +1319,10 @@ class TestHighPrestigeLayerPenalty:
         )["jc_earned"]
 
         # P1: int(17 x 1.18) = 20. P2: int(17 x 1.15) = 19, then economy-scaled.
-        assert jc_p1 == scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
-        assert jc_p2 == scale_minigame_jc_delta(19)
+        assert jc_p1 == scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
+        assert jc_p2 == scale_positive_dig_jc(scale_minigame_jc_delta(19))
         assert jc_p1 > jc_p2
 
     def test_p4_layer_penalty_reduces_layer_payout(
@@ -1311,18 +1334,25 @@ class TestHighPrestigeLayerPenalty:
             random, "randint", lambda a, b: 17 if (a, b) == (1, 4) else a,
         )
 
-        jc_p3 = self._dig_once(
+        result_p3 = self._dig_once(
             dig_service, dig_repo, player_repository, guild_id, 30005, 3,
-        )["jc_earned"]
-        jc_p4 = self._dig_once(
+        )
+        result_p4 = self._dig_once(
             dig_service, dig_repo, player_repository, guild_id, 30006, 4,
-        )["jc_earned"]
+        )
 
         # P3: int(17 x 1.13) = 19. P4: int(17 x 1.08) = 18, then economy-scaled.
-        assert jc_p3 == scale_minigame_jc_delta(19)
-        assert jc_p4 == scale_minigame_jc_delta(18)
-        # The penalty must actually bite before the base-payout cap is applied.
-        assert jc_p3 > jc_p4
+        assert result_p3["gross_jc"] == scale_minigame_jc_delta(19)
+        assert result_p4["gross_jc"] == scale_minigame_jc_delta(18)
+        # Half-up reward scaling maps both adjacent gross values to 12, so
+        # compare the pre-policy amounts to prove the layer penalty still bites.
+        assert result_p3["gross_jc"] > result_p4["gross_jc"]
+        assert result_p3["jc_earned"] == scale_positive_dig_jc(
+            result_p3["gross_jc"]
+        )
+        assert result_p4["jc_earned"] == scale_positive_dig_jc(
+            result_p4["gross_jc"]
+        )
 
     def test_p5_layer_penalty_reduces_layer_payout(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -1341,8 +1371,8 @@ class TestHighPrestigeLayerPenalty:
         )["jc_earned"]
 
         # P4: int(16 x 1.08) = 17. P5: int(16 x 1.01) = 16, then economy-scaled.
-        assert jc_p4 == scale_minigame_jc_delta(17)
-        assert jc_p5 == scale_minigame_jc_delta(16)
+        assert jc_p4 == scale_positive_dig_jc(scale_minigame_jc_delta(17))
+        assert jc_p5 == scale_positive_dig_jc(scale_minigame_jc_delta(16))
         assert jc_p4 > jc_p5
 
 
@@ -1859,7 +1889,7 @@ class TestBoss:
         assert result["success"]
         assert result.get("won")
         # Boundary 25's base reward is paid even when wager profit tapers to 0.
-        assert result["payout"] >= BOSS_VICTORY_BASE_JC[25]
+        assert result["payout"] >= scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25])
         gained = player_repository.get_balance(10001, guild_id) - balance_before
         assert gained == result["payout"]
 
@@ -2427,9 +2457,9 @@ class TestLuminosity:
     def test_luminosity_cave_in_bonus(self, dig_service):
         """Low luminosity should increase cave-in chance."""
         assert dig_service._luminosity_cave_in_bonus(100) == 0.0
-        assert dig_service._luminosity_cave_in_bonus(50) > 0.0  # dim
-        assert dig_service._luminosity_cave_in_bonus(10) > dig_service._luminosity_cave_in_bonus(50)  # dark > dim
-        assert dig_service._luminosity_cave_in_bonus(0) > dig_service._luminosity_cave_in_bonus(10)  # pitch > dark
+        assert dig_service._luminosity_cave_in_bonus(50) == 0.08
+        assert dig_service._luminosity_cave_in_bonus(10) == 0.20
+        assert dig_service._luminosity_cave_in_bonus(0) == 0.35
 
     def test_tiered_event_multiplier(self, dig_service, dig_repo, player_repository,
                                      guild_id, monkeypatch):
@@ -2449,9 +2479,9 @@ class TestLuminosity:
 
         # Weather neutralized by fixture (effects stubbed to {})
 
-        # Stone at depth 50: bright event=0.16, dim=0.24, dark=0.40, pitch=0.48
-        # Stone cave-in: bright=0.10, dim=0.15, dark=0.25, pitch=0.35
-        # roll=0.38 is above all cave-in thresholds but between dim(0.24) and dark(0.40)
+        # Stone at depth 50: bright event=0.22, dim=0.33, dark=0.55, pitch=0.66
+        # Stone cave-in: bright=0.10, dim=0.18, dark=0.30, pitch=0.45
+        # roll=0.50 is above every cave-in threshold and between dim and dark.
         cd = FREE_DIG_COOLDOWN_SECONDS
         dig_idx = [0]
         for lum, expect in [(100, False), (50, False), (10, True), (0, True)]:
@@ -2459,7 +2489,7 @@ class TestLuminosity:
             dig_idx[0] += 1
             t = 1_000_000 + dig_idx[0] * (cd + 1)
             monkeypatch.setattr(time, "time", lambda _t=t: _t)
-            monkeypatch.setattr(ds_mod.random, "random", lambda: 0.38)
+            monkeypatch.setattr(ds_mod.random, "random", lambda: 0.50)
             with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
                 dig_service.dig(10001, guild_id)
             assert (spy.call_count > 0) == expect, f"lum={lum}, roll=0.38: expected triggered={expect}"
@@ -3167,6 +3197,37 @@ class TestDigAtomicity:
         )
         assert dig_repo.get_queued_items(10001, guild_id) == []
 
+    def test_queued_boss_preparation_survives_normal_dig(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+        monkeypatch,
+    ):
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        item_id = dig_repo.add_inventory_item(
+            10001,
+            guild_id,
+            "rescue_line",
+        )
+        dig_repo.queue_item(item_id)
+
+        monkeypatch.setattr(
+            time,
+            "time",
+            lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert "Rescue Line" not in (result.get("items_used") or [])
+        queued = dig_repo.get_queued_items(10001, guild_id)
+        assert [row["id"] for row in queued] == [item_id]
+
     def test_prestige_rolls_back_grant_when_tunnel_reset_fails(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
@@ -3341,7 +3402,7 @@ class TestApplyDigOutcomeSecondaryPaths:
         balance_before = player_repository.get_balance(uid, guild_id)
         dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
         balance_after = player_repository.get_balance(uid, guild_id)
-        expected_payout = scale_minigame_jc_delta(10)
+        expected_payout = scale_positive_dig_jc(scale_minigame_jc_delta(10))
         expected_tax = scale_deflationary_minigame_jc_delta(5)
         assert balance_after == balance_before + expected_payout - expected_tax, (
             f"helltide tax not applied on DM path: got +{balance_after - balance_before}"
@@ -3365,7 +3426,9 @@ class TestApplyDigOutcomeSecondaryPaths:
             p, {"advance": 1, "jc_earned": 20, "cave_in": False, "event_id": ""}
         )
 
-        expected = scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        expected = scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
         assert seen_tax_inputs == [expected]
         assert result["jc_earned"] == expected
 
@@ -3381,7 +3444,9 @@ class TestApplyDigOutcomeSecondaryPaths:
         )
 
         balance_after = player_repository.get_balance(uid, guild_id)
-        expected = scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        expected = scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
         assert result["jc_earned"] == expected
         assert balance_after == balance_before + expected
 
@@ -3403,7 +3468,9 @@ class TestApplyDigOutcomeSecondaryPaths:
         )
 
         balance_after = player_repository.get_balance(uid, guild_id)
-        expected = scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        expected = scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
         assert result["jc_earned"] == expected
         assert balance_after == balance_before + expected
 
@@ -3428,7 +3495,9 @@ class TestApplyDigOutcomeSecondaryPaths:
         dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
         balance_after = player_repository.get_balance(uid, guild_id)
         # 10 JC x 2.0 combo (taxes neutralized) = 20, then economy-scaled.
-        assert balance_after == balance_before + scale_minigame_jc_delta(20), (
+        assert balance_after == balance_before + scale_positive_dig_jc(
+            scale_minigame_jc_delta(20)
+        ), (
             f"weather combo not applied on DM path: got +{balance_after - balance_before}"
         )
 

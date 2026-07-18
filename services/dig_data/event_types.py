@@ -49,6 +49,8 @@ class EventOutcome:
     streak_loss: int = 0             # daily-streak days lost (the "streak" threat)
     curse: TempCurse | None = None   # lingering hex applied (the "curse" threat)
     gear_reward_pool: tuple[str, ...] | None = None
+    consumable_reward_pool: tuple[str, ...] | None = None
+    artifact_reward_pool: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.streak_loss < 0:
@@ -224,6 +226,12 @@ def _outcome_to_dict(o: EventOutcome | None) -> dict | None:
             "effect": dict(o.curse.effect),
         } if o.curse else None,
         "gear_reward_pool": list(o.gear_reward_pool) if o.gear_reward_pool else None,
+        "consumable_reward_pool": (
+            list(o.consumable_reward_pool) if o.consumable_reward_pool else None
+        ),
+        "artifact_reward_pool": (
+            list(o.artifact_reward_pool) if o.artifact_reward_pool else None
+        ),
     }
 
 

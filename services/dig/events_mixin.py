@@ -7,6 +7,7 @@ carries no state of its own and is composed into ``DigService``.
 """
 
 import json
+import math
 import random
 import time
 import uuid
@@ -19,16 +20,29 @@ from services.dig._common import (
     logger,
 )
 from services.dig_constants import (
+    ARTIFACT_BY_ID,
+    CONSUMABLE_ITEMS,
     CURSE_DURATION_BONUS_DIGS,
     CURSE_STRENGTH_MULT,
+    DIG_EVENT_DEPTH_SETBACK_MULTIPLIER,
+    DIG_EVENT_HARMFUL_WEIGHT_MULTIPLIER,
     EVENT_CHAIN_CHANCE,
+    LUMINOSITY_BRIGHT,
+    LUMINOSITY_DARK,
+    LUMINOSITY_DARK_HARMFUL_EVENT_WEIGHT,
     LUMINOSITY_DARK_RISKY_PENALTY,
     LUMINOSITY_DIM,
+    LUMINOSITY_DIM_HARMFUL_EVENT_WEIGHT,
+    LUMINOSITY_DIM_RISKY_PENALTY,
     LUMINOSITY_MAX,
     LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_FORCE_RISKY,
+    LUMINOSITY_PITCH_HARMFUL_EVENT_WEIGHT,
+    LUMINOSITY_PITCH_RISKY_PENALTY,
+    MAX_INVENTORY_SIZE,
     NEGATIVE_EVENT_JC_MULTIPLIER,
     UNIQUE_GEAR,
+    scale_positive_dig_jc,
     strengthen_dig_event_penalty,
 )
 from services.dig_data.event_types import scale_curse_effects
@@ -84,6 +98,27 @@ class EventsMixin:
             if _is_negative(opt.get("success")) or _is_negative(opt.get("failure")):
                 return True
         return any(_is_negative(outcome) for outcome in (event.get("outcomes") or {}).values())
+
+    @staticmethod
+    def _luminosity_harmful_event_weight(luminosity: int) -> float:
+        multiplier = DIG_EVENT_HARMFUL_WEIGHT_MULTIPLIER
+        if luminosity >= LUMINOSITY_BRIGHT:
+            return multiplier
+        if luminosity >= LUMINOSITY_DIM:
+            return multiplier * LUMINOSITY_DIM_HARMFUL_EVENT_WEIGHT
+        if luminosity >= LUMINOSITY_DARK:
+            return multiplier * LUMINOSITY_DARK_HARMFUL_EVENT_WEIGHT
+        return multiplier * LUMINOSITY_PITCH_HARMFUL_EVENT_WEIGHT
+
+    @staticmethod
+    def _luminosity_risky_penalty(luminosity: int) -> float:
+        if luminosity >= LUMINOSITY_BRIGHT:
+            return 0.0
+        if luminosity >= LUMINOSITY_DIM:
+            return LUMINOSITY_DIM_RISKY_PENALTY
+        if luminosity >= LUMINOSITY_DARK:
+            return LUMINOSITY_DARK_RISKY_PENALTY
+        return LUMINOSITY_PITCH_RISKY_PENALTY
 
     def _shop_curse_stacks(self, discord_id: int, guild_id) -> int:
         """Return the number of active shop-bought curses on a digger."""
@@ -267,10 +302,12 @@ class EventsMixin:
         weighted = []
         for event in eligible:
             weight = adjusted_weights.get(event.get("rarity", "common"), 70)
+            if self._event_has_risk(event):
+                weight *= self._luminosity_harmful_event_weight(luminosity)
             if shop_curse_stacks and self._event_has_risk(event):
-                weight = int(weight * (
+                weight *= (
                     1.0 + SHOP_CURSE_EVENT_RISK_WEIGHT_PER_STACK * shop_curse_stacks
-                ))
+                )
             weighted.append((event, weight))
         events, w = zip(*weighted)
         event = random.choices(events, weights=w, k=1)[0]
@@ -385,6 +422,8 @@ class EventsMixin:
                         )
                 tunnel_updates["depth"] = max(0, depth + depth_delta)
             jc_delta = scale_minigame_jc_delta(jc_delta)
+            gross_jc = jc_delta if jc_delta > 0 else None
+            jc_delta = scale_positive_dig_jc(jc_delta)
 
             # JC + depth + audit log commit together so a crash can't credit
             # JC without the depth move (or vice versa).
@@ -395,6 +434,8 @@ class EventsMixin:
                 log_detail={
                     "event_id": event_id, "choice": choice,
                     "jc_delta": jc_delta, "depth_delta": depth_delta,
+                    "gross_jc": gross_jc,
+                    "reward_multiplier": 0.65 if gross_jc is not None else None,
                 },
                 log_action_type="event",
             )
@@ -416,9 +457,11 @@ class EventsMixin:
         ):
             success_chance = min(1.0, success_chance + 0.05)
 
-        # Dark luminosity: risky/desperate options are harder
-        if choice in ("risky", "desperate") and luminosity < LUMINOSITY_DIM:
-            success_chance = max(0.05, success_chance - LUMINOSITY_DARK_RISKY_PENALTY)
+        if choice in ("risky", "desperate"):
+            success_chance = max(
+                0.05,
+                success_chance - self._luminosity_risky_penalty(luminosity),
+            )
 
         shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
         if choice in ("risky", "desperate") and shop_curse_stacks:
@@ -456,14 +499,59 @@ class EventsMixin:
             result = option.get("success")  # fallback if no failure defined
 
         gear_definition = None
+        consumable_reward_id = None
+        artifact_definition = None
         gear_reward_pool = result.get("gear_reward_pool") or ()
+        owned_item_ids = set()
+        if gear_reward_pool:
+            owned_item_ids = {
+                row.get("item_id")
+                for row in self.dig_repo.get_gear(discord_id, guild_id)
+                if row.get("item_id")
+            }
         eligible_gear = [
             UNIQUE_GEAR[item_id]
             for item_id in gear_reward_pool
-            if item_id in UNIQUE_GEAR
+            if item_id in UNIQUE_GEAR and item_id not in owned_item_ids
         ]
-        if eligible_gear:
-            gear_definition = random.choice(eligible_gear)
+        consumable_pool = result.get("consumable_reward_pool") or ()
+        inventory_has_room = True
+        if consumable_pool:
+            inventory_has_room = (
+                len(self.dig_repo.get_inventory(discord_id, guild_id))
+                < MAX_INVENTORY_SIZE
+            )
+        eligible_consumables = [
+            item_id
+            for item_id in consumable_pool
+            if inventory_has_room and item_id in CONSUMABLE_ITEMS
+        ]
+        artifact_pool = result.get("artifact_reward_pool") or ()
+        owned_artifact_ids = set()
+        if artifact_pool:
+            owned_artifact_ids = {
+                row.get("artifact_id")
+                for row in self.dig_repo.get_artifacts(discord_id, guild_id)
+            }
+        eligible_artifacts = [
+            ARTIFACT_BY_ID[artifact_id]
+            for artifact_id in artifact_pool
+            if artifact_id in ARTIFACT_BY_ID
+            and artifact_id not in owned_artifact_ids
+        ]
+        reward_candidates = [
+            *(("gear", definition) for definition in eligible_gear),
+            *(("consumable", item_id) for item_id in eligible_consumables),
+            *(("artifact", definition) for definition in eligible_artifacts),
+        ]
+        if reward_candidates:
+            reward_type, reward = random.choice(reward_candidates)
+            if reward_type == "gear":
+                gear_definition = reward
+            elif reward_type == "consumable":
+                consumable_reward_id = reward
+            else:
+                artifact_definition = reward
 
         advance = result.get("advance", 0)
         jc = result.get("jc", 0)
@@ -488,6 +576,10 @@ class EventsMixin:
         if advance != 0:
             jittered = advance + random.randint(-2, 2)
             advance = max(1, jittered) if advance > 0 else min(-1, jittered)
+            if advance < 0:
+                advance = -math.ceil(
+                    abs(advance) * DIG_EVENT_DEPTH_SETBACK_MULTIPLIER
+                )
 
         if (
             succeeded
@@ -685,14 +777,23 @@ class EventsMixin:
         )
         if jc > 0:
             jc = self._apply_daily_economy_reward(guild_id, jc)
+        gross_jc = jc if jc > 0 else None
+        jc = scale_positive_dig_jc(jc)
 
         # Depth shift + JC credit/debit + optional buff + audit log commit
         # together, so the actor can't be paid without the depth/buff
         # applied (or vice versa).
-        gear_id = self.dig_repo.atomic_tunnel_balance_update(
+        reward_row_id = self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc,
             tunnel_updates=tunnel_updates or None,
+            add_inventory_item=consumable_reward_id,
+            add_artifact_id=(
+                artifact_definition.id if artifact_definition else None
+            ),
+            add_artifact_is_relic=(
+                artifact_definition.is_relic if artifact_definition else False
+            ),
             add_gear=(
                 {
                     "slot": gear_definition.slot.value,
@@ -706,7 +807,13 @@ class EventsMixin:
             log_detail={
                 "event_id": event_id, "choice": choice, "succeeded": succeeded,
                 "advance": advance, "jc": jc, "cave_in": cave_in,
+                "gross_jc": gross_jc,
+                "reward_multiplier": 0.65 if gross_jc is not None else None,
                 "gear": gear_definition.item_id if gear_definition else None,
+                "consumable": consumable_reward_id,
+                "artifact": (
+                    artifact_definition.id if artifact_definition else None
+                ),
                 "streak_days_lost": streak_days_lost or None,
                 "curse": curse_applied.get("name") if curse_applied else None,
                 "splash_victims": (
@@ -772,7 +879,7 @@ class EventsMixin:
             black_wax_seal_spent=black_wax_seal_spent,
             gear_drop=(
                 {
-                    "gear_id": gear_id,
+                    "gear_id": reward_row_id,
                     "item_id": gear_definition.item_id,
                     "name": gear_definition.name,
                     "slot": gear_definition.slot.value,
@@ -781,6 +888,25 @@ class EventsMixin:
                     "effect": gear_definition.effect_summary,
                 }
                 if gear_definition else None
+            ),
+            consumable_drop=(
+                {
+                    "inventory_id": reward_row_id,
+                    "item_id": consumable_reward_id,
+                    "name": CONSUMABLE_ITEMS[consumable_reward_id]["name"],
+                }
+                if consumable_reward_id else None
+            ),
+            artifact_drop=(
+                {
+                    "artifact_db_id": reward_row_id,
+                    "artifact_id": artifact_definition.id,
+                    "name": artifact_definition.name,
+                    "rarity": artifact_definition.rarity,
+                    "is_relic": artifact_definition.is_relic,
+                    "lore_text": artifact_definition.lore_text,
+                }
+                if artifact_definition else None
             ),
         )
 

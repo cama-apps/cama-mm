@@ -11,6 +11,7 @@ from typing import Any
 import discord
 
 from config import TRIVIA_ANSWER_TIMEOUT_SECONDS
+from services.dig_data.balance import scale_positive_dig_jc
 from services.trivia_questions import TriviaQuestion, generate_question
 from utils.interaction_safety import safe_followup
 
@@ -183,12 +184,18 @@ class DigTriviaView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.user_id
 
-    def _result_embed(self, *, correct: bool, timed_out: bool) -> discord.Embed:
+    def _result_embed(
+        self,
+        *,
+        correct: bool,
+        timed_out: bool,
+        delta: int,
+    ) -> discord.Embed:
         correct_answer = self.question.options[self.question.correct_index]
         if timed_out:
             title = "Dig Trivia — Time's up! -5 JC"
         elif correct:
-            title = "Dig Trivia — Correct! +15 JC"
+            title = f"Dig Trivia — Correct! +{delta} JC"
         else:
             title = "Dig Trivia — Wrong! -5 JC"
 
@@ -213,7 +220,14 @@ class DigTriviaView(discord.ui.View):
         )
 
     async def _settle(self, *, correct: bool, timed_out: bool) -> discord.Embed:
-        delta = 15 if correct else -5
+        gross_jc = 15 if correct else -5
+        delta = scale_positive_dig_jc(gross_jc)
+        metadata = {"correct": correct, "timed_out": timed_out}
+        if gross_jc > 0:
+            metadata.update({
+                "gross_jc": gross_jc,
+                "reward_multiplier": 0.65,
+            })
         await asyncio.to_thread(
             self.player_service.adjust_balance,
             self.user_id,
@@ -228,9 +242,13 @@ class DigTriviaView(discord.ui.View):
                 if correct
                 else "dig bonus trivia wrong answer"
             ),
-            metadata={"correct": correct, "timed_out": timed_out},
+            metadata=metadata,
         )
-        return self._result_embed(correct=correct, timed_out=timed_out)
+        return self._result_embed(
+            correct=correct,
+            timed_out=timed_out,
+            delta=delta,
+        )
 
     async def answer(
         self, interaction: discord.Interaction, choice_index: int,
@@ -290,7 +308,7 @@ def _question_embed(question: TriviaQuestion) -> discord.Embed:
         embed.set_thumbnail(url=question.image_url)
     embed.set_footer(
         text=(
-            f"+15 JC correct • -5 JC wrong or timeout • "
+            f"+{scale_positive_dig_jc(15)} JC correct • -5 JC wrong or timeout • "
             f"{TRIVIA_ANSWER_TIMEOUT_SECONDS}s"
         ),
     )

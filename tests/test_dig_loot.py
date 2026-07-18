@@ -471,15 +471,15 @@ class TestNewItemsAndArtifacts:
 
     def test_ten_consumables(self):
         from services.dig_constants import CONSUMABLES
-        assert len(CONSUMABLES) == 10
+        assert len(CONSUMABLES) == 13
         assert "torch" in CONSUMABLES
         assert "void_bait" in CONSUMABLES
         assert "streak_charm" in CONSUMABLES
 
     def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
-        # 37 existing relics plus 8 rarity-progression relics.
-        assert len(ALL_ARTIFACTS) == 45
+        # Existing relics, rarity-progression relics, and two statless curios.
+        assert len(ALL_ARTIFACTS) == 47
 
     def test_fungal_artifacts_exist(self):
         from services.dig_constants import ALL_ARTIFACTS

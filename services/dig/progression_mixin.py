@@ -39,6 +39,7 @@ from services.dig_constants import (
     PRESTIGE_PERKS,
     SABOTAGE_SUCCESS_CHANCE,
     WEATHER_BY_ID,
+    scale_positive_dig_jc,
 )
 
 
@@ -598,8 +599,13 @@ class ProgressionMixin:
         inv_count = len(inventory) if inventory else 0
 
         consumables = [
-            {"name": v["name"], "price": v["cost"], "description": v["description"]}
-            for v in CONSUMABLE_ITEMS.values()
+            {
+                "id": item_id,
+                "name": value["name"],
+                "price": value["cost"],
+                "description": value["description"],
+            }
+            for item_id, value in CONSUMABLE_ITEMS.items()
         ]
 
         # Show next available pickaxe upgrades
@@ -612,21 +618,20 @@ class ProgressionMixin:
         for i in range(current_tier + 1, len(PICKAXE_TIERS)):
             t = PICKAXE_TIERS[i]
             pickaxe_upgrades.append({
+                "tier": i,
                 "name": t["name"],
                 "price": t["jc_cost"],
                 "depth_req": t["depth_required"],
                 "prestige_req": t.get("prestige_required", 0),
             })
 
-        # Show shop-buyable boss gear (tiers 0..3 — Wooden/Stone/Iron/Diamond
-        # for armor and boots; weapons remain on the pickaxe ladder above).
+        # Weapons remain on the sequential pickaxe ladder above. Other slots
+        # expose every paid tier; purchase-time gates decide availability.
         gear_for_sale: list[dict] = []
         for slot_enum, table in GEAR_TIER_TABLES.items():
             if slot_enum == GearSlot.WEAPON:
                 continue  # weapons sell via the pickaxe upgrade row
             for tier_idx, td in enumerate(table):
-                if tier_idx > 3:
-                    continue  # Obsidian+ are drop-only
                 if td.shop_price <= 0:
                     continue  # tier 0 is the free starter — never in the shop
                 gear_for_sale.append({
@@ -707,10 +712,13 @@ class ProgressionMixin:
         next_tier_idx = current_tier + 1
         next_tier = PICKAXE_TIERS[next_tier_idx]
 
-        # Check depth requirement
-        if tunnel.get("depth", 0) < next_tier.get("depth_required", 0):
+        reached_depth = max(
+            int(tunnel.get("depth", 0) or 0),
+            int(tunnel.get("max_depth", 0) or 0),
+        )
+        if reached_depth < next_tier.get("depth_required", 0):
             return self._error(
-                f"Need depth {next_tier['depth_required']} (you have {tunnel.get('depth', 0)})."
+                f"Need depth {next_tier['depth_required']} (you have {reached_depth})."
             )
 
         # Check prestige requirement
@@ -809,6 +817,10 @@ class ProgressionMixin:
         if mentor_active:
             helper_jc_bonus += 10
             target_jc_bonus = 10
+        helper_gross_jc = helper_jc_bonus
+        target_gross_jc = target_jc_bonus
+        helper_jc_bonus = scale_positive_dig_jc(helper_gross_jc)
+        target_jc_bonus = scale_positive_dig_jc(target_gross_jc)
 
         # Target depth + helper cooldown + helper reward + audit log commit
         # together. The old flow committed each step individually and could
@@ -827,6 +839,8 @@ class ProgressionMixin:
                 "target_id": target_id, "advance": advance,
                 "target_depth_before": target_depth, "target_depth_after": new_depth,
                 "mentor_bonus": mentor_active,
+                "gross_jc": helper_gross_jc,
+                "reward_multiplier": 0.65,
             },
         )
         if target_jc_bonus > 0:
@@ -840,7 +854,12 @@ class ProgressionMixin:
                     related_type="mentor_bonus",
                     related_id=helper_id,
                     reason="dig mentor target bonus",
-                    metadata={"advance": advance, "bonus": target_jc_bonus},
+                    metadata={
+                        "advance": advance,
+                        "bonus": target_jc_bonus,
+                        "gross_jc": target_gross_jc,
+                        "reward_multiplier": 0.65,
+                    },
                 )
             except Exception:
                 logger.debug("Mentor's Lantern target bonus failed", exc_info=True)
@@ -902,7 +921,8 @@ class ProgressionMixin:
         # Counterspell / Sanctuary block outright; a single Aegis charge is
         # consumed when present. In both cases the would-be victim gets a
         # small JC tip — defending feels like a win, not a non-event.
-        victim_block_tip = max(25, cost // 2)
+        victim_block_tip_gross = max(25, cost // 2)
+        victim_block_tip = scale_positive_dig_jc(victim_block_tip_gross)
         protection_service = getattr(self, "protection_service", None)
         if protection_service is not None:
             try:
@@ -932,6 +952,8 @@ class ProgressionMixin:
                             reason="dig sabotage White shield block tip",
                             metadata={
                                 "tip": awarded_tip,
+                                "gross_jc": victim_block_tip_gross,
+                                "reward_multiplier": 0.65,
                                 "protection_source": protection.source,
                             },
                         )
@@ -973,7 +995,11 @@ class ProgressionMixin:
                         related_type="sabotage_block",
                         related_id=actor_id,
                         reason="dig sabotage ward block tip",
-                        metadata={"tip": victim_block_tip},
+                        metadata={
+                            "tip": victim_block_tip,
+                            "gross_jc": victim_block_tip_gross,
+                            "reward_multiplier": 0.65,
+                        },
                     )
                     return self._error(
                         "Your target is shielded by an active manashop ward — "
@@ -991,7 +1017,11 @@ class ProgressionMixin:
                         related_type="sabotage_block",
                         related_id=actor_id,
                         reason="dig sabotage aegis block tip",
-                        metadata={"tip": victim_block_tip},
+                        metadata={
+                            "tip": victim_block_tip,
+                            "gross_jc": victim_block_tip_gross,
+                            "reward_multiplier": 0.65,
+                        },
                     )
                     self.dig_repo.log_action(
                         discord_id=actor_id, guild_id=guild_id,
@@ -1196,7 +1226,12 @@ class ProgressionMixin:
                 )
                 steal_pct = _sab_mod.get("steal_depth_pct", 0.0)
                 if steal_pct > 0 and target_depth > 0:
-                    attacker_steal_jc = max(1, int(target_depth * steal_pct * 0.5))
+                    attacker_steal_gross_jc = max(
+                        1, int(target_depth * steal_pct * 0.5)
+                    )
+                    attacker_steal_jc = scale_positive_dig_jc(
+                        attacker_steal_gross_jc
+                    )
                     self.player_repo.add_balance(
                         actor_id,
                         guild_id,
@@ -1210,6 +1245,8 @@ class ProgressionMixin:
                             "target_id": target_id,
                             "target_depth": target_depth,
                             "amount": attacker_steal_jc,
+                            "gross_jc": attacker_steal_gross_jc,
+                            "reward_multiplier": 0.65,
                         },
                     )
             except Exception:
@@ -1223,7 +1260,8 @@ class ProgressionMixin:
         vendetta_reflect = 0
         vendetta_bonus = 0
         if self._has_relic(target_id, guild_id, "vendetta_coin"):
-            vendetta_bonus = 5
+            vendetta_bonus_gross = 5
+            vendetta_bonus = scale_positive_dig_jc(vendetta_bonus_gross)
             reflect_amount = max(1, int(damage * 0.5))
             try:
                 # Reflect via an atomic, floored debit so a relic proc can't
@@ -1250,7 +1288,12 @@ class ProgressionMixin:
                     related_type="vendetta_reflect",
                     related_id=actor_id,
                     reason="dig vendetta reflect bonus",
-                    metadata={"attacker_id": actor_id, "damage": damage},
+                    metadata={
+                        "attacker_id": actor_id,
+                        "damage": damage,
+                        "gross_jc": vendetta_bonus_gross,
+                        "reward_multiplier": 0.65,
+                    },
                 )
                 self.dig_repo.log_action(
                     discord_id=target_id, guild_id=guild_id,

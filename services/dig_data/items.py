@@ -53,8 +53,9 @@ PICKAXE_TIERS: list[dict] = [
 # Four persistent slots (Weapon, Armor, Boots, Amulet) modify boss-fight
 # stats. Weapon reuses the pickaxe names (Wooden → Void-Touched); Armor,
 # Boots, and Amulet each vary their suffix per tier (Iron Hauberk, Iron
-# Sabatons, Iron Talisman, ...). Shop sells Wooden–Diamond;
-# Obsidian–Void-Touched are boss-drop-only. Durability ticks once per
+# Sabatons, Iron Talisman, ...). The shop gates each tier by prior depth
+# and current prestige; boss victories can still drop pieces for free.
+# Durability ticks once per
 # boss fight; at zero the piece stays equipped but its effects remain
 # disabled until repaired.
 
@@ -326,6 +327,33 @@ CONSUMABLES: dict[str, Consumable] = {
         description="Passively saves one daily dig streak after exactly one missed day.",
         params={"missed_day_saves": 1},
     ),
+    "tempered_whetstone": Consumable(
+        id="tempered_whetstone",
+        name="Tempered Whetstone",
+        cost=60,
+        description="One boss attempt: +1 damage on every player hit.",
+        params={"boss_prep_player_damage": 1},
+    ),
+    "warding_salts": Consumable(
+        id="warding_salts",
+        name="Warding Salts",
+        cost=50,
+        description="One boss attempt: blocks the first mechanic or status effect.",
+        params={"boss_prep_block_mechanic": 1},
+    ),
+    "rescue_line": Consumable(
+        id="rescue_line",
+        name="Rescue Line",
+        cost=40,
+        description="One boss attempt: halves defeat knockback and extra gear wear.",
+        params={"boss_prep_rescue": 1},
+    ),
 }
+
+BOSS_PREP_ITEM_IDS: frozenset[str] = frozenset({
+    "tempered_whetstone",
+    "warding_salts",
+    "rescue_line",
+})
 
 HARD_HAT_USES: int = 3

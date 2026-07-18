@@ -33,7 +33,10 @@ import uuid
 from dataclasses import dataclass
 
 from config import HOSTILE_LOSS_MIN_BALANCE
-from services.dig_data.balance import strengthen_dig_event_penalty
+from services.dig_data.balance import (
+    scale_positive_dig_jc,
+    strengthen_dig_event_penalty,
+)
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
@@ -262,6 +265,9 @@ def resolve_splash(
         if mode == "burn"
         else scale_minigame_jc_delta(penalty_jc)
     )
+    grant_gross_jc = scaled_penalty_jc if mode == "grant" else None
+    if mode == "grant":
+        scaled_penalty_jc = scale_positive_dig_jc(scaled_penalty_jc)
     if scaled_penalty_jc <= 0:
         return SplashResult(
             strategy=strategy, event_name=event_name, victims=[],
@@ -278,6 +284,8 @@ def resolve_splash(
         "digger_id": digger_id,
         "penalty_requested": penalty_jc,
         "penalty_scaled": scaled_penalty_jc,
+        "gross_jc": grant_gross_jc,
+        "reward_multiplier": 0.65 if grant_gross_jc is not None else None,
         "mode": mode,
     })
 
@@ -301,6 +309,8 @@ def resolve_splash(
                     "strategy": strategy,
                     "mode": mode,
                     "digger_id": digger_id,
+                    "gross_jc": grant_gross_jc,
+                    "reward_multiplier": 0.65,
                 },
             )
             dig_repo.log_action(

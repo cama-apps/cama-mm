@@ -19,6 +19,7 @@ from services.dig._common import (
 from services.dig_constants import (
     BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
+    BOSS_PREP_ITEM_IDS,
     CAVE_IN_BLOCK_LOSS_RANGES,
     CAVE_IN_CATASTROPHIC_GEAR_TICKS,
     CAVE_IN_CATASTROPHIC_MEDICAL_BILL,
@@ -35,6 +36,7 @@ from services.dig_constants import (
     cave_in_band,
     pick_cave_in_consequence,
     roll_catastrophic_cave_in,
+    scale_positive_dig_jc,
 )
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -183,6 +185,8 @@ class DigCoreMixin:
         jc_earned = random.randint(1, 5)
         jc_earned = scale_minigame_jc_delta(jc_earned)
         jc_earned = self._apply_daily_economy_reward(guild_id, jc_earned)
+        gross_jc = jc_earned
+        jc_earned = scale_positive_dig_jc(gross_jc)
         new_depth = depth_before + advance
 
         # Tunnel advance + JC payout commit together so a crash can't
@@ -205,8 +209,12 @@ class DigCoreMixin:
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="dig",
+            depth_before=depth_before,
+            depth_after=new_depth,
+            jc_delta=jc_earned,
             details=json.dumps({
                 "advance": advance, "jc": jc_earned, "first_dig": True,
+                "gross_jc": gross_jc, "reward_multiplier": 0.65,
                 "depth_before": depth_before, "depth_after": new_depth,
             }),
         )
@@ -305,6 +313,8 @@ class DigCoreMixin:
         }
         for item in queued:
             itype = item.get("type")
+            if itype in BOSS_PREP_ITEM_IDS:
+                continue
             if itype in _display_names:
                 items_used.append(_display_names[itype])
             flag_key = f"has_{itype}" if itype else None
@@ -649,6 +659,8 @@ class DigCoreMixin:
                 cave_in_jc = random.randint(loot_min, loot_max)
             if gamblers_charm_bonus > 0:
                 cave_in_jc += gamblers_charm_bonus
+            cave_in_gross_jc = cave_in_jc
+            cave_in_jc = scale_positive_dig_jc(cave_in_gross_jc)
 
             if p["mutation_fx"].get("post_cave_in_advance"):
                 tunnel_updates["temp_buffs"] = json.dumps({
@@ -700,6 +712,8 @@ class DigCoreMixin:
                     "cave_in": True, "block_loss": block_loss,
                     "detail": cave_in_detail,
                     "depth_before": depth_before, "depth_after": new_depth,
+                    "gross_jc": cave_in_gross_jc,
+                    "reward_multiplier": 0.65 if cave_in_gross_jc > 0 else None,
                 }),
             )
             if p.get("overgrowth_active") and self.buff_service is not None:
@@ -876,6 +890,8 @@ class DigCoreMixin:
         jc_earned += streak_bonus
 
         jc_earned = scale_minigame_jc_delta(jc_earned)
+        gross_jc = jc_earned
+        jc_earned = scale_positive_dig_jc(gross_jc)
 
         # Plains tithe / Blue tax apply to the scaled full payout.
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
@@ -983,6 +999,7 @@ class DigCoreMixin:
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({
                 "advance": advance, "jc": jc_earned,
+                "gross_jc": gross_jc, "reward_multiplier": 0.65,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter, "cave_in": False,
                 "corruption": p["corruption"]["id"] if p["corruption"] else None,
@@ -1135,7 +1152,12 @@ class DigCoreMixin:
             if loot_chance > 0 and random.random() < loot_chance:
                 loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
                 loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
-                cave_in_balance_delta += random.randint(loot_min, loot_max)
+                cave_in_gross_jc = random.randint(loot_min, loot_max)
+                cave_in_balance_delta += scale_positive_dig_jc(
+                    cave_in_gross_jc
+                )
+            else:
+                cave_in_gross_jc = 0
             # Mutation: second_wind
             if p["mutation_fx"].get("post_cave_in_advance"):
                 cave_in_tunnel_updates["temp_buffs"] = json.dumps({
@@ -1163,6 +1185,8 @@ class DigCoreMixin:
                     "detail": cave_in_detail,
                     "depth_before": depth_before, "depth_after": new_depth,
                     "dm_mode": True,
+                    "gross_jc": cave_in_gross_jc,
+                    "reward_multiplier": 0.65 if cave_in_gross_jc > 0 else None,
                 }),
             )
             if p.get("overgrowth_active") and self.buff_service is not None:
@@ -1330,6 +1354,8 @@ class DigCoreMixin:
             total_digs = (tunnel.get("total_digs", 0) or 0) + 1
 
             jc_earned = scale_minigame_jc_delta(jc_earned)
+            gross_jc = jc_earned
+            jc_earned = scale_positive_dig_jc(gross_jc)
 
             # Plains tithe / Blue tax apply to the scaled full payout.
             jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
@@ -1367,8 +1393,12 @@ class DigCoreMixin:
 
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
+                depth_before=depth_before,
+                depth_after=new_depth,
+                jc_delta=jc_earned,
                 details=json.dumps({
                     "advance": advance, "jc": jc_earned,
+                    "gross_jc": gross_jc, "reward_multiplier": 0.65,
                     "depth_before": depth_before, "depth_after": new_depth,
                     "boss_encounter": boss_encounter, "cave_in": False,
                     "corruption": p["corruption"]["id"] if p["corruption"] else None,
@@ -1386,7 +1416,8 @@ class DigCoreMixin:
             result = self._ok(
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
-                advance=advance, jc_earned=jc_earned, nonstreak_jc=nonstreak_jc,
+                advance=advance, jc_earned=jc_earned, gross_jc=gross_jc,
+                nonstreak_jc=nonstreak_jc,
                 bankruptcy_penalty=dig_bankruptcy_penalty,
                 milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
                 cave_in=False, cave_in_detail=None,

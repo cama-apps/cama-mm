@@ -16,7 +16,7 @@ from services.dig_data.bosses import BOSSES
 from services.dig_data.event_art import EVENT_ASCII_ART
 from services.dig_data.event_definitions import RANDOM_EVENTS
 from services.dig_data.event_types import _choice_to_dict
-from services.dig_data.items import CONSUMABLES
+from services.dig_data.items import CONSUMABLES, UNIQUE_GEAR
 from services.dig_data.layers import (
     _LAYERS_DEF,
     FREE_DIG_COOLDOWN_SECONDS,
@@ -109,6 +109,34 @@ EVENT_POOL: list[dict] = [
     }
     for e in RANDOM_EVENTS
 ]
+
+
+def _validate_event_reward_pools(events: list[dict]) -> None:
+    """Fail fast when an event references a reward missing from its catalog."""
+    catalogs = {
+        "gear_reward_pool": set(UNIQUE_GEAR),
+        "consumable_reward_pool": set(CONSUMABLES),
+        "artifact_reward_pool": {artifact.id for artifact in ALL_ARTIFACTS},
+    }
+    for event in events:
+        for option_key in ("safe_option", "risky_option", "desperate_option"):
+            option = event.get(option_key)
+            if not option:
+                continue
+            for outcome_key in ("success", "failure"):
+                outcome = option.get(outcome_key)
+                if not outcome:
+                    continue
+                for field, known_ids in catalogs.items():
+                    unknown_ids = set(outcome.get(field) or ()) - known_ids
+                    if unknown_ids:
+                        raise ValueError(
+                            f"Event {event['id']!r} has unknown {field}: "
+                            f"{sorted(unknown_ids)}"
+                        )
+
+
+_validate_event_reward_pools(EVENT_POOL)
 
 # Tips as dicts
 DIG_TIPS: list[dict] = [

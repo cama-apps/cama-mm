@@ -19,6 +19,7 @@ from collections.abc import Callable
 
 from repositories.dig_quest_repository import DigQuestRepository, QuestState
 from services.dig_constants import QUESTS, QuestDef
+from services.dig_data.balance import scale_positive_dig_jc
 
 logger = logging.getLogger("cama_bot.services.dig_quest")
 
@@ -264,10 +265,10 @@ class DigQuestService:
                 "modifier_payload": dict,
             }
 
-        The gross JC is run through ``self._tax_fn`` (Plains tithe + Blue
-        tax) so mana-region effects apply consistently with the rest of the
-        dig flow. The returned ``personal_jc`` is the net amount actually
-        credited.
+        The gross JC first uses the dig reward policy, then runs through
+        ``self._tax_fn`` (Plains tithe + Blue tax) so mana-region effects
+        apply consistently with the rest of the dig flow. The returned
+        ``personal_jc`` is the net amount actually credited.
         """
         payload = quest.finale_payload
         gross_jc = int(payload.get("personal_jc", 0))
@@ -275,9 +276,10 @@ class DigQuestService:
         duration = int(payload.get("duration_seconds", 0))
         modifier_payload = dict(payload.get("modifier_payload") or {})
 
-        net_jc = gross_jc
-        if self._tax_fn is not None and gross_jc > 0:
-            net_jc = self._tax_fn(discord_id, guild_id, gross_jc)
+        scaled_jc = scale_positive_dig_jc(gross_jc)
+        net_jc = scaled_jc
+        if self._tax_fn is not None and scaled_jc > 0:
+            net_jc = self._tax_fn(discord_id, guild_id, scaled_jc)
 
         if net_jc != 0:
             self.dig_repo.atomic_tunnel_balance_update(
@@ -288,6 +290,7 @@ class DigQuestService:
                 log_detail={
                     "quest_id": quest.quest_id,
                     "gross_jc": gross_jc,
+                    "reward_multiplier": 0.65,
                     "net_jc": net_jc,
                 },
             )

@@ -16,6 +16,7 @@ from services.dig_constants import (
     PINNACLE_BOSSES,
     PINNACLE_DEPTH,
 )
+from services.dig_data.balance import scale_positive_dig_jc
 from services.dig_service import DigService
 
 
@@ -238,9 +239,9 @@ class TestPinnacleWagerPayout:
             phase_idx=3, won=True, wager=200, risk_tier="bold", win_chance=0.55,
         )
 
-        assert result["payout"] == PINNACLE_BASE_JC_REWARD + 560
-        assert (player_repository.get_balance(20001, guild_id)
-                == before + PINNACLE_BASE_JC_REWARD + 560)
+        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 560
+        assert result["payout"] == expected
+        assert player_repository.get_balance(20001, guild_id) == before + expected
 
     def test_full_clear_wager_payout_tapers_at_high_win_chance(
         self, dig_service, dig_repo, player_repository, guild_id,
@@ -255,9 +256,9 @@ class TestPinnacleWagerPayout:
             phase_idx=3, won=True, wager=200, risk_tier="bold", win_chance=0.95,
         )
 
-        assert result["payout"] == PINNACLE_BASE_JC_REWARD + 10
-        assert (player_repository.get_balance(20001, guild_id)
-                == before + PINNACLE_BASE_JC_REWARD + 10)
+        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 10
+        assert result["payout"] == expected
+        assert player_repository.get_balance(20001, guild_id) == before + expected
 
     def test_full_clear_without_a_wager_pays_only_the_base_reward(
         self, dig_service, dig_repo, player_repository, guild_id,
@@ -269,9 +270,9 @@ class TestPinnacleWagerPayout:
             dig_service, guild_id, tunnel=tunnel, phase_idx=3, won=True, wager=0,
         )
 
-        assert result["payout"] == PINNACLE_BASE_JC_REWARD
-        assert (player_repository.get_balance(20001, guild_id)
-                == before + PINNACLE_BASE_JC_REWARD)
+        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD)
+        assert result["payout"] == expected
+        assert player_repository.get_balance(20001, guild_id) == before + expected
 
     def test_phase_loss_forfeits_the_wager(
         self, dig_service, dig_repo, player_repository, guild_id,
@@ -384,9 +385,10 @@ class TestWagerSettledExactlyOnceAcrossPhases:
         )
         # bold mult 3.8 untapered -> profit int(200 * 2.8) = 560.
         assert r3["wager_payout"] == 560
-        assert r3["payout"] == PINNACLE_BASE_JC_REWARD + 560
+        expected = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD) + 560
+        assert r3["payout"] == expected
         assert player_repository.get_balance(20001, guild_id) == (
-            start_balance + PINNACLE_BASE_JC_REWARD + 560
+            start_balance + expected
         ), "Full clear pays base + wager profit exactly once across 3 phases"
 
         # Carry markers are gone after the final settlement.

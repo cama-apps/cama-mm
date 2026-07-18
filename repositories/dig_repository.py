@@ -637,6 +637,83 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return cursor.lastrowid
 
+    def atomic_purchase_gear(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        slot: str,
+        tier: int,
+        source: str = "shop",
+        durability: int | None = None,
+        item_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> int | None:
+        """Conditionally debit JC and insert purchased gear in one transaction."""
+        from services.dig_constants import GEAR_MAX_DURABILITY  # avoid import cycle
+
+        gid = self.normalize_guild_id(guild_id)
+        dur = GEAR_MAX_DURABILITY if durability is None else int(durability)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            if cost > 0:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=discord_id,
+                    related_type="gear_purchase",
+                    related_id=f"{slot}:{tier}",
+                    reason="dig gear purchase",
+                    metadata=metadata,
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                          AND jopacoin_balance >= ?
+                        """,
+                        (cost, discord_id, gid, cost),
+                    )
+                    debit_rowcount = cursor.rowcount
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+                if debit_rowcount != 1:
+                    return None
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND (lowest_balance_ever IS NULL
+                           OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    (discord_id, gid),
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO dig_gear
+                    (discord_id, guild_id, slot, tier, durability,
+                     equipped, acquired_at, source, item_id)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    discord_id,
+                    gid,
+                    slot,
+                    tier,
+                    dur,
+                    int(time.time()),
+                    source,
+                    item_id,
+                ),
+            )
+            return cursor.lastrowid
+
     def get_gear(self, discord_id: int, guild_id: int) -> list[dict]:
         """All gear owned by a player (any slot, equipped or not)."""
         gid = self.normalize_guild_id(guild_id)
@@ -796,12 +873,14 @@ class DigRepository(BaseRepository, IDigRepository):
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
         add_relic_artifact_id: str | None = None,
+        add_artifact_id: str | None = None,
+        add_artifact_is_relic: bool = False,
         add_gear: dict | None = None,
         consume_inventory_item_ids: list[int] | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None:
-        """Apply a balance delta + tunnel update + optional inventory/relic add +
+        """Apply a balance delta + tunnel update + optional inventory/artifact add +
         optional gear add + optional inventory consumption + optional audit log in one
         BEGIN IMMEDIATE.
 
@@ -809,17 +888,16 @@ class DigRepository(BaseRepository, IDigRepository):
         row" two-step pattern (upgrade_pickaxe, set_trap, buy_insurance,
         buy_item). Without this, a crash between the balance debit and the
         tunnel mutation leaves the player with coins deducted and nothing
-        to show for it. ``add_relic_artifact_id`` fuses a relic drop into the
-        same txn (pinnacle victory) so a crash can't mint a relic without also
-        marking the boss defeated and paying out. ``consume_inventory_item_ids``
+        to show for it. The artifact arguments fuse relic and curio drops into
+        the same txn so a crash can't mint an artifact without also committing
+        its outcome. ``consume_inventory_item_ids``
         deletes queued consumable rows inside the same txn so a dig's item burn
         commits-or-rolls-back together with the dig result — an exception
         between resolving queued items and the final commit can no longer
         destroy consumables with no depth/JC to show for them.
 
-        Returns the ``id`` of the newly inserted relic row (when
-        ``add_relic_artifact_id`` is given), else the inventory row id (when
-        ``add_inventory_item`` is given), else None.
+        Returns the ``id`` of newly inserted gear, artifact, or inventory rows,
+        in that priority order, else None.
         """
         if tunnel_updates:
             unknown = set(tunnel_updates) - self._TUNNEL_UPDATABLE_COLUMNS
@@ -883,17 +961,24 @@ class DigRepository(BaseRepository, IDigRepository):
                     (discord_id, gid, *[int(i) for i in consume_inventory_item_ids]),
                 )
 
-            relic_id: int | None = None
-            if add_relic_artifact_id is not None:
+            artifact_row_id: int | None = None
+            artifact_id = add_relic_artifact_id or add_artifact_id
+            if artifact_id is not None:
                 cursor.execute(
                     """
                     INSERT INTO dig_artifacts
                         (discord_id, guild_id, artifact_id, found_at, is_relic, equipped)
-                    VALUES (?, ?, ?, ?, 1, 0)
+                    VALUES (?, ?, ?, ?, ?, 0)
                     """,
-                    (discord_id, gid, add_relic_artifact_id, int(time.time())),
+                    (
+                        discord_id,
+                        gid,
+                        artifact_id,
+                        int(time.time()),
+                        1 if add_relic_artifact_id or add_artifact_is_relic else 0,
+                    ),
                 )
-                relic_id = cursor.lastrowid
+                artifact_row_id = cursor.lastrowid
 
             gear_id: int | None = None
             if add_gear is not None:
@@ -933,7 +1018,9 @@ class DigRepository(BaseRepository, IDigRepository):
 
             if gear_id is not None:
                 return gear_id
-            return relic_id if add_relic_artifact_id is not None else inventory_id
+            if artifact_id is not None:
+                return artifact_row_id
+            return inventory_id
 
     def atomic_boss_full_victory(
         self,

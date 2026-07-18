@@ -457,10 +457,10 @@ def test_finale_jc_applies_tax_fn(
     quest_repo.set_active(10001, TEST_GUILD_ID, "agh", 5)
     result = qs.advance_on_desperate_success(10001, TEST_GUILD_ID, "agh_s5")
     assert result is not None
-    assert result["personal_jc"] == 95  # 100 gross - 5 tax
+    assert result["personal_jc"] == 60  # 100 gross × 65%, then 5 JC tax
     assert result["personal_jc_gross"] == 100
     # Balance reflects post-tax credit
-    assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100 + 95
+    assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100 + 60
 
 
 def test_finale_completes_quest_before_dispatch(
