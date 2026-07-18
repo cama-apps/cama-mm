@@ -21,7 +21,7 @@ from services.dig_constants import (
     BOSS_ARCHETYPES,
     BOSS_BOUNDARIES,
     BOSS_DIALOGUE_V2,
-    BOSS_HP_REGEN_PER_3_HOURS,
+    BOSS_HP_REGEN_PER_24_HOURS,
     BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
@@ -339,27 +339,56 @@ class TestPersistedBossHP:
         assert hp_max == 12
 
     def test_regen_caps_at_hp_max(self):
-        # 100 hours elapsed at +1/3h would exceed hp_max; should cap.
-        now = 100 * 3600
+        # 100 days elapsed at +1/24h would exceed hp_max; should cap.
+        now = 100 * 24 * 3600
         bp = {"25": {"hp_remaining": 4, "hp_max": 12, "last_engaged_at": 0}}
         hp, hp_max = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
         assert hp == 12  # capped at hp_max
         assert hp_max == 12
 
-    def test_regen_partial(self):
-        # 9 hours → 3 three-hour blocks → +3 HP; persisted 4 → 7 (within cap).
-        now = 9 * 3600
+    def test_regen_adds_one_hp_per_completed_day(self):
+        # Three days gives three regen ticks: persisted 4 becomes 7.
+        now = 3 * 24 * 3600
         bp = {"25": {"hp_remaining": 4, "hp_max": 12, "last_engaged_at": 0}}
         hp, _ = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
-        assert hp == 4 + 3 * BOSS_HP_REGEN_PER_3_HOURS
+        assert hp == 4 + 3 * BOSS_HP_REGEN_PER_24_HOURS
 
-    def test_regen_six_hours_no_longer_two_blocks(self):
-        """6 hours under the new 1/3h cadence is two three-hour blocks, not
-        three two-hour blocks. Guards against silent revert to 1/2h."""
-        now = 6 * 3600
+    def test_regen_waits_for_a_complete_day(self):
+        """No regeneration occurs before a full 24-hour block elapses."""
+        now = 24 * 3600 - 1
         bp = {"25": {"hp_remaining": 4, "hp_max": 12, "last_engaged_at": 0}}
         hp, _ = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
-        assert hp == 4 + 2 * BOSS_HP_REGEN_PER_3_HOURS
+        assert hp == 4
+
+    def test_fresh_cap_reduction_preserves_absolute_damage(self):
+        bp = {"25": {"hp_remaining": 7, "hp_max": 12, "last_engaged_at": 0}}
+
+        hp, hp_max = self.service._resolve_persisted_boss_hp(
+            bp, 25, fresh_hp=9, now=0,
+        )
+
+        assert hp == 4
+        assert hp_max == 9
+
+    def test_fresh_cap_increase_preserves_absolute_damage(self):
+        bp = {"25": {"hp_remaining": 7, "hp_max": 12, "last_engaged_at": 0}}
+
+        hp, hp_max = self.service._resolve_persisted_boss_hp(
+            bp, 25, fresh_hp=15, now=0,
+        )
+
+        assert hp == 10
+        assert hp_max == 15
+
+    def test_regen_applies_after_rebasing_onto_fresh_cap(self):
+        bp = {"25": {"hp_remaining": 7, "hp_max": 12, "last_engaged_at": 0}}
+
+        hp, hp_max = self.service._resolve_persisted_boss_hp(
+            bp, 25, fresh_hp=9, now=2 * 24 * 3600,
+        )
+
+        assert hp == 6
+        assert hp_max == 9
 
     def test_persist_after_loss_writes_entry(self):
         bp = {}

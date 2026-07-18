@@ -95,7 +95,10 @@ class PackageDealView(discord.ui.View):
         if self.message is not None:
             try:
                 await self.message.edit(
-                    content="*The mini Package Deal expired.*",
+                    content=(
+                        "*The unearthed foreman's contract crumbled to dust "
+                        "in the mine.*"
+                    ),
                     embed=None,
                     view=self,
                 )
@@ -124,7 +127,10 @@ class PackageDealView(discord.ui.View):
             logger.exception("Failed to activate dig package deal bonus")
             try:
                 await interaction.response.edit_message(
-                    content="The package deal could not be activated. Try again later.",
+                    content=(
+                        "The unearthed foreman's contract could not be activated. "
+                        "Try again later."
+                    ),
                     embed=None,
                     view=None,
                 )
@@ -135,7 +141,8 @@ class PackageDealView(discord.ui.View):
         try:
             await interaction.response.edit_message(
                 content=(
-                    f"Mini Package Deal active with **{candidate.display_name}**: "
+                    "The unearthed foreman's contract is "
+                    f"signed with **{candidate.display_name}**: "
                     f"**3 games added**, **{deal.games_remaining} games remaining**."
                 ),
                 embed=None,
@@ -193,13 +200,15 @@ class DigTriviaView(discord.ui.View):
     ) -> discord.Embed:
         correct_answer = self.question.options[self.question.correct_index]
         if timed_out:
-            title = "Dig Trivia — Time's up! -5 JC"
+            title = "⛏️ Unearthed Rune Tablet — Time's up! -5 JC"
         elif correct:
-            title = f"Dig Trivia — Correct! +{delta} JC"
+            title = f"⛏️ Unearthed Rune Tablet — Correct! +{delta} JC"
         else:
-            title = "Dig Trivia — Wrong! -5 JC"
+            title = "⛏️ Unearthed Rune Tablet — Wrong! -5 JC"
 
-        description = f"The correct answer was **{correct_answer}**."
+        description = (
+            f"The rune tablet reveals the correct answer: **{correct_answer}**."
+        )
         if self.question.explanation:
             description += f"\n\n*{self.question.explanation}*"
         return discord.Embed(
@@ -211,10 +220,10 @@ class DigTriviaView(discord.ui.View):
     @staticmethod
     def _settlement_error_embed() -> discord.Embed:
         return discord.Embed(
-            title="Dig Trivia — Settlement Error",
+            title="⛏️ Unearthed Rune Tablet — Settlement Error",
             description=(
-                "The JC result could not be confirmed. Please contact an admin "
-                "to verify the balance ledger."
+                "The mine's rune tablet flickers, but the JC result could not be "
+                "confirmed. Please contact an admin to verify the balance ledger."
             ),
             color=0xE53935,
         )
@@ -292,8 +301,11 @@ class DigTriviaView(discord.ui.View):
 
 def _question_embed(question: TriviaQuestion) -> discord.Embed:
     embed = discord.Embed(
-        title="Dig Bonus — Dota 2 Trivia",
-        description=question.text,
+        title="⛏️ Unearthed in the Mine — Dota 2 Trivia",
+        description=(
+            "A rune-covered stone tablet slides free from the mine wall. "
+            f"Decipher its challenge:\n\n{question.text}"
+        ),
         color=0x5865F2,
     )
     embed.add_field(
@@ -341,7 +353,10 @@ async def send_dig_bonus(
         if not candidates:
             await safe_followup(
                 interaction,
-                content="A mini Package Deal appeared, but there were not four eligible active players.",
+                content=(
+                    "Your pickaxe unearthed a foreman's Package Deal contract, "
+                    "but there were not four eligible active players to sign it."
+                ),
                 ephemeral=True,
             )
             return
@@ -353,10 +368,11 @@ async def send_dig_bonus(
             package_deal_service=bot.package_deal_service,
         )
         embed = discord.Embed(
-            title="Dig Bonus — Mini Package Deal",
+            title="⛏️ Unearthed in the Mine — Package Deal",
             description=(
-                "Choose one active player. Your pick creates or extends a "
-                "free Package Deal for **3 games**."
+                "Your pickaxe cracks open a sealed foreman's contract buried "
+                "in the rock. Choose one active player to share a free Package "
+                "Deal for **3 games**."
             ),
             color=0xF1C40F,
         )

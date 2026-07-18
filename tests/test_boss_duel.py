@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -504,8 +505,9 @@ class TestDuelPayout:
 
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
-        # No chip damage → boss at full HP and the soften line is suppressed.
-        assert result["boss_hp_remaining"] == seed_max
+        # No chip damage → boss remains at the freshly rebased full cap and
+        # the soften line is suppressed.
+        assert result["boss_hp_remaining"] == result["boss_hp_max"]
         assert result.get("soften_line") is None
 
     def test_loss_soften_line_present_when_player_chips(
@@ -619,7 +621,15 @@ class TestBossEchoWeakening:
         assert row is not None
         assert row["killer_discord_id"] == 10001
 
-    def test_second_kill_sees_weakened_boss(self, dig_service, dig_repo, player_repository, monkeypatch):
+    @pytest.mark.parametrize("entrypoint", ["legacy", "state_machine"])
+    def test_second_kill_reduces_only_wager_profit(
+        self,
+        entrypoint,
+        dig_service,
+        dig_repo,
+        player_repository,
+        monkeypatch,
+    ):
         # First digger kills Grothak
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         monkeypatch.setattr(random, "random", lambda: 0.0)
@@ -637,26 +647,151 @@ class TestBossEchoWeakening:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
         balance_before = player_repository.get_balance(10002, TEST_GUILD_ID)
         monkeypatch.setattr(random, "random", lambda: 0.0)
-        # Pin win chance below the taper knee so this isolates the 0.7x echo
+        # Pin win chance below the taper knee so this isolates the 0.7x profit
         # penalty from the high-win-chance payout taper.
         monkeypatch.setattr(
             "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
         )
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
 
-        result = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=10)
+        if entrypoint == "legacy":
+            result = dig_service.fight_boss(
+                10002, TEST_GUILD_ID, "cautious", wager=10,
+            )
+        else:
+            result = dig_service.start_boss_duel(
+                10002, TEST_GUILD_ID, "cautious", wager=10,
+            )
         assert result["won"] is True
         assert result.get("echo_applied") is True
         assert result.get("echo_killer_id") == 10001
 
-        # Wager profit is 0.7x the normal cautious multiplier; the flat base
-        # reward is still paid on top.
+        # Echo trims the computed wager profit by exactly 30%; it does not
+        # multiply the total return or touch the flat boss reward.
         base_multiplier = BOSS_PAYOUTS[25][0]
-        expected_profit = int(10 * (base_multiplier * 0.7 - 1))
+        normal_profit = int(10 * (base_multiplier - 1))
+        expected_profit = int(normal_profit * 0.7)
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == (
             balance_before
             + scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25])
             + expected_profit
         )
+
+    def test_echo_scout_multiplier_matches_profit_penalty(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.record_boss_echo(
+            TEST_GUILD_ID,
+            "grothak",
+            25,
+            killer_discord_id=9999,
+            window_seconds=24 * 3600,
+        )
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
+
+        result = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        assert result["success"] is True
+        assert result["echo_applied"] is True
+        normal_multiplier = BOSS_PAYOUTS[25][0]
+        expected_multiplier = 1 + (normal_multiplier - 1) * 0.7
+        assert result["odds"]["cautious"]["multiplier"] == round(
+            expected_multiplier, 2,
+        )
+
+    def test_p4_echo_scout_multiplier_includes_boss_rage(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(
+            dig_service, dig_repo, player_repository, monkeypatch, prestige=4,
+        )
+        dig_repo.record_boss_echo(
+            TEST_GUILD_ID,
+            "grothak",
+            25,
+            killer_discord_id=9999,
+            window_seconds=24 * 3600,
+        )
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
+
+        result = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        ascension = dig_service._get_ascension_effects(4)
+        boss_payout_multiplier = 1 + ascension["boss_payout_multiplier"]
+        live_multiplier = BOSS_PAYOUTS[25][0] * boss_payout_multiplier
+        expected_echo_multiplier = 1 + (live_multiplier - 1) * 0.7
+        assert result["success"] is True
+        assert result["echo_applied"] is True
+        assert result["odds"]["cautious"]["multiplier"] == round(
+            expected_echo_multiplier, 2,
+        )
+
+    def test_echo_reduces_profit_after_drain_penalty(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.record_boss_echo(
+            TEST_GUILD_ID,
+            "grothak",
+            25,
+            killer_discord_id=9999,
+            window_seconds=24 * 3600,
+        )
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            stinger_curse=json.dumps({"drain_next_reward": True}),
+        )
+        monkeypatch.setattr("domain.models.boss_mechanics.get_mechanic", lambda mid: None)
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", lambda **kw: 0.50,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=100,
+        )
+
+        normal_profit = int(100 * (BOSS_PAYOUTS[25][0] - 1))
+        drain_penalty = int(round(100 * BOSS_PAYOUTS[25][0] * 0.25))
+        expected_profit = int(max(0, normal_profit - drain_penalty) * 0.7)
+        assert result["won"] is True
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == (
+            balance_before
+            + scale_positive_dig_jc(BOSS_VICTORY_BASE_JC[25])
+            + expected_profit
+        )
+
+    def test_echo_result_copy_names_max_hp_and_wager_profit(self):
+        from commands.dig_helpers.boss_views import _build_boss_fight_result_embed
+
+        embed = _build_boss_fight_result_embed(
+            result=SimpleNamespace(
+                won=True,
+                boss_name="Grothak",
+                payout=17,
+                win_chance=0.5,
+                echo_applied=True,
+                echo_killer_id=9999,
+            ),
+            risk_tier="cautious",
+            amount=10,
+        )
+
+        echo_field = next(
+            field for field in embed.fields
+            if field.name == "Echoing in the Tunnels"
+        )
+        assert "-25% max HP" in echo_field.value
+        assert "30% less wager profit" in echo_field.value
 
     def test_killer_reruns_get_no_discount(self, dig_service, dig_repo, player_repository, monkeypatch):
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
@@ -1118,14 +1253,13 @@ class TestWagerTaper:
     def test_won_wager_at_high_win_chance_never_loses_money(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        # First digger kills the boss, leaving a weakened echo (0.7x payout).
+        # First digger kills the boss, leaving a weakened echo.
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         monkeypatch.setattr(random, "random", lambda: 0.0)
         dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
 
         # Second digger fights the echo at a near-certain win chance. The
-        # taper plus the 0.7x echo penalty would drive a winning wager
-        # negative — but a win must never cost the player money.
+        # taper leaves only a small profit and Echo trims that component.
         _register(player_repository, discord_id=10002, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 10)
         monkeypatch.setattr(random, "random", lambda: 0.99)

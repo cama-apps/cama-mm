@@ -89,7 +89,37 @@ async def test_package_deal_view_creates_free_three_game_deal():
         cost=0,
     )
     interaction.response.edit_message.assert_awaited_once()
-    assert "Player 2" in interaction.response.edit_message.call_args.kwargs["content"]
+    content = interaction.response.edit_message.call_args.kwargs["content"]
+    assert "unearthed foreman's contract" in content
+    assert "signed with **Player 2**" in content
+    assert interaction.response.edit_message.call_args.kwargs["view"] is None
+
+
+@pytest.mark.asyncio
+async def test_package_deal_activation_failure_keeps_mine_framing():
+    from commands.dig_helpers.bonus_events import PackageDealView
+
+    candidate = SimpleNamespace(id=2, display_name="Player 2")
+    view = PackageDealView(
+        buyer_id=1,
+        guild_id=99,
+        candidates=[candidate],
+        package_deal_service=SimpleNamespace(
+            create_or_extend_deal=MagicMock(
+                side_effect=RuntimeError("package service unavailable"),
+            ),
+        ),
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=1),
+        response=SimpleNamespace(edit_message=AsyncMock()),
+    )
+
+    await view.select_partner(interaction, candidate)
+
+    content = interaction.response.edit_message.call_args.kwargs["content"]
+    assert "unearthed foreman's contract" in content
+    assert "could not be activated" in content
     assert interaction.response.edit_message.call_args.kwargs["view"] is None
 
 
@@ -141,7 +171,9 @@ async def test_package_deal_timeout_disables_expired_choices():
 
     assert all(child.disabled for child in view.children)
     view.message.edit.assert_awaited_once_with(
-        content="*The mini Package Deal expired.*",
+        content=(
+            "*The unearthed foreman's contract crumbled to dust in the mine.*"
+        ),
         embed=None,
         view=view,
     )
@@ -246,7 +278,8 @@ async def test_dig_trivia_correct_answer_applies_dig_reward_policy_with_audit_co
         },
     )
     result_embed = interaction.response.edit_message.call_args.kwargs["embed"]
-    assert "+10 JC" in result_embed.title
+    assert result_embed.title == "⛏️ Unearthed Rune Tablet — Correct! +10 JC"
+    assert "rune tablet reveals the correct answer" in result_embed.description
 
 
 @pytest.mark.asyncio
@@ -324,7 +357,8 @@ async def test_dig_trivia_answer_surfaces_settlement_failure():
     await view.answer(interaction, 1)
 
     error_embed = interaction.response.edit_message.call_args.kwargs["embed"]
-    assert "Settlement Error" in error_embed.title
+    assert error_embed.title == "⛏️ Unearthed Rune Tablet — Settlement Error"
+    assert "mine's rune tablet" in error_embed.description
     assert interaction.response.edit_message.call_args.kwargs["view"] is None
 
 
@@ -379,7 +413,8 @@ async def test_dig_trivia_wrong_answer_loses_five_jc():
         "timed_out": False,
     }
     result_embed = interaction.response.edit_message.call_args.kwargs["embed"]
-    assert "-5 JC" in result_embed.title
+    assert result_embed.title == "⛏️ Unearthed Rune Tablet — Wrong! -5 JC"
+    assert "rune tablet reveals the correct answer" in result_embed.description
     assert "Bane" in result_embed.description
 
 
@@ -404,8 +439,8 @@ async def test_dig_trivia_timeout_loses_five_jc():
         "timed_out": True,
     }
     timeout_embed = view.message.edit.call_args.kwargs["embed"]
-    assert "Time" in timeout_embed.title
-    assert "-5 JC" in timeout_embed.title
+    assert timeout_embed.title == "⛏️ Unearthed Rune Tablet — Time's up! -5 JC"
+    assert "rune tablet reveals the correct answer" in timeout_embed.description
 
 
 @pytest.mark.asyncio
@@ -425,7 +460,8 @@ async def test_dig_trivia_timeout_surfaces_settlement_failure():
     await view.on_timeout()
 
     error_embed = view.message.edit.call_args.kwargs["embed"]
-    assert "Settlement Error" in error_embed.title
+    assert error_embed.title == "⛏️ Unearthed Rune Tablet — Settlement Error"
+    assert "mine's rune tablet" in error_embed.description
     assert view.message.edit.call_args.kwargs["view"] is None
 
 
@@ -575,6 +611,47 @@ async def test_send_dig_bonus_offers_four_active_package_players():
     assert len(sent_view.children) == 4
     assert sent_view.buyer_id == 1
     assert sent_view.message is sent_message
+    sent_embed = interaction.followup.send.call_args.kwargs["embed"]
+    assert sent_embed.title == "⛏️ Unearthed in the Mine — Package Deal"
+    assert "pickaxe" in sent_embed.description
+    assert "buried" in sent_embed.description
+    assert "free Package Deal for **3 games**" in sent_embed.description
+
+
+@pytest.mark.asyncio
+async def test_send_dig_bonus_insufficient_package_candidates_keeps_mine_framing():
+    from commands.dig_helpers.bonus_events import send_dig_bonus
+
+    members = {
+        player_id: SimpleNamespace(
+            id=player_id,
+            display_name=f"Player {player_id}",
+            bot=False,
+        )
+        for player_id in range(1, 5)
+    }
+    player_service = SimpleNamespace(
+        get_all_registered_players_for_lottery=MagicMock(
+            return_value=[{"discord_id": player_id} for player_id in members],
+        ),
+    )
+    interaction = SimpleNamespace(
+        user=members[1],
+        guild=SimpleNamespace(id=99, get_member=lambda player_id: members.get(player_id)),
+        followup=SimpleNamespace(send=AsyncMock()),
+        channel=MagicMock(),
+    )
+    bot = SimpleNamespace(
+        package_deal_service=MagicMock(),
+        player_service=player_service,
+    )
+
+    await send_dig_bonus(bot, interaction, "package_deal")
+
+    content = interaction.followup.send.call_args.kwargs["content"]
+    assert "pickaxe unearthed a foreman's Package Deal contract" in content
+    assert "not four eligible active players to sign it" in content
+    assert interaction.followup.send.call_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -602,7 +679,10 @@ async def test_send_dig_bonus_posts_one_standalone_trivia_question():
     sent_view = interaction.followup.send.call_args.kwargs["view"]
     assert isinstance(sent_view, DigTriviaView)
     assert sent_view.message is sent_message
-    assert sent_embed.description == question.text
+    assert sent_embed.title == "⛏️ Unearthed in the Mine — Dota 2 Trivia"
+    assert "stone tablet" in sent_embed.description
+    assert "mine wall" in sent_embed.description
+    assert sent_embed.description.endswith(question.text)
     assert "+10 JC" in sent_embed.footer.text
     assert "-5 JC" in sent_embed.footer.text
 
