@@ -12,11 +12,22 @@ import pytest
 from repositories.economy_event_repository import EconomyEventRepository
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
-from services.economy_event_service import EconomyEventService
+from services.economy_event_service import _EVENT_CATALOG, EconomyEventService
+from services.trivia_data import get_ability_icon_url_by_name
 from tests.conftest import TEST_GUILD_ID
 from utils.game_date import get_game_date
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
+
+
+def test_every_economy_event_has_dotabase_spell_art():
+    missing = [
+        template.name
+        for template in _EVENT_CATALOG
+        if not get_ability_icon_url_by_name(template.name)
+    ]
+
+    assert missing == []
 
 
 def _local_timestamp(

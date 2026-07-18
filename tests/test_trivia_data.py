@@ -4,6 +4,7 @@ import pytest
 
 from services.trivia_data import (
     ability_icon_url,
+    get_ability_icon_url_by_name,
     get_hero_by_id,
     hero_image_url,
     item_icon_url,
@@ -114,6 +115,15 @@ class TestDataLoading:
         abilities = load_abilities()
         bad = [a for a in abilities if "_" in a.localized_name]
         assert bad == [], f"Internal-named abilities leaked: {[a.localized_name for a in bad[:5]]}"
+
+    def test_get_ability_icon_url_by_name_is_case_insensitive(self):
+        icon_url = get_ability_icon_url_by_name("  global silence  ")
+
+        assert icon_url is not None
+        assert icon_url.endswith("/abilities/silencer_global_silence.png")
+
+    def test_get_ability_icon_url_by_name_missing(self):
+        assert get_ability_icon_url_by_name("Definitely Not An Ability") is None
 
     def test_load_voicelines(self):
         voicelines = load_voicelines()

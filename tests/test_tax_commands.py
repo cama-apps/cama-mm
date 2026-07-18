@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -65,6 +65,7 @@ class _FakeResponse:
     def __init__(self):
         self.messages: list[dict] = []
         self._done = False
+        self.deferred_ephemeral: bool | None = None
 
     async def send_message(self, content=None, ephemeral=None, embed=None, **kwargs):
         self._done = True
@@ -74,6 +75,7 @@ class _FakeResponse:
 
     async def defer(self, ephemeral=False):
         self._done = True
+        self.deferred_ephemeral = ephemeral
 
     async def edit_message(self, **kwargs):
         self._done = True
@@ -110,6 +112,49 @@ def _embed_text(embed) -> str:
     return "\n".join(parts)
 
 
+def _global_silence_status() -> dict:
+    effects = {
+        "reward_multiplier": 0.64,
+        "gamba_win_multiplier": 0.91,
+        "bet_payout_multiplier": 0.97,
+        "prediction_depth_multiplier": 0.16,
+        "prediction_spread_ticks_delta": 6,
+    }
+    return {
+        "policy": {
+            "mode": "recovery",
+            "target_annual_rate": -0.035,
+            "inflation_ceiling": 0.02,
+        },
+        "balance_sheet": {
+            "monetary_stock": 124_464,
+            "player_wallets": 53_900,
+            "average_wallet": 449.17,
+            "reserve_available": 42_795,
+            "reserve_locked": 0,
+            "prediction_open_cash": 26_155,
+            "wager_escrow": 1_614,
+        },
+        "latest_snapshot": {},
+        "event": {
+            "name": "Global Silence",
+            "severity": 3,
+            "direction": "deflationary",
+            "announcement": (
+                "Bonus rewards vanish and market makers fall quiet.\n"
+                "Generated rewards (dig, trivia, and mana): **-36%**."
+            ),
+            "effects": effects,
+            "forecast_flow_jc": 2_237,
+            "target_effect_jc": -2_249,
+            "expected_effect_jc": -2_203,
+            "direct_effect_jc": 0,
+            "ends_at": 1_752_943_600,
+        },
+        "effects": effects,
+    }
+
+
 def _assert_ledger_page_metadata(
     embed,
     *,
@@ -135,6 +180,7 @@ def test_tax_group_contains_audit_and_enforcement_commands():
 
     assert names == {
         "audit",
+        "event",
         "player",
         "ledger",
         "fine",
@@ -142,6 +188,152 @@ def test_tax_group_contains_audit_and_enforcement_commands():
         "bankruptcy",
         "policy",
     }
+
+
+def test_public_event_embed_is_high_level_theatrical_and_explains_indirect_effect():
+    embed = tax_commands._build_public_event_embed(
+        _global_silence_status(),
+        icon_url="https://cdn.example/global_silence.png",
+    )
+    text = _embed_text(embed)
+
+    assert embed.title == "🌑 Global Silence — Level III"
+    assert embed.thumbnail.url == "https://cdn.example/global_silence.png"
+    assert "36% lower" in text
+    assert "9% lower" in text
+    assert "3% lower" in text
+    assert "84% thinner" in text
+    assert "6 ticks wider" in text
+    assert "No JC moved when this spell activated" in text
+    assert "Forecast unmanaged flow" not in text
+    assert "Target event effect" not in text
+    assert "124,464" not in text
+    assert validate_embed(embed) == []
+
+
+def test_public_event_embed_names_immediate_reserve_and_wallet_actions():
+    status = _global_silence_status()
+    status["event"]["effects"] = {
+        "reserve_burn_jc": 300,
+        "wallet_burn_jc": 75,
+    }
+
+    text = _embed_text(tax_commands._build_public_event_embed(status))
+
+    assert "300 JC" in text
+    assert "burned from the Jopa Reserve" in text
+    assert "75 JC" in text
+    assert "burned from positive wallets" in text
+    assert "No JC moved" not in text
+
+
+def test_public_event_embed_handles_no_active_event():
+    embed = tax_commands._build_public_event_embed({"event": None})
+
+    assert embed.title == "🌤️ The Economy Is Between Spells"
+    assert "10 AM Pacific" in embed.description
+    assert validate_embed(embed) == []
+
+
+def test_private_policy_embed_labels_zero_direct_effect_as_indirect():
+    text = _embed_text(tax_commands._build_policy_embed(_global_silence_status()))
+
+    assert "Projected daily impact" in text
+    assert "Immediate supply change" in text
+    assert "None" in text
+    assert "works through adjusted outcomes" in text
+
+
+@pytest.mark.asyncio
+async def test_tax_event_is_public_and_does_not_require_tax_man(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        await interaction.response.defer(ephemeral=ephemeral)
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    def _unexpected_permission_check(_interaction):
+        raise AssertionError("public event command must not check Tax Man permission")
+
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+    monkeypatch.setattr(
+        tax_commands,
+        "has_tax_man_permission",
+        _unexpected_permission_check,
+    )
+    monkeypatch.setattr(
+        tax_commands.trivia_data,
+        "get_ability_icon_url_by_name",
+        MagicMock(return_value="https://cdn.example/global_silence.png"),
+    )
+    economy_service = SimpleNamespace(
+        get_policy_status=MagicMock(return_value=_global_silence_status())
+    )
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(economy_event_service=economy_service),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123)
+
+    await cog.event.callback(cog, interaction)
+
+    economy_service.get_policy_status.assert_called_once_with(123)
+    assert interaction.response.deferred_ephemeral is False
+    message = interaction.followup.messages[-1]
+    assert message["ephemeral"] is False
+    assert message["embed"].title == "🌑 Global Silence — Level III"
+
+
+@pytest.mark.asyncio
+async def test_tax_event_survives_spell_icon_lookup_failure(monkeypatch):
+    async def _safe_defer(interaction, ephemeral=False):
+        await interaction.response.defer(ephemeral=ephemeral)
+        return True
+
+    async def _safe_followup(interaction, **kwargs):
+        await interaction.followup.send(**kwargs)
+
+    monkeypatch.setattr(tax_commands, "safe_defer", _safe_defer)
+    monkeypatch.setattr(tax_commands, "safe_followup", _safe_followup)
+    monkeypatch.setattr(
+        tax_commands.trivia_data,
+        "get_ability_icon_url_by_name",
+        MagicMock(side_effect=RuntimeError("dotabase unavailable")),
+    )
+    economy_service = SimpleNamespace(
+        get_policy_status=MagicMock(return_value=_global_silence_status())
+    )
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(economy_event_service=economy_service),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123)
+
+    await cog.event.callback(cog, interaction)
+
+    embed = interaction.followup.messages[-1]["embed"]
+    assert embed.title == "🌑 Global Silence — Level III"
+    assert not embed.thumbnail
+
+
+@pytest.mark.asyncio
+async def test_tax_policy_remains_private_and_tax_man_only(monkeypatch):
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: False)
+    service = SimpleNamespace(get_policy_status=AsyncMock())
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(economy_event_service=service),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123)
+
+    await cog.policy.callback(cog, interaction)
+
+    service.get_policy_status.assert_not_awaited()
+    message = interaction.response.messages[-1]
+    assert message["ephemeral"] is True
+    assert message["content"] == "Only Tax Men can use this command."
 
 
 def test_tax_player_recent_ledger_splits_long_field():
