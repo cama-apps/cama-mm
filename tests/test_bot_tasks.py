@@ -310,23 +310,94 @@ async def test_economy_event_loop_wakes_at_interval_or_trigger_whichever_is_firs
     sleep.assert_awaited_once_with(expected_sleep)
 
 
-async def test_economy_event_announcement_names_ten_am_pacific_rollover(bot_module):
+async def test_economy_event_announcement_uses_shared_public_embed(bot_module):
     guild = SimpleNamespace(id=42)
-    economy_service = MagicMock()
-    economy_service.format_event.return_value = ("Ravage", "The economy shudders.")
     cog = SimpleNamespace(announce_to_gamba=AsyncMock())
+    event = {
+        "name": "Ravage",
+        "severity": 3,
+        "direction": "deflationary",
+        "announcement": "A tidal shock tears through the Jopacoin economy.",
+        "effects": {"reward_multiplier": 0.76, "reserve_burn_jc": 300},
+        "ends_at": 1_752_943_600,
+    }
+    icon_url = "https://cdn.example/ravage.png"
+
+    def get_cog(name):
+        assert name == "PredictionCommands"
+        return cog
 
     with (
-        patch.object(bot_module.bot, "economy_event_service", economy_service, create=True),
-        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_cog", side_effect=get_cog),
+        patch.object(
+            bot_module.trivia_data,
+            "get_ability_icon_url_by_name",
+            return_value=icon_url,
+            create=True,
+        ) as icon_lookup,
+    ):
+        await bot_module._announce_economy_event(guild, event)
+
+    embed = cog.announce_to_gamba.await_args.kwargs["embed"]
+    icon_lookup.assert_called_once_with("Ravage")
+    assert embed.to_dict() == bot_module.build_public_economy_event_embed(
+        event,
+        icon_url=icon_url,
+    ).to_dict()
+    assert embed.thumbnail.url == icon_url
+    assert embed.title == "🌑 Ravage — Level III"
+    assert "24% lower" in embed.fields[0].value
+    assert "300 JC" in embed.fields[1].value
+    assert embed.footer.text == "The treasury watches. The edict endures."
+
+
+async def test_economy_event_announcement_logs_when_prediction_cog_missing(
+    bot_module, caplog
+):
+    guild = SimpleNamespace(id=42)
+
+    with (
+        patch.object(bot_module.bot, "get_cog", return_value=None) as get_cog,
+        caplog.at_level(logging.WARNING, logger="cama_bot"),
     ):
         await bot_module._announce_economy_event(
             guild, {"direction": "deflationary"}
         )
 
+    get_cog.assert_called_once_with("PredictionCommands")
+    assert any(
+        "PredictionCommands cog not loaded" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_economy_event_announcement_survives_icon_lookup_failure(
+    bot_module, caplog
+):
+    guild = SimpleNamespace(id=42)
+    cog = SimpleNamespace(announce_to_gamba=AsyncMock())
+
+    with (
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(
+            bot_module.trivia_data,
+            "get_ability_icon_url_by_name",
+            side_effect=RuntimeError("dotabase unavailable"),
+            create=True,
+        ),
+        caplog.at_level(logging.WARNING, logger="cama_bot"),
+    ):
+        await bot_module._announce_economy_event(
+            guild, {"name": "Ravage", "direction": "deflationary"}
+        )
+
+    cog.announce_to_gamba.assert_awaited_once()
     embed = cog.announce_to_gamba.await_args.kwargs["embed"]
-    assert embed.footer.text == (
-        "Server-wide daily Jopacoin event • Applies until the next 10 AM Pacific rollover"
+    assert not embed.thumbnail
+    assert any(
+        "economy event icon lookup failed for event=Ravage guild=42"
+        in record.message
+        for record in caplog.records
     )
 
 # --------------------------------------------------------------------------- #

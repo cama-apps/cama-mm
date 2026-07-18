@@ -11,8 +11,10 @@ from discord.ext import commands
 
 from commands.checks import require_guild
 from config import BANKRUPTCY_PENALTY_GAMES, MINIGAME_JC_DELTA_SCALE
+from services import trivia_data
 from services.permissions import has_tax_man_permission
 from services.tax_service import TaxService
+from utils.economy_event_display import build_public_economy_event_embed
 from utils.embed_safety import EMBED_LIMITS, add_lines_field, truncate_field
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -230,7 +232,10 @@ class TaxPlayerLedgerView(discord.ui.View):
 
 
 class TaxCommands(commands.Cog):
-    tax = app_commands.Group(name="tax", description="Tax Man economy audit")
+    tax = app_commands.Group(
+        name="tax",
+        description="Jopacoin economy and Tax Man tools",
+    )
 
     def __init__(self, bot: commands.Bot, tax_service: TaxService):
         self.bot = bot
@@ -302,6 +307,62 @@ class TaxCommands(commands.Cog):
             interaction,
             embed=_build_policy_embed(status),
             ephemeral=True,
+        )
+
+    @tax.command(
+        name="event",
+        description="Reveal today's server-wide Jopacoin event",
+    )
+    @require_guild
+    async def event(self, interaction: discord.Interaction):
+        """Public, player-facing view of the current monetary spell."""
+        await safe_defer(interaction, ephemeral=False)
+        service = getattr(self.bot, "economy_event_service", None)
+        if service is None:
+            await safe_followup(
+                interaction,
+                content="The daily economy controller is not configured.",
+                ephemeral=False,
+            )
+            return
+
+        try:
+            status = await asyncio.to_thread(
+                service.get_policy_status,
+                interaction.guild.id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load public economy event for guild_id=%s",
+                interaction.guild.id,
+            )
+            await safe_followup(
+                interaction,
+                content="The current economic edict is obscured. Try again shortly.",
+                ephemeral=False,
+            )
+            return
+
+        icon_url = None
+        event = status.get("event")
+        if event and event.get("name"):
+            try:
+                icon_url = await asyncio.to_thread(
+                    trivia_data.get_ability_icon_url_by_name,
+                    event["name"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Public economy event icon lookup failed for event=%s guild=%s",
+                    event["name"],
+                    interaction.guild.id,
+                    exc_info=True,
+                )
+
+        await safe_followup(
+            interaction,
+            embed=_build_public_event_embed(status, icon_url=icon_url),
+            ephemeral=False,
         )
 
     @tax.command(name="player", description="View one player's full monetary exposure")
@@ -635,6 +696,17 @@ def _format_signed_jc(amount: int) -> str:
     return f"{prefix}{amount:,} {JOPACOIN_EMOTE}"
 
 
+def _build_public_event_embed(
+    status: dict,
+    *,
+    icon_url: str | None = None,
+) -> discord.Embed:
+    return build_public_economy_event_embed(
+        status.get("event"),
+        icon_url=icon_url,
+    )
+
+
 def _build_policy_embed(status: dict) -> discord.Embed:
     policy = status["policy"]
     sheet = status["balance_sheet"]
@@ -677,13 +749,19 @@ def _build_policy_embed(status: dict) -> discord.Embed:
     ]
     embed.add_field(name="Measured inflation", value="\n".join(inflation_lines), inline=False)
     if event:
+        direct_effect = int(event["direct_effect_jc"])
+        immediate = (
+            f"**{direct_effect:+,} JC**"
+            if direct_effect
+            else "**None** — this event works through adjusted outcomes"
+        )
         embed.add_field(
             name=f"Active event: {event['name']} (Level {event['severity']})",
             value=(
                 f"Forecast unmanaged flow: **{int(event['forecast_flow_jc']):+,} JC/day**\n"
                 f"Target event effect: **{int(event['target_effect_jc']):+,} JC**\n"
-                f"Expected effect: **{int(event['expected_effect_jc']):+,} JC**\n"
-                f"Direct effect: **{int(event['direct_effect_jc']):+,} JC**"
+                f"Projected daily impact: **{int(event['expected_effect_jc']):+,} JC**\n"
+                f"Immediate supply change: {immediate}"
             ),
             inline=False,
         )
