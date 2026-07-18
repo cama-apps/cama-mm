@@ -131,7 +131,7 @@ class TestTriviaPayout:
         assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 2
 
     @pytest.mark.asyncio
-    async def test_correct_answer_scales_larger_trivia_payout(
+    async def test_correct_answer_keeps_larger_payout_at_neutral_scale(
         self, player_service, registered_player, monkeypatch
     ):
         import commands.trivia as trivia_mod
@@ -160,8 +160,71 @@ class TestTriviaPayout:
         await view._handle_answer(interaction, 1)
 
         assert session.streak == 10
-        assert session.total_jc == 2
-        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 2
+        assert session.total_jc == 3
+        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 3
+
+    @pytest.mark.asyncio
+    async def test_daily_event_runs_after_single_central_scale(
+        self, player_service, registered_player, monkeypatch
+    ):
+        import commands.trivia as trivia_mod
+
+        class EventService:
+            def __init__(self):
+                self.calls = []
+
+            def adjust_reward(self, guild_id, amount):
+                self.calls.append((guild_id, amount))
+                return amount // 2
+
+        event_service = EventService()
+        bot = SimpleNamespace(
+            player_service=player_service,
+            mana_effects_service=None,
+            bankruptcy_service=None,
+            economy_event_service=event_service,
+        )
+        cog = trivia_mod.TriviaCog(bot)
+        session = trivia_mod.TriviaSession(
+            user_id=registered_player,
+            guild_id=TEST_GUILD_ID,
+            user=_trivia_user(registered_player),
+        )
+        cog._sessions[(registered_player, TEST_GUILD_ID)] = session
+        view = trivia_mod.TriviaView(session, _trivia_question(), 1, cog)
+        interaction = MagicMock()
+        interaction.user.id = registered_player
+        interaction.response.edit_message = AsyncMock()
+        interaction.followup.send = AsyncMock()
+        monkeypatch.setattr(trivia_mod, "TRIVIA_REWARD_PER_QUESTION", 10)
+        scale_spy = MagicMock(wraps=trivia_mod.scale_minigame_jc_delta)
+        monkeypatch.setattr(trivia_mod, "scale_minigame_jc_delta", scale_spy)
+        monkeypatch.setattr(
+            trivia_mod,
+            "generate_question",
+            lambda _streak, _recent: None,
+        )
+
+        initial = player_service.get_balance(registered_player, TEST_GUILD_ID)
+        await view._handle_answer(interaction, 1)
+
+        scale_spy.assert_called_once_with(10)
+        assert event_service.calls == [(TEST_GUILD_ID, 10)]
+        assert session.total_jc == 5
+        assert player_service.get_balance(registered_player, TEST_GUILD_ID) == initial + 5
+
+    def test_missing_bot_or_event_service_is_neutral(self):
+        import commands.trivia as trivia_mod
+
+        assert trivia_mod._apply_daily_reward_event(None, TEST_GUILD_ID, 8) == 8
+        assert (
+            trivia_mod._apply_daily_reward_event(
+                SimpleNamespace(),
+                TEST_GUILD_ID,
+                8,
+            )
+            == 8
+        )
 
 
 class TestTriviaCooldown:

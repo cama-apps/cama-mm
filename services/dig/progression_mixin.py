@@ -108,6 +108,7 @@ class ProgressionMixin:
         """
         if total_jc <= 0:
             return total_jc
+        total_jc = self._apply_daily_economy_reward(guild_id, total_jc)
         effects = self._mana_effects_or_none(discord_id, guild_id)
         if effects is None:
             return total_jc

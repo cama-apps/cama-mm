@@ -38,6 +38,8 @@ class ServiceContainer:
         max_debt: int = 500,
         leverage_tiers: list[int] | None = None,
         garnishment_percentage: float = 1.0,
+        economy_events_enabled: bool = False,
+        economy_recovery_mode: bool = False,
         llm_api_key: str | None = None,
         ai_model: str = "groq/qwen/qwen3-32b",
         # Defaults mirror config.py (AI_TIMEOUT_SECONDS / AI_MAX_TOKENS) so a
@@ -53,6 +55,8 @@ class ServiceContainer:
         self.max_debt = max_debt
         self.leverage_tiers = leverage_tiers or [2, 3, 5]
         self.garnishment_percentage = garnishment_percentage
+        self.economy_events_enabled = economy_events_enabled
+        self.economy_recovery_mode = economy_recovery_mode
         self.llm_api_key = llm_api_key
         self.ai_model = ai_model
         self.ai_timeout_seconds = ai_timeout_seconds
@@ -107,6 +111,7 @@ class ServiceContainer:
         from repositories.dig_repository import DigRepository
         from repositories.disburse_repository import DisburseRepository
         from repositories.duel_challenge_repository import DuelChallengeRepository
+        from repositories.economy_event_repository import EconomyEventRepository
         from repositories.economy_ledger_repository import EconomyLedgerRepository
         from repositories.guild_config_repository import GuildConfigRepository
         from repositories.loan_repository import LoanRepository
@@ -145,6 +150,7 @@ class ServiceContainer:
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
             "economy_ledger_repo": EconomyLedgerRepository(p),
+            "economy_event_repo": EconomyEventRepository(p),
             "tax_repo": TaxRepository(p),
             "recalibration_repo": RecalibrationRepository(p),
             "soft_avoid_repo": SoftAvoidRepository(p),
@@ -203,11 +209,17 @@ class ServiceContainer:
         from services.balance_history_service import BalanceHistoryService
         from services.betting_service import BettingService
         from services.disburse_service import DisburseService
+        from services.economy_event_service import EconomyEventService
         from services.gambling_stats_service import GamblingStatsService
         from services.prediction_service import PredictionService
         from services.tax_service import TaxService
 
         c = self._components
+        c["economy_event_service"] = EconomyEventService(
+            c["economy_event_repo"],
+            enabled=self.economy_events_enabled,
+            recovery_mode=self.economy_recovery_mode,
+        )
         c["betting_service"] = BettingService(
             bet_repo=c["bet_repo"],
             player_repo=c["player_repo"],
@@ -216,9 +228,13 @@ class ServiceContainer:
             max_debt=self.max_debt,
             leverage_tiers=self.leverage_tiers,
             buff_service=None,
+            economy_event_service=c["economy_event_service"],
         )
         c["disburse_service"] = DisburseService(
-            c["disburse_repo"], c["player_repo"], c["loan_repo"]
+            c["disburse_repo"],
+            c["player_repo"],
+            c["loan_repo"],
+            voting_enabled=not self.economy_recovery_mode,
         )
         c["gambling_stats_service"] = GamblingStatsService(
             bet_repo=c["bet_repo"],
@@ -233,6 +249,7 @@ class ServiceContainer:
             player_repo=c["player_repo"],
             admin_user_ids=self.admin_user_ids,
             bankruptcy_service=c["bankruptcy_service"],
+            economy_event_service=c["economy_event_service"],
         )
         c["balance_history_service"] = BalanceHistoryService(
             bet_repo=c["bet_repo"],
@@ -393,6 +410,7 @@ class ServiceContainer:
             mana_repo=c["mana_repo"],
             loan_service=c["loan_service"],
             protection_service=c["protection_service"],
+            economy_event_service=c["economy_event_service"],
         )
         c["buff_service"] = BuffService(
             buff_repo=c["buff_repo"],
@@ -445,6 +463,7 @@ class ServiceContainer:
             quest_service=c["dig_quest_service"],
             prediction_repo=c.get("prediction_repo"),
             curse_repo=c.get("curse_repo"),
+            economy_event_service=c.get("economy_event_service"),
         )
         # Hostile dig splashes and sabotage are wired after both services exist.
         c["dig_service"].protection_service = c["protection_service"]
@@ -571,6 +590,7 @@ class ServiceContainer:
         bot.recalibration_service = c["recalibration_service"]
         bot.disburse_service = c["disburse_service"]
         bot.tax_service = c["tax_service"]
+        bot.economy_event_service = c["economy_event_service"]
         bot.match_enrichment_service = c["match_enrichment_service"]
         bot.match_discovery_service = c["match_discovery_service"]
         bot.pairings_service = c["pairings_service"]

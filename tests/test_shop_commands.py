@@ -1120,6 +1120,7 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
     from repositories.bet_repository import BetRepository
     from repositories.player_repository import PlayerRepository
     from tests.conftest import TEST_GUILD_ID
+    from utils.economy_scaling import scale_minigame_jc_delta
     from utils.game_date import _PST
 
     user_id = 4242
@@ -1165,15 +1166,70 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
         shop, interaction, SimpleNamespace(value="regrowth"), target=None,
     )
 
-    # 35% of the 1000 loss, capped at 120, credited back via adjust_balance.
+    # 35% of the 1000 loss is capped at 120, then passes through the neutral
+    # central scaling lever before the generated recovery is credited.
+    expected_recovery = scale_minigame_jc_delta(120)
+    assert expected_recovery == 120
     recovery_calls = [
         c for c in player_service.adjust_balance.call_args_list
-        if c.args == (user_id, TEST_GUILD_ID, 120)
+        if c.args == (user_id, TEST_GUILD_ID, expected_recovery)
     ]
     assert recovery_calls, (
-        "Regrowth should credit 120 (35% of a 1000 loss from 12h ago, capped); "
+        "Regrowth should credit the centrally scaled form of its capped recovery; "
         f"adjust_balance calls were {player_service.adjust_balance.call_args_list}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("item", "color", "loss_method"),
+    [
+        ("mana_shield", "Blue", "_compute_largest_recent_loss"),
+        ("regrowth", "Green", "_compute_cumulative_recent_losses"),
+    ],
+)
+async def test_manashop_generated_recovery_scales_before_daily_event(
+    monkeypatch, item, color, loss_method
+):
+    from tests.conftest import TEST_GUILD_ID
+    from utils.economy_scaling import scale_minigame_jc_delta
+
+    user_id = 5353
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color=color)
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    economy_event_service = MagicMock()
+    economy_event_service.adjust_reward.return_value = 41
+    bot.economy_event_service = economy_event_service
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=user_id)
+    player_service.get_balance.return_value = 1_000
+    shop = ShopCommands(bot, player_service)
+    monkeypatch.setattr(shop, loss_method, lambda *_args: 1_000)
+    interaction = _make_interaction(user_id=user_id, guild_id=TEST_GUILD_ID)
+
+    await shop.manashop.callback(
+        shop, interaction, SimpleNamespace(value=item), target=None
+    )
+
+    scaled_cap = scale_minigame_jc_delta(120)
+    assert scaled_cap == 120  # Neutral baseline; ordering remains observable.
+    economy_event_service.adjust_reward.assert_called_once_with(
+        TEST_GUILD_ID, scaled_cap
+    )
+    reward_calls = [
+        call
+        for call in player_service.adjust_balance.call_args_list
+        if call.args == (user_id, TEST_GUILD_ID, 41)
+    ]
+    assert reward_calls
+    assert reward_calls[0].kwargs["source"] == "mana_reward"
+    assert reward_calls[0].kwargs["metadata"] == {
+        "base_reward": 120,
+        "adjusted_reward": 41,
+    }
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1334,9 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
     }
     assert len(prefixes) == 1
     for target, call in zip(targets, protection_calls, strict=True):
-        assert call.args[:3] == (target.discord_id, guild_id, 18)
+        # Neutral 1.0 central scale leaves only the intentional 10%
+        # deflationary-pressure bump: 20 -> 22 attempted loss.
+        assert call.args[:3] == (target.discord_id, guild_id, 22)
         assert call.kwargs["kind"] == "pyroclasm"
         assert call.kwargs["destination"] == "burn"
         assert call.kwargs["clamp_to_balance"] is True
@@ -1477,7 +1535,8 @@ async def test_manashop_wildfire_reward_uses_post_shield_loss(monkeypatch):
     )
 
     call = bot.protection_service.apply_hostile_loss.call_args
-    assert call.args[:3] == (victim.discord_id, guild_id, 9)
+    # Neutral 1.0 central scale plus the intentional deflationary bump: 10 -> 11.
+    assert call.args[:3] == (victim.discord_id, guild_id, 11)
     assert call.kwargs["kind"] == "wildfire"
     assert call.kwargs["destination"] == "burn"
     # 45% of the 4 JC that landed floors to 1; the absorbed 5 pays nothing.

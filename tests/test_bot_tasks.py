@@ -20,10 +20,15 @@ def bot_module():
 
     bot_module._reminder_recovery_task = None
     bot_module._duel_challenge_task = None
+    bot_module._economy_event_task = None
     with patch.object(bot_module.bot, "is_closed", return_value=False):
         yield bot_module
 
-    for attr in ("_reminder_recovery_task", "_duel_challenge_task"):
+    for attr in (
+        "_reminder_recovery_task",
+        "_duel_challenge_task",
+        "_economy_event_task",
+    ):
         task = getattr(bot_module, attr)
         if task is not None:
             if task.done() and not task.cancelled():
@@ -172,6 +177,7 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
     bot_module._prediction_refresh_task = running
     bot_module._prediction_digest_task = running
     bot_module._manashop_debt_task = running
+    bot_module._economy_event_task = running
     bot_module._duel_challenge_task = None
 
     duel_task = MagicMock()
@@ -209,6 +215,119 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
     log_exit.assert_called_once_with("duel_challenges")
     duel_task.add_done_callback.assert_called_once_with(exit_callback)
     assert bot_module._duel_challenge_task is duel_task
+
+
+async def test_economy_event_loop_enforces_moratorium_before_activation(bot_module):
+    """Each wake unlocks recovery ballots before sizing the day's event."""
+    guild = SimpleNamespace(id=42)
+    order: list[str] = []
+    disburse_service = MagicMock()
+    economy_service = MagicMock()
+
+    def enforce(guild_id):
+        assert guild_id == guild.id
+        order.append("moratorium")
+        return {"cancelled": False}
+
+    def ensure(guild_id):
+        assert guild_id == guild.id
+        assert order == ["moratorium"]
+        order.append("event")
+        return ({"name": "Ravage", "direction": "deflationary"}, True)
+
+    disburse_service.enforce_voting_moratorium.side_effect = enforce
+    economy_service.ensure_daily_event.side_effect = ensure
+    economy_service.seconds_until_next_trigger.return_value = 900
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: [guild]),
+        ),
+        patch.object(
+            bot_module.bot,
+            "disburse_service",
+            disburse_service,
+            create=True,
+        ),
+        patch.object(
+            bot_module.bot,
+            "economy_event_service",
+            economy_service,
+            create=True,
+        ),
+        patch.object(bot_module, "ECONOMY_RECOVERY_MODE", True),
+        patch.object(bot_module, "_announce_economy_event", AsyncMock()) as announce,
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        await bot_module._economy_event_loop()
+
+    assert order == ["moratorium", "event"]
+    announce.assert_awaited_once_with(
+        guild, {"name": "Ravage", "direction": "deflationary"}
+    )
+    sleep.assert_awaited_once_with(900)
+
+
+@pytest.mark.parametrize(
+    ("configured_wake", "seconds_until_trigger", "expected_sleep"),
+    [
+        (3600, 75, 75),
+        (60, 3600, 60),
+    ],
+)
+async def test_economy_event_loop_wakes_at_interval_or_trigger_whichever_is_first(
+    bot_module,
+    configured_wake,
+    seconds_until_trigger,
+    expected_sleep,
+):
+    """Startup drift cannot leave the worker asleep past the 10 AM trigger."""
+    guild = SimpleNamespace(id=42)
+    economy_service = MagicMock()
+    economy_service.ensure_daily_event.return_value = (None, False)
+    economy_service.seconds_until_next_trigger.return_value = seconds_until_trigger
+
+    with (
+        patch.object(bot_module.bot, "wait_until_ready", AsyncMock()),
+        patch.object(bot_module.bot, "is_closed", side_effect=[False, True]),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: [guild]),
+        ),
+        patch.object(bot_module.bot, "economy_event_service", economy_service, create=True),
+        patch.object(bot_module, "ECONOMY_RECOVERY_MODE", False),
+        patch.object(bot_module, "ECONOMY_EVENT_WAKE_SECONDS", configured_wake),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        await bot_module._economy_event_loop()
+
+    economy_service.seconds_until_next_trigger.assert_called_once_with()
+    sleep.assert_awaited_once_with(expected_sleep)
+
+
+async def test_economy_event_announcement_names_ten_am_pacific_rollover(bot_module):
+    guild = SimpleNamespace(id=42)
+    economy_service = MagicMock()
+    economy_service.format_event.return_value = ("Ravage", "The economy shudders.")
+    cog = SimpleNamespace(announce_to_gamba=AsyncMock())
+
+    with (
+        patch.object(bot_module.bot, "economy_event_service", economy_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+    ):
+        await bot_module._announce_economy_event(
+            guild, {"direction": "deflationary"}
+        )
+
+    embed = cog.announce_to_gamba.await_args.kwargs["embed"]
+    assert embed.footer.text == (
+        "Server-wide daily Jopacoin event • Applies until the next 10 AM Pacific rollover"
+    )
 
 # --------------------------------------------------------------------------- #
 # reconnect recovery sweeps — retained single-flight lifecycle

@@ -65,6 +65,10 @@ from commands.betting_helpers.disburse_actions import (
 )
 from commands.betting_helpers.disburse_views import DisburseVoteView
 from commands.betting_helpers.economy_actions import (
+    apply_gamba_event_multiplier,
+    get_gamba_event_multipliers,
+)
+from commands.betting_helpers.economy_actions import (
     bankruptcy_action as _bankruptcy_action,
 )
 from commands.betting_helpers.economy_actions import (
@@ -120,6 +124,7 @@ from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
 from services.tip_service import TipService
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.wheel_drawing import (
@@ -691,6 +696,9 @@ class BettingCommands(commands.Cog):
         wheel_event_id = (
             str(raw_event_id) if isinstance(raw_event_id, int) else uuid.uuid4().hex
         )
+        gamba_win_multiplier, gamba_loss_multiplier = (
+            await get_gamba_event_multipliers(self, guild_id)
+        )
 
         # Check if player is registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
@@ -779,7 +787,14 @@ class BettingCommands(commands.Cog):
                 )
                 explosion_is_golden = user_id in {p.discord_id for p in top_n}
 
-            explosion_reward = WHEEL_EXPLOSION_REWARD
+            central_explosion_reward = scale_minigame_jc_delta(
+                WHEEL_EXPLOSION_REWARD
+            )
+            explosion_reward = apply_gamba_event_multiplier(
+                central_explosion_reward,
+                win_multiplier=gamba_win_multiplier,
+                loss_multiplier=gamba_loss_multiplier,
+            )
             explosion_penalty = 0
             bankruptcy_service = getattr(self.bot, "bankruptcy_service", None)
             if bankruptcy_service:
@@ -829,6 +844,9 @@ class BettingCommands(commands.Cog):
                     event_id=wheel_event_id,
                     outcome_metadata={
                         "gross_reward": WHEEL_EXPLOSION_REWARD,
+                        "central_scaled_reward": central_explosion_reward,
+                        "event_adjusted_reward": explosion_reward + explosion_penalty,
+                        "event_win_multiplier": gamba_win_multiplier,
                         "credited_reward": explosion_reward,
                         "bankruptcy_penalty": explosion_penalty,
                         "garnished_amount": garnished_amount,
@@ -1274,6 +1292,23 @@ class BettingCommands(commands.Cog):
                 await discover_msg.edit(embed=timeout_embed, view=None)
             result_value = result_wedge[1]
 
+        # Daily-event economics apply after any interactive wedge resolves but
+        # before the outcome processor makes its atomic wallet/Reserve moves.
+        # Replacing the wedge keeps history and the result embed aligned with
+        # the exact credited/debited integer amount.
+        if isinstance(result_value, int) and result_value != 0:
+            event_adjusted_value = apply_gamba_event_multiplier(
+                result_value,
+                win_multiplier=gamba_win_multiplier,
+                loss_multiplier=gamba_loss_multiplier,
+            )
+            result_wedge = (
+                result_wedge[0],
+                event_adjusted_value,
+                result_wedge[2],
+            )
+            result_value = event_adjusted_value
+
         # Anchor for post-outcome gain tracking (bankruptcy debuff / Blood Pact skim),
         # captured AFTER any interactive TOWN_TRIAL/DISCOVER wait so a concurrent
         # balance change during that window (a steal/tip/settlement landing on the
@@ -1315,6 +1350,8 @@ class BettingCommands(commands.Cog):
             mana_effects_service=mana_effects_service,
             is_bad_gamba=is_eligible_for_bad_gamba,
             hostile_event_prefix=hostile_event_prefix,
+            gamba_win_multiplier=gamba_win_multiplier,
+            gamba_loss_multiplier=gamba_loss_multiplier,
         )
         outcome_state = await WheelOutcomeProcessor(
             outcome_context, outcome_state
@@ -1358,6 +1395,8 @@ class BettingCommands(commands.Cog):
             outcome_metadata["mana_insurance_activated"] = True
         if _reroll_used:
             outcome_metadata["mana_reroll_used"] = True
+        outcome_metadata["event_win_multiplier"] = gamba_win_multiplier
+        outcome_metadata["event_loss_multiplier"] = gamba_loss_multiplier
 
         await asyncio.to_thread(
             functools.partial(

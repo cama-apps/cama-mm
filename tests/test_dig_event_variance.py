@@ -130,7 +130,7 @@ class TestEventVariance:
         assert min(rolls) >= scale_minigame_jc_delta(2)
         assert max(rolls) <= scale_minigame_jc_delta(4)
         mean = sum(rolls) / len(rolls)
-        assert 2.0 <= mean <= 2.8, f"mean {mean} not within scaled base-3 range"
+        assert 2.8 <= mean <= 3.2, f"mean {mean} not within neutral base-3 range"
         assert len({*rolls}) >= 2, "no jitter visible across 200 rolls"
 
     def test_zero_jc_outcome_stays_zero(self):

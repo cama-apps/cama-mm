@@ -35,6 +35,11 @@ async def disburse_propose(
                 "A disbursement vote is already active. Use `/disburse status` to see it.",
                 ephemeral=True,
             )
+        elif reason == cog.disburse_service.MONETARY_RECOVERY_CODE:
+            await interaction.response.send_message(
+                cog.disburse_service.MONETARY_RECOVERY_REASON,
+                ephemeral=True,
+            )
         elif reason.startswith("insufficient_fund:"):
             parts = reason.split(":")
             current = int(parts[1])
@@ -80,6 +85,13 @@ async def disburse_status(
     """Show current proposal status, replacing the old message to keep it visible."""
     proposal = await asyncio.to_thread(cog.disburse_service.get_proposal, guild_id)
     if not proposal:
+        if not getattr(cog.disburse_service, "voting_enabled", True):
+            await interaction.response.send_message(
+                cog.disburse_service.MONETARY_RECOVERY_REASON
+                + " There is no active allocation ballot.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             "No active disbursement proposal. Use `/disburse propose` to create one.",
             ephemeral=True,
@@ -101,8 +113,17 @@ async def disburse_status(
 
     # Send new message with embed and voting buttons
     embed = build_disburse_embed(proposal)
-    view = DisburseVoteView(cog.disburse_service, cog)
-    await interaction.response.send_message(embed=embed, view=view)
+    view = (
+        DisburseVoteView(cog.disburse_service, cog)
+        if getattr(cog.disburse_service, "voting_enabled", True)
+        else None
+    )
+    content = (
+        None
+        if getattr(cog.disburse_service, "voting_enabled", True)
+        else cog.disburse_service.MONETARY_RECOVERY_REASON
+    )
+    await interaction.response.send_message(content=content, embed=embed, view=view)
 
     # Update stored message reference to point to the new message
     msg = await interaction.original_response()
@@ -176,6 +197,13 @@ async def disburse_execute(
     if not has_tax_man_permission(interaction):
         await interaction.response.send_message(
             "Only Tax Men can force-execute disbursement proposals.", ephemeral=True
+        )
+        return
+
+    if not getattr(cog.disburse_service, "voting_enabled", True):
+        await interaction.response.send_message(
+            cog.disburse_service.MONETARY_RECOVERY_REASON,
+            ephemeral=True,
         )
         return
 

@@ -2305,6 +2305,7 @@ class BossCombatMixin:
             else:
                 wager_profit = 0
             net_payout = base_reward + wager_profit
+            net_payout = self._apply_daily_economy_reward(guild_id, net_payout)
             # Bankruptcy debuff: a penalized player keeps only the configured
             # fraction of the boss-victory winnings; withheld share is a sink.
             net_payout, boss_bankruptcy_penalty = self._penalize_jc(

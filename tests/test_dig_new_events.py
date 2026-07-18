@@ -201,10 +201,11 @@ class TestStealMode:
             mode="steal",
         )
         assert result.mode == "steal"
-        assert result.victims == [(20002, scale_minigame_jc_delta(15))]
+        expected = scale_minigame_jc_delta(15)
+        assert result.victims == [(20002, expected)]
         # Victim is debited, digger is credited atomically.
-        assert player_repository.get_balance(20001, TEST_GUILD_ID) == 112
-        assert player_repository.get_balance(20002, TEST_GUILD_ID) == 188
+        assert player_repository.get_balance(20001, TEST_GUILD_ID) == 100 + expected
+        assert player_repository.get_balance(20002, TEST_GUILD_ID) == 200 - expected
 
     def test_steal_logs_both_victim_and_thief(
         self, dig_repo, player_repository, monkeypatch,
@@ -232,8 +233,9 @@ class TestStealMode:
                 "ORDER BY id",
             ).fetchall()
         actions = [(r["actor_id"], r["action_type"], r["jc_delta"]) for r in rows]
-        assert (20002, "splash_victim", -12) in actions
-        assert (20001, "splash_thief", 12) in actions
+        expected = scale_minigame_jc_delta(15)
+        assert (20002, "splash_victim", -expected) in actions
+        assert (20001, "splash_thief", expected) in actions
 
     def test_steal_skips_victim_below_auto_blind_threshold(
         self, dig_repo, player_repository, monkeypatch,

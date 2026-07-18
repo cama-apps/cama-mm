@@ -73,6 +73,11 @@ class DisburseService:
         "next_match_pot": "Next Match Pot",
         "cancel": "Cancel",
     }
+    MONETARY_RECOVERY_REASON = (
+        "Jopacoin Reserve voting is temporarily disabled while the economy is "
+        "in monetary recovery mode."
+    )
+    MONETARY_RECOVERY_CODE = "monetary_recovery"
 
     def __init__(
         self,
@@ -81,6 +86,7 @@ class DisburseService:
         loan_repo: LoanRepository,
         min_fund: int | None = None,
         quorum_percentage: float | None = None,
+        voting_enabled: bool = True,
     ):
         self.disburse_repo = disburse_repo
         self.player_repo = player_repo
@@ -89,6 +95,9 @@ class DisburseService:
         self.quorum_percentage = (
             quorum_percentage if quorum_percentage is not None else DISBURSE_QUORUM_PERCENTAGE
         )
+        # Defaults to enabled so direct construction and existing deployments
+        # keep their current behavior unless recovery mode is explicitly opted in.
+        self.voting_enabled = voting_enabled
         # Per-guild serialization lock for execute/force_execute/reset paths.
         # Prevents the reserve-then-distribute sequence (add_to_nonprofit_fund
         # followed by complete_and_disburse_atomic) from interleaving between two
@@ -109,6 +118,11 @@ class DisburseService:
                 self._guild_locks[normalized] = lock
             return lock
 
+    def _require_voting_enabled(self) -> None:
+        """Reject reserve-governance mutations while recovery mode is active."""
+        if not self.voting_enabled:
+            raise ValueError(self.MONETARY_RECOVERY_REASON)
+
     def can_propose(self, guild_id: int | None) -> tuple[bool, str]:
         """
         Check if a disbursement proposal can be created.
@@ -116,6 +130,9 @@ class DisburseService:
         Returns:
             (allowed, reason) - reason is empty string if allowed
         """
+        if not self.voting_enabled:
+            return False, self.MONETARY_RECOVERY_CODE
+
         # Check for existing active proposal
         existing = self.disburse_repo.get_active_proposal(guild_id)
         if existing:
@@ -143,6 +160,7 @@ class DisburseService:
 
     def _create_proposal_locked(self, guild_id: int | None) -> DisburseProposal:
         """Inner create; must be called with the guild lock held."""
+        self._require_voting_enabled()
         can, reason = self.can_propose(guild_id)
         if not can:
             raise ValueError(f"Cannot create proposal: {reason}")
@@ -228,32 +246,37 @@ class DisburseService:
         Returns:
             dict with vote state and quorum info
         """
-        if method not in self.METHODS:
-            raise ValueError(f"Invalid method: {method}")
+        with self._get_guild_lock(guild_id):
+            self._require_voting_enabled()
 
-        proposal = self.get_proposal(guild_id)
-        if not proposal:
-            raise ValueError("No active proposal")
+            if method not in self.METHODS:
+                raise ValueError(f"Invalid method: {method}")
 
-        # Record vote
-        self.disburse_repo.add_vote(
-            guild_id=guild_id,
-            proposal_id=proposal.proposal_id,
-            discord_id=discord_id,
-            method=method,
-        )
+            proposal = self.get_proposal(guild_id)
+            if not proposal:
+                raise ValueError("No active proposal")
 
-        # Get updated state
-        votes = self.disburse_repo.get_vote_counts(guild_id)
-        total = sum(votes.values())
+            # Record vote while holding the same guild lock as recovery-mode
+            # cancellation. This prevents a ballot read just before cancellation
+            # from being inserted as an orphan immediately afterward.
+            self.disburse_repo.add_vote(
+                guild_id=guild_id,
+                proposal_id=proposal.proposal_id,
+                discord_id=discord_id,
+                method=method,
+            )
 
-        return {
-            "votes": votes,
-            "total_votes": total,
-            "quorum_required": proposal.quorum_required,
-            "quorum_reached": total >= proposal.quorum_required,
-            "quorum_progress": total / proposal.quorum_required if proposal.quorum_required > 0 else 1.0,
-        }
+            # Get updated state
+            votes = self.disburse_repo.get_vote_counts(guild_id)
+            total = sum(votes.values())
+
+            return {
+                "votes": votes,
+                "total_votes": total,
+                "quorum_required": proposal.quorum_required,
+                "quorum_reached": total >= proposal.quorum_required,
+                "quorum_progress": total / proposal.quorum_required if proposal.quorum_required > 0 else 1.0,
+            }
 
     def _determine_winner(self, votes: dict[str, int]) -> str | None:
         """
@@ -306,6 +329,7 @@ class DisburseService:
             dict with disbursement details
         """
         with self._get_guild_lock(guild_id):
+            self._require_voting_enabled()
             # Re-check quorum INSIDE the lock so a late vote cannot cause a
             # second caller to re-enter the distribution path after the first
             # one has already reserved / started executing.
@@ -506,6 +530,7 @@ class DisburseService:
             ValueError if no active proposal or no votes cast
         """
         with self._get_guild_lock(guild_id):
+            self._require_voting_enabled()
             proposal = self.get_proposal(guild_id)
             if not proposal:
                 raise ValueError("No active proposal")
@@ -540,6 +565,30 @@ class DisburseService:
                 fund_amount,
                 proposal_outcome="reset",
             )
+
+    def enforce_voting_moratorium(self, guild_id: int | None) -> dict:
+        """Cancel an active ballot and restore its locked Reserve funds.
+
+        This operation is intentionally idempotent. Repeating it after the
+        active proposal has been cancelled reports a no-op and cannot restore
+        the same funds twice or revive the old ballot.
+
+        Returns:
+            ``cancelled``, ``proposal_id``, and ``fund_amount_returned``.
+        """
+        with self._get_guild_lock(guild_id):
+            result = self.disburse_repo.cancel_for_monetary_recovery_atomic(guild_id)
+            if result is None:
+                return {
+                    "cancelled": False,
+                    "proposal_id": None,
+                    "fund_amount_returned": 0,
+                }
+            return {
+                "cancelled": True,
+                "proposal_id": result["proposal_id"],
+                "fund_amount_returned": result["fund_amount_returned"],
+            }
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """Get the most recent disbursement for display in /nonprofit."""

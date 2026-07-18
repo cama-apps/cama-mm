@@ -18,6 +18,28 @@ def scale_minigame_jc_delta(amount: int | float) -> int:
     return magnitude if value > 0 else -magnitude
 
 
+def adjust_generated_jc_reward(
+    amount: int | float,
+    *,
+    guild_id: int | None,
+    economy_event_service=None,
+) -> int:
+    """Apply the structural scale, then today's reward policy, exactly once.
+
+    This helper is only for newly generated JC. Transfers, returned stakes,
+    refunds, Reserve disbursements, and loan principal must keep using their
+    original amount so moving existing liquidity cannot destroy coins.
+
+    Negative values retain the central minigame scale but intentionally skip
+    the generic reward policy. Loss-bearing surfaces such as the wheel have
+    their own daily loss multiplier.
+    """
+    adjusted = scale_minigame_jc_delta(amount)
+    if adjusted <= 0 or economy_event_service is None:
+        return adjusted
+    return int(economy_event_service.adjust_reward(guild_id, adjusted))
+
+
 def scale_deflationary_minigame_jc_delta(amount: int | float) -> int:
     """Scale a minigame JC burn/loss with the global deflation pressure bump."""
     base = scale_minigame_jc_delta(amount)

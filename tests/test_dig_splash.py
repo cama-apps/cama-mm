@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from repositories.dig_repository import DigRepository
+from services.dig_data.balance import strengthen_dig_event_penalty
 from services.dig_service import DigService
 from services.dig_splash import (
     ACTIVE_DIGGERS_LOOKBACK_DAYS,
@@ -259,7 +260,15 @@ class TestResolveSplashBurns:
         assert result.absorbed_total == 10
         assert result.shielded_count == 1
         call = protection.apply_hostile_loss.call_args
-        assert call.args[:4] == (10002, TEST_GUILD_ID, 19, "dig_splash_burn")
+        expected_attempt = scale_deflationary_minigame_jc_delta(
+            strengthen_dig_event_penalty(20)
+        )
+        assert call.args[:4] == (
+            10002,
+            TEST_GUILD_ID,
+            expected_attempt,
+            "dig_splash_burn",
+        )
         assert call.kwargs["destination"] == "burn"
         assert call.kwargs["event_key"] == "dig:test:10002"
         # The fake gateway owns settlement, so the legacy debit is not repeated.
@@ -322,7 +331,7 @@ class TestSplashGrantMode:
         assert vid == 10002
         assert amount == scale_minigame_jc_delta(10)
         # Recipient balance goes UP.
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 108
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 100 + amount
 
     def test_grant_ignores_zero_balance_guard(self, dig_repo, player_repository, monkeypatch):
         """Grant mode does not skip debtors — you can gift into a negative balance."""
@@ -342,8 +351,9 @@ class TestSplashGrantMode:
             penalty_jc=10,
             mode="grant",
         )
-        assert result.victims == [(10002, scale_minigame_jc_delta(10))]
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == -17
+        amount = scale_minigame_jc_delta(10)
+        assert result.victims == [(10002, amount)]
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == -25 + amount
 
 
 class TestSplashStealMode:
@@ -407,9 +417,12 @@ class TestResolveSplashDeepest:
         assert victim_ids == [10002, 10003]
         assert 10001 not in victim_ids
         # Each victim burned the deflation-strengthened penalty; shallower 10004 untouched.
-        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 90
-        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 90
+        penalty = scale_deflationary_minigame_jc_delta(
+            strengthen_dig_event_penalty(10)
+        )
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 100 - penalty
+        assert player_repository.get_balance(10003, TEST_GUILD_ID) == 100 - penalty
         assert player_repository.get_balance(10004, TEST_GUILD_ID) == 100
         # Digger's own balance is not touched by the splash.
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == 100
-        assert result.total_burned == 20
+        assert result.total_burned == 2 * penalty

@@ -140,6 +140,7 @@ def test_tax_group_contains_audit_and_enforcement_commands():
         "fine",
         "resetcooldown",
         "bankruptcy",
+        "policy",
     }
 
 

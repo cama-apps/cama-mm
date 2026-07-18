@@ -99,6 +99,13 @@ class DisburseVoteView(discord.ui.View):
         """Handle a vote button press."""
         guild_id = interaction.guild.id if interaction.guild else None
 
+        if not getattr(self.disburse_service, "voting_enabled", True):
+            await interaction.response.send_message(
+                self.disburse_service.MONETARY_RECOVERY_REASON,
+                ephemeral=True,
+            )
+            return
+
         # Check if user is registered
         player = await asyncio.to_thread(self.cog.player_service.get_player, interaction.user.id, guild_id)
         if not player:

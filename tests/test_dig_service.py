@@ -6,6 +6,7 @@ import random
 import sqlite3
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -186,6 +187,25 @@ class TestCoreDig:
             result = dig_service.dig(pid, guild_id)
             assert result["success"]
             assert not result.get("cave_in"), f"Cave-in on first dig with seed={seed}"
+
+    def test_first_dig_runs_daily_event_after_central_scale(
+        self, dig_service, player_repository, guild_id, monkeypatch
+    ):
+        """The early-return first dig follows the same payout order as later digs."""
+        _register_player(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        rolls = iter((3, 5))
+        monkeypatch.setattr(random, "randint", lambda *_args: next(rolls))
+        event_service = MagicMock()
+        event_service.adjust_reward.return_value = 2
+        dig_service.economy_event_service = event_service
+
+        result = dig_service.dig(10001, guild_id)
+
+        # The neutral structural lever passes the rolled 5 JC through once;
+        # the active daily event then supplies the only reduction.
+        event_service.adjust_reward.assert_called_once_with(guild_id, 5)
+        assert result["jc_earned"] == 2
 
     def test_dig_advances_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Normal dig increases depth within layer advance range."""

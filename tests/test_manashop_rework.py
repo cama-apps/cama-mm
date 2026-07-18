@@ -196,11 +196,11 @@ def test_swamp_siphon_routes_through_protection_gateway(monkeypatch):
     result = service.execute_siphon(USER, TEST_GUILD_ID)
 
     assert result["amount"] == 1
-    assert result["attempted_amount"] == 2
+    assert result["attempted_amount"] == 3
     assert result["absorbed_amount"] == 1
     player_repo.steal_atomic.assert_not_called()
     call = protection_service.apply_hostile_loss.call_args
-    assert call.args[:3] == (TARGET, TEST_GUILD_ID, 2)
+    assert call.args[:3] == (TARGET, TEST_GUILD_ID, 3)
     assert call.kwargs["kind"] == "swamp_siphon"
     assert call.kwargs["actor_id"] == USER
     assert call.kwargs["event_key"].startswith("swamp_siphon:")

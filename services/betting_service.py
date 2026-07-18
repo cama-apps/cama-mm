@@ -4,6 +4,7 @@ Handles betting-related business logic.
 
 import hashlib
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -29,6 +30,7 @@ from config import (
 from domain.models.pending_match_state import PendingMatchState
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
+from utils.economy_scaling import adjust_generated_jc_reward
 
 if TYPE_CHECKING:
     from services.bankruptcy_service import BankruptcyService
@@ -47,6 +49,7 @@ class BettingService:
         max_debt: int | None = None,
         bankruptcy_service: "BankruptcyService | None" = None,
         buff_service=None,
+        economy_event_service=None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
@@ -55,6 +58,27 @@ class BettingService:
         self.max_debt = max_debt if max_debt is not None else MAX_DEBT
         self.bankruptcy_service = bankruptcy_service
         self.buff_service = buff_service
+        self.economy_event_service = economy_event_service
+
+    def _economy_event_multiplier(self, guild_id: int | None, field: str) -> float:
+        """Return one bounded daily-event multiplier, defaulting safely to 1x."""
+        if self.economy_event_service is None:
+            return 1.0
+        try:
+            effects = self.economy_event_service.get_effects(guild_id)
+            value = float(getattr(effects, field, 1.0))
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("Invalid economy event %s; using 1x", field, exc_info=True)
+            return 1.0
+        except Exception:
+            logger.exception("Failed to load economy event %s; using 1x", field)
+            return 1.0
+        if not math.isfinite(value):
+            logger.warning("Non-finite economy event %s; using 1x", field)
+            return 1.0
+        # Event definitions are trusted policy inputs, but bounding here prevents
+        # a malformed row from creating negative payouts or an unbounded mint.
+        return min(10.0, max(0.0, value))
 
     def _apply_blood_pact_skim(
         self, earner_id: int, guild_id: int | None, earning: int
@@ -229,13 +253,17 @@ class BettingService:
 
         betting_mode = pending_state.betting_mode
         pending_match_id = pending_state.pending_match_id
+        event_payout_multiplier = self._economy_event_multiplier(
+            guild_id, "bet_payout_multiplier"
+        )
 
         # Atomic settlement (payouts + bet tagging in one DB transaction). The
         # bankruptcy debuff is folded in here too: a penalized winner keeps only
         # the configured fraction of their profit (payout above their at-risk
-        # stake), so a win never nets a loss — and the withheld share is netted
-        # out of the credit inside the same txn instead of as a follow-up debit
-        # with a crash window. Stake basis is effective_bet (amount * leverage).
+        # stake). The debuff itself cannot turn profit negative; a disclosed
+        # daily-event gross payout multiplier may. The withheld share is netted
+        # out inside the same txn instead of through a follow-up debit with a
+        # crash window. Stake basis is effective_bet (amount * leverage).
         distributions = self.bet_repo.settle_pending_bets_atomic(
             match_id=match_id,
             guild_id=guild_id,
@@ -250,6 +278,7 @@ class BettingService:
             bet_seed_radiant=pending_state.bet_seed_radiant,
             bet_seed_dire=pending_state.bet_seed_dire,
             bet_seed_bonus=pending_state.bet_seed_bonus,
+            payout_multiplier=event_payout_multiplier,
         )
         pending_state.bet_seed_reserved = 0
         pending_state.bet_seed_radiant = 0
@@ -298,7 +327,11 @@ class BettingService:
                 sanctuary_bonus = 0
                 try:
                     if self.buff_service.has_sanctuary_match_bonus(pid, guild_id):
-                        sanctuary_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.15))
+                        sanctuary_bonus = adjust_generated_jc_reward(
+                            max(1, int(JOPACOIN_WIN_REWARD * 0.15)),
+                            guild_id=guild_id,
+                            economy_event_service=self.economy_event_service,
+                        )
                 except Exception:
                     sanctuary_bonus = 0
                 if sanctuary_bonus > 0:
@@ -331,7 +364,11 @@ class BettingService:
                 except Exception:
                     blessing = None
                 if blessing:
-                    blessing_bonus = max(1, int(JOPACOIN_WIN_REWARD * 0.10))
+                    blessing_bonus = adjust_generated_jc_reward(
+                        max(1, int(JOPACOIN_WIN_REWARD * 0.10)),
+                        guild_id=guild_id,
+                        economy_event_service=self.economy_event_service,
+                    )
                     try:
                         consumed = self.buff_service.buff_repo.consume_and_credit_atomic(
                             blessing[0]["id"], pid, guild_id, blessing_bonus

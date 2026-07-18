@@ -397,6 +397,56 @@ async def test_last_correct_answer_shows_summary_and_ends_in_memory_session():
 
 
 @pytest.mark.asyncio
+async def test_daily_event_runs_after_single_player_trivia_central_scale(monkeypatch):
+    import commands.player_trivia as module
+
+    class EventService:
+        def __init__(self):
+            self.calls = []
+
+        def adjust_reward(self, guild_id, amount):
+            self.calls.append((guild_id, amount))
+            return amount // 2
+
+    service = FakePlayerTriviaService(questions=[_question(1)])
+    service.next_result = {
+        "is_correct": True,
+        "reward": 5,
+        "score": 1,
+        "jc_earned": 5,
+        "completed": True,
+    }
+    cog = _cog(service)
+    event_service = EventService()
+    cog.bot.economy_event_service = event_service
+    session = module.PlayerTriviaSession(
+        session_id=42,
+        user_id=101,
+        guild_id=TEST_GUILD_ID,
+        user=_user(),
+        questions=service.questions,
+    )
+    cog._sessions[(101, TEST_GUILD_ID)] = session
+    monkeypatch.setattr(module, "PLAYER_TRIVIA_REWARD_PER_CORRECT", 10)
+    scale_spy = MagicMock(wraps=module.scale_minigame_jc_delta)
+    monkeypatch.setattr(module, "scale_minigame_jc_delta", scale_spy)
+
+    await module.PlayerTriviaView(session, cog)._handle_answer(_interaction(), 1)
+
+    scale_spy.assert_called_once_with(10)
+    assert event_service.calls == [(TEST_GUILD_ID, 10)]
+    assert service.settlements[0][3] == 5
+    assert session.total_jc == 5
+
+
+def test_missing_bot_or_player_trivia_event_service_is_neutral():
+    import commands.player_trivia as module
+
+    assert module._apply_daily_reward_event(None, TEST_GUILD_ID, 8) == 8
+    assert module._apply_daily_reward_event(SimpleNamespace(), TEST_GUILD_ID, 8) == 8
+
+
+@pytest.mark.asyncio
 async def test_other_player_is_rejected_ephemerally():
     from commands.player_trivia import PlayerTriviaSession, PlayerTriviaView
 

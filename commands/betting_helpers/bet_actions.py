@@ -21,6 +21,7 @@ from config import (
     JOPACOIN_MIN_BET,
 )
 from services.permissions import has_admin_permission
+from utils.economy_scaling import scale_minigame_jc_delta
 from utils.formatting import JOPACOIN_EMOTE, calculate_pool_odds
 from utils.interaction_safety import safe_defer
 from utils.neon_helpers import send_neon_result
@@ -151,10 +152,39 @@ async def bet_action(
         try:
             _bet_fx = await asyncio.to_thread(_mana_fx_bet.get_effects, user_id, guild_id)
             if _bet_fx.match_bet_steady_bonus > 0:
-                await asyncio.to_thread(
-                    cog.player_service.adjust_balance,
-                    user_id, guild_id, _bet_fx.match_bet_steady_bonus,
+                steady_bonus = scale_minigame_jc_delta(
+                    _bet_fx.match_bet_steady_bonus
                 )
+                bot_attrs = getattr(cog.bot, "__dict__", {})
+                economy_event_service = (
+                    bot_attrs.get("economy_event_service")
+                    if isinstance(bot_attrs, dict)
+                    else getattr(cog.bot, "economy_event_service", None)
+                )
+                if economy_event_service is not None:
+                    steady_bonus = int(
+                        await asyncio.to_thread(
+                            economy_event_service.adjust_reward,
+                            guild_id,
+                            steady_bonus,
+                        )
+                    )
+                if steady_bonus > 0:
+                    await asyncio.to_thread(
+                        cog.player_service.adjust_balance,
+                        user_id,
+                        guild_id,
+                        steady_bonus,
+                        source="mana_reward",
+                        actor_id=user_id,
+                        related_type="match_bet_steady_bonus",
+                        related_id=pending_match_id,
+                        reason="scaled Green mana bet-placement reward",
+                        metadata={
+                            "base_reward": _bet_fx.match_bet_steady_bonus,
+                            "adjusted_reward": steady_bonus,
+                        },
+                    )
         except Exception:
             logger.debug("Mana steady bonus on bet placement failed", exc_info=True)
 

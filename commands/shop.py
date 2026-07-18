@@ -175,6 +175,37 @@ class ShopCommands(commands.Cog):
         self.dig_service = dig_service
         self.curse_service = curse_service
 
+    async def _adjust_generated_mana_reward(
+        self, guild_id: int | None, amount: int
+    ) -> int:
+        """Scale minted mana JC, then apply today's server-wide reward event.
+
+        This is deliberately limited to newly generated rewards. Purchase
+        refunds, Reserve/player transfers, hostile harvests, and debt-backed
+        credits retain their principal semantics and do not pass through here.
+        """
+        adjusted = scale_minigame_jc_delta(amount)
+        if adjusted <= 0:
+            return adjusted
+
+        bot_attrs = getattr(self.bot, "__dict__", {})
+        economy_event_service = (
+            bot_attrs.get("economy_event_service")
+            if isinstance(bot_attrs, dict)
+            else getattr(self.bot, "economy_event_service", None)
+        )
+        if economy_event_service is None:
+            return adjusted
+        try:
+            return int(
+                await asyncio.to_thread(
+                    economy_event_service.adjust_reward, guild_id, adjusted
+                )
+            )
+        except Exception:
+            logger.exception("Daily economy event failed to adjust a mana reward")
+            return adjusted
+
     async def hero_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
@@ -2330,9 +2361,26 @@ class ShopCommands(commands.Cog):
             largest_loss = await asyncio.to_thread(
                 self._compute_largest_recent_loss, user_id, guild_id, cutoff,
             )
-            refund = min(120, int(largest_loss * 0.60))
+            base_refund = min(120, int(largest_loss * 0.60))
+            refund = await self._adjust_generated_mana_reward(
+                guild_id, base_refund
+            )
             if refund > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, refund)
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance,
+                    user_id,
+                    guild_id,
+                    refund,
+                    source="mana_reward",
+                    actor_id=user_id,
+                    related_type="manashop_mana_shield",
+                    related_id=today,
+                    reason="scaled manashop Mana Shield recovery",
+                    metadata={
+                        "base_reward": base_refund,
+                        "adjusted_reward": refund,
+                    },
+                )
             await interaction.followup.send(
                 f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention} reclaims {refund} {JOPACOIN_EMOTE}.\n"
                 f"(60% of your largest loss in the past 24h, capped at 120. "
@@ -2347,9 +2395,26 @@ class ShopCommands(commands.Cog):
             total_lost = await asyncio.to_thread(
                 self._compute_cumulative_recent_losses, user_id, guild_id, cutoff,
             )
-            recovery = min(120, int(total_lost * 0.35))
+            base_recovery = min(120, int(total_lost * 0.35))
+            recovery = await self._adjust_generated_mana_reward(
+                guild_id, base_recovery
+            )
             if recovery > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance,
+                    user_id,
+                    guild_id,
+                    recovery,
+                    source="mana_reward",
+                    actor_id=user_id,
+                    related_type="manashop_regrowth",
+                    related_id=today,
+                    reason="scaled manashop Regrowth recovery",
+                    metadata={
+                        "base_reward": base_recovery,
+                        "adjusted_reward": recovery,
+                    },
+                )
             await interaction.followup.send(
                 f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
                 f"(35% of your last 24h losses, capped at 120. "

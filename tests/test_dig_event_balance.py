@@ -141,8 +141,12 @@ def test_burn_payout_ratio_uses_strengthened_nominal_amount(
     result = dig_service.resolve_event(10001, 12345, event["id"], "risky")
 
     assert result["splash"]["total_burned"] == 6
-    # Strengthened/scaled nominal burn is 2 * 6, so half of the payout remains.
-    assert result["jc_delta"] == scale_minigame_jc_delta(5)
+    per_victim = scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(5)
+    )
+    nominal_burn = 2 * per_victim
+    expected_payout = scale_minigame_jc_delta(round(10 * 6 / nominal_burn))
+    assert result["jc_delta"] == expected_payout
 
 
 def _carries_threat(outcome: dict | None) -> bool:

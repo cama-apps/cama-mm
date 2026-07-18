@@ -153,7 +153,7 @@ DOTA_BET_SEED_AMOUNT = _parse_int("DOTA_BET_SEED_AMOUNT", 50)
 # Shared minigame/PvP economy policy. Keep the hostile-loss eligibility floor
 # independent from auto-liquidity so tuning betting does not silently retune
 # who can be targeted by hostile effects.
-MINIGAME_JC_DELTA_SCALE = _parse_float("MINIGAME_JC_DELTA_SCALE", 0.8)
+MINIGAME_JC_DELTA_SCALE = _parse_float("MINIGAME_JC_DELTA_SCALE", 1.0)
 HOSTILE_LOSS_MIN_BALANCE = _parse_int("HOSTILE_LOSS_MIN_BALANCE", 50)
 
 # Auto-liquidity (blind bets) configuration
@@ -394,6 +394,31 @@ PREDICTION_RECENT_TRADES_SHOWN = _parse_int("PREDICTION_RECENT_TRADES_SHOWN", 5)
 PREDICTION_DIGEST_HOUR_UTC = _parse_int("PREDICTION_DIGEST_HOUR_UTC", 12)        # anchor UTC hour; guild digest fires here and 12h opposite (twice daily)
 PREDICTION_INITIAL_FAIR_DEFAULT = _parse_int("PREDICTION_INITIAL_FAIR_DEFAULT", 50)
 PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TRADE", 1000)  # hard cap on a single buy
+
+# Server-wide Jopacoin monetary policy. Recovery mode deliberately starts
+# enabled in production: it pauses player-directed Reserve disbursements and
+# lets the daily event controller steer the economy toward a modest temporary
+# contraction. ServiceContainer keeps opt-in constructor defaults so isolated
+# tests and tools do not mutate Reserve governance unless they explicitly ask.
+ECONOMY_EVENTS_ENABLED = _parse_bool("ECONOMY_EVENTS_ENABLED", True)
+ECONOMY_RECOVERY_MODE = _parse_bool("ECONOMY_RECOVERY_MODE", True)
+ECONOMY_RECOVERY_ANNUAL_RATE = _parse_float(
+    "ECONOMY_RECOVERY_ANNUAL_RATE", -0.035
+)
+ECONOMY_NORMAL_ANNUAL_RATE = _parse_float("ECONOMY_NORMAL_ANNUAL_RATE", 0.01)
+ECONOMY_INFLATION_CEILING = _parse_float("ECONOMY_INFLATION_CEILING", 0.02)
+ECONOMY_EVENT_WAKE_SECONDS = _parse_int("ECONOMY_EVENT_WAKE_SECONDS", 3600)
+ECONOMY_EVENT_TRIGGER_HOUR_LOCAL = _parse_int(
+    "ECONOMY_EVENT_TRIGGER_HOUR_LOCAL", 10
+)
+ECONOMY_RECOVERY_STABLE_DAYS = _parse_int("ECONOMY_RECOVERY_STABLE_DAYS", 30)
+ECONOMY_EVENT_LOOKBACK_DAYS = _parse_int("ECONOMY_EVENT_LOOKBACK_DAYS", 7)
+ECONOMY_EVENT_MAX_RESERVE_BURN_PCT = _parse_float(
+    "ECONOMY_EVENT_MAX_RESERVE_BURN_PCT", 0.03
+)
+ECONOMY_EVENT_MAX_WALLET_BURN_PCT = _parse_float(
+    "ECONOMY_EVENT_MAX_WALLET_BURN_PCT", 0.0025
+)
 
 # Trivia configuration
 TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours

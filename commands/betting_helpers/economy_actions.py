@@ -29,6 +29,7 @@ from config import (
     TIP_FEE_RATE,
 )
 from services.flavor_text_service import FlavorEvent
+from utils.economy_scaling import adjust_generated_jc_reward
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import send_neon_result
@@ -38,6 +39,53 @@ if TYPE_CHECKING:
     from commands.betting import BettingCommands
 
 logger = logging.getLogger("cama_bot.commands.betting")
+
+
+def bounded_economy_multiplier(value: object) -> float:
+    """Coerce a policy multiplier to a finite, non-negative operational range."""
+    try:
+        multiplier = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(multiplier):
+        return 1.0
+    return min(10.0, max(0.0, multiplier))
+
+
+async def get_gamba_event_multipliers(
+    cog: BettingCommands, guild_id: int | None,
+) -> tuple[float, float]:
+    """Fetch the active daily event's win/loss multipliers off the event loop."""
+    service = getattr(cog.bot, "economy_event_service", None)
+    if service is None:
+        return 1.0, 1.0
+    try:
+        effects = await asyncio.to_thread(service.get_effects, guild_id)
+    except Exception:
+        logger.exception("Failed to load daily gamba event effects; using 1x")
+        return 1.0, 1.0
+    return (
+        bounded_economy_multiplier(getattr(effects, "gamba_win_multiplier", 1.0)),
+        bounded_economy_multiplier(getattr(effects, "gamba_loss_multiplier", 1.0)),
+    )
+
+
+def apply_gamba_event_multiplier(
+    value: int,
+    *,
+    win_multiplier: float,
+    loss_multiplier: float,
+) -> int:
+    """Scale one numeric wheel outcome, rounding its magnitude toward zero."""
+    if value == 0:
+        return 0
+    multiplier = win_multiplier if value > 0 else loss_multiplier
+    magnitude = int(abs(value) * bounded_economy_multiplier(multiplier))
+    # A numeric wheel result must not collapse into the special zero-value
+    # "lose a turn" outcome (which changes cooldown semantics). Event profiles
+    # can make a payout/loss tiny, but not silently turn it into a different wedge.
+    magnitude = max(1, magnitude)
+    return magnitude if value > 0 else -magnitude
 
 
 async def tip_action(
@@ -184,8 +232,31 @@ async def tip_action(
         # Green steady bonus: recipient gets +1 JC
         if effects.green_steady_bonus > 0:
             try:
-                await asyncio.to_thread(cog.player_service.adjust_balance, player.id, guild_id, effects.green_steady_bonus)
-                mana_notes.append(f"🌲 +{effects.green_steady_bonus} bonus to recipient")
+                green_bonus = await asyncio.to_thread(
+                    adjust_generated_jc_reward,
+                    effects.green_steady_bonus,
+                    guild_id=guild_id,
+                    economy_event_service=getattr(
+                        cog.bot, "economy_event_service", None
+                    ),
+                )
+                if green_bonus > 0:
+                    await asyncio.to_thread(
+                        cog.player_service.adjust_balance,
+                        player.id,
+                        guild_id,
+                        green_bonus,
+                        source="mana_reward",
+                        actor_id=interaction.user.id,
+                        related_type="tip_steady_bonus",
+                        related_id=interaction.user.id,
+                        reason="scaled Green mana tip reward",
+                        metadata={
+                            "base_reward": effects.green_steady_bonus,
+                            "adjusted_reward": green_bonus,
+                        },
+                    )
+                    mana_notes.append(f"🌲 +{green_bonus} bonus to recipient")
             except Exception:
                 logger.error("Tip green_steady_bonus adjustment failed", exc_info=True)
 
@@ -902,4 +973,3 @@ async def nonprofit_action(
     embed.set_footer(text="Use /disburse propose to start a reserve allocation vote!")
 
     await safe_followup(interaction, embed=embed)
-

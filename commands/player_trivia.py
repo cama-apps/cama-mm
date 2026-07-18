@@ -31,6 +31,14 @@ logger = logging.getLogger("cama_bot.commands.player_trivia")
 OPTION_LABELS = ("A", "B", "C", "D")
 
 
+def _apply_daily_reward_event(bot, guild_id: int | None, amount: int) -> int:
+    """Apply the active daily event after central minigame scaling."""
+    event_service = getattr(bot, "economy_event_service", None)
+    if event_service is None or amount <= 0:
+        return amount
+    return event_service.adjust_reward(guild_id, amount)
+
+
 @dataclass
 class PlayerTriviaSession:
     """In-memory UI state for a persisted player-trivia session."""
@@ -182,6 +190,11 @@ class PlayerTriviaView(discord.ui.View):
 
         question = self.session.questions[self.question_index]
         reward = max(0, scale_minigame_jc_delta(PLAYER_TRIVIA_REWARD_PER_CORRECT))
+        reward = _apply_daily_reward_event(
+            self.cog.bot,
+            self.session.guild_id,
+            reward,
+        )
         try:
             result = await asyncio.to_thread(
                 self.cog.bot.player_trivia_service.settle_answer,
