@@ -1879,10 +1879,9 @@ BOSS_LOSS_EXTRA_GEAR_TICKS: int = 1             # extra durability tick on a los
 # ---------------------------------------------------------------------------
 # Persisted boss HP / regen (boss revamp)
 # ---------------------------------------------------------------------------
-# Slowed to "1 HP per 3 hours" so soften-and-retreat damage actually sticks
-# between fights — under the prior 1/2h rate a single dig-cooldown gap was
-# already regenning half of a hard-won softening.
-BOSS_HP_REGEN_PER_3_HOURS: int = 1
+# Slowed to "1 HP per 24 hours" so soften-and-retreat damage actually sticks
+# between fights.
+BOSS_HP_REGEN_PER_24_HOURS: int = 1
 
 
 

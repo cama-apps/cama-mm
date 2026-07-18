@@ -783,7 +783,7 @@ class BettingCommands(commands.Cog):
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
             explosion_is_bankrupt = new_balance < 0
             explosion_is_golden = False
-            if not explosion_is_bankrupt:
+            if not bonus_spin and not explosion_is_bankrupt:
                 top_n = await self._get_visible_balance_leaderboard(
                     interaction,
                     guild_id,
@@ -876,8 +876,12 @@ class BettingCommands(commands.Cog):
             )
             if bonus_spin:
                 result_embed.add_field(
-                    name="Dig Bonus",
-                    value="Free spin — regular `/gamba` cooldown unchanged.",
+                    name="⛏️ Unearthed in the Mine",
+                    value=(
+                        "Your pickaxe struck a buried wheel mechanism, waking a "
+                        "free normal wheel spin from the rock. Regular `/gamba` "
+                        "cooldown unchanged."
+                    ),
                     inline=False,
                 )
             await message.edit(embed=result_embed)
@@ -903,7 +907,7 @@ class BettingCommands(commands.Cog):
         is_golden = False
         visible_players = []
         top_n = []
-        if not is_eligible_for_bad_gamba:
+        if not bonus_spin and not is_eligible_for_bad_gamba:
             visible_players = await self._get_visible_balance_leaderboard(
                 interaction,
                 guild_id,
@@ -1494,8 +1498,12 @@ class BettingCommands(commands.Cog):
         )
         if bonus_spin:
             result_embed.add_field(
-                name="Dig Bonus",
-                value="Free spin — regular `/gamba` cooldown unchanged.",
+                name="⛏️ Unearthed in the Mine",
+                value=(
+                    "Your pickaxe struck a buried wheel mechanism, waking a "
+                    "free normal wheel spin from the rock. Regular `/gamba` "
+                    "cooldown unchanged."
+                ),
                 inline=False,
             )
 

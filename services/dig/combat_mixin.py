@@ -22,7 +22,7 @@ from services.dig_constants import (
     BOSS_BOUNDARIES,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
-    BOSS_HP_REGEN_PER_3_HOURS,
+    BOSS_HP_REGEN_PER_24_HOURS,
     BOSS_LOSS_EXTRA_COOLDOWN_SECONDS,
     BOSS_LOSS_EXTRA_GEAR_TICKS,
     BOSS_LOSS_KNOCKBACK_MAX,
@@ -168,7 +168,7 @@ class BossCombatMixin:
         (the freshly-computed scaled boss HP for this fight) so the boss can
         regen back to it. ``starting_hp`` is:
           - ``hp_remaining`` from the last unfinished engagement, plus regen
-            of ``BOSS_HP_REGEN_PER_3_HOURS`` per three-hour block since
+            of ``BOSS_HP_REGEN_PER_24_HOURS`` per 24-hour block since
             ``last_engaged_at``, capped at ``hp_max``;
           - ``fresh_hp`` if no persisted HP exists.
 
@@ -179,21 +179,27 @@ class BossCombatMixin:
         if not isinstance(entry, dict):
             return fresh_hp, fresh_hp
         hp_remaining = entry.get("hp_remaining")
-        hp_max = entry.get("hp_max", fresh_hp)
-        if hp_remaining is None or hp_max is None:
+        stored_hp_max = entry.get("hp_max", fresh_hp)
+        if hp_remaining is None or stored_hp_max is None:
             return fresh_hp, fresh_hp
         try:
             hp_remaining = int(hp_remaining)
-            hp_max = int(hp_max)
+            stored_hp_max = int(stored_hp_max)
         except (TypeError, ValueError):
             return fresh_hp, fresh_hp
+        hp_max = max(1, int(fresh_hp))
+        damage_dealt = max(0, stored_hp_max - hp_remaining)
+        hp_remaining = max(1, hp_max - damage_dealt)
         last_engaged = entry.get("last_engaged_at")
         if last_engaged is not None:
             try:
-                three_hour_blocks = max(0, (now - int(last_engaged)) // 10800)
+                daily_blocks = max(0, (now - int(last_engaged)) // (24 * 3600))
             except (TypeError, ValueError):
-                three_hour_blocks = 0
-            hp_remaining = min(hp_max, hp_remaining + three_hour_blocks * BOSS_HP_REGEN_PER_3_HOURS)
+                daily_blocks = 0
+            hp_remaining = min(
+                hp_max,
+                hp_remaining + daily_blocks * BOSS_HP_REGEN_PER_24_HOURS,
+            )
         return max(1, hp_remaining), hp_max
 
     def get_carried_wager(self, discord_id: int, guild_id) -> dict | None:
@@ -758,8 +764,9 @@ class BossCombatMixin:
         active_boss_id = boss_def.boss_id
 
         # Echo weakening: if another guildmate has killed this boss within
-        # the last 24h, the boss comes in at -25% HP and pays -30%. The
-        # original killer is exempt so re-runs can't farm their own discount.
+        # the last 24h, the boss comes in at -25% HP and pays 30% less wager
+        # profit. The original killer is exempt so re-runs can't farm their
+        # own discount.
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, active_boss_id)
         echo_applied = bool(
             active_echo
@@ -1086,8 +1093,6 @@ class BossCombatMixin:
 
             # Full victory (or phase 2 already cleared)
             new_depth = at_boss
-            echo_payout_mult = 0.7 if echo_applied else 1.0
-
             # Persist outcome for future dialogue picks. close_win signals when
             # the player just barely won — the boss responds differently.
             outcome_label = "close_win" if win_chance < 0.6 else "defeated"
@@ -1126,12 +1131,14 @@ class BossCombatMixin:
                 at_boss, prestige_level=prestige_level,
             )
             if wager > 0:
-                # A won wager never returns less than the stake — the taper
-                # plus loot penalties (echo) can otherwise drive it negative.
+                # Compute normal wager profit first; Echo trims that profit
+                # without touching the stake or flat boss-clear reward.
                 wager_profit = max(
                     0,
-                    int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1)),
+                    int(wager * (multiplier * boss_payout_mult - 1)),
                 )
+                if echo_applied:
+                    wager_profit = int(wager_profit * 0.7)
             else:
                 wager_profit = 0
             gross_base_reward = base_reward
@@ -2391,7 +2398,6 @@ class BossCombatMixin:
 
             # Full victory
             new_depth = at_boss
-            echo_payout_mult = 0.7 if echo_applied else 1.0
             # Honor drain_next_reward curse: -25% on this reward.
             curse_raw = tunnel.get("stinger_curse")
             drain_applied = False
@@ -2446,14 +2452,15 @@ class BossCombatMixin:
                 at_boss, prestige_level=prestige_level,
             )
             if wager > 0:
-                # A won wager never returns less than the stake — the taper
-                # plus loot penalties (echo, drain curse) can otherwise drive
-                # it negative.
+                # Preserve the drain calculation, then let Echo trim the final
+                # computed wager-profit component.
                 wager_profit = max(
                     0,
-                    int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1))
+                    int(wager * (multiplier * boss_payout_mult - 1))
                     - (int(round(wager * multiplier * 0.25)) if drain_applied else 0),
                 )
+                if echo_applied:
+                    wager_profit = int(wager_profit * 0.7)
             else:
                 wager_profit = 0
             gross_base_reward = self._apply_daily_economy_reward(
@@ -2786,6 +2793,8 @@ class BossCombatMixin:
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
+        ascension = self._get_ascension_effects(prestige_level)
+        boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
 
         # Lock the boss before reading boss_id — handles the post-migration
         # case where boss_progress[depth] still has an empty boss_id (the
@@ -2799,8 +2808,6 @@ class BossCombatMixin:
             and active_echo.get("killer_discord_id") != discord_id
         )
         # Echo HP discount is applied inside `_scale_boss_stats` now.
-        payout_mult = 0.7 if echo_applied else 1.0
-
         # Apply the player's current gear loadout so previewed odds reflect
         # what they'd actually fight with.
         scout_loadout = self._get_loadout(discord_id, guild_id)
@@ -2857,6 +2864,11 @@ class BossCombatMixin:
                 crit_bonus=_scout_crit_bonus,
             )
             base_multiplier = payouts[i] if i < len(payouts) else 2.0
+            effective_multiplier = self._effective_wager_multiplier(
+                base_multiplier, win_pct,
+            ) * boss_payout_mult
+            if echo_applied:
+                effective_multiplier = 1 + (effective_multiplier - 1) * 0.7
             odds[tier] = {
                 "win_pct": round(win_pct, 2),
                 "free_fight_pct": round(free_win_pct, 2),
@@ -2864,10 +2876,7 @@ class BossCombatMixin:
                 "boss_hp": boss_hp,
                 "player_hit": round(player_hit, 2),
                 "boss_hit": round(boss_hit_chance, 2),
-                "multiplier": round(
-                    self._effective_wager_multiplier(base_multiplier, win_pct)
-                    * payout_mult, 2,
-                ),
+                "multiplier": round(effective_multiplier, 2),
             }
 
         # Resolve the locked boss for richer scout output (and Great Lantern tier).

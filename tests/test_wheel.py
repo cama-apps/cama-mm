@@ -1777,6 +1777,11 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     bot.reminder_service = MagicMock()
 
     player_service = _make_wheel_player_service(spinner_balance=50)
+    player_service.get_leaderboard.return_value = [
+        SimpleNamespace(discord_id=1001, jopacoin_balance=50),
+    ]
+    player_service.get_total_positive_balance.return_value = 50
+    player_service.get_leaderboard_bottom.return_value = []
     previous_spin = 1_700_000_000 - 300
     concurrent_spin = 1_700_000_000 - 10
     current_last_spin = {"value": previous_spin}
@@ -1789,24 +1794,26 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
 
     interaction = _make_wheel_interaction(1001)
     interaction.channel.name = "dig"
+    interaction.channel.send = AsyncMock()
     interaction.response.is_done.return_value = True
 
     commands = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
     target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 5)
 
     with patch("commands.betting.require_gamba_channel", new_callable=AsyncMock) as channel_check:
-        with patch("commands.betting.time.time", return_value=1_700_000_000):
-            with patch("commands.betting.random.randint", return_value=target_idx):
-                with patch("commands.betting.random.random", return_value=1.0):
-                    with patch(
-                        "commands.betting.asyncio.sleep",
-                        new_callable=AsyncMock,
-                        side_effect=advance_animation,
-                    ):
-                        with patch.object(
-                            commands, "_create_wheel_gif_file", return_value=MagicMock(),
+        with patch("commands.betting.compute_live_golden_wedges", return_value=WHEEL_WEDGES):
+            with patch("commands.betting.time.time", return_value=1_700_000_000):
+                with patch("commands.betting.random.randint", return_value=target_idx):
+                    with patch("commands.betting.random.random", return_value=1.0):
+                        with patch(
+                            "commands.betting.asyncio.sleep",
+                            new_callable=AsyncMock,
+                            side_effect=advance_animation,
                         ):
-                            await commands._gamba_action(interaction, bonus_spin=True)
+                            with patch.object(
+                                commands, "_create_wheel_gif_file", return_value=MagicMock(),
+                            ) as create_gif:
+                                await commands._gamba_action(interaction, bonus_spin=True)
 
     channel_check.assert_not_awaited()
     player_service.try_claim_wheel_spin.assert_not_called()
@@ -1816,14 +1823,20 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     log_kwargs = player_service.log_wheel_spin.call_args.kwargs
     assert log_kwargs["outcome_code"] == "NUMERIC_3"
     assert log_kwargs["is_bonus"] is True
+    assert log_kwargs["is_golden"] is False
     assert log_kwargs["outcome_metadata"]["dig_reward_multiplier"] == 0.65
+    assert create_gif.call_args.args[3] is False
+    interaction.channel.send.assert_not_awaited()
     _assert_gamba_adjust_call(player_service.adjust_balance, 1001, 123, 3)
     interaction.response.defer.assert_not_awaited()
     interaction.followup.send.assert_awaited_once()
 
     result_embed = interaction.followup.send.return_value.edit.call_args.kwargs["embed"]
     assert any(
-        field.name == "Dig Bonus" and "cooldown unchanged" in field.value
+        field.name == "⛏️ Unearthed in the Mine"
+        and "pickaxe" in field.value
+        and "normal wheel" in field.value
+        and "cooldown unchanged" in field.value
         for field in result_embed.fields
     )
     next_spin_field = next(
@@ -1878,7 +1891,8 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
     assert log_kwargs["outcome_code"] == "EXPLOSION"
     assert log_kwargs["is_bonus"] is True
     assert log_kwargs["is_bankrupt"] is False
-    assert log_kwargs["is_golden"] is True
+    assert log_kwargs["is_golden"] is False
+    player_service.get_leaderboard.assert_not_called()
     assert log_kwargs["event_id"] == "987654"
     assert log_kwargs["outcome_metadata"]["gross_reward"] == WHEEL_EXPLOSION_REWARD
     assert log_kwargs["outcome_metadata"]["dig_reward_multiplier"] == 0.65
@@ -1892,7 +1906,10 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
 
     result_embed = interaction.followup.send.return_value.edit.call_args.kwargs["embed"]
     assert any(
-        field.name == "Dig Bonus" and "cooldown unchanged" in field.value
+        field.name == "⛏️ Unearthed in the Mine"
+        and "pickaxe" in field.value
+        and "normal wheel" in field.value
+        and "cooldown unchanged" in field.value
         for field in result_embed.fields
     )
     next_spin_field = next(

@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.dig")
 
+_ECHO_EFFECT_COPY = "-25% max HP and 30% less wager profit"
+
 BossResolvedCallback = Callable[[int, int | None], Awaitable[None]]
 
 
@@ -281,7 +283,7 @@ class BossWagerModal(discord.ui.Modal):
                     name="Echoing in the Tunnels",
                     value=(
                         f"{killer_mention} killed this boss recently. "
-                        "It came in weakened (-25% HP, -30% payout)."
+                        f"It came in weakened ({_ECHO_EFFECT_COPY})."
                     ),
                     inline=False,
                 )
@@ -794,7 +796,7 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             name="Echoing in the Tunnels",
             value=(
                 f"{killer_mention} killed this boss recently. "
-                "It came in weakened (-25% HP, -30% payout)."
+                f"It came in weakened ({_ECHO_EFFECT_COPY})."
             ),
             inline=False,
         )
@@ -1180,7 +1182,7 @@ class BossEncounterView(discord.ui.View):
                 killer_mention = f"<@{killer_id}>" if killer_id else "a guildmate"
                 lines.append(
                     f"*Weakened — {killer_mention} killed this boss in the last 24h. "
-                    "(-25% HP, -30% payout)*\n"
+                    f"({_ECHO_EFFECT_COPY})*\n"
                 )
             if isinstance(odds, dict):
                 for tier in ("cautious", "bold", "reckless"):
