@@ -374,6 +374,68 @@ def test_resolve_orderbook_settles_locked_market(
     assert player_repository.get_balance(10, TEST_GUILD_ID) - pre == 3 * PREDICTION_CONTRACT_VALUE
 
 
+def test_resolve_orderbook_rejects_deleted_position_holder(
+    prediction_service, prediction_repo, player_repository
+):
+    """Settlement fails atomically when a winner's player row is gone.
+
+    Without the rowcount guard the winner credit silently no-ops: no credit,
+    no ledger row, but lp_pnl still absorbs the full payout — and any later
+    rollback permanently fails on the ledger-consistency check. The whole
+    settlement must raise and roll back instead, leaving the market open.
+    """
+    _add_player(player_repository, 1, balance=1000)
+    _add_player(player_repository, 2, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="deleted holder?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=2)
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=2, side="no", contracts=1)
+    winner_basis = prediction_repo.get_position(pid, 1)["yes_cost_basis_total"]
+    survivor_balance = player_repository.get_balance(2, TEST_GUILD_ID)
+    lp_pnl_before = prediction_repo.get_prediction(pid)["lp_pnl"]
+    assert player_repository.delete(1, TEST_GUILD_ID)
+
+    with pytest.raises(ValueError, match="Winning player not found"):
+        prediction_service.resolve_orderbook(
+            prediction_id=pid, outcome="yes", resolved_by=ADMIN_ID
+        )
+
+    # Clean failure: market untouched, no partial credits, no settlement ledger.
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["status"] == "open"
+    assert pred["lp_pnl"] == lp_pnl_before
+    assert player_repository.get_balance(2, TEST_GUILD_ID) == survivor_balance
+    assert prediction_repo.get_position(pid, 1)["yes_contracts"] == 2
+    assert prediction_repo.get_position(pid, 2)["no_contracts"] == 1
+    with prediction_repo.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM economy_ledger_entries "
+            "WHERE source = 'prediction_resolution' AND related_id = ?",
+            (str(pid),),
+        )
+        assert cursor.fetchone()["n"] == 0
+
+    # Re-registering the holder unbricks resolution — and rollback still works.
+    _add_player(player_repository, 1, balance=0)
+    result = prediction_service.resolve_orderbook(
+        prediction_id=pid, outcome="yes", resolved_by=ADMIN_ID
+    )
+    payout = 2 * PREDICTION_CONTRACT_VALUE
+    assert result["winners"] == [
+        {"discord_id": 1, "contracts": 2, "payout": payout, "profit": payout - winner_basis}
+    ]
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == payout
+
+    rollback = prediction_service.rollback_orderbook(
+        pid, guild_id=TEST_GUILD_ID, rolled_back_by=ADMIN_ID
+    )
+    assert rollback["total_reversed"] == payout
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == 0
+    assert prediction_repo.get_prediction(pid)["status"] == "open"
+
+
 # --------------------------------------------------------------------------- #
 # rollback_orderbook: reverse settlement and reopen the original market
 # --------------------------------------------------------------------------- #

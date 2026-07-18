@@ -1655,6 +1655,8 @@ class PredictionCommands(commands.Cog):
             return
         if not await safe_defer(interaction, ephemeral=True):
             return
+        if not await self._guild_owns_market(interaction, prediction_id):
+            return
 
         summary = await asyncio.to_thread(
             self.prediction_service.refresh_market, prediction_id

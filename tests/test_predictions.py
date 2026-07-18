@@ -104,6 +104,51 @@ def test_position_transfer_rejects_non_open_market(prediction_repo):
     assert attacker_position is None
 
 
+def test_position_transfer_rejects_unregistered_recipient(
+    prediction_repo, player_repository
+):
+    """Contracts must not be parked on an account with no player row in the
+    market's guild — such a holder could never be credited at settlement."""
+    _add_player(player_repository, 1001)
+    market_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=999,
+        question="Steal to nowhere?",
+        initial_fair=50,
+    )
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total)
+            VALUES (?, ?, 8, 24)
+            """,
+            (market_id, 1001),
+        )
+
+    # Recipient has no player row at all.
+    assert prediction_repo.transfer_position_contracts(market_id, 1001, 1002, "yes", 4) is None
+    # A player row in a different guild does not count.
+    player_repository.add(
+        discord_id=1002, discord_username="user1002", guild_id=TEST_GUILD_ID_SECONDARY
+    )
+    assert prediction_repo.transfer_position_contracts(market_id, 1001, 1002, "yes", 4) is None
+    victim = prediction_repo.get_position(market_id, 1001)
+    assert victim["yes_contracts"] == 8
+    assert victim["yes_cost_basis_total"] == 24
+    assert prediction_repo.get_position(market_id, 1002) is None
+
+    # Registered in the market's guild: the transfer goes through.
+    player_repository.add(
+        discord_id=1002, discord_username="user1002", guild_id=TEST_GUILD_ID
+    )
+    result = prediction_repo.transfer_position_contracts(market_id, 1001, 1002, "yes", 4)
+    assert result == {"prediction_id": market_id, "side": "yes", "contracts": 4}
+    recipient = prediction_repo.get_position(market_id, 1002)
+    assert recipient["yes_contracts"] == 4
+    assert recipient["yes_cost_basis_total"] == 12
+
+
 def test_predictions_has_orderbook_columns(prediction_repo):
     with prediction_repo.connection() as conn:
         cursor = conn.cursor()
@@ -364,6 +409,35 @@ def test_sell_full_position_deletes_row(prediction_service, prediction_repo, pla
     prediction_service.sell_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=3)
     pos = prediction_repo.get_position(pid, 1)
     assert pos is None
+
+
+def test_sell_missing_player_row_fails_cleanly(prediction_service, prediction_repo):
+    """A seller whose player row is gone gets a clean error, and the failed
+    transaction leaves position, book, and lp_pnl untouched."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market i2?", initial_fair=50,
+    )["prediction_id"]
+    # Position row without a matching players row (holder deleted).
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total)
+            VALUES (?, ?, 5, 100)
+            """,
+            (pid, 4242),
+        )
+    book_before = prediction_repo.get_book(pid)
+    lp_pnl_before = prediction_repo.get_prediction(pid)["lp_pnl"]
+
+    with pytest.raises(ValueError, match="Player not found"):
+        prediction_repo.sell_contracts_atomic(pid, 4242, "yes", 2)
+
+    pos = prediction_repo.get_position(pid, 4242)
+    assert pos["yes_contracts"] == 5
+    assert pos["yes_cost_basis_total"] == 100
+    assert prediction_repo.get_book(pid) == book_before
+    assert prediction_repo.get_prediction(pid)["lp_pnl"] == lp_pnl_before
 
 
 # --------------------------------------------------------------------------- #
@@ -1168,6 +1242,53 @@ async def test_force_refresh_skipped_when_resolved(
 
     fwup = " ".join((m.get("content") or "") for m in interaction.followup.messages)
     assert "skipped" in fwup.lower()
+
+
+_ADMIN_MARKET_CALLS = {
+    "cancel": lambda cog, interaction, pid: cog.cancel.callback(cog, interaction, pid),
+    "force_refresh": lambda cog, interaction, pid: cog.force_refresh.callback(
+        cog, interaction, pid
+    ),
+    "resolve": lambda cog, interaction, pid: cog.resolve.callback(
+        cog, interaction, pid, SimpleNamespace(value="yes")
+    ),
+    "set_fair": lambda cog, interaction, pid: cog.set_fair.callback(
+        cog, interaction, pid, 70
+    ),
+    "view": lambda cog, interaction, pid: cog.view.callback(cog, interaction, pid),
+}
+
+
+@pytest.mark.parametrize("command", sorted(_ADMIN_MARKET_CALLS))
+async def test_admin_market_commands_reject_cross_guild_market(
+    command, prediction_service, player_repository, patched_cog_helpers
+):
+    """A market ID from guild A must be untouchable from guild B.
+
+    prediction_id is a global auto-increment PK, so every admin command keyed
+    on it needs the ownership guard — this pins the whole class, not just one
+    command.
+    """
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Cross-guild probe?", initial_fair=50,
+    )["prediction_id"]
+    before = prediction_service.prediction_repo.get_prediction(pid)
+
+    cog = _make_cog(prediction_service)
+    cog.refresh_market_embed = AsyncMock()
+    cog.announce_to_gamba = AsyncMock()
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID_SECONDARY)
+    await _ADMIN_MARKET_CALLS[command](cog, interaction, pid)
+
+    after = prediction_service.prediction_repo.get_prediction(pid)
+    assert after == before
+    replies = " ".join((m.get("content") or "") for m in interaction.followup.messages)
+    assert "not found in this server" in replies
+    cog.refresh_market_embed.assert_not_awaited()
 
 
 async def test_resolve_announces_all_winners_and_losers(
