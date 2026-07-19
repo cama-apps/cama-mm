@@ -178,7 +178,8 @@ class TestPackageDealWithPoolShuffle:
         shuffler = BalancedShuffler(
             use_glicko=True,
             consider_roles=True,
-            package_deal_penalty=5000.0,  # High penalty
+            package_deal_penalty=5000.0,  # High penalty: keep the pair on the same team
+            package_deal_split_penalty=5000.0,  # High penalty: keep the pair in the match
         )
 
         # Deal between player 0 and player 5
@@ -189,17 +190,19 @@ class TestPackageDealWithPoolShuffle:
             deals=deals,
         )
 
-        # If both are included, they should be together
-        included_ids = {p.discord_id for p in team1.players} | {p.discord_id for p in team2.players}
+        team1_ids = {p.discord_id for p in team1.players}
+        team2_ids = {p.discord_id for p in team2.players}
+        included_ids = team1_ids | team2_ids
 
-        if 100 in included_ids and 105 in included_ids:
-            team1_ids = {p.discord_id for p in team1.players}
-            team2_ids = {p.discord_id for p in team2.players}
+        # All 11 players are identical, so excluding a non-deal player is always
+        # available; with the high split penalty both deal members must be included.
+        assert 100 in included_ids and 105 in included_ids, (
+            "Package deal pair should both be included when splitting them is penalized"
+        )
 
-            both_team1 = 100 in team1_ids and 105 in team1_ids
-            both_team2 = 100 in team2_ids and 105 in team2_ids
-
-            assert both_team1 or both_team2, "Package deal pair should be on same team when both included"
+        both_team1 = 100 in team1_ids and 105 in team1_ids
+        both_team2 = 100 in team2_ids and 105 in team2_ids
+        assert both_team1 or both_team2, "Package deal pair should be on same team"
 
     def test_branch_bound_respects_split_penalty(self, monkeypatch):
         """Test that 14-player branch-and-bound shuffle respects split penalty."""

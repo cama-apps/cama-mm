@@ -231,8 +231,14 @@ async def test_lobby_command_uses_guild_id(monkeypatch_safe_defer):
     # This should not raise UnboundLocalError
     await cog.lobby.callback(cog, interaction)
 
-    # Should have sent some response
-    assert interaction.followup.messages or lobby_service.get_lobby() is not None
+    # The command must create the lobby in THIS guild, credit the invoker as
+    # creator, auto-join them, and confirm via followup.
+    lobby = lobby_service.get_lobby(guild_id=TEST_GUILD_ID)
+    assert lobby is not None
+    assert lobby.created_by == 1
+    assert 1 in lobby.players
+    assert interaction.followup.messages
+    assert "Lobby created and joined" in interaction.followup.messages[-1]["content"]
     assert "📋" in interaction.channel.sent_messages[0].added_reactions
 
 

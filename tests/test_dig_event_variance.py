@@ -138,11 +138,39 @@ class TestEventVariance:
         assert 1.8 <= mean <= 2.2, f"mean {mean} not within scaled base-3 range"
         assert len({*rolls}) >= 2, "no jitter visible across 200 rolls"
 
-    def test_zero_jc_outcome_stays_zero(self):
-        """A base outcome of 0 JC should never roll non-zero (rounding
-        artifact protection)."""
-        for x in (0.5, 1.0, 1.5, 0.73, 1.42):
-            assert int(round(0 * x)) == 0
+    def test_zero_jc_outcome_stays_zero(
+        self, dig_service, dig_repo, player_repository, monkeypatch, inject_event,
+    ):
+        """End-to-end: an outcome whose base JC is 0 must resolve to
+        jc_delta == 0 and never move the balance. Guards the ``if jc != 0``
+        jitter skip in resolve_event (and the zero-preserving economy
+        scalers downstream) — a jitter change (e.g. an additive roll)
+        could otherwise mint or burn JC on a zero-base outcome."""
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        _seed_tunnel(dig_service, dig_repo, player_repository)
+        ev = _threat_event(
+            "variance_zero_jc",
+            {"description": "Nothing lost.", "advance": 0, "jc": -5,
+             "cave_in": False, "streak_loss": 0, "curse": None},
+        )
+        ev["safe_option"]["success"] = {
+            "description": "Nothing gained.", "advance": 0, "jc": 0,
+            "cave_in": False, "streak_loss": 0, "curse": None,
+        }
+        inject_event(ev)
+        balance_before = player_repository.get_balance(10001, 12345)
+
+        for i in range(80):
+            random.seed(i + 300)
+            r = dig_service.resolve_event(10001, 12345, "variance_zero_jc", "safe")
+            assert r["success"]
+            assert r.get("jc_delta", 0) == 0, (
+                f"jc jitter fired on a 0-base outcome (iter {i}, "
+                f"got {r.get('jc_delta')})"
+            )
+        assert player_repository.get_balance(10001, 12345) == balance_before, (
+            "a 0-JC outcome moved the balance"
+        )
 
     def test_zero_advance_outcome_stays_zero(
         self, dig_service, dig_repo, player_repository, monkeypatch,

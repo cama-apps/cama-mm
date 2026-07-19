@@ -535,47 +535,46 @@ class TestDedicatedLobbyChannelE2E:
 
 
 class TestConfigEnvVar:
-    """Test LOBBY_CHANNEL_ID configuration parsing logic."""
+    """Test LOBBY_CHANNEL_ID configuration parsing (the real config.py logic)."""
+
+    @staticmethod
+    def _parse_via_config(raw):
+        """Reload config.py with LOBBY_CHANNEL_ID set to ``raw`` and return the
+        value production parsed, restoring env and config afterwards."""
+        import importlib
+
+        import config as config_module
+
+        original = os.environ.get("LOBBY_CHANNEL_ID")
+        try:
+            if raw is None:
+                os.environ.pop("LOBBY_CHANNEL_ID", None)
+            else:
+                os.environ["LOBBY_CHANNEL_ID"] = raw
+            importlib.reload(config_module)
+            return config_module.LOBBY_CHANNEL_ID
+        finally:
+            if original is None:
+                os.environ.pop("LOBBY_CHANNEL_ID", None)
+            else:
+                os.environ["LOBBY_CHANNEL_ID"] = original
+            importlib.reload(config_module)
 
     def test_lobby_channel_id_parsing_valid_int(self):
-        """Test parsing logic for valid integer."""
-        # Test the parsing logic directly without reloading config
-        raw = "123456789"
-        try:
-            result = int(raw.strip())
-        except ValueError:
-            result = None
-        assert result == 123456789
+        """A valid integer env value is parsed to int."""
+        assert self._parse_via_config("123456789") == 123456789
 
     def test_lobby_channel_id_parsing_none_when_empty(self):
-        """Test parsing logic when value is empty."""
-        raw = ""
-        if raw:
-            try:
-                result = int(raw.strip())
-            except ValueError:
-                result = None
-        else:
-            result = None
-        assert result is None
+        """An empty env value leaves LOBBY_CHANNEL_ID as None."""
+        assert self._parse_via_config("") is None
 
     def test_lobby_channel_id_parsing_none_on_invalid(self):
-        """Test parsing logic for invalid value."""
-        raw = "not-a-number"
-        try:
-            result = int(raw.strip())
-        except ValueError:
-            result = None
-        assert result is None
+        """A non-numeric env value is rejected to None, not an exception."""
+        assert self._parse_via_config("not-a-number") is None
 
     def test_lobby_channel_id_parsing_strips_whitespace(self):
-        """Test that whitespace is stripped from value."""
-        raw = "  123456789  "
-        try:
-            result = int(raw.strip())
-        except ValueError:
-            result = None
-        assert result == 123456789
+        """Surrounding whitespace is stripped before parsing."""
+        assert self._parse_via_config("  123456789  ") == 123456789
 
 
 class TestGetLobbyTargetChannelEdgeCases:
@@ -1052,97 +1051,97 @@ class TestShuffleDedicatedChannel:
 
 
 class TestResetLobbyDedicatedChannel:
-    """Test /resetlobby command behavior with dedicated lobby channel."""
+    """Test /resetlobby channel resolution by invoking the real command."""
+
+    @staticmethod
+    def _make_cog_and_interaction(lobby_channel_id):
+        from commands.lobby import LobbyCommands
+
+        bot = MagicMock()
+        # No pending match and no active draft, so resetlobby proceeds.
+        bot.match_service.get_last_shuffle.return_value = None
+        bot.draft_state_manager = None
+
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = lobby_channel_id
+        lobby_service.get_lobby.return_value = MagicMock(created_by=12345)
+
+        cog = LobbyCommands(bot, lobby_service, MagicMock())
+
+        interaction = MagicMock()
+        interaction.guild.id = 1
+        interaction.user.id = 12345  # lobby creator, so permission check passes
+        interaction.channel = MagicMock()
+        interaction.channel.id = 200
+
+        return cog, bot, lobby_service, interaction
+
+    @staticmethod
+    async def _run_resetlobby(cog, interaction):
+        """Invoke the real resetlobby callback with Discord-side helpers mocked.
+
+        Returns the mock for safe_unpin_all_bot_messages, whose call argument
+        is the channel the production code resolved.
+        """
+        unpin_mock = AsyncMock(return_value=0)
+        with (
+            patch("commands.lobby.safe_defer", AsyncMock(return_value=True)),
+            patch("commands.lobby.safe_followup", AsyncMock()),
+            patch("commands.lobby.safe_unpin_all_bot_messages", unpin_mock),
+            patch.object(cog, "_update_channel_message_closed", AsyncMock()),
+            patch.object(cog, "_archive_lobby_thread", AsyncMock()),
+        ):
+            await cog.resetlobby.callback(cog, interaction)
+        return unpin_mock
 
     @pytest.mark.asyncio
     async def test_resetlobby_unpins_from_dedicated_channel(self):
         """Test that resetlobby unpins from the dedicated lobby channel, not interaction channel."""
-
-        bot = MagicMock()
+        cog, bot, lobby_service, interaction = self._make_cog_and_interaction(
+            lobby_channel_id=100
+        )
         dedicated_channel = MagicMock()
         dedicated_channel.id = 100
-
-        # Mock the pinned message
-        pinned_message = MagicMock()
-        pinned_message.unpin = AsyncMock()
-        dedicated_channel.fetch_message = AsyncMock(return_value=pinned_message)
-
         bot.get_channel.return_value = dedicated_channel
 
-        lobby_service = MagicMock()
-        lobby_service.get_lobby_channel_id.return_value = 100  # Dedicated channel
-        lobby_service.get_lobby_message_id.return_value = 111
-        lobby_service.get_lobby.return_value = MagicMock(
-            created_by=12345,
-            players=set()
-        )
+        unpin_mock = await self._run_resetlobby(cog, interaction)
 
-        # Simulate the channel resolution logic from resetlobby (lines 639-650)
-        lobby_channel_id = lobby_service.get_lobby_channel_id()
-        lobby_channel = None
-        if lobby_channel_id:
-            lobby_channel = bot.get_channel(lobby_channel_id)
-
-        # Verify dedicated channel is used for unpinning
-        assert lobby_channel == dedicated_channel
-        assert lobby_channel.id == 100
-        bot.get_channel.assert_called_with(100)
+        # The production code must resolve the dedicated channel and unpin there.
+        bot.get_channel.assert_called_once_with(100)
+        unpin_mock.assert_awaited_once_with(dedicated_channel, bot.user)
+        lobby_service.reset_lobby.assert_called_once_with(1)
 
     @pytest.mark.asyncio
     async def test_resetlobby_falls_back_to_interaction_channel(self):
         """Test that resetlobby falls back to interaction channel when dedicated channel unavailable."""
-
-        bot = MagicMock()
-        bot.get_channel.return_value = None  # Dedicated channel not found
+        cog, bot, lobby_service, interaction = self._make_cog_and_interaction(
+            lobby_channel_id=100
+        )
+        bot.get_channel.return_value = None  # Dedicated channel not in cache
         bot.fetch_channel = AsyncMock(side_effect=Exception("Channel not found"))
 
-        lobby_service = MagicMock()
-        lobby_service.get_lobby_channel_id.return_value = 100  # Configured but unavailable
-        lobby_service.get_lobby_message_id.return_value = 111
+        unpin_mock = await self._run_resetlobby(cog, interaction)
 
-        interaction_channel = MagicMock()
-        interaction_channel.id = 200
-
-        # Simulate the fallback logic from resetlobby (lines 647-650)
-        lobby_channel_id = lobby_service.get_lobby_channel_id()
-        lobby_channel = None
-        if lobby_channel_id:
-            try:
-                lobby_channel = bot.get_channel(lobby_channel_id)
-                if not lobby_channel:
-                    lobby_channel = await bot.fetch_channel(lobby_channel_id)
-            except Exception:
-                lobby_channel = interaction_channel
-        else:
-            lobby_channel = interaction_channel
-
-        # Should fall back to interaction channel
-        assert lobby_channel == interaction_channel
-        assert lobby_channel.id == 200
+        # Production tried the dedicated channel, then fell back to the
+        # interaction channel for the unpin.
+        bot.fetch_channel.assert_awaited_once_with(100)
+        unpin_mock.assert_awaited_once_with(interaction.channel, bot.user)
+        lobby_service.reset_lobby.assert_called_once_with(1)
 
     @pytest.mark.asyncio
     async def test_resetlobby_uses_interaction_channel_when_no_dedicated(self):
         """Test that resetlobby uses interaction channel when no dedicated channel configured."""
+        cog, bot, lobby_service, interaction = self._make_cog_and_interaction(
+            lobby_channel_id=None
+        )
 
-        bot = MagicMock()
+        unpin_mock = await self._run_resetlobby(cog, interaction)
 
-        lobby_service = MagicMock()
-        lobby_service.get_lobby_channel_id.return_value = None  # No dedicated channel
-        lobby_service.get_lobby_message_id.return_value = 111
-
-        interaction_channel = MagicMock()
-        interaction_channel.id = 200
-
-        # Simulate the logic from resetlobby
-        lobby_channel_id = lobby_service.get_lobby_channel_id()
-        if lobby_channel_id:
-            lobby_channel = bot.get_channel(lobby_channel_id)
-        else:
-            lobby_channel = interaction_channel
-
-        # Should use interaction channel directly
-        assert lobby_channel == interaction_channel
+        # No dedicated channel configured: the interaction channel is used
+        # directly, without any channel lookup.
         bot.get_channel.assert_not_called()
+        unpin_mock.assert_awaited_once_with(interaction.channel, bot.user)
+        lobby_service.reset_lobby.assert_called_once_with(1)
 
 
 class TestSchemaMigration:

@@ -3,16 +3,15 @@ Consolidated tests for match recording.
 
 Merges the previously fragmented test_match_recording_* files into one module:
 basic win/loss recording, radiant/dire mapping, betting integration, admin
-override + voting, logging, and bug regressions.
+override + voting, and bug regressions.
 """
 
-import logging
+import json
 
 import pytest
 
 from config import JOPACOIN_EXCLUSION_REWARD, JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from domain.models.team import Team
-from rating_system import CamaRatingSystem
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -503,12 +502,80 @@ class TestRadiantDireMapping:
 
 
 class TestRadiantDireBugFixRecording:
-    """Test the critical bug fix where Dire wins were incorrectly recorded as losses."""
+    """Regression tests for the bug where Dire wins were recorded as losses.
+
+    These drive the real mapping owned by ``MatchService.record_match``:
+    winners/losers are derived from the ``winning_team`` side name, radiant is
+    always stored as team1 / dire as team2 in the matches row, and the stored
+    ``winning_team`` column is 1 for a radiant win, 2 for a dire win.
+    """
 
     @pytest.fixture
     def test_db(self, repo_db_path):
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
+
+    # Exact team composition from the original bug report.
+    RADIANT_NAMES = [
+        "FakeUser917762",
+        "FakeUser924119",
+        "FakeUser926408",
+        "FakeUser921765",
+        "FakeUser925589",
+    ]
+    DIRE_NAMES = [
+        "FakeUser923487",
+        "BugReporter",  # The user who reported the bug
+        "FakeUser921510",
+        "FakeUser920053",
+        "FakeUser919197",
+    ]
+
+    def _setup_bug_report_match(self, test_db, base_id):
+        """Seed the 10 bug-report players and pin the exact teams on the
+        real pending match state (mutate + persist, the established pattern)."""
+        player_repo = PlayerRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+        )
+
+        all_ids = list(range(base_id, base_id + 10))
+        for pid, name in zip(all_ids, self.RADIANT_NAMES + self.DIRE_NAMES):
+            player_repo.add(
+                discord_id=pid,
+                discord_username=name,
+                guild_id=TEST_GUILD_ID,
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        radiant_team_ids = all_ids[:5]
+        dire_team_ids = all_ids[5:]
+
+        match_service.shuffle_players(all_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        pending.radiant_team_ids = radiant_team_ids
+        pending.dire_team_ids = dire_team_ids
+        match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+        return match_service, player_repo, radiant_team_ids, dire_team_ids
+
+    @staticmethod
+    def _fetch_match_row(test_db, match_id):
+        conn = test_db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT team1_players, team2_players, winning_team FROM matches WHERE match_id = ?",
+            (match_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row
 
     def test_exact_bug_scenario_dire_wins(self, test_db):
         """
@@ -521,117 +588,49 @@ class TestRadiantDireBugFixRecording:
         - Bug: Dire players were recorded as losses, Radiant players as wins
         - Expected: Dire players should have wins, Radiant players should have losses
         """
-        # Create players with exact names from the bug report
-        radiant_players = [
-            ("FakeUser917762", 1405),
-            ("FakeUser924119", 1120),
-            ("FakeUser926408", 1763),
-            ("FakeUser921765", 1689),
-            ("FakeUser925589", 1568),
-        ]
-
-        dire_players = [
-            ("FakeUser923487", 1161),
-            ("BugReporter", 1500),  # The user who reported the bug
-            ("FakeUser921510", 1816),
-            ("FakeUser920053", 1500),
-            ("FakeUser919197", 1601),
-        ]
-
-        # Assign Discord IDs (using sequential IDs for testing)
-        player_data = []
-        discord_id = 90001
-
-        for name, rating in radiant_players + dire_players:
-            test_db.add_player(
-                discord_id=discord_id,
-                discord_username=name,
-                initial_mmr=1500,
-                glicko_rating=float(rating),
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-            player_data.append((discord_id, name, rating))
-            discord_id += 1
-
-        # Extract Discord IDs for each team
-        radiant_team_ids = [
-            pid for pid, name, _ in player_data if name in [n for n, _ in radiant_players]
-        ]
-        dire_team_ids = [
-            pid for pid, name, _ in player_data if name in [n for n, _ in dire_players]
-        ]
-
-        # Verify we have the right players
-        assert len(radiant_team_ids) == 5, (
-            f"Expected 5 Radiant players, got {len(radiant_team_ids)}"
-        )
-        assert len(dire_team_ids) == 5, f"Expected 5 Dire players, got {len(dire_team_ids)}"
-
-        # Simulate the shuffle output structure (as stored in bot.last_shuffle)
-        # In the actual bug, radiant_team_num could be 1 or 2, dire_team_num would be the other
-        # Let's test both scenarios to ensure the fix works
-
-        # Scenario 1: Radiant is team 1, Dire is team 2
-        radiant_team_num = 1
-        dire_team_num = 2
-
-        # Simulate recording match with "Dire won"
-        # This is what the fixed code does:
-        winning_team_num = dire_team_num  # Dire won
-
-        # Map winning team to team1/team2 for database
-        if winning_team_num == radiant_team_num:
-            # Radiant won
-            team1_ids_for_db = radiant_team_ids
-            team2_ids_for_db = dire_team_ids
-            winning_team_for_db = 1
-        elif winning_team_num == dire_team_num:
-            # Dire won - THIS IS THE BUG SCENARIO
-            team1_ids_for_db = dire_team_ids  # Dire goes to team1
-            team2_ids_for_db = radiant_team_ids  # Radiant goes to team2
-            winning_team_for_db = 1  # team1 (Dire) won
-        else:
-            raise ValueError(f"Invalid winning_team_num: {winning_team_num}")
-
-        # Record the match
-        match_id = test_db.record_match(
-            team1_ids=team1_ids_for_db, team2_ids=team2_ids_for_db, winning_team=winning_team_for_db
+        match_service, player_repo, radiant_team_ids, dire_team_ids = (
+            self._setup_bug_report_match(test_db, base_id=90001)
         )
 
-        assert match_id is not None
+        # Drive the REAL production mapping: record "dire" won.
+        result = match_service.record_match("dire", guild_id=TEST_GUILD_ID)
+
+        assert sorted(result["winning_player_ids"]) == sorted(dire_team_ids)
+        assert sorted(result["losing_player_ids"]) == sorted(radiant_team_ids)
 
         # CRITICAL TEST: Verify Dire players (who won) have WINS
         for pid in dire_team_ids:
-            player = test_db.get_player(pid)
-            player_name = player.name if player else f"Unknown({pid})"
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1, (
-                f"BUG REPRODUCTION: Dire player {player_name} (ID: {pid}) should have 1 win, got {player.wins}"
+                f"BUG REPRODUCTION: Dire player {player.name} (ID: {pid}) should have 1 win, got {player.wins}"
             )
             assert player.losses == 0, (
-                f"BUG REPRODUCTION: Dire player {player_name} (ID: {pid}) should have 0 losses, got {player.losses}"
+                f"BUG REPRODUCTION: Dire player {player.name} (ID: {pid}) should have 0 losses, got {player.losses}"
             )
 
         # CRITICAL TEST: Verify Radiant players (who lost) have LOSSES
         for pid in radiant_team_ids:
-            player = test_db.get_player(pid)
-            player_name = player.name if player else f"Unknown({pid})"
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0, (
-                f"BUG REPRODUCTION: Radiant player {player_name} (ID: {pid}) should have 0 wins, got {player.wins}"
+                f"BUG REPRODUCTION: Radiant player {player.name} (ID: {pid}) should have 0 wins, got {player.wins}"
             )
             assert player.losses == 1, (
-                f"BUG REPRODUCTION: Radiant player {player_name} (ID: {pid}) should have 1 loss, got {player.losses}"
+                f"BUG REPRODUCTION: Radiant player {player.name} (ID: {pid}) should have 1 loss, got {player.losses}"
             )
 
-        # Specifically verify BugReporter (the user who reported the bug) has a WIN
-        reporter_player = None
-        for pid in dire_team_ids:
-            player = test_db.get_player(pid)
-            if player and player.name == "BugReporter":
-                reporter_player = player
-                break
+        # Pin the persisted matches row: radiant stored as team1, dire as
+        # team2, and a dire win stored as winning_team=2.
+        row = self._fetch_match_row(test_db, result["match_id"])
+        assert json.loads(row["team1_players"]) == radiant_team_ids
+        assert json.loads(row["team2_players"]) == dire_team_ids
+        assert row["winning_team"] == 2
 
-        assert reporter_player is not None, "BugReporter player not found in Dire team"
+        # Specifically verify BugReporter (the user who reported the bug) has a WIN
+        reporter_player = next(
+            player_repo.get_by_id(pid, TEST_GUILD_ID)
+            for pid in dire_team_ids
+            if player_repo.get_by_id(pid, TEST_GUILD_ID).name == "BugReporter"
+        )
         assert reporter_player.wins == 1, (
             f"BUG: BugReporter should have 1 win (Dire won), got {reporter_player.wins}"
         )
@@ -645,76 +644,18 @@ class TestRadiantDireBugFixRecording:
 
         Same teams as bug report, but Radiant wins this time.
         """
-        # Same player setup
-        radiant_players = [
-            ("FakeUser917762", 1405),
-            ("FakeUser924119", 1120),
-            ("FakeUser926408", 1763),
-            ("FakeUser921765", 1689),
-            ("FakeUser925589", 1568),
-        ]
-
-        dire_players = [
-            ("FakeUser923487", 1161),
-            ("BugReporter", 1500),
-            ("FakeUser921510", 1816),
-            ("FakeUser920053", 1500),
-            ("FakeUser919197", 1601),
-        ]
-
-        player_data = []
-        discord_id = 91001
-
-        for name, rating in radiant_players + dire_players:
-            test_db.add_player(
-                discord_id=discord_id,
-                discord_username=name,
-                initial_mmr=1500,
-                glicko_rating=float(rating),
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-            player_data.append((discord_id, name, rating))
-            discord_id += 1
-
-        radiant_team_ids = [
-            pid for pid, name, _ in player_data if name in [n for n, _ in radiant_players]
-        ]
-        dire_team_ids = [
-            pid for pid, name, _ in player_data if name in [n for n, _ in dire_players]
-        ]
-
-        # Scenario: Radiant is team 2, Dire is team 1 (opposite of previous test)
-        radiant_team_num = 2
-        dire_team_num = 1
-
-        # Radiant won
-        winning_team_num = radiant_team_num
-
-        # Map winning team to team1/team2 for database
-        if winning_team_num == radiant_team_num:
-            # Radiant won
-            team1_ids_for_db = radiant_team_ids
-            team2_ids_for_db = dire_team_ids
-            winning_team_for_db = 1
-        elif winning_team_num == dire_team_num:
-            # Dire won
-            team1_ids_for_db = dire_team_ids
-            team2_ids_for_db = radiant_team_ids
-            winning_team_for_db = 1
-        else:
-            raise ValueError(f"Invalid winning_team_num: {winning_team_num}")
-
-        # Record the match
-        match_id = test_db.record_match(
-            team1_ids=team1_ids_for_db, team2_ids=team2_ids_for_db, winning_team=winning_team_for_db
+        match_service, player_repo, radiant_team_ids, dire_team_ids = (
+            self._setup_bug_report_match(test_db, base_id=91001)
         )
 
-        assert match_id is not None
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        assert sorted(result["winning_player_ids"]) == sorted(radiant_team_ids)
+        assert sorted(result["losing_player_ids"]) == sorted(dire_team_ids)
 
         # Verify Radiant players (who won) have WINS
         for pid in radiant_team_ids:
-            player = test_db.get_player(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1, (
                 f"Radiant player {player.name} should have 1 win, got {player.wins}"
             )
@@ -724,7 +665,7 @@ class TestRadiantDireBugFixRecording:
 
         # Verify Dire players (who lost) have LOSSES
         for pid in dire_team_ids:
-            player = test_db.get_player(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0, (
                 f"Dire player {player.name} should have 0 wins, got {player.wins}"
             )
@@ -732,70 +673,35 @@ class TestRadiantDireBugFixRecording:
                 f"Dire player {player.name} should have 1 loss, got {player.losses}"
             )
 
+        # A radiant win is stored as winning_team=1 with radiant as team1.
+        row = self._fetch_match_row(test_db, result["match_id"])
+        assert json.loads(row["team1_players"]) == radiant_team_ids
+        assert json.loads(row["team2_players"]) == dire_team_ids
+        assert row["winning_team"] == 1
+
     def test_team_number_validation(self, test_db):
-        """Test that the fix properly validates team numbers."""
-        # Create test players
-        player_ids = list(range(92001, 92011))
-        for pid in player_ids:
-            test_db.add_player(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        team1_ids = player_ids[:5]
-        team2_ids = player_ids[5:]
-
-        # Test with missing team numbers (should be handled gracefully)
-        # This simulates what happens if last_shuffle is missing team numbers
-        # The fix should handle this by using explicit checks
-
-        # Normal case: both team numbers set
-        radiant_team_num = 1
-        dire_team_num = 2
-
-        # Dire wins
-        winning_team_num = dire_team_num
-
-        # This is the fixed logic
-        if radiant_team_num is not None and dire_team_num is not None:
-            if radiant_team_num == dire_team_num:
-                raise ValueError("Invalid: both teams have same number")
-
-            if winning_team_num == radiant_team_num:
-                team1_ids_for_db = team1_ids  # Assuming these are radiant
-                team2_ids_for_db = team2_ids  # Assuming these are dire
-                winning_team_for_db = 1
-            elif winning_team_num == dire_team_num:
-                team1_ids_for_db = team2_ids  # Dire goes to team1
-                team2_ids_for_db = team1_ids  # Radiant goes to team2
-                winning_team_for_db = 1
-            else:
-                raise ValueError(f"Invalid winning_team_num: {winning_team_num}")
-        else:
-            raise ValueError("Missing team numbers")
-
-        # Record match
-        match_id = test_db.record_match(
-            team1_ids=team1_ids_for_db, team2_ids=team2_ids_for_db, winning_team=winning_team_for_db
+        """record_match rejects anything but 'radiant'/'dire', hands out no
+        stats on the failed attempt, and stays recordable afterwards."""
+        match_service, player_repo, radiant_team_ids, dire_team_ids = (
+            self._setup_bug_report_match(test_db, base_id=92001)
         )
 
-        assert match_id is not None
+        with pytest.raises(ValueError, match="winning_team must be 'radiant' or 'dire'"):
+            match_service.record_match("team1", guild_id=TEST_GUILD_ID)
 
-        # Verify team2_ids (Radiant) lost
-        for pid in team1_ids:
-            player = test_db.get_player(pid)
-            # These were originally team1 (Radiant), but got swapped to team2, so they lost
-            assert player.losses == 1, f"Player {pid} should have 1 loss"
+        # Nothing was recorded by the rejected attempt.
+        for pid in radiant_team_ids + dire_team_ids:
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            assert player.wins == 0, f"Player {pid} should have 0 wins after rejected record"
+            assert player.losses == 0, f"Player {pid} should have 0 losses after rejected record"
 
-        # Verify team1_ids (Dire) won (they were swapped to team1)
-        for pid in team2_ids:
-            player = test_db.get_player(pid)
-            # These were originally team2 (Dire), but got swapped to team1, so they won
-            assert player.wins == 1, f"Player {pid} should have 1 win"
+        # The failed attempt must not wedge recording: a valid retry succeeds.
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        assert sorted(result["winning_player_ids"]) == sorted(radiant_team_ids)
+
+        # Once recorded, the pending state is cleared and a re-record fails.
+        with pytest.raises(ValueError, match="No recent shuffle found"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
 
 class TestGlickoRatingPersistence:
@@ -1901,148 +1807,6 @@ class TestAbortVoting:
 
 
 # =============================================================================
-# === Logging ===
-# =============================================================================
-
-
-class TestMatchRecordingLogging:
-    """Test enhanced logging for match recording with player names."""
-
-    @pytest.fixture
-    def test_db(self, repo_db_path):
-        """Create a test database using centralized fast fixture."""
-        return Database(repo_db_path)
-
-    def test_match_logging_includes_player_names(self, test_db, caplog):
-        """Test that match recording logs include player names for winners and losers."""
-        # Set up logging capture
-        caplog.set_level(logging.INFO)
-
-        # Create test players with distinct names
-        player_ids = [5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010]
-        player_names = [f"Winner{i}" if i <= 5 else f"Loser{i - 5}" for i in range(1, 11)]
-
-        for pid, name in zip(player_ids, player_names):
-            test_db.add_player(
-                discord_id=pid,
-                discord_username=name,
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        # Split into teams
-        team1_ids = player_ids[:5]  # Winners
-        team2_ids = player_ids[5:]  # Losers
-
-        # Simulate the match recording logic from bot.py
-        # This tests the logging format without needing the full Discord bot
-        CamaRatingSystem()
-
-        # Get player names for logging (simulating bot.py logic)
-        winning_team_ids = team1_ids
-        losing_team_ids = team2_ids
-
-        winning_player_names = []
-        losing_player_names = []
-
-        for player_id in winning_team_ids:
-            player_obj = test_db.get_player(player_id)
-            if player_obj:
-                winning_player_names.append(player_obj.name)
-            else:
-                winning_player_names.append(f"Unknown({player_id})")
-
-        for player_id in losing_team_ids:
-            player_obj = test_db.get_player(player_id)
-            if player_obj:
-                losing_player_names.append(player_obj.name)
-            else:
-                losing_player_names.append(f"Unknown({player_id})")
-
-        # Record the match
-        match_id = test_db.record_match(team1_ids=team1_ids, team2_ids=team2_ids, winning_team=1)
-
-        # Simulate the logging that happens in bot.py
-        winning_team_display = "Team 1"
-        winning_team_num = 1
-        updated_count = 10
-
-        log_message = (
-            f"Match {match_id} recorded - {winning_team_display} (Team {winning_team_num}) won. "
-            f"Updated ratings for {updated_count} players. "
-            f"Winners: {', '.join(winning_player_names)}. "
-            f"Losers: {', '.join(losing_player_names)}"
-        )
-
-        # Log it (simulating what bot.py does)
-        logger = logging.getLogger("test")
-        logger.info(log_message)
-
-    def test_match_logging_radiant_dire_format(self, test_db, caplog):
-        """Test that logging works correctly with Radiant/Dire team names."""
-        caplog.set_level(logging.INFO)
-
-        # Create test players
-        player_ids = [6001, 6002, 6003, 6004, 6005, 6006, 6007, 6008, 6009, 6010]
-        for pid in player_ids:
-            test_db.add_player(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                initial_mmr=1500,
-                glicko_rating=1500.0,
-                glicko_rd=350.0,
-                glicko_volatility=0.06,
-            )
-
-        # Simulate Radiant/Dire scenario
-        radiant_team_ids = player_ids[:5]
-        dire_team_ids = player_ids[5:]
-        winning_team_num = 1  # Radiant won
-        winning_team_display = "Radiant"
-
-        # Get player names
-        winning_player_names = []
-        losing_player_names = []
-
-        for player_id in radiant_team_ids:
-            player_obj = test_db.get_player(player_id)
-            winning_player_names.append(player_obj.name if player_obj else f"Unknown({player_id})")
-
-        for player_id in dire_team_ids:
-            player_obj = test_db.get_player(player_id)
-            losing_player_names.append(player_obj.name if player_obj else f"Unknown({player_id})")
-
-        # Record match
-        match_id = test_db.record_match(
-            team1_ids=radiant_team_ids, team2_ids=dire_team_ids, winning_team=1
-        )
-
-        # Simulate logging
-        updated_count = 10
-        log_message = (
-            f"Match {match_id} recorded - {winning_team_display} (Team {winning_team_num}) won. "
-            f"Updated ratings for {updated_count} players. "
-            f"Winners: {', '.join(winning_player_names)}. "
-            f"Losers: {', '.join(losing_player_names)}"
-        )
-
-        logger = logging.getLogger("test")
-        logger.info(log_message)
-
-        # Verify Radiant is mentioned
-        assert "Radiant" in log_message
-        assert f"Team {winning_team_num}" in log_message
-
-        # Verify all players are listed
-        assert len(winning_player_names) == 5
-        assert len(losing_player_names) == 5
-        assert all(name in log_message for name in winning_player_names)
-        assert all(name in log_message for name in losing_player_names)
-
-
-# =============================================================================
 # === Bug regressions ===
 # =============================================================================
 
@@ -2055,6 +1819,17 @@ class TestExcludedPlayersBug:
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
 
+    @staticmethod
+    def _make_service(test_db):
+        player_repo = PlayerRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+        )
+        return match_service, player_repo
+
     def test_excluded_player_should_not_get_loss(self, test_db):
         """
         Test the exact bug scenario: player was excluded from match but got a loss.
@@ -2066,6 +1841,8 @@ class TestExcludedPlayersBug:
         - Bug: BugReporter (excluded) got a loss
         - Expected: BugReporter should have 0 wins, 0 losses (not in match)
         """
+        match_service, player_repo = self._make_service(test_db)
+
         # Create 11 players (10 for match + 1 excluded)
         player_names = [
             "FakeUser172699",
@@ -2085,50 +1862,35 @@ class TestExcludedPlayersBug:
         for idx, name in enumerate(player_names):
             discord_id = 96001 + idx
             player_ids.append(discord_id)
-            test_db.add_player(
+            player_repo.add(
                 discord_id=discord_id,
                 discord_username=name,
+                guild_id=TEST_GUILD_ID,
                 initial_mmr=1500,
                 glicko_rating=1500.0,
                 glicko_rd=350.0,
                 glicko_volatility=0.06,
             )
 
-        # Simulate shuffle: 10 players in match, 1 excluded
-        # First 10 players are in the match
-        match_player_ids = player_ids[:10]
+        # Real shuffle with 11 players, then pin BugReporter as the excluded
+        # player and the other ten onto the teams (mutate + persist pattern).
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_team_ids = player_ids[:5]
+        dire_team_ids = player_ids[5:10]
         excluded_player_id = player_ids[10]  # BugReporter
+        pending.radiant_team_ids = radiant_team_ids
+        pending.dire_team_ids = dire_team_ids
+        pending.excluded_player_ids = [excluded_player_id]
+        match_service._persist_match_state(TEST_GUILD_ID, pending)
 
-        # Split match players into teams
-        radiant_team_ids = match_player_ids[:5]
-        dire_team_ids = match_player_ids[5:10]
-
-        # Verify excluded player is NOT in match
-        assert excluded_player_id not in radiant_team_ids
-        assert excluded_player_id not in dire_team_ids
-        assert excluded_player_id not in match_player_ids[:10]
-
-        # Record match - Dire won
-        # Simulate the fixed logic
-        team1_ids_for_db = dire_team_ids  # Dire goes to team1
-        team2_ids_for_db = radiant_team_ids  # Radiant goes to team2
-        winning_team_for_db = 1  # team1 (Dire) won
-
-        # CRITICAL VALIDATION: Ensure excluded player is NOT in match
-        all_match_ids = set(team1_ids_for_db + team2_ids_for_db)
-        assert excluded_player_id not in all_match_ids, (
-            f"BUG: Excluded player {excluded_player_id} found in match teams!"
-        )
-
-        # Record the match
-        match_id = test_db.record_match(
-            team1_ids=team1_ids_for_db, team2_ids=team2_ids_for_db, winning_team=winning_team_for_db
-        )
-
-        assert match_id is not None
+        # Record match through the REAL production path - Dire won
+        result = match_service.record_match("dire", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+        assert result["excluded_player_ids"] == [excluded_player_id]
 
         # CRITICAL TEST: Excluded player should have 0 wins, 0 losses
-        excluded_player = test_db.get_player(excluded_player_id)
+        excluded_player = player_repo.get_by_id(excluded_player_id, TEST_GUILD_ID)
         assert excluded_player is not None
         assert excluded_player.wins == 0, (
             f"BUG: Excluded player BugReporter should have 0 wins, got {excluded_player.wins}"
@@ -2140,59 +1902,79 @@ class TestExcludedPlayersBug:
 
         # Verify match players have correct stats
         for pid in dire_team_ids:
-            player = test_db.get_player(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1, f"Dire player {player.name} should have 1 win"
             assert player.losses == 0, f"Dire player {player.name} should have 0 losses"
 
         for pid in radiant_team_ids:
-            player = test_db.get_player(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0, f"Radiant player {player.name} should have 0 wins"
             assert player.losses == 1, f"Radiant player {player.name} should have 1 loss"
 
+        # Pin the DB rows: the excluded player is in neither stored team and
+        # got no rating_history entry for this match.
+        conn = test_db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT team1_players, team2_players FROM matches WHERE match_id = ?",
+            (match_id,),
+        )
+        row = cursor.fetchone()
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM rating_history WHERE match_id = ? AND discord_id = ?",
+            (match_id, excluded_player_id),
+        )
+        history_count = cursor.fetchone()["n"]
+        conn.close()
+
+        stored_ids = set(json.loads(row["team1_players"])) | set(json.loads(row["team2_players"]))
+        assert excluded_player_id not in stored_ids, (
+            f"BUG: Excluded player {excluded_player_id} found in stored match teams!"
+        )
+        assert stored_ids == set(radiant_team_ids + dire_team_ids)
+        assert history_count == 0, "Excluded player must not get a rating_history row"
+
     def test_excluded_players_validation(self, test_db):
-        """Test that validation prevents excluded players from being in match."""
+        """Production refuses to record a match whose teams contain an
+        excluded player, and hands out no stats on the rejected attempt."""
+        match_service, player_repo = self._make_service(test_db)
+
         # Create 11 players
         player_ids = list(range(97001, 97012))
         for pid in player_ids:
-            test_db.add_player(
+            player_repo.add(
                 discord_id=pid,
                 discord_username=f"Player{pid}",
+                guild_id=TEST_GUILD_ID,
                 initial_mmr=1500,
                 glicko_rating=1500.0,
                 glicko_rd=350.0,
                 glicko_volatility=0.06,
             )
 
-        # Simulate: 10 players in match, 1 excluded
-        match_player_ids = player_ids[:10]
-        excluded_player_id = player_ids[10]
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        # Corrupt the state: mark a player who is also on radiant as excluded.
+        pending.radiant_team_ids = player_ids[:5]
+        pending.dire_team_ids = player_ids[5:10]
+        pending.excluded_player_ids = [player_ids[0], player_ids[10]]
+        match_service._persist_match_state(TEST_GUILD_ID, pending)
 
-        # Split into teams
-        team1_ids = match_player_ids[:5]
-        team2_ids = match_player_ids[5:10]
+        with pytest.raises(ValueError, match="Excluded players detected in match teams"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        # Verify excluded player is not in teams
-        assert excluded_player_id not in team1_ids
-        assert excluded_player_id not in team2_ids
+        # No match row was created and nobody got a win or loss.
+        conn = test_db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM matches")
+        match_count = cursor.fetchone()["n"]
+        conn.close()
+        assert match_count == 0
 
-        # Record match
-        test_db.record_match(team1_ids=team1_ids, team2_ids=team2_ids, winning_team=1)
-
-        # Verify excluded player has no stats
-        excluded_player = test_db.get_player(excluded_player_id)
-        assert excluded_player.wins == 0
-        assert excluded_player.losses == 0
-
-        # Verify match players have stats
-        for pid in team1_ids:
-            player = test_db.get_player(pid)
-            assert player.wins == 1
-            assert player.losses == 0
-
-        for pid in team2_ids:
-            player = test_db.get_player(pid)
+        for pid in player_ids:
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0
-            assert player.losses == 1
+            assert player.losses == 0
 
 
 class TestPlayerOrderPreservation:

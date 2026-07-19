@@ -256,11 +256,16 @@ class TestTeammatesEmbed:
         user = MockUser(1)
         embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
-        # Find even teammates field (may not appear if min_games not met or below threshold)
+        # 4 games together at 2W/2L meets min_games=3 with an exact 50% win
+        # rate, so the Even Teammates field must render with real data.
         even_teammates = next((f for f in embed.fields if "Even Teammates" in f.name), None)
-        if even_teammates:
-            # If it appears, player 2 should be there
-            assert "<@2>" in even_teammates.value or "Player2" in even_teammates.value
+        assert even_teammates is not None, "Even Teammates field missing from embed"
+        assert "No data yet" not in even_teammates.value, (
+            "Even Teammates field rendered empty despite a 50% win-rate teammate "
+            "with 4 games (min_games=3)"
+        )
+        assert "<@2>" in even_teammates.value or "Player2" in even_teammates.value
+        assert "2W/2L" in even_teammates.value
 
     @pytest.mark.asyncio
     async def test_teammates_embed_footer_has_counts(self, profile_cog, player_repo, pairings_repo):
