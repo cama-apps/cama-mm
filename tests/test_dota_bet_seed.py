@@ -543,3 +543,116 @@ def test_roll_and_russianroulette_extensions_are_removed():
     assert "commands.roll" not in bot.EXTENSIONS
     assert "commands.russianroulette" not in bot.EXTENSIONS
     assert "commands.mafia" in bot.EXTENSIONS
+
+
+def test_house_shuffle_routes_queued_pot_to_bonus_and_pays_it_out(services):
+    """A queued next-match pot on a HOUSE match must land in bet_seed_bonus.
+
+    Regression: the pot used to be split radiant/dire even in house mode, but
+    house settlement only pays the bonus field — the pot was consumed without
+    being paid or returned (coins destroyed).
+    """
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    player_ids = list(range(30500, 30510))
+    _add_players(player_repo, player_ids)
+    loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 200)
+    with loan_repo.connection() as conn:
+        conn.execute(
+            "UPDATE nonprofit_fund SET total_collected = 25, next_match_pot = 175 WHERE guild_id = ?",
+            (TEST_GUILD_ID,),
+        )
+    bettor = 30550
+    _add_players(player_repo, [bettor])
+    player_repo.add_balance(bettor, TEST_GUILD_ID, 100)
+
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+
+    assert pending.bet_seed_reserved == 175
+    assert pending.bet_seed_radiant == 0
+    assert pending.bet_seed_dire == 0
+    assert pending.bet_seed_bonus == 175
+
+    pending.bet_lock_until = int(time.time()) + 600
+    betting_service.place_bet(TEST_GUILD_ID, bettor, "radiant", 10, pending)
+    assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 93
+
+    distributions = betting_service.settle_bets(
+        310, TEST_GUILD_ID, "radiant", pending_state=pending
+    )
+
+    # 1:1 house payout (20) + full queued pot (175): every reserved coin is
+    # paid out; the fund keeps exactly what was never queued.
+    assert sum(w["payout"] for w in distributions["winners"]) == 195
+    assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 288
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 25
+
+
+def test_house_settlement_folds_legacy_split_seed_into_bonus(services):
+    """A persisted house state with radiant/dire-split seeds (written before
+    mode-aware routing) must still pay the full pot at settlement."""
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    player_ids = list(range(30600, 30610))
+    _add_players(player_repo, player_ids)
+    bettor = 30650
+    _add_players(player_repo, [bettor])
+    player_repo.add_balance(bettor, TEST_GUILD_ID, 100)
+
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    pending.bet_seed_reserved = 175
+    pending.bet_seed_radiant = 88
+    pending.bet_seed_dire = 87
+    pending.bet_seed_bonus = 0
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    pending.bet_lock_until = int(time.time()) + 600
+    betting_service.place_bet(TEST_GUILD_ID, bettor, "radiant", 10, pending)
+
+    distributions = betting_service.settle_bets(
+        311, TEST_GUILD_ID, "radiant", pending_state=pending
+    )
+
+    assert sum(w["payout"] for w in distributions["winners"]) == 195
+    assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 288
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+
+def test_house_settlement_returns_legacy_split_seed_when_no_winners(services):
+    """Same legacy split-seed shape, but with no winning bets the folded pot
+    must flow back to the nonprofit fund instead of vanishing."""
+    player_repo = services["player_repo"]
+    loan_repo = services["loan_repo"]
+    betting_service = services["betting_service"]
+    match_service = services["match_service"]
+    player_ids = list(range(30700, 30710))
+    _add_players(player_repo, player_ids)
+    bettor = 30750
+    _add_players(player_repo, [bettor])
+    player_repo.add_balance(bettor, TEST_GUILD_ID, 100)
+
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    pending.bet_seed_reserved = 175
+    pending.bet_seed_radiant = 88
+    pending.bet_seed_dire = 87
+    pending.bet_seed_bonus = 0
+    match_service._persist_match_state(TEST_GUILD_ID, pending)
+
+    pending.bet_lock_until = int(time.time()) + 600
+    betting_service.place_bet(TEST_GUILD_ID, bettor, "dire", 10, pending)
+
+    distributions = betting_service.settle_bets(
+        312, TEST_GUILD_ID, "radiant", pending_state=pending
+    )
+
+    assert distributions["winners"] == []
+    assert distributions["seed_returned"] == [{"amount": 175}]
+    assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 93
+    assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 175

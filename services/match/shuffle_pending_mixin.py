@@ -151,7 +151,10 @@ class ShufflePendingMixin:
             return state
 
         state.bet_seed_reserved = reserved
-        if state.betting_mode == "pool" or queued_for_next_match:
+        # Route by betting mode: house settlement only pays the bonus field, so
+        # a queued pot split radiant/dire on a house match would be consumed
+        # without ever being paid out or returned.
+        if state.betting_mode == "pool":
             state.bet_seed_radiant = (reserved + 1) // 2
             state.bet_seed_dire = reserved // 2
             state.bet_seed_bonus = 0

@@ -993,3 +993,111 @@ def test_bet_history_distinguishes_zero_payout_from_null(repo_db_path):
     # NULL payout: the 2x house estimate still applies → profit = 20 - 10 = 10.
     assert by_match[902]["profit"] == 10, \
         "A genuinely unsettled (NULL) winning bet should keep the 2x fallback"
+
+
+def test_settle_skims_blood_pact_on_net_profit_for_penalized_winner(services):
+    """Blood Pact must skim what a penalized winner actually received.
+
+    The bet payout column stays gross; the bankruptcy penalty is netted out of
+    the balance credit inside the settlement txn. Skimming on gross profit
+    over-skims the winner.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+    match_service = services["match_service"]
+
+    player_ids = list(range(9500, 9510))
+    for pid in player_ids:
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=1500,
+            glicko_rating=1500.0,
+            glicko_rd=350.0,
+            glicko_volatility=0.06,
+        )
+    winner = 9550
+    player_repo.add(
+        discord_id=winner,
+        discord_username="PenalizedWinner",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.add_balance(winner, TEST_GUILD_ID, 100)
+    with betting_service.bet_repo.connection() as conn:
+        conn.execute(
+            "INSERT INTO bankruptcy_state (guild_id, discord_id, last_bankruptcy_at, "
+            "penalty_games_remaining, bankruptcy_count) VALUES (?, ?, ?, 3, 1)",
+            (TEST_GUILD_ID, winner, int(time.time())),
+        )
+    betting_service.bankruptcy_service = SimpleNamespace(penalty_rate=0.5)
+    buff_service = MagicMock()
+    buff_service.apply_blood_pact_skim.return_value = 5
+    betting_service.buff_service = buff_service
+
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    pending.bet_lock_until = int(time.time()) + 600
+    betting_service.place_bet(TEST_GUILD_ID, winner, "radiant", 20, pending)
+
+    distributions = betting_service.settle_bets(
+        910, TEST_GUILD_ID, "radiant", pending_state=pending
+    )
+
+    # Gross payout 40 on a 20 stake -> profit 20; the penalty withholds
+    # int(20 * (1 - 0.5)) = 10, so only 10 profit was actually credited.
+    assert distributions["bankruptcy_penalties"] == {winner: 10}
+    buff_service.apply_blood_pact_skim.assert_called_once_with(
+        winner, TEST_GUILD_ID, 10, player_repo
+    )
+    assert distributions["blood_pact_skims"] == {winner: 5}
+    # Mock skim moves no coins: 103 - 20 stake + 40 payout - 10 penalty.
+    assert player_repo.get_balance(winner, TEST_GUILD_ID) == 113
+
+
+def test_award_win_bonus_skims_blood_pact_on_net(services):
+    """Win-bonus Blood Pact skim must use the credited net (post garnish and
+    bankruptcy penalty), not the gross reward."""
+    from unittest.mock import MagicMock
+
+    from config import JOPACOIN_WIN_REWARD
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+
+    pid = 9650
+    player_repo.add(
+        discord_id=pid,
+        discord_username="NetSkimWinner",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.update_balance(pid, TEST_GUILD_ID, 0)
+
+    bankruptcy_service = MagicMock()
+    bankruptcy_service.apply_penalty_to_winnings.return_value = {"penalty_applied": 1}
+    bankruptcy_service.penalty_rate = 0.5
+    betting_service.bankruptcy_service = bankruptcy_service
+    buff_service = MagicMock()
+    buff_service.has_sanctuary_match_bonus.return_value = False
+    buff_service.buff_repo.active_for.return_value = []
+    buff_service.apply_blood_pact_skim.return_value = 1
+    betting_service.buff_service = buff_service
+
+    results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
+
+    expected_penalty = int(JOPACOIN_WIN_REWARD * (1 - 0.5))
+    expected_net = JOPACOIN_WIN_REWARD - expected_penalty
+    assert results[pid]["gross"] == JOPACOIN_WIN_REWARD
+    assert results[pid]["bankruptcy_penalty"] == expected_penalty
+    buff_service.apply_blood_pact_skim.assert_called_once_with(
+        pid, TEST_GUILD_ID, expected_net, player_repo
+    )
+    assert results[pid]["blood_pact_skimmed"] == 1
+    assert results[pid]["net"] == expected_net - 1
+    # Mock skim moves no coins: the player holds the credited net.
+    assert player_repo.get_balance(pid, TEST_GUILD_ID) == expected_net

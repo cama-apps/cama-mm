@@ -760,6 +760,16 @@ class BetRepository(BaseRepository, IBetRepository):
             bet_seed_radiant = seed_fields["bet_seed_radiant"]
             bet_seed_dire = seed_fields["bet_seed_dire"]
             bet_seed_bonus = seed_fields["bet_seed_bonus"]
+            if betting_mode != "pool" and (bet_seed_radiant or bet_seed_dire):
+                # House settlement only pays the bonus field; a queued pot that
+                # was split radiant/dire (states persisted before mode-aware
+                # routing) would be consumed above but never paid nor returned.
+                # Fold it into the bonus so the coins survive settlement.
+                bet_seed_bonus = (
+                    int(bet_seed_bonus) + int(bet_seed_radiant) + int(bet_seed_dire)
+                )
+                bet_seed_radiant = 0
+                bet_seed_dire = 0
 
             if pending_match_id is not None:
                 # Match by pending_match_id OR legacy bets (NULL) with matching timestamp
@@ -868,15 +878,19 @@ class BetRepository(BaseRepository, IBetRepository):
                     payout_updates,
                 )
 
-            # Tag settled bets with match_id
+            # Tag settled bets with match_id. Must cover the same rows the
+            # payment SELECT covered, including legacy bets (NULL
+            # pending_match_id) matched by timestamp — otherwise a paid legacy
+            # bet keeps match_id IS NULL and is re-payable on a settle retry.
             if pending_match_id is not None:
                 cursor.execute(
                     """
                     UPDATE bets
                     SET match_id = ?
-                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    WHERE guild_id = ? AND match_id IS NULL
+                          AND (pending_match_id = ? OR (pending_match_id IS NULL AND bet_time >= ?))
                     """,
-                    (match_id, normalized_guild, pending_match_id),
+                    (match_id, normalized_guild, pending_match_id, since_ts),
                 )
             else:
                 cursor.execute(
@@ -1814,18 +1828,32 @@ class BetRepository(BaseRepository, IBetRepository):
         match_id: int,
         new_winners: list[dict],
         pool_mode: bool = True,
+        old_winners: list[dict] | None = None,
     ) -> tuple[dict[int, int], list[tuple[int, int]]]:
         """
         Pure computation of post-correction payouts (no DB writes).
 
-        For the new winners: they get their stakes back + winnings.
-        For pool mode: recalculate based on pool proportions.
-        For house mode: double the effective bet.
+        The original settlement may have added a losing-side seed and applied a
+        daily-event payout multiplier; neither is persisted anywhere except the
+        gross ``payout`` recorded on the settled (old winner) bet rows. So:
+
+        Pool mode: redistribute exactly what the original settlement paid out
+        (``sum(old winners' payouts)``) pro-rata over the new winners' effective
+        bets — seeds and multiplier carry over and the correction conserves
+        coins exactly (reversal == re-payment). Falls back to stakes-based pool
+        math when the original settlement paid nothing.
+
+        House mode: pay each new winner ``effective_bet * (1 + multiplier)``
+        against the house, then redistribute the surplus the old winners
+        received beyond plain house odds (the seed bonus, plus any event
+        multiplier effect) so fund-sourced seed coins are not destroyed.
 
         Args:
             match_id: The match being corrected
             new_winners: List of bet dicts for bets that now win
             pool_mode: True for parimutuel, False for house mode
+            old_winners: Bet dicts that previously won (carry the settled
+                ``payout`` values the reversal claws back)
 
         Returns:
             Tuple of (balance_deltas mapping discord_id -> amount to add,
@@ -1833,11 +1861,9 @@ class BetRepository(BaseRepository, IBetRepository):
         """
         balance_deltas: dict[int, int] = {}
         payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
+        settled_total = sum(int(b.get("payout") or 0) for b in (old_winners or []))
 
         if pool_mode:
-            # Get all bets for the match to calculate pool
-            all_bets = self.get_settled_bets_for_match(match_id)
-            total_pool = sum(b["effective_bet"] for b in all_bets)
             winner_pool = sum(b["effective_bet"] for b in new_winners)
 
             if winner_pool == 0:
@@ -1853,10 +1879,34 @@ class BetRepository(BaseRepository, IBetRepository):
                     winners_by_user[discord_id] = []
                 winners_by_user[discord_id].append(bet)
 
-            # Calculate payouts per user with single ceiling
+            if settled_total > 0:
+                # Redistribute the settled pot exactly: floor each user's
+                # pro-rata share and give the remainder to the last user.
+                user_payouts: dict[int, int] = {}
+                users = list(winners_by_user.items())
+                allocated_total = 0
+                for index, (discord_id, bets) in enumerate(users):
+                    if index == len(users) - 1:
+                        user_payouts[discord_id] = settled_total - allocated_total
+                    else:
+                        user_eff = sum(b["effective_bet"] for b in bets)
+                        share = int((user_eff / winner_pool) * settled_total)
+                        user_payouts[discord_id] = share
+                        allocated_total += share
+            else:
+                # Original settlement paid nothing (e.g. burned pool) — fall
+                # back to stakes-based pool math with per-user ceiling.
+                all_bets = self.get_settled_bets_for_match(match_id)
+                total_pool = sum(b["effective_bet"] for b in all_bets)
+                user_payouts = {
+                    discord_id: math.ceil(
+                        sum((b["effective_bet"] / winner_pool) * total_pool for b in bets)
+                    )
+                    for discord_id, bets in winners_by_user.items()
+                }
+
             for discord_id, bets in winners_by_user.items():
-                raw_total = sum((b["effective_bet"] / winner_pool) * total_pool for b in bets)
-                user_payout = math.ceil(raw_total)
+                user_payout = user_payouts[discord_id]
                 balance_deltas[discord_id] = user_payout
 
                 # Distribute across individual bets
@@ -1872,11 +1922,42 @@ class BetRepository(BaseRepository, IBetRepository):
         else:
             # House mode: stake + (stake * multiplier), mirroring _calculate_house_payouts
             from config import HOUSE_PAYOUT_MULTIPLIER
+
+            # Surplus the old winners received beyond plain house odds — the
+            # seed bonus (and any event-multiplier effect) the reversal claws
+            # back. Redistribute it so fund-sourced coins aren't destroyed.
+            old_base = sum(
+                int(int(b["effective_bet"]) * (1 + HOUSE_PAYOUT_MULTIPLIER))
+                for b in (old_winners or [])
+            )
+            extra_pot = max(0, settled_total - old_base)
+
+            winners_by_user = {}
             for bet in new_winners:
-                payout = int(bet["effective_bet"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
-                discord_id = bet["discord_id"]
-                balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + payout
-                payout_updates.append((payout, bet["bet_id"]))
+                winners_by_user.setdefault(bet["discord_id"], []).append(bet)
+            new_pool = sum(b["effective_bet"] for b in new_winners)
+
+            extra_by_user: dict[int, int] = {}
+            if extra_pot > 0 and new_pool > 0:
+                users = list(winners_by_user.items())
+                allocated_extra = 0
+                for index, (discord_id, bets) in enumerate(users):
+                    if index == len(users) - 1:
+                        extra_by_user[discord_id] = extra_pot - allocated_extra
+                    else:
+                        user_eff = sum(b["effective_bet"] for b in bets)
+                        share = int((user_eff / new_pool) * extra_pot)
+                        extra_by_user[discord_id] = share
+                        allocated_extra += share
+
+            for discord_id, bets in winners_by_user.items():
+                user_extra = extra_by_user.get(discord_id, 0)
+                for i, bet in enumerate(bets):
+                    payout = int(bet["effective_bet"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
+                    if i == len(bets) - 1:
+                        payout += user_extra
+                    balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + payout
+                    payout_updates.append((payout, bet["bet_id"]))
 
         return balance_deltas, payout_updates
 
@@ -1917,8 +1998,10 @@ class BetRepository(BaseRepository, IBetRepository):
         reversal_deltas = self.reverse_bet_payouts_for_correction(old_winners)
 
         # New payouts are pure compute too; bet-row payout updates come along.
+        # old_winners carry the settled payout values, which embed the seed and
+        # event multiplier the original settlement applied.
         new_deltas, payout_updates = self._compute_new_bet_payouts(
-            match_id, new_winners, pool_mode=pool_mode,
+            match_id, new_winners, pool_mode=pool_mode, old_winners=old_winners,
         )
 
         # Merge reversal + new into the net per-player balance delta.
