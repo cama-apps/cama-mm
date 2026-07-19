@@ -426,11 +426,11 @@ class DuelCommands(commands.Cog):
     async def deliver_due_result(self, result: DuelDueResult) -> None:
         """Deliver an already-claimed reminder or expiry result."""
         challenge = result.challenge
-        event = (
-            DuelFlavorEvent.REMINDER
-            if result.kind is DuelDueKind.REMINDER
-            else DuelFlavorEvent.EXPIRED
-        )
+        event = {
+            DuelDueKind.REMINDER: DuelFlavorEvent.REMINDER,
+            DuelDueKind.EXPIRED: DuelFlavorEvent.EXPIRED,
+            DuelDueKind.UNRESOLVED: DuelFlavorEvent.UNRESOLVED,
+        }[result.kind]
         flavor = await self.flavor_service.generate(
             event,
             challenge.guild_id,
@@ -454,6 +454,28 @@ class DuelCommands(commands.Cog):
                 f"The {challenge.decline_penalty} JC penalty was paid to the challenger."
             )
             allowed_mentions = discord.AllowedMentions.none()
+        elif result.kind is DuelDueKind.UNRESOLVED:
+            trial = (
+                self._trial_label(challenge.trial_type)
+                if challenge.trial_type is not None
+                else "The trial"
+            )
+            content = (
+                f"<@{challenge.challenger_id}> <@{challenge.recipient_id}>\n"
+                f"{flavor}\n"
+                f"Challenge #{challenge.challenge_id} awaits its verdict: "
+                f"{trial}, {challenge.wager} JC a side. Settle it, then have "
+                "an admin record the outcome with /duel resolve."
+            )
+            allowed_mentions = discord.AllowedMentions(
+                everyone=False,
+                roles=False,
+                users=[
+                    discord.Object(id=challenge.challenger_id),
+                    discord.Object(id=challenge.recipient_id),
+                ],
+                replied_user=False,
+            )
         else:
             mention = f"<@{challenge.recipient_id}>" if result.ping_recipient else ""
             content = (

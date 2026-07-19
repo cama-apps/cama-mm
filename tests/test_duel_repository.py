@@ -889,3 +889,79 @@ def test_reminder_pings_recipient_in_final_48_hours(duel_fixture):
     assert claimed is not None
     assert claimed.remaining_seconds == 48 * 3600
     assert claimed.ping_recipient
+
+
+def accept_fixture_challenge(duel_fixture, *, accepted_at=NOW + 100):
+    repo, players, challenge = duel_fixture(wager=500, recipient_balance=500)
+    accepted = repo.accept_atomic(
+        challenge.challenge_id,
+        GUILD_ID,
+        2,
+        DuelTrial.TRIAL_BY_COMBAT,
+        accepted_at,
+        2,
+    )
+    return repo, players, accepted
+
+
+def test_accept_schedules_daily_unresolved_reminder(duel_fixture):
+    _, _, accepted = accept_fixture_challenge(duel_fixture)
+
+    assert accepted.status is DuelStatus.ACCEPTED
+    assert accepted.next_reminder_at == accepted.responded_at + DAY
+
+
+def test_unresolved_claim_bumps_to_next_daily_boundary(duel_fixture):
+    repo, _, accepted = accept_fixture_challenge(duel_fixture)
+    now = accepted.responded_at + 3 * DAY + 500
+
+    claimed = repo.claim_unresolved_reminder_atomic(
+        accepted.challenge_id, GUILD_ID, now
+    )
+
+    assert claimed is not None
+    assert claimed.kind is DuelDueKind.UNRESOLVED
+    assert claimed.challenge.next_reminder_at == accepted.responded_at + 4 * DAY
+    assert (
+        repo.claim_unresolved_reminder_atomic(accepted.challenge_id, GUILD_ID, now)
+        is None
+    )
+
+
+def test_due_scan_includes_accepted_unresolved_reminder(duel_fixture):
+    repo, _, accepted = accept_fixture_challenge(duel_fixture)
+
+    assert repo.get_due_challenge_ids(accepted.next_reminder_at - 1) == []
+    assert repo.get_due_challenge_ids(accepted.next_reminder_at) == [
+        (accepted.challenge_id, GUILD_ID)
+    ]
+
+
+def test_resolution_stops_unresolved_reminders(duel_fixture):
+    repo, _, accepted = accept_fixture_challenge(duel_fixture)
+    repo.resolve_atomic(
+        accepted.challenge_id, GUILD_ID, winner_id=2, now=NOW + 200, actor_id=99
+    )
+
+    assert repo.get_due_challenge_ids(NOW + 30 * DAY) == []
+    assert (
+        repo.claim_unresolved_reminder_atomic(
+            accepted.challenge_id, GUILD_ID, NOW + 30 * DAY
+        )
+        is None
+    )
+
+
+def test_only_one_concurrent_unresolved_claim_succeeds(duel_fixture):
+    repo, _, accepted = accept_fixture_challenge(duel_fixture)
+    now = accepted.responded_at + DAY
+
+    def claim():
+        return DuelChallengeRepository(repo.db_path).claim_unresolved_reminder_atomic(
+            accepted.challenge_id, GUILD_ID, now
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: claim(), range(2)))
+
+    assert sum(result is not None for result in results) == 1

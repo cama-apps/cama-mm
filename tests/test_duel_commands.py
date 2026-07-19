@@ -608,6 +608,38 @@ async def test_final_due_reminders_post_only_the_recipient_ping(
 
 
 @pytest.mark.asyncio
+async def test_unresolved_daily_reminder_pings_both_participants(
+    cog, bot, flavor_service
+):
+    challenge = make_challenge(
+        status=DuelStatus.ACCEPTED,
+        trial_type=DuelTrial.TRIAL_BY_COMBAT,
+        responded_at=1_700_000_100,
+        next_reminder_at=1_700_086_500,
+    )
+    result = DuelDueResult(kind=DuelDueKind.UNRESOLVED, challenge=challenge)
+
+    await cog.deliver_due_result(result)
+
+    flavor_service.generate.assert_awaited_once_with(
+        DuelFlavorEvent.UNRESOLVED,
+        GUILD_ID,
+        ANY,
+    )
+    sent = bot.get_channel.return_value.send.await_args
+    content = sent.kwargs["content"]
+    assert content.startswith(f"<@{CHALLENGER_ID}> <@{RECIPIENT_ID}>")
+    assert "Challenge #7" in content
+    assert "Trial by Combat" in content
+    assert "/duel resolve" in content
+    allowed = sent.kwargs["allowed_mentions"]
+    assert allowed.everyone is False
+    assert allowed.roles is False
+    assert allowed.replied_user is False
+    assert {user.id for user in allowed.users} == {CHALLENGER_ID, RECIPIENT_ID}
+
+
+@pytest.mark.asyncio
 async def test_earlier_daily_reminder_suppresses_recipient_ping(cog, bot):
     result = DuelDueResult(
         kind=DuelDueKind.REMINDER,

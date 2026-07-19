@@ -12,12 +12,26 @@ if TYPE_CHECKING:
 
 
 SYSTEM_PROMPT = (
-    "You are a grim medieval tournament herald announcing a challenge of honor "
-    "in a Dota inhouse league. Write original courtly fanfare with sharp humor, "
-    "jousting imagery, and concise Dota references. Do not quote or imitate any "
-    "existing novel or television dialogue. Never invent or alter players, wagers, "
-    "deadlines, trial types, or outcomes. Produce one line under 300 characters and "
-    "never include mentions."
+    "You are the herald of a challenge of honor in a Dota inhouse league, "
+    "announcing from a world of hedge knights in the spirit of the Tales of "
+    "Dunk and Egg: muddy tourney meadows, mystery knights, trials of seven, "
+    "and armor won on a wager — crossed with concise Dota references. Write "
+    "original courtly fanfare with sharp humor. Do not quote or imitate any "
+    "existing novel or television dialogue. Never invent or alter players, "
+    "wagers, deadlines, trial types, or outcomes. Produce one line under 300 "
+    "characters and never include mentions."
+)
+
+HERALD_VOICES: tuple[str, ...] = (
+    "Speak as a towering hedge knight errant: plainspoken, dutiful, short of "
+    "coin, weighing every quarrel against the price of a new shield.",
+    "Speak as a shaven-headed squire far too clever for his station: dry, "
+    "precise, quietly needling both duelists about their lane equilibrium.",
+    "Speak as the master of the games at a muddy tourney meadow: officious "
+    "and long-suffering, reading the lists while the smallfolk heckle item "
+    "builds.",
+    "Speak as a mystery knight in mismatched armor: theatrical and anonymous, "
+    "hinting the feud will be settled where the river runes spawn.",
 )
 
 
@@ -32,32 +46,45 @@ class DuelFlavorEvent(str, Enum):
     EXPIRED = "expired"
     RESOLVED = "resolved"
     VOIDED = "voided"
+    UNRESOLVED = "unresolved"
 
 
 FALLBACKS: dict[DuelFlavorEvent, tuple[str, ...]] = {
     DuelFlavorEvent.ISSUED: (
-        "📯 The lists are opened; a gauntlet lands harder than a missed last hit.",
+        "📯 A gauntlet slaps the mud of the tourney meadow, and even the couriers stop to gawk.",
+        "📯 A shield is hung upon the lists; let the smallfolk gather and the wards go out.",
     ),
     DuelFlavorEvent.REMINDER: (
-        "⏳ The herald tolls again: answer the challenge before the courier grows old.",
+        "⏳ The herald calls across the meadow: answer, ser, before your courier grows a beard.",
+        "⏳ The lists still wait on your word; a hedge knight would have answered by now.",
     ),
     DuelFlavorEvent.ACCEPTED_COMBAT: (
-        "⚔️ Helms lower and lances rise; this quarrel will be settled in combat.",
+        "⚔️ Lances lower in the mid lane; this quarrel will be settled before gods, men, and observer wards.",
+        "⚔️ Trial by combat is sworn: one lane, two knights, and a river rune between them.",
     ),
     DuelFlavorEvent.ACCEPTED_FIVE: (
-        "🛡️ Five banners gather on each side; the lanes shall judge this grand dispute.",
+        "🛡️ Five banners to a side, near enough a trial of seven for this muddy meadow.",
+        "🛡️ The trial of five is sworn; may the drafting gods show mercy on both retinues.",
     ),
     DuelFlavorEvent.DECLINED: (
-        "🏳️ The gauntlet is returned; the court records a strategic retreat.",
+        "🏳️ The gauntlet is returned with its seal unbroken; the meadow boos politely.",
+        "🏳️ The shield comes down without a tilt, and the rolls record a careful knight.",
     ),
     DuelFlavorEvent.EXPIRED: (
-        "⌛ The challenge fades unanswered, like a smoke breaking before the gank.",
+        "⌛ The challenge rusts on the lists like a puddle-painted shield left in the rain.",
+        "⌛ No answer came; the herald strikes the tilt from the rolls at first light.",
     ),
     DuelFlavorEvent.RESOLVED: (
-        "🏆 The dust settles and the herald seals the victor's name in the ledger.",
+        "🏆 The tilt is run; the victor's name goes in the rolls and the pot rides home in his saddlebags.",
+        "🏆 The commons cheer, the loser mutters of buybacks, and the ledger closes another quarrel.",
     ),
     DuelFlavorEvent.VOIDED: (
-        "📜 The marshal strikes the challenge from the rolls; no lance shall fall today.",
+        "📜 The marshal voids the tilt; both purses ride home unbloodied.",
+        "📜 No verdict and no victor; the stakes walk home like a courier spared.",
+    ),
+    DuelFlavorEvent.UNRESOLVED: (
+        "🗡️ The meadow still waits: two knights sworn to a tilt that no one has ridden.",
+        "🗡️ The rolls show an unfinished trial; even the wards have expired waiting.",
     ),
 }
 
@@ -100,9 +127,10 @@ class DuelFlavorService:
                 key: _sanitize_detail(value) for key, value in details.items()
             }
             prompt = f"Event: {event.value}. Details: {cleaned_details}."
+            voice = self._rng.choice(HERALD_VOICES)
             generated = await self.ai_service.complete(
                 prompt,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=f"{SYSTEM_PROMPT} {voice}",
             )
         except Exception:
             return fallback()
