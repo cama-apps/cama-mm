@@ -30,24 +30,17 @@ def test_chunk_discord_content_hard_splits_oversized_line() -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_announcement_separates_flavor_and_chunks_both_parts() -> None:
+async def test_record_announcement_chunks_the_reliable_result_message() -> None:
     cog = MatchCommands(Mock(), Mock(), Mock(), Mock())
     interaction = SimpleNamespace(followup=AsyncMock())
     result_message = "✅ Match recorded.\n" + "\n".join(
         f"payout-{index}: {'x' * 90}" for index in range(45)
     )
-    flavor_text = "\n\n💬 " + "flavor " * 700
-
-    await cog._send_record_announcement(interaction, result_message, flavor_text)
+    await cog._send_record_announcement(interaction, result_message)
 
     sent = [call.args[0] for call in interaction.followup.send.call_args_list]
     result_chunks = _chunk_discord_content(result_message)
-    flavor_chunks = _chunk_discord_content(flavor_text)
-
-    assert sent == result_chunks + flavor_chunks
+    assert sent == result_chunks
     assert len(result_chunks) > 1
-    assert len(flavor_chunks) > 1
     assert all(len(content) <= DISCORD_MESSAGE_MAX_CHARS for content in sent)
-    assert all("💬" not in content for content in result_chunks)
-    assert flavor_chunks[0].startswith("💬")
     assert all(call.kwargs == {"ephemeral": False} for call in interaction.followup.send.call_args_list)

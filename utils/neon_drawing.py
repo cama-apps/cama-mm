@@ -31,6 +31,14 @@ CRT_BLACK = (10, 10, 15)
 DIM_GREEN = (0, 120, 30)
 DIM_CYAN = (0, 100, 100)
 
+POST_MATCH_GIF_THEMES: tuple[str, ...] = (
+    "divine_rapier_position",
+    "buyback_denied",
+    "ancient_liquidated",
+    "beyond_godlike",
+    "odds_anomaly",
+)
+
 # Witch's Curse palette (toxic green + violet hellfire over a darker, purpler CRT)
 WITCH_GREEN = (57, 255, 20)
 WITCH_VIOLET = (170, 60, 255)
@@ -144,9 +152,113 @@ def _save_gif(frames: list[Image.Image], durations: list[int]) -> io.BytesIO:
     return buffer
 
 
+def _fit_neon_text(text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> str:
+    """Truncate terminal text so centered labels stay inside the CRT viewport."""
+    max_width = WIDTH - 40
+    if font.getbbox(text)[2] <= max_width:
+        return text
+    truncated = text
+    while truncated and font.getbbox(f"{truncated}...")[2] > max_width:
+        truncated = truncated[:-1]
+    return f"{truncated}..."
+
+
 # ---------------------------------------------------------------------------
 # GIF Generators
 # ---------------------------------------------------------------------------
+
+
+def create_post_match_gif(
+    name: str,
+    value: int,
+    *,
+    theme: str,
+) -> io.BytesIO:
+    """Render a themed JOPA-T settlement animation for a completed match."""
+    if theme not in POST_MATCH_GIF_THEMES:
+        raise ValueError(f"Unsupported post-match GIF theme: {theme!r}")
+
+    display_name = " ".join(name.split())[:22] or "UNKNOWN CLIENT"
+    font_lg = _get_font(20, bold=True)
+    font_md = _get_font(14, bold=True)
+    font_sm = _get_font(12)
+    value_formats = {
+        "divine_rapier_position": f"+{value:,} RATING",
+        "buyback_denied": f"{value:,} JC LOST",
+        "ancient_liquidated": f"{value:,} JC PAID",
+        "beyond_godlike": f"{value:,} MATCH STREAK",
+        "odds_anomaly": f"{value:,}% IMPLIED ODDS",
+    }
+    value_text = _fit_neon_text(value_formats[theme], font_lg)
+
+    theme_details = {
+        "divine_rapier_position": ("RAPIER POSITION", NEON_YELLOW, NEON_GREEN),
+        "buyback_denied": ("BUYBACK DENIED", NEON_RED, NEON_PINK),
+        "ancient_liquidated": ("ANCIENT LIQUIDATED", NEON_CYAN, NEON_GREEN),
+        "beyond_godlike": ("BEYOND GODLIKE", (180, 80, 255), NEON_YELLOW),
+        "odds_anomaly": ("ODDS ANOMALY", NEON_CYAN, NEON_PINK),
+    }
+    banner, primary, secondary = theme_details[theme]
+    frames: list[Image.Image] = []
+    durations: list[int] = []
+
+    for frame_index in range(18):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+        progress = (frame_index + 1) / 18
+        draw.rectangle([12, 12, WIDTH - 12, HEIGHT - 12], outline=primary, width=2)
+        _draw_text_centered(draw, "JOPA-T/v3.7 MATCH LEDGER", 24, secondary, font_sm)
+        _draw_text_centered(draw, banner, 50, primary, font_lg)
+        _draw_text_centered(draw, _fit_neon_text(display_name, font_md), 88, secondary, font_md)
+        _draw_text_centered(draw, value_text, 112, primary, font_lg)
+
+        if theme == "divine_rapier_position":
+            size = int(20 + progress * 48)
+            center_x, center_y = WIDTH // 2, 210
+            draw.polygon(
+                [(center_x, center_y - size), (center_x + size, center_y),
+                 (center_x, center_y + size), (center_x - size, center_y)],
+                outline=primary,
+                width=3,
+            )
+            for offset in range(3):
+                y = 250 - offset * 16
+                draw.line([(80 + frame_index * 8, y), (320 - frame_index * 8, y)], fill=secondary)
+        elif theme == "buyback_denied":
+            for row in range(6):
+                y = 160 + row * 18
+                width = max(12, int(50 + progress * 250) - row * 18)
+                draw.rectangle([WIDTH // 2 - width // 2, y, WIDTH // 2 + width // 2, y + 8], fill=primary)
+            _draw_text_centered(draw, "LIQUIDATION LOCKED", 268, secondary, font_sm)
+        elif theme == "ancient_liquidated":
+            for column in range(8):
+                x = 54 + column * 38
+                height = int((column + 2) * 8 * progress)
+                draw.rectangle([x, 255 - height, x + 22, 255], outline=primary, width=2)
+                if frame_index >= column * 2:
+                    draw.rectangle([x + 4, 251 - height, x + 18, 251], fill=secondary)
+            _draw_text_centered(draw, "SETTLEMENT COMPLETE", 268, primary, font_sm)
+        elif theme == "beyond_godlike":
+            for streak in range(7):
+                x = (frame_index * 24 + streak * 59) % (WIDTH + 80) - 40
+                y = 170 + (streak * 17) % 90
+                draw.line([(x, y), (x + 64, y - 36)], fill=primary if streak % 2 else secondary, width=3)
+            _draw_text_centered(draw, "STREAK ASCENDING", 268, secondary, font_sm)
+        else:
+            points = []
+            for x in range(36, WIDTH - 36, 8):
+                y = 210 + int(math.sin((x + frame_index * 18) / 20) * 28)
+                points.append((x, y))
+            draw.line(points, fill=primary, width=3)
+            for x in range(36, WIDTH - 36, 16):
+                y = 210 + int(math.cos((x + frame_index * 18) / 22) * 20)
+                draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill=secondary)
+            _draw_text_centered(draw, "MARKET SIGNAL UNSTABLE", 268, secondary, font_sm)
+
+        frames.append(_make_frame(img, glitch=frame_index in (0, 9)))
+        durations.append(80 if frame_index < 17 else 60000)
+
+    return _save_gif(frames, durations)
 
 def create_terminal_crash_gif(name: str, filing_number: int) -> io.BytesIO:
     """
