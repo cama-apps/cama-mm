@@ -58,11 +58,13 @@ class WinnerChoiceView(discord.ui.View):
         guild_id: int,
         winner_id: int,
         timeout: float = PRE_DRAFT_TIMEOUT,
+        draft_state: DraftState | None = None,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.winner_id = winner_id
+        self.draft_state = draft_state
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.winner_id:
@@ -83,7 +85,7 @@ class WinnerChoiceView(discord.ui.View):
         self.stop()
 
     async def on_timeout(self):
-        await self.cog._handle_draft_timeout(self.guild_id)
+        await self.cog._handle_draft_timeout(self.guild_id, view=self)
 
 
 class SideChoiceView(discord.ui.View):
@@ -96,12 +98,14 @@ class SideChoiceView(discord.ui.View):
         chooser_id: int,
         is_winner: bool,
         timeout: float = PRE_DRAFT_TIMEOUT,
+        draft_state: DraftState | None = None,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.chooser_id = chooser_id
         self.is_winner = is_winner  # True if coinflip winner, False if loser
+        self.draft_state = draft_state
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.chooser_id:
@@ -122,7 +126,7 @@ class SideChoiceView(discord.ui.View):
         self.stop()
 
     async def on_timeout(self):
-        await self.cog._handle_draft_timeout(self.guild_id)
+        await self.cog._handle_draft_timeout(self.guild_id, view=self)
 
 
 class HeroPickOrderView(discord.ui.View):
@@ -135,12 +139,14 @@ class HeroPickOrderView(discord.ui.View):
         chooser_id: int,
         is_winner: bool,
         timeout: float = PRE_DRAFT_TIMEOUT,
+        draft_state: DraftState | None = None,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.chooser_id = chooser_id
         self.is_winner = is_winner
+        self.draft_state = draft_state
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.chooser_id:
@@ -161,7 +167,7 @@ class HeroPickOrderView(discord.ui.View):
         self.stop()
 
     async def on_timeout(self):
-        await self.cog._handle_draft_timeout(self.guild_id)
+        await self.cog._handle_draft_timeout(self.guild_id, view=self)
 
 
 # ============================================================================
@@ -252,11 +258,13 @@ class DraftingView(discord.ui.View):
         timeout: float = DRAFTING_TIMEOUT,
         captain_ids: set[int] | None = None,
         player_pool_ids: list[int] | None = None,
+        draft_state: DraftState | None = None,
     ):
         super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.current_captain_id = current_captain_id
+        self.draft_state = draft_state
         # All participants: captains + draftable pool. Used in interaction_check
         # to silently ignore button presses from non-participants (saves a DB
         # round-trip compared to letting the handlers field the invalid press).
@@ -297,7 +305,7 @@ class DraftingView(discord.ui.View):
         return False
 
     async def on_timeout(self):
-        await self.cog._handle_draft_timeout(self.guild_id)
+        await self.cog._handle_draft_timeout(self.guild_id, view=self)
 
 
 # ============================================================================
@@ -325,6 +333,23 @@ class DraftCommands(commands.Cog):
         self.draft_state_manager = draft_state_manager
         self.draft_service = draft_service
         self.match_service = match_service
+        # Live draft view per guild. Each replacement view stops its
+        # predecessor so a superseded view's timeout can never fire against
+        # a newer draft's state.
+        self._active_draft_views: dict[int, discord.ui.View] = {}
+
+    def _track_draft_view(self, guild_id: int, view: discord.ui.View) -> None:
+        """Track the current draft view, stopping the one it supersedes."""
+        previous = self._active_draft_views.get(guild_id)
+        if previous is not None and previous is not view and not previous.is_finished():
+            previous.stop()
+        self._active_draft_views[guild_id] = view
+
+    def _stop_tracked_draft_view(self, guild_id: int) -> None:
+        """Stop and drop the tracked draft view (restart/cancel/complete)."""
+        view = self._active_draft_views.pop(guild_id, None)
+        if view is not None and not view.is_finished():
+            view.stop()
 
     async def _delete_captain_ping_message(
         self, interaction: discord.Interaction, state: DraftState
@@ -401,8 +426,10 @@ class DraftCommands(commands.Cog):
             if pending_state and pending_state.is_draft:
                 await asyncio.to_thread(self.match_service.clear_last_shuffle, guild_id)
 
-        # Clear the draft state
+        # Clear the draft state and stop the old draft's live view so its
+        # timeout cannot fire against a future draft.
         await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
+        self._stop_tracked_draft_view(guild_id)
 
         # Get user name for the message
         user_name = interaction.user.display_name
@@ -473,12 +500,15 @@ class DraftCommands(commands.Cog):
         available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, guild_id)
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
+        # Pass the mock state (never stored in the manager) so this sample
+        # view's timeout can never clear a real draft; do not track it either.
         view = DraftingView(
             cog=self,
             guild_id=guild_id,
             available_players=available_players,
             current_captain_id=state.current_captain_id,
             guild=interaction.guild,
+            draft_state=state,
         )
 
         await interaction.response.send_message(
@@ -765,7 +795,8 @@ class DraftCommands(commands.Cog):
 
             # Send with winner choice buttons — reuse the progress message so
             # the draft appears in place instead of as a second message.
-            view = WinnerChoiceView(self, guild_id, coinflip_winner_id)
+            view = WinnerChoiceView(self, guild_id, coinflip_winner_id, draft_state=state)
+            self._track_draft_view(guild_id, view)
             await progress_message.edit(content=None, embed=embed, view=view)
             message = progress_message
 
@@ -795,6 +826,7 @@ class DraftCommands(commands.Cog):
         except Exception:
             logger.error("Draft setup failed after state creation, cleaning up", exc_info=True)
             await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
+            self._stop_tracked_draft_view(guild_id)
             with contextlib.suppress(Exception):
                 await progress_message.delete()
             raise
@@ -989,7 +1021,10 @@ class DraftCommands(commands.Cog):
             inline=False,
         )
 
-        view = SideChoiceView(self, guild_id, state.coinflip_winner_id, is_winner=True)
+        view = SideChoiceView(
+            self, guild_id, state.coinflip_winner_id, is_winner=True, draft_state=state
+        )
+        self._track_draft_view(guild_id, view)
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def handle_winner_chose_hero_pick(self, interaction: discord.Interaction, guild_id: int):
@@ -1039,7 +1074,10 @@ class DraftCommands(commands.Cog):
             inline=False,
         )
 
-        view = HeroPickOrderView(self, guild_id, state.coinflip_winner_id, is_winner=True)
+        view = HeroPickOrderView(
+            self, guild_id, state.coinflip_winner_id, is_winner=True, draft_state=state
+        )
+        self._track_draft_view(guild_id, view)
         await interaction.response.edit_message(embed=embed, view=view)
 
     async def handle_side_choice(
@@ -1107,7 +1145,10 @@ class DraftCommands(commands.Cog):
                 inline=False,
             )
 
-            view = HeroPickOrderView(self, guild_id, loser_id, is_winner=False)
+            view = HeroPickOrderView(
+                self, guild_id, loser_id, is_winner=False, draft_state=state
+            )
+            self._track_draft_view(guild_id, view)
             await interaction.response.edit_message(embed=embed, view=view)
 
         else:
@@ -1180,7 +1221,10 @@ class DraftCommands(commands.Cog):
                 inline=False,
             )
 
-            view = SideChoiceView(self, guild_id, loser_id, is_winner=False)
+            view = SideChoiceView(
+                self, guild_id, loser_id, is_winner=False, draft_state=state
+            )
+            self._track_draft_view(guild_id, view)
             await interaction.response.edit_message(embed=embed, view=view)
 
         else:
@@ -1291,7 +1335,9 @@ class DraftCommands(commands.Cog):
             guild=interaction.guild,
             captain_ids={state.radiant_captain_id, state.dire_captain_id} - {None},
             player_pool_ids=state.player_pool_ids,
+            draft_state=state,
         )
+        self._track_draft_view(guild_id, view)
 
         if is_edit:
             await self._edit_interaction_message(interaction, embed=embed, view=view)
@@ -1421,9 +1467,13 @@ class DraftCommands(commands.Cog):
             inline=False,
         )
 
-        # Excluded players section
-        if state.excluded_player_ids:
-            excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.excluded_player_ids, state.guild_id)
+        # Excluded players section (regular exclusions + excluded conditionals;
+        # the latter are tracked separately for the half exclusion bonus)
+        display_excluded_ids = list(
+            dict.fromkeys(state.excluded_player_ids + state.half_exclusion_increment_ids)
+        )
+        if display_excluded_ids:
+            excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, display_excluded_ids, state.guild_id)
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
@@ -1472,7 +1522,8 @@ class DraftCommands(commands.Cog):
             embed = await self._build_draft_embed(guild, state)
 
             if state.phase == DraftPhase.COMPLETE:
-                # Draft complete - remove buttons
+                # Draft complete - remove buttons and stop the live view
+                self._stop_tracked_draft_view(state.guild_id)
                 await message.edit(embed=embed, view=None)
             else:
                 # Still drafting - update with new buttons, sorted by rating
@@ -1488,7 +1539,9 @@ class DraftCommands(commands.Cog):
                     guild=guild,
                     captain_ids={state.radiant_captain_id, state.dire_captain_id} - {None},
                     player_pool_ids=state.player_pool_ids,
+                    draft_state=state,
                 )
+                self._track_draft_view(state.guild_id, view)
                 await message.edit(embed=embed, view=view)
 
         except Exception as e:
@@ -1738,6 +1791,7 @@ class DraftCommands(commands.Cog):
                 )
         finally:
             await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
+            self._stop_tracked_draft_view(guild_id)
 
     async def handle_side_preference(
         self,
@@ -1976,9 +2030,13 @@ class DraftCommands(commands.Cog):
             inline=False,
         )
 
-        # Excluded players section
-        if state.excluded_player_ids:
-            excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.excluded_player_ids, state.guild_id)
+        # Excluded players section (regular exclusions + excluded conditionals;
+        # the latter are tracked separately for the half exclusion bonus)
+        display_excluded_ids = list(
+            dict.fromkeys(state.excluded_player_ids + state.half_exclusion_increment_ids)
+        )
+        if display_excluded_ids:
+            excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, display_excluded_ids, state.guild_id)
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
@@ -2171,16 +2229,32 @@ class DraftCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post to match thread: {exc}")
 
-    async def _handle_draft_timeout(self, guild_id: int) -> None:
+    async def _handle_draft_timeout(
+        self, guild_id: int, view: discord.ui.View | None = None
+    ) -> None:
         """Handle draft timeout by clearing state and updating the message."""
         state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             return
 
+        # Only the view that owns the current draft session may time it out.
+        # A superseded view (replaced by a newer pick UI, or left over from a
+        # restarted draft) must not wipe the newer draft's state. Note that
+        # is_finished() is True inside a legitimate on_timeout, so ownership
+        # is checked by identity instead: the view must still hold the live
+        # state object and must not have been replaced as the tracked view.
+        if view is not None:
+            tracked = self._active_draft_views.get(guild_id)
+            if getattr(view, "draft_state", None) is not state or (
+                tracked is not None and tracked is not view
+            ):
+                return
+
         logger.info(f"Draft timed out for guild {guild_id} in phase {state.phase.value}")
 
         # Clear the draft state
         await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
+        self._stop_tracked_draft_view(guild_id)
 
         # Try to update the message to show timeout
         if state.draft_message_id and state.draft_channel_id:

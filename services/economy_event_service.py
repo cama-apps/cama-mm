@@ -353,6 +353,12 @@ class EconomyEventService:
         )
         return event, created
 
+    def mark_event_announced(
+        self, guild_id: int | None, event_id: int, *, now: int | None = None
+    ) -> None:
+        """Record that an event's public announcement was delivered."""
+        self.repository.mark_event_announced(guild_id, event_id, now=now)
+
     def get_policy_status(self, guild_id: int | None) -> dict[str, Any]:
         policy = self.ensure_policy(guild_id)
         snapshot = self.repository.capture_balance_sheet(guild_id)
@@ -443,6 +449,7 @@ class EconomyEventService:
             effects["prediction_payout_multiplier"] - 1.0
         )
         expected -= int(effects.get("reserve_burn_jc", 0))
+        expected += int(effects.get("reserve_release_jc", 0))
         expected -= int(
             float(balance_sheet["positive_wallets"])
             * float(effects.get("wallet_burn_rate", 0.0))

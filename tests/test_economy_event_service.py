@@ -306,3 +306,64 @@ def test_seconds_until_next_trigger_tracks_dst(
     now = _local_timestamp(year, month, day, 10)
 
     assert service.seconds_until_next_trigger(now=now) == expected_seconds
+
+
+def test_estimate_effect_counts_reserve_release_as_expansion():
+    effects = {
+        "reward_multiplier": 1.0,
+        "gamba_win_multiplier": 1.0,
+        "gamba_loss_multiplier": 1.0,
+        "bet_payout_multiplier": 1.0,
+        "prediction_payout_multiplier": 1.0,
+        "reserve_burn_jc": 0,
+        "reserve_release_jc": 250,
+        "wallet_burn_rate": 0.0,
+    }
+    volumes = {
+        "reward_credits": 0.0,
+        "gamba_credits": 0.0,
+        "gamba_debits": 0.0,
+        "bet_payouts": 0.0,
+        "prediction_payouts": 0.0,
+    }
+    balance_sheet = {"positive_wallets": 0}
+
+    assert EconomyEventService._estimate_effect(effects, volumes, balance_sheet) == 250
+
+
+def test_atomic_event_release_credits_players_and_counts_direct_effect(repo_db_path):
+    repo, players = _seed_economy(repo_db_path)
+    date = get_game_date()
+    before = repo.capture_balance_sheet(TEST_GUILD_ID)
+    payload = _event_payload(date, int(before["monetary_stock"]))
+    payload["effects"]["reserve_burn_jc"] = 0
+    payload["effects"]["wallet_burn_rate"] = 0.0
+    payload["effects"]["reserve_release_jc"] = 200
+
+    event, created = repo.activate_event_atomic(TEST_GUILD_ID, payload)
+
+    assert created is True
+    assert event["effects"]["reserve_release_jc"] == 200
+    assert event["direct_effect_jc"] == 200
+    assert players.get_balance(1, TEST_GUILD_ID) == 1100
+    assert players.get_balance(2, TEST_GUILD_ID) == 600
+    assert LoanRepository(repo_db_path).get_nonprofit_fund(TEST_GUILD_ID) == 800
+
+
+def test_mark_event_announced_stamps_once(repo_db_path):
+    repo, _ = _seed_economy(repo_db_path)
+    date = get_game_date()
+    before = repo.capture_balance_sheet(TEST_GUILD_ID)
+    event, _ = repo.activate_event_atomic(
+        TEST_GUILD_ID, _event_payload(date, int(before["monetary_stock"]))
+    )
+
+    assert event["announced_at"] is None
+
+    service = EconomyEventService(repo, enabled=True)
+    service.mark_event_announced(TEST_GUILD_ID, event["event_id"], now=1111)
+    assert repo.get_event_for_date(TEST_GUILD_ID, date)["announced_at"] == 1111
+
+    # Retries keep the original announcement timestamp.
+    service.mark_event_announced(TEST_GUILD_ID, event["event_id"], now=2222)
+    assert repo.get_event_for_date(TEST_GUILD_ID, date)["announced_at"] == 1111

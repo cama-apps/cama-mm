@@ -48,6 +48,17 @@ from utils.streaming import get_streaming_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
 
+# Strong references to fire-and-forget tasks. The event loop only holds
+# tasks weakly, so an unreferenced task can be garbage-collected mid-run.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _retain_background_task(task: asyncio.Task) -> asyncio.Task:
+    """Hold a strong reference to a fire-and-forget task until it finishes."""
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 DISCORD_MESSAGE_MAX_CHARS = 2000
 
 
@@ -1247,11 +1258,13 @@ class MatchCommands(commands.Cog):
         # Finalize lobby thread as soon as the match is committed. Everything
         # below this point is presentation/notification work and may fail
         # independently of the persisted match result.
-        asyncio.create_task(
-            self._finalize_lobby_thread(
-                guild_id, winning_result,
-                thread_id=thread_id_for_finalize,
-                pending_match_id=pending_match_id,
+        _retain_background_task(
+            asyncio.create_task(
+                self._finalize_lobby_thread(
+                    guild_id, winning_result,
+                    thread_id=thread_id_for_finalize,
+                    pending_match_id=pending_match_id,
+                )
             )
         )
 
@@ -1293,8 +1306,10 @@ class MatchCommands(commands.Cog):
         # Trigger auto-discovery in background if enabled
         match_id = record_result.get("match_id")
         if match_id:
-            asyncio.create_task(
-                self._trigger_auto_discovery(guild_id, match_id, interaction.channel)
+            _retain_background_task(
+                asyncio.create_task(
+                    self._trigger_auto_discovery(guild_id, match_id, interaction.channel)
+                )
             )
 
     async def _send_record_announcement(
@@ -1998,7 +2013,9 @@ class MatchCommands(commands.Cog):
                         for neon_result in mvp_results:
                             if neon_result and neon_result.text_block:
                                 mvp_msg = await channel.send(neon_result.text_block)
-                                asyncio.create_task(_neon_delete_after(mvp_msg, 60))
+                                _retain_background_task(
+                                    asyncio.create_task(_neon_delete_after(mvp_msg, 60))
+                                )
                 except Exception as exc:
                     logger.debug(f"MVP compliment failed: {exc}")
         except Exception as exc:
@@ -2117,8 +2134,10 @@ class MatchCommands(commands.Cog):
 
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc and guild_id is not None:
-            asyncio.create_task(
-                reminder_svc.notify_betting_subscribers(self.bot, guild_id, bet_lock_until)
+            _retain_background_task(
+                asyncio.create_task(
+                    reminder_svc.notify_betting_subscribers(self.bot, guild_id, bet_lock_until)
+                )
             )
 
     async def _run_bet_reminder_after_delay(

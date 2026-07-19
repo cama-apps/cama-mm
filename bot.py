@@ -99,6 +99,17 @@ _lobby_rally_lock = asyncio.Lock()
 _lobby_ready_cooldowns: dict[int, float] = {}
 _lobby_ready_lock = asyncio.Lock()
 
+# Strong references to fire-and-forget tasks. The event loop only holds
+# tasks weakly, so an unreferenced task can be garbage-collected mid-run.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _retain_background_task(task: asyncio.Task) -> asyncio.Task:
+    """Hold a strong reference to a fire-and-forget task until it finishes."""
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 # Retained startup-recovery task handles.  These prevent overlapping sweeps
 # when Discord dispatches on_ready repeatedly during a reconnect.
 _reminder_recovery_task: asyncio.Task | None = None
@@ -237,8 +248,13 @@ async def _duel_challenge_loop() -> None:
         await asyncio.sleep(DUEL_WORKER_WAKE_SECONDS)
 
 
-async def _announce_economy_event(guild: discord.Guild, event: dict) -> None:
-    """Post a newly activated monetary event in the guild's gamba channel."""
+async def _announce_economy_event(guild: discord.Guild, event: dict) -> bool:
+    """Post a newly activated monetary event in the guild's gamba channel.
+
+    Returns True when the announcement was handed to the gamba channel, so
+    the caller can stamp the event as announced. A missing cog returns False
+    and leaves the event unannounced for the next wake to retry.
+    """
     cog = bot.get_cog("PredictionCommands")
     if cog is None:
         logger.warning(
@@ -246,7 +262,7 @@ async def _announce_economy_event(guild: discord.Guild, event: dict) -> None:
             "PredictionCommands cog not loaded",
             guild.id,
         )
-        return
+        return False
     icon_url = None
     event_name = event.get("name")
     if event_name:
@@ -267,6 +283,7 @@ async def _announce_economy_event(guild: discord.Guild, event: dict) -> None:
         icon_url=icon_url,
     )
     await cog.announce_to_gamba(guild, embed=embed)
+    return True
 
 
 async def _economy_event_loop() -> None:
@@ -294,12 +311,21 @@ async def _economy_event_loop() -> None:
                             guild.id,
                             result.get("proposal_id"),
                         )
-                event, created = await asyncio.to_thread(
+                event, _created = await asyncio.to_thread(
                     bot.economy_event_service.ensure_daily_event,
                     guild.id,
                 )
-                if created and event:
-                    await _announce_economy_event(guild, event)
+                # Announce any active event that has not been announced yet —
+                # not just freshly created ones — so a failed announcement is
+                # retried on the next wake instead of being lost.
+                if event and not event.get("announced_at"):
+                    announced = await _announce_economy_event(guild, event)
+                    if announced:
+                        await asyncio.to_thread(
+                            bot.economy_event_service.mark_event_announced,
+                            guild.id,
+                            event["event_id"],
+                        )
             except Exception:  # noqa: BLE001
                 logger.exception("economy event wake failed for guild=%s", guild.id)
         sleep_seconds = ECONOMY_EVENT_WAKE_SECONDS
@@ -685,15 +711,18 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
     If a dedicated lobby channel is configured, rally notifications go to the
     origin channel (where /lobby was run) instead of the reaction channel.
     """
+    total = lobby.get_total_count()
+    needed = LOBBY_READY_THRESHOLD - total
+
+    if needed < 1 or needed > 2:
+        return False  # Only notify for +1 or +2
+
+    cooldown_key = (guild_id, needed)
+
+    # The lock covers only the check-and-claim so one slow guild's network
+    # I/O cannot block rally notifications for every other guild.
     async with _lobby_rally_lock:
-        total = lobby.get_total_count()
-        needed = LOBBY_READY_THRESHOLD - total
-
-        if needed < 1 or needed > 2:
-            return False  # Only notify for +1 or +2
-
         now = time.time()
-        cooldown_key = (guild_id, needed)
         last_sent = _lobby_rally_cooldowns.get(cooldown_key, 0)
 
         if now - last_sent < LOBBY_RALLY_COOLDOWN_SECONDS:
@@ -703,15 +732,15 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
         # send. A failed send releases the claim below.
         _lobby_rally_cooldowns[cooldown_key] = now
 
-        try:
-            sent = await _send_lobby_rally(channel, thread, lobby, guild_id, total, needed)
-            if not sent:
-                _lobby_rally_cooldowns.pop(cooldown_key, None)
-            return sent
-        except Exception as exc:
+    try:
+        sent = await _send_lobby_rally(channel, thread, lobby, guild_id, total, needed)
+        if not sent:
             _lobby_rally_cooldowns.pop(cooldown_key, None)
-            logger.error(f"Error sending rally notification: {exc}", exc_info=True)
-            return False
+        return sent
+    except Exception as exc:
+        _lobby_rally_cooldowns.pop(cooldown_key, None)
+        logger.error(f"Error sending rally notification: {exc}", exc_info=True)
+        return False
 
 
 async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, needed: int) -> bool:
@@ -859,7 +888,7 @@ async def on_ready():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Trivia image cache warm failed: %s", exc, exc_info=True)
 
-        warm_task = bot.loop.create_task(asyncio.to_thread(warm_cache))
+        warm_task = _retain_background_task(bot.loop.create_task(asyncio.to_thread(warm_cache)))
         warm_task.add_done_callback(_log_warm_cache_failure)
     except Exception as exc:
         logger.debug(f"Trivia image cache warm failed to schedule: {exc}")
@@ -877,8 +906,10 @@ async def on_ready():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Inferred-region backfill failed: %s", exc, exc_info=True)
 
-        region_task = bot.loop.create_task(
-            asyncio.to_thread(region_service.backfill_inferred_regions)
+        region_task = _retain_background_task(
+            bot.loop.create_task(
+                asyncio.to_thread(region_service.backfill_inferred_regions)
+            )
         )
         region_task.add_done_callback(_log_region_backfill)
 
@@ -992,6 +1023,43 @@ def _should_force_regular_join_for_conditional_click(
     already_in_lobby = user_id in players or user_id in conditional_players
     projected_total = lobby.get_total_count() if already_in_lobby else lobby.get_total_count() + 1
     return projected_total <= ready_threshold
+
+
+async def _user_still_has_sword_reaction(message, user_id: int) -> bool:
+    """Return True if the user's ⚔️ reaction is still on the lobby message."""
+    for reaction in message.reactions:
+        if str(reaction.emoji) != "⚔️":
+            continue
+        async for reactor in reaction.users():
+            if reactor.id == user_id:
+                return True
+        return False
+    return False
+
+
+async def _leave_lobby_for_frogling_removal(
+    lobby_service, message, lobby, user_id: int, guild_id
+) -> bool:
+    """Leave the lobby for a removed frogling reaction.
+
+    Try a conditional leave first. If the player is instead in the regular
+    roster (a frogling click can force-join a full-enough lobby as regular,
+    leaving the frogling as their only reaction), fall back to a regular
+    leave — unless they still hold a ⚔️, which means this removal is the bot
+    clearing a stale frogling right after a sword join and must not undo it.
+    """
+    left = await asyncio.to_thread(
+        lobby_service.leave_lobby_conditional, user_id, guild_id
+    )
+    if left:
+        return True
+    if user_id not in getattr(lobby, "players", set()):
+        return False
+    if await _user_still_has_sword_reaction(message, user_id):
+        return False
+    return bool(
+        await asyncio.to_thread(lobby_service.leave_lobby, user_id, guild_id)
+    )
 
 
 @bot.event
@@ -1124,7 +1192,9 @@ async def on_raw_reaction_add(payload):
                                     await m.delete()
                                 except Exception:
                                     pass
-                            asyncio.create_task(_delete_after(neon_msg, 60))
+                            _retain_background_task(
+                                asyncio.create_task(_delete_after(neon_msg, 60))
+                            )
                 except Exception as exc:
                     logger.debug(f"Neon gamba spectator hook failed: {exc}")
             return
@@ -1160,11 +1230,26 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
+        ready_threshold = getattr(bot.lobby_service, "ready_threshold", LOBBY_READY_THRESHOLD)
         force_regular_from_frogling = is_frogling and _should_force_regular_join_for_conditional_click(
             lobby,
             payload.user_id,
-            getattr(bot.lobby_service, "ready_threshold", LOBBY_READY_THRESHOLD),
+            ready_threshold,
         )
+        if force_regular_from_frogling:
+            # Re-check against a fresh roster right before the forced add: the
+            # lobby snapshot above predates this join, so two simultaneous
+            # frogling clicks at 9 players would otherwise both project 10.
+            fresh_lobby = await asyncio.to_thread(
+                bot.lobby_service.get_lobby, guild_id=payload_guild_id
+            )
+            if fresh_lobby:
+                lobby = fresh_lobby
+                force_regular_from_frogling = _should_force_regular_join_for_conditional_click(
+                    lobby,
+                    payload.user_id,
+                    ready_threshold,
+                )
 
         # Handle mutual exclusivity: join first (atomically moves between sets),
         # then remove the old reaction. This order prevents on_raw_reaction_remove
@@ -1184,8 +1269,12 @@ async def on_raw_reaction_add(payload):
                 success = True
                 reason = ""
                 post_join_activity = False
-            if success:
-                # Remove frogling after join so the reaction_remove handler finds nothing to leave
+            if success and is_sword:
+                # Remove any stale frogling after a sword join so the
+                # reaction_remove handler finds nothing to leave. A forced
+                # regular join (frogling click) keeps its frogling — it is the
+                # player's only reaction, and removing it would leave them with
+                # no reaction that can ever take them out of the lobby.
                 try:
                     frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
                     await message.remove_reaction(frogling_emoji, user)
@@ -1337,8 +1426,8 @@ async def on_raw_reaction_remove(payload):
                 bot.lobby_service.leave_lobby, payload.user_id, payload_guild_id
             )
         else:
-            left = await asyncio.to_thread(
-                bot.lobby_service.leave_lobby_conditional, payload.user_id, payload_guild_id
+            left = await _leave_lobby_for_frogling_removal(
+                bot.lobby_service, message, lobby, payload.user_id, payload_guild_id
             )
 
         if left:
