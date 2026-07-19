@@ -7,8 +7,11 @@ Tests for the new match storage invariants:
 
 import pytest
 
+from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
+from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from services.betting_service import BettingService
 from services.match_service import MatchService
 from tests.repository_harness import RepositoryTestDatabase as Database
 
@@ -224,7 +227,8 @@ class TestConcurrencyGuard:
     def test_no_double_record_when_post_core_step_fails(
         self, test_db, player_repo, test_players
     ):
-        """Regression: a post-core failure must not let a retry double-record.
+        """Regression: a post-core failure must not let a retry double-record
+        — nor double-pay the post-core bonus credits.
 
         record_match commits the match (matches row + win/loss + rating writes)
         in record_match_core_atomic, then runs the money side (bet settlement,
@@ -238,13 +242,31 @@ class TestConcurrencyGuard:
         (no duplicate, no second win/loss), and the post-core money steps re-run
         to settle what the failure stranded — the pending row is kept until those
         steps succeed. Exactly one match exists with wins/losses applied once.
+
+        The bonus credits (participation, win bonus, streak bonus) are gated by
+        the per-match bonuses_paid claim: the failing first attempt pays them,
+        the retry fails to claim and skips them — balances credited exactly once.
         """
         match_repo = MatchRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        betting_service = BettingService(bet_repo, player_repo)
         match_service = MatchService(
-            player_repo=player_repo, match_repo=match_repo, use_glicko=True
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+            betting_service=betting_service,
         )
 
+        # Capture per-player baselines (players are created with a nonzero
+        # starting balance) so the exactly-once assertions are exact deltas.
+        start = {
+            pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in test_players
+        }
+
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = list(pending.radiant_team_ids)
+        dire_ids = list(pending.dire_team_ids)
 
         # Simulate a post-core step raising AFTER the atomic core commits. The
         # atomic match/win-loss/rating writes have already landed at this point.
@@ -285,6 +307,20 @@ class TestConcurrencyGuard:
             )
         assert sum(p.wins for p in players) == 5
         assert sum(p.losses for p in players) == 5
+
+        # Bonuses credited exactly once: the failing first attempt paid them
+        # (the injected failure hit AFTER the bonus step), and the retry's
+        # claim on matches.bonuses_paid fails, so it must not re-pay. Winners
+        # hold exactly one win bonus, losers exactly one participation credit
+        # (no bets placed, no streak bonus on a day-one streak).
+        for pid in radiant_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_WIN_REWARD
+            ), f"winner {pid} must be credited the win bonus exactly once"
+        for pid in dire_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_PER_GAME
+            ), f"loser {pid} must be credited participation exactly once"
 
     def test_consume_pending_match_is_single_use_idempotent(self, test_db):
         """consume_pending_match is single-use: the first call returns the exact

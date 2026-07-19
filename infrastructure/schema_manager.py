@@ -508,9 +508,80 @@ class SchemaManager:
                 self._migration_create_economy_policy_tables,
             ),
             ("cap_soft_avoid_games_remaining", self._migration_cap_soft_avoid_games_remaining),
+            # Track whether a daily economy event was announced so a failed
+            # announcement is retried on the next wake instead of lost.
+            (
+                "add_announced_at_to_economy_daily_events",
+                self._migration_add_announced_at_to_economy_daily_events,
+            ),
+            # Per-match idempotency claim for the post-core bonus credits
+            # (participation / win / streak) so a retry after a post-core
+            # failure can't re-pay them.
+            ("add_bonuses_paid_to_matches", self._migration_add_bonuses_paid_to_matches),
+            # Persist the win-bonus balance delta per winner so a match
+            # correction can reverse exactly what the old winners received.
+            (
+                "add_win_bonus_jc_to_match_participants",
+                self._migration_add_win_bonus_jc_to_match_participants,
+            ),
+            # Stamp the last game-date a daily tunnel bonus applied so the
+            # write commits together with the bonus and can't re-apply on a
+            # retried dig.
+            (
+                "add_lantern_stub_date_to_tunnels",
+                self._migration_add_lantern_stub_date_to_tunnels,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
+        """Idempotency claim for the post-core bonus credits.
+
+        The pending_match_id guard makes the atomic core no-op on retry, but
+        the post-core bonus credits (participation, win bonus, streak bonus)
+        re-ran unguarded, double-paying them whenever a later post-core step
+        (e.g. loan repayment) raised and the user retried. The recording path
+        claims this flag with a conditional UPDATE before paying; a retry that
+        fails to claim skips the credits."""
+        self._add_column_if_not_exists(
+            cursor, "matches", "bonuses_paid", "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    def _migration_add_lantern_stub_date_to_tunnels(self, cursor) -> None:
+        """Track the last game-date the lantern-stub daily restore applied.
+
+        The restore previously keyed off last_dig_at alone; a dig that failed
+        after the restore write left the gate open, so a retry re-applied the
+        bonus. The date stamp commits in the same UPDATE as the restore,
+        making a re-run within the day a no-op."""
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "lantern_stub_date", "TEXT"
+        )
+
+    def _migration_add_win_bonus_jc_to_match_participants(self, cursor) -> None:
+        """Snapshot the win-bonus balance delta (gross minus bankruptcy
+        penalty / skims — garnishment is a bookkeeping split that stays in
+        the balance) per winner. bonus_jc aggregates every bonus for the
+        match, so a correction couldn't isolate the win bonus to reverse it;
+        this column records exactly the JC the win bonus put on the balance."""
+        self._add_column_if_not_exists(
+            cursor, "match_participants", "win_bonus_jc", "INTEGER"
+        )
+
+    def _migration_add_announced_at_to_economy_daily_events(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor, "economy_daily_events", "announced_at", "INTEGER"
+        )
+        # Pre-migration rows predate announcement tracking; treat them as
+        # announced so the wake loop does not re-announce stale events.
+        cursor.execute(
+            """
+            UPDATE economy_daily_events
+            SET announced_at = created_at
+            WHERE announced_at IS NULL
+            """
+        )
 
     def _migration_add_next_match_pot_to_nonprofit_fund(self, cursor) -> None:
         self._add_column_if_not_exists(

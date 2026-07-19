@@ -1005,29 +1005,120 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return json.loads(row["enrichment_data"])
 
     def update_participant_bonus_jc(
-        self, match_id: int, guild_id: int | None, bonus_by_player: dict[int, int]
+        self,
+        match_id: int,
+        guild_id: int | None,
+        bonus_by_player: dict[int, int],
+        win_bonus_by_player: dict[int, int] | None = None,
     ) -> None:
         """Persist the actual JC awarded per participant for this match.
 
         Atomic so a mid-batch crash can't leave some participants with a
         ``bonus_jc`` snapshot and others with NULL — that mix would silently
         break balance-history reconstruction for this match forever.
+
+        ``win_bonus_by_player`` optionally snapshots the win-bonus balance
+        delta per winner into ``win_bonus_jc`` in the same txn, so a later
+        match correction can reverse exactly what each old winner received.
         """
-        if not bonus_by_player:
+        if not bonus_by_player and not win_bonus_by_player:
+            return
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            if bonus_by_player:
+                cursor.executemany(
+                    """
+                    UPDATE match_participants
+                    SET bonus_jc = ?
+                    WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (int(amount), match_id, discord_id, normalized_guild)
+                        for discord_id, amount in bonus_by_player.items()
+                    ],
+                )
+            if win_bonus_by_player:
+                cursor.executemany(
+                    """
+                    UPDATE match_participants
+                    SET win_bonus_jc = ?
+                    WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (int(amount), match_id, discord_id, normalized_guild)
+                        for discord_id, amount in win_bonus_by_player.items()
+                    ],
+                )
+
+    def claim_match_bonuses_paid(self, match_id: int, guild_id: int | None) -> bool:
+        """Atomically claim the one-time right to pay this match's bonuses.
+
+        The post-core bonus credits (participation, win bonus, streak bonus)
+        run AFTER record_match_core_atomic commits; a retry after a later
+        post-core failure re-enters that path. This conditional UPDATE flips
+        ``matches.bonuses_paid`` 0 -> 1 exactly once: the first caller gets
+        True and pays, any retry gets False and skips the credits.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE matches
+                SET bonuses_paid = 1
+                WHERE match_id = ? AND guild_id = ?
+                  AND COALESCE(bonuses_paid, 0) = 0
+                """,
+                (match_id, normalized_guild),
+            )
+            return cursor.rowcount == 1
+
+    def apply_win_bonus_reversal_atomic(
+        self, match_id: int, guild_id: int | None, debits_by_player: dict[int, int]
+    ) -> None:
+        """Reverse previously-awarded win bonuses in one BEGIN IMMEDIATE.
+
+        Debits each old winner's balance by the recorded win-bonus balance
+        delta and clears their ``win_bonus_jc`` snapshot (it no longer holds
+        a live bonus to reverse), so a repeat correction can't double-debit.
+        """
+        if not debits_by_player:
             return
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.executemany(
                 """
-                UPDATE match_participants
-                SET bonus_jc = ?
-                WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
                 """,
                 [
-                    (int(amount), match_id, discord_id, normalized_guild)
-                    for discord_id, amount in bonus_by_player.items()
+                    (int(amount), discord_id, normalized_guild)
+                    for discord_id, amount in debits_by_player.items()
                 ],
+            )
+            # Maintain the lowest-balance watermark like add_balance does for
+            # debits.
+            cursor.executemany(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL
+                       OR jopacoin_balance < lowest_balance_ever)
+                """,
+                [(discord_id, normalized_guild) for discord_id in debits_by_player],
+            )
+            cursor.executemany(
+                """
+                UPDATE match_participants
+                SET win_bonus_jc = NULL
+                WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                """,
+                [(match_id, discord_id, normalized_guild) for discord_id in debits_by_player],
             )
 
     def get_player_bonus_events(
@@ -1151,6 +1242,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 LIMIT ?
             """,
                 (discord_id, guild_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [bool(row["won"]) for row in rows]
+
+    def get_player_outcomes_before_match(
+        self, discord_id: int, guild_id: int | None, match_id: int, limit: int = 20
+    ) -> list[bool]:
+        """
+        Get a player's match outcomes strictly BEFORE a given match.
+
+        Same shape as get_player_recent_outcomes (True=win, most recent
+        first), but excludes the given match and everything after it — the
+        window a streak multiplier for that match must be computed from.
+        Returns [] if the player has no rating_history row for the match.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT won FROM rating_history
+                WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
+                  AND id < (
+                      SELECT id FROM rating_history
+                      WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                  )
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (discord_id, normalized_guild, match_id, discord_id, normalized_guild, limit),
             )
             rows = cursor.fetchall()
             return [bool(row["won"]) for row in rows]
@@ -1684,6 +1805,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
         match in one BEGIN IMMEDIATE, so a crash can't leave the two tables
         disagreeing on whose OS rating reflects fantasy weighting.
 
+        A player's live ``players.os_mu/os_sigma`` is only touched when this
+        match is their LATEST rated match (no rating_history row with a
+        higher match_id exists for them in this guild). Phase 2 values are
+        recomputed from this match's Phase 1 baseline, so writing them for an
+        old match (fantasy refill, manual /enrich of history) would rewind
+        the player's current rating to a stale post-that-match value. The
+        rating_history rows for the match are always updated.
+
         Returns ``{"players_updated": int, "history_updated": int}``.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
@@ -1697,8 +1826,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     UPDATE players
                     SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM rating_history rh
+                          WHERE rh.discord_id = players.discord_id
+                            AND rh.guild_id = players.guild_id
+                            AND rh.match_id > ?
+                      )
                     """,
-                    [(mu, sigma, pid, normalized_guild) for pid, mu, sigma in player_updates],
+                    [
+                        (mu, sigma, pid, normalized_guild, match_id)
+                        for pid, mu, sigma in player_updates
+                    ],
                 )
                 players_updated = cursor.rowcount
 
@@ -2811,7 +2949,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
         ``rating_history_updates`` items carry:
         ``{discord_id, new_rating, new_rd, new_volatility, new_won,
-           new_os_mu (optional), new_os_sigma (optional)}``.
+           new_os_mu (optional), new_os_sigma (optional),
+           new_streak_length (optional), new_streak_multiplier (optional)}``.
 
         Returns the correction_id if ``corrected_by`` was provided, else None.
         Bet payout reversal/re-apply is NOT included here — it runs in its
@@ -2879,7 +3018,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                         volatility_after = ?,
                         won = ?,
                         os_mu_after = COALESCE(?, os_mu_after),
-                        os_sigma_after = COALESCE(?, os_sigma_after)
+                        os_sigma_after = COALESCE(?, os_sigma_after),
+                        streak_length = COALESCE(?, streak_length),
+                        streak_multiplier = COALESCE(?, streak_multiplier)
                     WHERE match_id = ? AND discord_id = ?
                     """,
                     [
@@ -2890,6 +3031,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                             u["new_won"],
                             u.get("new_os_mu"),
                             u.get("new_os_sigma"),
+                            u.get("new_streak_length"),
+                            u.get("new_streak_multiplier"),
                             match_id,
                             u["discord_id"],
                         )

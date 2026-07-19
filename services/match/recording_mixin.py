@@ -40,6 +40,16 @@ class RecordingMixin:
         if not self.betting_service:
             return distributions
 
+        # Per-match idempotency claim for the bonus credits. The atomic core
+        # no-ops on retry (pending_match_id guard), but this post-core path
+        # re-runs whenever a later step (e.g. loan repayment) raised and the
+        # user retried — previously double-paying participation, win, and
+        # streak bonuses. Bet settlement stays outside the claim: it has its
+        # own idempotency (pending bets settle exactly once).
+        bonuses_claimed = True
+        if hasattr(self.match_repo, "claim_match_bonuses_paid"):
+            bonuses_claimed = self.match_repo.claim_match_bonuses_paid(match_id, guild_id)
+
         is_bomb_pot = last_shuffle.is_bomb_pot
         # Track actual net JC paid per player so we can persist it on
         # match_participants. Without this, balance-history reconstruction
@@ -50,21 +60,29 @@ class RecordingMixin:
             for pid, amounts in awards.items():
                 bonus_net[pid] = bonus_net.get(pid, 0) + int(amounts.get("net", 0))
 
-        _accumulate(
-            self.betting_service.award_participation(losing_ids, guild_id, is_bomb_pot=is_bomb_pot)
-        )
-        if is_bomb_pot:
-            # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
+        if bonuses_claimed:
             _accumulate(
                 self.betting_service.award_participation(
-                    winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+                    losing_ids, guild_id, is_bomb_pot=is_bomb_pot
                 )
             )
+            if is_bomb_pot:
+                # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
+                _accumulate(
+                    self.betting_service.award_participation(
+                        winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+                    )
+                )
 
         distributions = self.betting_service.settle_bets(
             match_id, guild_id, winning_team, pending_state=last_shuffle
         )
-        _accumulate(self.betting_service.award_win_bonus(winning_ids, guild_id))
+        distributions["streaks"] = {}
+        if not bonuses_claimed:
+            return distributions
+
+        win_awards = self.betting_service.award_win_bonus(winning_ids, guild_id)
+        _accumulate(win_awards)
         if excluded_player_ids:
             _accumulate(
                 self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
@@ -83,8 +101,20 @@ class RecordingMixin:
         )
         distributions["streaks"] = streaks
 
-        if bonus_net and hasattr(self.match_repo, "update_participant_bonus_jc"):
-            self.match_repo.update_participant_bonus_jc(match_id, guild_id, bonus_net)
+        # Snapshot the win bonus separately as the balance delta it actually
+        # produced (gross minus bankruptcy penalty / skims; garnishment is a
+        # bookkeeping split that stays in the balance), so a later match
+        # correction can reverse exactly this amount from the old winners.
+        win_bonus_delta = {
+            pid: int(r.get("net", 0)) + int(r.get("garnished", 0))
+            for pid, r in win_awards.items()
+        }
+        if (bonus_net or win_bonus_delta) and hasattr(
+            self.match_repo, "update_participant_bonus_jc"
+        ):
+            self.match_repo.update_participant_bonus_jc(
+                match_id, guild_id, bonus_net, win_bonus_by_player=win_bonus_delta
+            )
 
         return distributions
 
