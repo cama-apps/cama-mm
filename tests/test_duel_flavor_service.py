@@ -4,6 +4,7 @@ import pytest
 
 from services.duel_flavor_service import (
     HERALD_VOICES,
+    PROMPT_CONSTRAINTS,
     SYSTEM_PROMPT,
     DuelFlavorEvent,
     DuelFlavorService,
@@ -32,7 +33,8 @@ async def test_flavor_uses_dedicated_prompt_and_sanitizes_output():
     assert "Game of Thrones" not in system_prompt
     assert "Tales of Dunk and Egg" in system_prompt
     assert "Do not quote or imitate" in system_prompt
-    assert system_prompt == f"{SYSTEM_PROMPT} {HERALD_VOICES[0]}"
+    assert system_prompt == f"{SYSTEM_PROMPT} {HERALD_VOICES[0]} {PROMPT_CONSTRAINTS}"
+    assert system_prompt.endswith(PROMPT_CONSTRAINTS)
     assert len(result) <= 300
 
 

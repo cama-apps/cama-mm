@@ -609,7 +609,7 @@ async def test_final_due_reminders_post_only_the_recipient_ping(
 
 @pytest.mark.asyncio
 async def test_unresolved_daily_reminder_pings_both_participants(
-    cog, bot, flavor_service
+    cog, bot, duel_service, flavor_service
 ):
     challenge = make_challenge(
         status=DuelStatus.ACCEPTED,
@@ -617,6 +617,7 @@ async def test_unresolved_daily_reminder_pings_both_participants(
         responded_at=1_700_000_100,
         next_reminder_at=1_700_086_500,
     )
+    duel_service.get_challenge.return_value = challenge
     result = DuelDueResult(kind=DuelDueKind.UNRESOLVED, challenge=challenge)
 
     await cog.deliver_due_result(result)
@@ -637,6 +638,75 @@ async def test_unresolved_daily_reminder_pings_both_participants(
     assert allowed.roles is False
     assert allowed.replied_user is False
     assert {user.id for user in allowed.users} == {CHALLENGER_ID, RECIPIENT_ID}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "stale_status"),
+    [
+        (DuelDueKind.UNRESOLVED, DuelStatus.RESOLVED),
+        (DuelDueKind.REMINDER, DuelStatus.ACCEPTED),
+    ],
+)
+async def test_stale_claimed_reminder_is_not_delivered(
+    cog, bot, duel_service, flavor_service, kind, stale_status
+):
+    claimed = make_challenge(
+        status=(
+            DuelStatus.ACCEPTED
+            if kind is DuelDueKind.UNRESOLVED
+            else DuelStatus.PENDING
+        ),
+        trial_type=DuelTrial.TRIAL_BY_COMBAT,
+    )
+    duel_service.get_challenge.return_value = make_challenge(status=stale_status)
+    result = DuelDueResult(
+        kind=kind,
+        challenge=claimed,
+        remaining_seconds=48 * 3600,
+        ping_recipient=True,
+    )
+
+    await cog.deliver_due_result(result)
+
+    flavor_service.generate.assert_not_awaited()
+    bot.get_channel.return_value.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_channel_failure_defers_reminder_claims(
+    cog, bot, duel_service
+):
+    bot.get_channel.return_value = None
+    bot.fetch_channel.side_effect = discord.HTTPException(
+        SimpleNamespace(status=500, reason="error"),
+        "gateway hiccup",
+    )
+    duel_service.process_due.return_value = None
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_permanently_missing_channel_still_claims_reminders(
+    cog, bot, duel_service
+):
+    bot.get_channel.return_value = None
+    bot.fetch_channel.side_effect = discord.NotFound(
+        MagicMock(status=404),
+        "channel deleted",
+    )
+    duel_service.process_due.return_value = None
+
+    await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
+
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=True
+    )
 
 
 @pytest.mark.asyncio
@@ -727,7 +797,9 @@ async def test_process_due_challenge_claims_off_loop_and_delivers(cog, duel_serv
 
     await cog.process_due_challenge(7, GUILD_ID, 1_700_432_000)
 
-    duel_service.process_due.assert_called_once_with(7, GUILD_ID, 1_700_432_000)
+    duel_service.process_due.assert_called_once_with(
+        7, GUILD_ID, 1_700_432_000, claim_reminders=True
+    )
     cog.deliver_due_result.assert_awaited_once_with(result)
 
 
