@@ -2042,3 +2042,96 @@ class TestDraftingViewInteractionCheck:
         result = await view.interaction_check(interaction)
 
         assert result is True
+
+
+class TestDraftTimeoutOwnership:
+    """A stale or superseded view's timeout must not clear a newer draft.
+
+    Regression tests for the bug where every pick built a fresh DraftingView
+    but never stopped the superseded one, so a stale view's 600s timeout
+    could wipe whatever draft state the guild had (e.g. after /draft restart)
+    and overwrite the new draft's message with "Draft Timed Out".
+    """
+
+    def _make_cog(self):
+        return DraftCommands(
+            bot=MagicMock(),
+            player_repo=MagicMock(),
+            lobby_manager=MagicMock(),
+            draft_state_manager=DraftStateManager(),
+            draft_service=DraftService(),
+            match_service=None,
+        )
+
+    def _make_view(self, cog, guild_id, state):
+        from commands.draft import DraftingView
+
+        return DraftingView(
+            cog=cog,
+            guild_id=guild_id,
+            available_players=[],
+            current_captain_id=1,
+            draft_state=state,
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_view_timeout_does_not_clear_restarted_draft(self):
+        """A view left over from a restarted draft must not wipe the new one."""
+        cog = self._make_cog()
+        guild_id = 123
+        old_state = cog.draft_state_manager.create_draft(guild_id)
+        stale_view = self._make_view(cog, guild_id, old_state)
+        cog._track_draft_view(guild_id, stale_view)
+
+        # /draft restart: clear state, stop the tracked view, start a new draft
+        cog.draft_state_manager.clear_state(guild_id)
+        cog._stop_tracked_draft_view(guild_id)
+        new_state = cog.draft_state_manager.create_draft(guild_id)
+
+        await cog._handle_draft_timeout(guild_id, view=stale_view)
+
+        assert cog.draft_state_manager.get_state(guild_id) is new_state
+
+    @pytest.mark.asyncio
+    async def test_superseded_view_timeout_does_not_clear_state(self):
+        """A view replaced by a newer pick UI is stopped and cannot time out the draft."""
+        cog = self._make_cog()
+        guild_id = 123
+        state = cog.draft_state_manager.create_draft(guild_id)
+        old_view = self._make_view(cog, guild_id, state)
+        cog._track_draft_view(guild_id, old_view)
+        new_view = self._make_view(cog, guild_id, state)
+        cog._track_draft_view(guild_id, new_view)
+
+        # Tracking the replacement stopped the superseded view outright.
+        assert old_view.is_finished()
+
+        await cog._handle_draft_timeout(guild_id, view=old_view)
+
+        assert cog.draft_state_manager.get_state(guild_id) is state
+
+    @pytest.mark.asyncio
+    async def test_current_view_timeout_still_clears_state(self):
+        """The live view's timeout must keep working."""
+        cog = self._make_cog()
+        guild_id = 123
+        state = cog.draft_state_manager.create_draft(guild_id)
+        view = self._make_view(cog, guild_id, state)
+        cog._track_draft_view(guild_id, view)
+
+        await cog._handle_draft_timeout(guild_id, view=view)
+
+        assert cog.draft_state_manager.get_state(guild_id) is None
+
+    @pytest.mark.asyncio
+    async def test_sample_view_timeout_does_not_clear_real_draft(self):
+        """A sample UI view (mock state, untracked) must not clear a real draft."""
+        cog = self._make_cog()
+        guild_id = 123
+        real_state = cog.draft_state_manager.create_draft(guild_id)
+        mock_state = DraftState(guild_id=guild_id)
+        sample_view = self._make_view(cog, guild_id, mock_state)
+
+        await cog._handle_draft_timeout(guild_id, view=sample_view)
+
+        assert cog.draft_state_manager.get_state(guild_id) is real_state

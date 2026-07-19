@@ -568,6 +568,7 @@ class EconomyEventRepository(BaseRepository):
                             released += credit
                     finally:
                         self._clear_economy_ledger_context(cursor)
+                direct_effect += released
 
             effects["reserve_burn_jc"] = reserve_burn
             effects["wallet_burn_jc"] = wallet_burn
@@ -584,6 +585,22 @@ class EconomyEventRepository(BaseRepository):
                 "SELECT * FROM economy_daily_events WHERE event_id = ?", (event_id,)
             ).fetchone()
             return self._event_row(row), True
+
+    def mark_event_announced(
+        self, guild_id: int | None, event_id: int, *, now: int | None = None
+    ) -> None:
+        """Stamp an event as announced so the wake loop stops retrying it."""
+        gid = self.normalize_guild_id(guild_id)
+        now = int(now if now is not None else time.time())
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE economy_daily_events
+                SET announced_at = ?
+                WHERE guild_id = ? AND event_id = ? AND announced_at IS NULL
+                """,
+                (now, gid, int(event_id)),
+            )
 
     def reconcile_prior_event(
         self, guild_id: int | None, event_date: str, current_stock: int
