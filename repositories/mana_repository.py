@@ -176,7 +176,7 @@ class ManaRepository(BaseRepository, IManaRepository):
 
         Returns True if the flag flipped (claim succeeded), False if already
         consumed today or no mana row exists. Uses BEGIN IMMEDIATE for
-        race-safety against two concurrent /manashop ultimate calls.
+        race-safety against two concurrent /shop mana ultimate calls.
         """
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:

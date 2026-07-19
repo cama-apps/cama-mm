@@ -75,7 +75,7 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
         """
         Atomically declare bankruptcy: re-check the player is in debt, that the
         cooldown has elapsed, then reset the balance and bump the state — all
-        inside one BEGIN IMMEDIATE so two concurrent /bankruptcy calls cannot
+        inside one BEGIN IMMEDIATE so two concurrent /economy bankruptcy calls cannot
         both pass validation.
 
         Returns the absolute debt cleared.

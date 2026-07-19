@@ -297,7 +297,7 @@ class LoanService:
         Check if a player can take a loan.
 
         ``fee_rate_override`` / ``max_amount_override`` let callers (e.g. the
-        /loan command via ``ManaEffectsService``) substitute mana-adjusted
+        /economy loan command via ``ManaEffectsService``) substitute mana-adjusted
         values without mutating the service singleton.
 
         Returns:

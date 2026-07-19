@@ -591,7 +591,7 @@ class DisburseService:
             }
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
-        """Get the most recent disbursement for display in /nonprofit."""
+        """Get the most recent disbursement for display in /economy reserve."""
         return self.disburse_repo.get_last_disbursement(guild_id)
 
     def _calculate_even_distribution(

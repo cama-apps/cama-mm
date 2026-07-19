@@ -729,8 +729,8 @@ async def balance_action(
         await interaction.followup.send(
             f"{mana_prefix}{interaction.user.mention} has **{balance}** {JOPACOIN_EMOTE} (in debt)\n"
             f"Garnishment: {garnishment_pct}% of winnings go to debt repayment{penalty_info}{loan_info}\n\n"
-            f"Use `/bankruptcy` to clear your debt (with penalties).\n"
-            f"Use `/loan` to borrow more jopacoin (with a fee).",
+            f"Use `/economy bankruptcy` to clear your debt (with penalties).\n"
+            f"Use `/economy loan` to borrow more jopacoin (with a fee).",
             ephemeral=True,
         )
 

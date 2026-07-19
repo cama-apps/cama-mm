@@ -162,7 +162,7 @@ BALANCE_DEBT_TEMPLATES = [
         f"{DIM}Client:{RESET} {name}\n"
         f"{DIM}Debt:{RESET} {RED}{abs(bal)}{RESET} JC\n"
         f"{DIM}Payment plan:{RESET} Win games.\n"
-        f"{DIM}Alternative:{RESET} /bankruptcy"
+        f"{DIM}Alternative:{RESET} /economy bankruptcy"
     ),
     lambda bal, name: (
         f"{DIM}[{_ts()}] ALERT LEVEL: {RESET}{RED}CRIMSON{RESET}\n"
@@ -261,7 +261,7 @@ BET_LEVERAGE_TEMPLATES = [
     ),
 ]
 
-# /loan taken
+# /economy loan taken
 LOAN_TEMPLATES = [
     lambda amt, owed: (
         f"{DIM}[JOPA-T] LOAN DISBURSED{RESET}\n"
@@ -439,7 +439,7 @@ def system_breach_max_debt(name: str) -> str:
         f"{DIM}intervened to prevent total{RESET}",
         f"{DIM}financial {RESET}{corrupt_text('annihilation')}{DIM}.{RESET}",
         "",
-        f"{DIM}Options: /bankruptcy, /loan{RESET}",
+        f"{DIM}Options: /economy bankruptcy, /economy loan{RESET}",
         f"{DIM}Or: {RESET}{corrupt_text('accept your fate')}",
     ]
     return "\n".join(lines)

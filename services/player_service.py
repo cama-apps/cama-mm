@@ -292,7 +292,7 @@ class PlayerService:
         now: int,
         cooldown_seconds: int,
     ) -> dict[str, int | str | bool | None]:
-        """Atomically charge for /pingedash and claim its persistent cooldown."""
+        """Atomically charge for /shop pingedash and claim its persistent cooldown."""
         return self.player_repo.try_purchase_pingedash(
             discord_id,
             guild_id,

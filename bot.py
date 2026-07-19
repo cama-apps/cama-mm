@@ -63,6 +63,11 @@ from config import (
 from infrastructure.service_container import ServiceContainer
 from services import trivia_data
 from services.monitoring_service import MonitoringService, UsageMonitor, set_global_usage_monitor
+from utils.command_registry import (
+    CHAT_INPUT_COMMAND_LIMIT,
+    COMMAND_OPTION_LIMIT,
+    summarize_command_tree,
+)
 from utils.economy_event_display import build_public_economy_event_embed
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 from utils.thread_safety import ensure_thread_writable
@@ -594,21 +599,7 @@ async def _load_extensions():
         f"{len(skipped_extensions)} skipped, {len(failed_extensions)} failed"
     )
 
-    # Diagnostic: Log all registered commands
-    all_commands = list(bot.tree.walk_commands())
-    command_counts = {}
-    for cmd in all_commands:
-        command_counts[cmd.name] = command_counts.get(cmd.name, 0) + 1
-
-    # Log duplicate commands if any
-    duplicates = {name: count for name, count in command_counts.items() if count > 1}
-    if duplicates:
-        logger.warning(f"Found duplicate command registrations: {duplicates}")
-
-    logger.info(
-        f"Total registered commands: {len(all_commands)}. "
-        f"Unique command names: {len(command_counts)}"
-    )
+    _log_command_registration("Extension load")
 
 
 
@@ -814,41 +805,45 @@ async def setup_hook():
     await _load_extensions()
 
 
+def _log_command_registration(stage: str):
+    """Log top-level command capacity separately from nested command nodes."""
+    summary = summarize_command_tree(bot.tree)
+    logger.info(
+        "%s: %d/%d top-level commands; %d total command/group nodes",
+        stage,
+        summary.top_level_count,
+        CHAT_INPUT_COMMAND_LIMIT,
+        summary.node_count,
+    )
+    if summary.near_option_limit:
+        logger.warning(
+            "%s groups nearing Discord's %d-option limit: %s",
+            stage,
+            COMMAND_OPTION_LIMIT,
+            summary.near_option_limit,
+        )
+    if summary.duplicate_qualified_names:
+        logger.warning(
+            "%s duplicate qualified command registrations: %s",
+            stage,
+            summary.duplicate_qualified_names,
+        )
+    return summary
+
+
 @bot.event
 async def on_ready():
     """Called when bot is ready."""
     logger.info(f"{bot.user} connected. Guilds: {len(bot.guilds)}")
 
-    # Diagnostic: Log all registered commands before sync
-    all_commands = list(bot.tree.walk_commands())
-    command_counts = {}
-    for cmd in all_commands:
-        command_counts[cmd.name] = command_counts.get(cmd.name, 0) + 1
-
-    # Log duplicate commands if any
-    duplicates = {name: count for name, count in command_counts.items() if count > 1}
-    if duplicates:
-        logger.warning(f"Found duplicate command registrations before sync: {duplicates}")
-        # Log details for addfake specifically
-        addfake_cmds = [cmd for cmd in all_commands if cmd.name == "addfake"]
-        if len(addfake_cmds) > 1:
-            logger.warning(
-                f"Found {len(addfake_cmds)} addfake command registrations. "
-                f"Details: {[{'cog': cmd.cog.__class__.__name__ if cmd.cog else None, 'qualified_name': cmd.qualified_name} for cmd in addfake_cmds]}"
-            )
-
-    logger.info(
-        f"Pre-sync: {len(all_commands)} total commands, {len(command_counts)} unique names. "
-        f"Loaded cogs: {list(bot.cogs.keys())}"
-    )
+    _log_command_registration("Pre-sync")
+    logger.info(f"Loaded cogs: {list(bot.cogs.keys())}")
 
     try:
         await bot.tree.sync()
         logger.info("Slash commands synced globally.")
 
-        # Diagnostic: Log commands after sync
-        post_sync_commands = list(bot.tree.walk_commands())
-        logger.info(f"Post-sync: {len(post_sync_commands)} commands available")
+        _log_command_registration("Post-sync")
     except Exception as exc:
         logger.error(f"Failed to sync commands: {exc}", exc_info=True)
 

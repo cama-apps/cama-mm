@@ -1,4 +1,4 @@
-"""Action handlers for the `/disburse` subcommands.
+"""Action handlers for the `/economy disburse` actions.
 
 These are split out of the cog as free coroutines because they only need the
 cog as a service container — they have no Discord-specific decorator state.
@@ -32,7 +32,7 @@ async def disburse_propose(
     if not can:
         if reason == "active_proposal_exists":
             await interaction.response.send_message(
-                "A disbursement vote is already active. Use `/disburse status` to see it.",
+                "A disbursement vote is already active. Use `/economy disburse` and choose status to see it.",
                 ephemeral=True,
             )
         elif reason == cog.disburse_service.MONETARY_RECOVERY_CODE:
@@ -93,7 +93,7 @@ async def disburse_status(
             )
             return
         await interaction.response.send_message(
-            "No active disbursement proposal. Use `/disburse propose` to create one.",
+            "No active disbursement proposal. Use `/economy disburse` and choose propose to create one.",
             ephemeral=True,
         )
         return
@@ -167,7 +167,7 @@ async def disburse_votes(
     proposal = await asyncio.to_thread(cog.disburse_service.get_proposal, guild_id)
     if not proposal:
         await interaction.response.send_message(
-            "No active disbursement proposal. Use `/disburse status` to check.",
+            "No active disbursement proposal. Use `/economy disburse` and choose status to check.",
             ephemeral=True,
         )
         return

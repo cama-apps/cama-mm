@@ -1,7 +1,7 @@
 """
 Match enrichment commands: /enrich setleague, /enrich match, /enrich discover,
 /enrich backfill, /enrich config, /enrich wipeall, /enrich wipematch,
-/enrich rebuildpairings, /matchhistory, /viewmatch, /recent
+/enrich rebuildpairings, /matches history, /matches view, /matches recent
 """
 
 import asyncio
@@ -28,6 +28,10 @@ class EnrichmentCommands(commands.Cog):
     """Commands for match enrichment and configuration."""
 
     enrich = app_commands.Group(name="enrich", description="Match enrichment and discovery (Admin)")
+    matches = app_commands.Group(
+        name="matches",
+        description="Recent and detailed match statistics",
+    )
 
     def __init__(
         self,
@@ -286,8 +290,8 @@ class EnrichmentCommands(commands.Cog):
 
         await safe_followup(interaction, content=response, ephemeral=True)
 
-    @app_commands.command(
-        name="matchhistory",
+    @matches.command(
+        name="history",
         description="View recent matches with detailed stats",
     )
     @app_commands.describe(
@@ -468,12 +472,12 @@ class EnrichmentCommands(commands.Cog):
             if hero_img:
                 embed.set_thumbnail(url=hero_img)
 
-        embed.set_footer(text="Use /viewmatch <id> for detailed match stats")
+        embed.set_footer(text="Use /matches view <id> for detailed match stats")
 
         await safe_followup(interaction, embed=embed, ephemeral=True)
 
-    @app_commands.command(
-        name="viewmatch",
+    @matches.command(
+        name="view",
         description="View detailed stats for a specific match",
     )
     @app_commands.describe(
@@ -898,7 +902,7 @@ class EnrichmentCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
+    @matches.command(
         name="recent",
         description="View your recent Dota 2 matches as an image",
     )

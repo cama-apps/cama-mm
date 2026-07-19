@@ -159,6 +159,11 @@ __all__ = [
 
 class DigCommands(commands.Cog):
     dig = app_commands.Group(name="dig", description="Tunnel digging minigame")
+    admin = app_commands.Group(
+        name="admin",
+        description="Dig maintenance commands",
+        parent=dig,
+    )
 
     def __init__(self, bot: commands.Bot, dig_service: DigService, dig_flavor_service: DigFlavorService | None = None):
         self.bot = bot
@@ -2269,10 +2274,10 @@ class DigCommands(commands.Cog):
         await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
-    # 17. /dig resetcooldown — Admin: reset a player's free dig
+    # 17. /dig admin — Admin maintenance
     # ------------------------------------------------------------------
 
-    @dig.command(name="resetcooldown", description="Reset a player's free dig cooldown (Admin only)")
+    @admin.command(name="resetcooldown", description="Reset a player's free dig cooldown (Admin only)")
     @app_commands.describe(user="The player whose cooldown to reset")
     @require_guild
     async def dig_resetcooldown(self, interaction: discord.Interaction, user: discord.User):
@@ -2292,7 +2297,7 @@ class DigCommands(commands.Cog):
 
         await safe_followup(interaction, content=f"Reset free dig cooldown for {user.mention}.", ephemeral=True)
 
-    @dig.command(name="forceevent", description="Force next dig to trigger an event (Admin only)")
+    @admin.command(name="forceevent", description="Force next dig to trigger an event (Admin only)")
     @app_commands.describe(user="The player whose next dig gets an event")
     @require_guild
     async def dig_forceevent(self, interaction: discord.Interaction, user: discord.User):
@@ -2306,7 +2311,7 @@ class DigCommands(commands.Cog):
         self.dig_service._force_event_for.add((user.id, guild_id))
         await interaction.response.send_message(f"Next dig for {user.mention} will force an event.", ephemeral=True)
 
-    @dig.command(name="setdepth", description="Set a player's tunnel depth (Admin only)")
+    @admin.command(name="setdepth", description="Set a player's tunnel depth (Admin only)")
     @app_commands.describe(user="The player", depth="New depth value")
     @require_guild
     async def dig_setdepth(self, interaction: discord.Interaction, user: discord.User, depth: int):

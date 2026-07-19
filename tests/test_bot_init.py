@@ -54,8 +54,14 @@ def test_bot_commands_registered(tmp_path):
                     "predict",
                     "duel",
                     "admin",
+                    "bet",
+                    "balance",
+                    "gamba",
+                    "economy",
                     "enrich",
+                    "matches",
                     "dota",
+                    "shop",
                     "lobby",
                     "shuffle",
                     "record",
@@ -67,6 +73,37 @@ def test_bot_commands_registered(tmp_path):
                     assert command_name in command_names, (
                         f"Command {command_name!r} not found in registered commands"
                     )
+
+                qualified_names = {
+                    command.qualified_name for command in bot.bot.tree.walk_commands()
+                }
+                expected_paths = {
+                    "dig admin resetcooldown",
+                    "dig admin forceevent",
+                    "dig admin setdepth",
+                    "economy tip",
+                    "economy paydebt",
+                    "economy bankruptcy",
+                    "economy loan",
+                    "economy reserve",
+                    "economy disburse",
+                    "shop buy",
+                    "shop pingedash",
+                    "shop avoids",
+                    "shop deals",
+                    "shop mana",
+                    "matches history",
+                    "matches view",
+                    "matches recent",
+                }
+                assert expected_paths <= qualified_names
+                expected_top_level_count = 41 if "ask" in command_names else 40
+                assert len(bot.bot.tree.get_commands()) == expected_top_level_count
+                assert len(bot.bot.tree.get_commands()) <= 100
+                for command in bot.bot.tree.walk_commands():
+                    options = getattr(command, "commands", None)
+                    if options is not None:
+                        assert len(options) <= 25, command.qualified_name
             finally:
                 await bot.bot.close()
 

@@ -77,7 +77,7 @@ class PackageDealService:
         """
         Get all active deals created by a user.
 
-        Used for /mydeals command.
+        Used for /shop deals.
 
         Args:
             guild_id: Guild ID

@@ -695,7 +695,7 @@ class UnifiedLeaderboardView(discord.ui.View):
         total_volume = state.data.get("total_volume", {})
 
         if not top_senders and not top_receivers:
-            embed.description = "No tips yet! Use `/tip` to spread some jopacoin love."
+            embed.description = "No tips yet! Use `/economy tip` to spread some jopacoin love."
             return embed
 
         start = state.current_page * MULTI_SECTION_PAGE_SIZE
@@ -919,9 +919,9 @@ class InfoCommands(commands.Cog):
         embed.add_field(
             name="📊 Dota 2 Stats (OpenDota)",
             value=(
-                "`/matchhistory` - Recent matches with heroes and stats\n"
-                "`/viewmatch` - View detailed match embed\n"
-                "`/recent` - Recent matches as image table\n"
+                "`/matches history` - Recent matches with heroes and stats\n"
+                "`/matches view` - View detailed match embed\n"
+                "`/matches recent` - Recent matches as image table\n"
                 "*Use `/profile` Dota tab for role & lane graphs*"
             ),
             inline=False,
@@ -972,9 +972,13 @@ class InfoCommands(commands.Cog):
                 "  • Cannot bet while in debt\n"
                 "`/mybets` - View your active bets and potential payout\n"
                 "`/balance` - Check your jopacoin balance and debt\n"
-                "`/paydebt` - Help another player pay off their debt (be a philanthropist!)\n"
-                f"`/pingedash` - Spend {PINGEDASH_COST} jopacoin to send the Pingedash (24h cooldown)\n"
-                "`/bankruptcy` - Declare bankruptcy (clears debt, 1 week cooldown, 5 game penalty)"
+                "`/economy tip` - Give jopacoin to another player\n"
+                "`/economy paydebt` - Help another player pay off their debt\n"
+                "`/economy loan` / `/economy bankruptcy` - Manage debt\n"
+                "`/economy reserve` / `/economy disburse` - View or allocate Reserve funds\n"
+                "`/shop buy` / `/shop mana` - Browse the jopacoin and mana shops\n"
+                "`/shop avoids` / `/shop deals` - View active matchmaking purchases\n"
+                f"`/shop pingedash` - Spend {PINGEDASH_COST} jopacoin to send the Pingedash"
             ),
             inline=False,
         )

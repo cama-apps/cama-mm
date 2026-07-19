@@ -268,7 +268,7 @@ class PackageDealRepository(BaseRepository, IPackageDealRepository):
         """
         Get all active deals created by a user.
 
-        Used for /mydeals command.
+        Used for /shop deals.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
 

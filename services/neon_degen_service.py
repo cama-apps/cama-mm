@@ -677,7 +677,7 @@ class NeonDegenService:
         debt_cleared: int,
         filing_number: int,
     ) -> NeonResult | None:
-        """Trigger on /bankruptcy. Always fires Layer 2. Layer 3 for repeat offenders."""
+        """Trigger on /economy bankruptcy. Always fires Layer 2. Layer 3 for repeat offenders."""
         try:
             if not self._is_enabled():
                 return None
@@ -729,7 +729,7 @@ class NeonDegenService:
         total_owed: int,
         is_negative: bool = False,
     ) -> NeonResult | None:
-        """Trigger on /loan. Layer 1 at 50%, Layer 2 for negative loans at 80%."""
+        """Trigger on /economy loan. Layer 1 at 50%, Layer 2 for negative loans at 80%."""
         try:
             if not self._is_enabled():
                 return None
@@ -1033,7 +1033,7 @@ class NeonDegenService:
         amount: int,
         fee: int,
     ) -> NeonResult | None:
-        """Trigger on /tip. 5% Layer 2 surveillance report, 20% Layer 1 one-liner."""
+        """Trigger on /economy tip. 5% Layer 2 surveillance report, 20% Layer 1 one-liner."""
         try:
             if not self._is_enabled():
                 return None
