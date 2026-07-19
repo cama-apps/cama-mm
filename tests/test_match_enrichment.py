@@ -158,9 +158,12 @@ class TestMatchEnrichmentService:
         # Use skip_validation for unit test
         result = service.enrich_match(1, 8181518332, skip_validation=True)
 
-        assert result["success"] is True
+        # Zero matched participants must be a no-op failure: committing would
+        # mark the match enriched with no stats and hide it from refill lists.
+        assert result["success"] is False
         assert result["players_enriched"] == 0
         assert 12345 in result["players_not_found"]
+        match_repo.apply_enrichment_atomic.assert_not_called()
 
     def test_enrich_match_no_steam_id(self, mock_repos, mock_opendota_api):
         """Test enrichment when player has no steam_id."""
@@ -189,8 +192,11 @@ class TestMatchEnrichmentService:
         # Use skip_validation for unit test
         result = service.enrich_match(1, 8181518332, skip_validation=True)
 
-        assert result["success"] is True
+        # Zero matched participants must be a no-op failure: committing would
+        # mark the match enriched with no stats and hide it from refill lists.
+        assert result["success"] is False
         assert result["players_enriched"] == 0
+        match_repo.apply_enrichment_atomic.assert_not_called()
 
     def test_backfill_steam_ids(self, mock_repos, mock_opendota_api):
         """Test steam_id backfill from dotabuff URLs."""

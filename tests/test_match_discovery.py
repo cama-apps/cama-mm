@@ -465,13 +465,16 @@ class TestEnrichmentServiceSource:
             "radiant_score": 35,
             "dire_score": 22,
             "game_mode": 2,
-            "players": [],
+            "players": [{"account_id": 42, "hero_id": 1, "kills": 3, "deaths": 2, "assists": 5}],
         }
 
         match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
-        match_repo.get_match_participants.return_value = []
-        # Bulk method returns dict of lists (empty for no participants)
-        player_repo.get_steam_ids_bulk.return_value = {}
+        # One matched participant: enrichment now refuses to commit with zero
+        # matches, and this test is about source/confidence propagation.
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": 111, "side": "radiant"}
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {111: [42]}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation since this test is checking source/confidence, not validation
@@ -496,13 +499,16 @@ class TestEnrichmentServiceSource:
             "radiant_score": 35,
             "dire_score": 22,
             "game_mode": 2,
-            "players": [],
+            "players": [{"account_id": 42, "hero_id": 1, "kills": 3, "deaths": 2, "assists": 5}],
         }
 
         match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
-        match_repo.get_match_participants.return_value = []
-        # Bulk method returns dict of lists (empty for no participants)
-        player_repo.get_steam_ids_bulk.return_value = {}
+        # One matched participant: enrichment now refuses to commit with zero
+        # matches, and this test is about source/confidence propagation.
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": 111, "side": "radiant"}
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {111: [42]}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation since this test is checking source/confidence, not validation

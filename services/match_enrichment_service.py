@@ -344,6 +344,23 @@ class MatchEnrichmentService:
             })
             players_enriched += 1
 
+        # Zero matched participants means there is nothing to enrich with:
+        # committing anyway would mark the match enriched with no stats,
+        # hiding it from refill lists forever. Validation normally prevents
+        # this, but skip_validation (manual /enrich, fantasy refill) can
+        # reach here with no matches — fail without writing.
+        if players_enriched == 0:
+            logger.warning(
+                f"Enrichment aborted for match {internal_match_id}: no participants "
+                f"matched OpenDota match {dota_match_id}; match left unenriched"
+            )
+            return {
+                "success": False,
+                "error": "No participants matched the OpenDota match data",
+                "players_enriched": 0,
+                "players_not_found": players_not_found,
+            }
+
         # Atomic enrichment write: match-level fields + all participant rows
         # commit together so we can't persist valve_match_id/duration without
         # the matching hero/KDA/fantasy data (or vice versa).

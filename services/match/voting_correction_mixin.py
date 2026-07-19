@@ -85,13 +85,18 @@ class VotingCorrectionMixin:
         This reverses all effects of the original recording and re-applies
         them with the correct winning team. Effects reversed/reapplied:
         - Win/loss counters
-        - Glicko-2 ratings (restored from rating_history snapshots)
+        - Glicko-2 ratings (restored from rating_history snapshots, with
+          streak multipliers recomputed for the corrected result)
         - OpenSkill ratings (restored from rating_history snapshots)
         - Bet payouts (winners become losers and vice versa)
+        - JC win bonuses (old winners debited, corrected winners awarded)
         - Pairings statistics
 
         Note: Loan repayments are NOT reversed (they are deferred payments,
-        not match-dependent rewards).
+        not match-dependent rewards). Participation bonuses are not swapped
+        either: the demoted winners never received the losers' participation
+        JC, and clawing the promoted winners' back would punish them for
+        playing.
 
         Args:
             match_id: The match ID to correct
@@ -156,6 +161,25 @@ class VotingCorrectionMixin:
         # fall back to current rating if a snapshot is missing.
         rating_by_id = {e["discord_id"]: e for e in rating_history}
 
+        # Recompute per-player streak multipliers as-of this match with the
+        # CORRECTED result. Recording amplifies Glicko deltas on 3+ game
+        # streaks; a correction that ignored them produced different ratings
+        # than recording the true result would have. The pre-match outcome
+        # window is recoverable from rating_history (rows strictly before
+        # this match), so the multiplier is recomputed, not restored.
+        streak_multipliers: dict[int, float] = {}
+        new_streaks: dict[int, tuple[int, float]] = {}
+        if hasattr(self.match_repo, "get_player_outcomes_before_match"):
+            for pid in radiant_ids + dire_ids:
+                outcomes = self.match_repo.get_player_outcomes_before_match(
+                    pid, guild_id, match_id, limit=20
+                )
+                slen, mult = self.rating_system.calculate_streak_multiplier(
+                    outcomes, won=pid in new_winner_ids
+                )
+                streak_multipliers[pid] = mult
+                new_streaks[pid] = (slen, mult)
+
         def _build_player(pid: int):
             entry = rating_by_id.get(pid)
             if entry and entry.get("rating_before") is not None:
@@ -171,11 +195,11 @@ class VotingCorrectionMixin:
 
         if new_winning_team == "radiant":
             team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                radiant_glicko, dire_glicko, 1
+                radiant_glicko, dire_glicko, 1, streak_multipliers=streak_multipliers
             )
         else:
             team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                dire_glicko, radiant_glicko, 1
+                dire_glicko, radiant_glicko, 1, streak_multipliers=streak_multipliers
             )
 
         new_glicko_updates = [
@@ -222,6 +246,9 @@ class VotingCorrectionMixin:
                 new_mu, new_sigma = os_results[pid]
                 update["new_os_mu"] = new_mu
                 update["new_os_sigma"] = new_sigma
+            if pid in new_streaks:
+                update["new_streak_length"] = new_streaks[pid][0]
+                update["new_streak_multiplier"] = new_streaks[pid][1]
             rating_history_updates.append(update)
 
         # 7. Pre-compute bet correction deltas outside the atomic block. Bet
@@ -292,6 +319,46 @@ class VotingCorrectionMixin:
                 "balance_changes": combined_bet_deltas,
             }
 
+        # 10. JC win-bonus correction: the old "winners" keep their win bonus
+        # and the corrected winners never got theirs unless it moves here.
+        # The reversal debits each old winner's recorded win-bonus balance
+        # delta (win_bonus_jc, snapshotted at recording) in one atomic txn;
+        # matches recorded before the snapshot existed fall back to the gross
+        # JOPACOIN_WIN_REWARD — the best recoverable figure, since garnishment
+        # stayed in the balance and any bankruptcy penalty withheld back then
+        # was never persisted per-player. The re-award goes through the
+        # existing award primitive (so current garnishment / bankruptcy rules
+        # apply) and its delta is snapshotted so a repeat correction reverses
+        # exactly what was paid.
+        win_bonus_correction: dict = {}
+        if self.betting_service and hasattr(self.match_repo, "apply_win_bonus_reversal_atomic"):
+            from config import JOPACOIN_WIN_REWARD
+
+            participants_by_id = {p["discord_id"]: p for p in participants}
+            win_bonus_debits: dict[int, int] = {}
+            for pid in old_winner_ids:
+                stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
+                amount = int(stored) if stored is not None else JOPACOIN_WIN_REWARD
+                if amount > 0:
+                    win_bonus_debits[pid] = amount
+            self.match_repo.apply_win_bonus_reversal_atomic(
+                match_id, guild_id, win_bonus_debits
+            )
+
+            new_win_awards = self.betting_service.award_win_bonus(new_winner_ids, guild_id)
+            win_bonus_awarded = {
+                pid: int(r.get("net", 0)) + int(r.get("garnished", 0))
+                for pid, r in new_win_awards.items()
+            }
+            if win_bonus_awarded and hasattr(self.match_repo, "update_participant_bonus_jc"):
+                self.match_repo.update_participant_bonus_jc(
+                    match_id, guild_id, {}, win_bonus_by_player=win_bonus_awarded
+                )
+            win_bonus_correction = {
+                "reversed": win_bonus_debits,
+                "awarded": win_bonus_awarded,
+            }
+
         logger.info(
             f"Match {match_id} corrected: {old_winning_team} -> {new_winning_team} "
             f"(by user {corrected_by})"
@@ -305,6 +372,7 @@ class VotingCorrectionMixin:
             "players_affected": len(radiant_ids) + len(dire_ids),
             "ratings_updated": len(new_glicko_updates),
             "bet_correction": bet_correction_summary,
+            "win_bonus_correction": win_bonus_correction,
             "new_winner_ids": new_winner_ids,
             "new_loser_ids": new_loser_ids,
         }

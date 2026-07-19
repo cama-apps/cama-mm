@@ -12,6 +12,7 @@ from unittest import mock
 
 import pytest
 
+from config import JOPACOIN_PER_GAME, JOPACOIN_WIN_REWARD
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
@@ -259,10 +260,12 @@ class TestMatchCorrection:
             "Spectator must be credited exactly the new winning payout"
 
         # Former winner: payout column nulled and balance reduced by EXACTLY
-        # the stale payout it previously held — no more, no less.
+        # the stale payout plus the win bonus the correction reclaims (the
+        # radiant bettor was on the old winning team) — no more, no less.
         assert radiant_bet_after["payout"] is None
-        assert radiant_balance_after == radiant_balance_after_wrong - radiant_old_payout, \
-            "Former winner must have exactly its old payout reversed"
+        assert radiant_balance_after == (
+            radiant_balance_after_wrong - radiant_old_payout - JOPACOIN_WIN_REWARD
+        ), "Former winner must have exactly its old payout and win bonus reversed"
 
     def test_correction_bet_settlement_is_all_or_nothing(self, correction_services):
         """If the player-balance credit fails mid-correction, the bets-table
@@ -583,3 +586,156 @@ class TestMatchCorrection:
         # Should have 2 correction records
         corrections = match_repo.get_match_corrections(match_id)
         assert len(corrections) == 2
+
+    def test_correction_moves_win_bonus_exactly(self, correction_services):
+        """Correction must debit the old winners' recorded win bonus and award
+        the corrected winners theirs — exact JC per player, and reversible on
+        a repeat correction via the win_bonus_jc snapshot."""
+        match_service = correction_services["match_service"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=9000)
+        # Capture per-player baselines (players are created with a nonzero
+        # starting balance) so every assertion below is an exact delta.
+        start = {
+            pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in player_ids
+        }
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
+
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        # Post-recording baseline: winners hold start + win bonus, losers
+        # start + participation (no bets, no streak bonus on day one).
+        for pid in radiant_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_WIN_REWARD
+            )
+        for pid in dire_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_PER_GAME
+            )
+
+        correction = match_service.correct_match_result(
+            match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+        )
+        assert correction["win_bonus_correction"]["reversed"] == dict.fromkeys(radiant_ids, JOPACOIN_WIN_REWARD)
+        assert correction["win_bonus_correction"]["awarded"] == dict.fromkeys(dire_ids, JOPACOIN_WIN_REWARD)
+
+        # Old winners: win bonus reclaimed exactly. New winners: keep their
+        # participation JC and gain exactly the win bonus.
+        for pid in radiant_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid]
+        for pid in dire_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_PER_GAME + JOPACOIN_WIN_REWARD
+            )
+
+        # Correcting back reverses the snapshotted award exactly — no drift.
+        match_service.correct_match_result(
+            match_id, "radiant", TEST_GUILD_ID, corrected_by=99999
+        )
+        for pid in radiant_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_WIN_REWARD
+            )
+        for pid in dire_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_PER_GAME
+            )
+
+    def test_correction_applies_streak_multipliers(self, correction_services):
+        """Corrected ratings must include the streak amplification recording
+        the true result would have applied. Seeds a 3-win streak for the true
+        winners, corrects, and checks stored ratings against an independent
+        recomputation — and that they differ from the no-multiplier values
+        the buggy path produced."""
+        match_service = correction_services["match_service"]
+        match_repo = correction_services["match_repo"]
+        player_repo = correction_services["player_repo"]
+
+        player_ids = _create_players(player_repo, start_id=11000)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = pending.radiant_team_ids
+        dire_ids = pending.dire_team_ids
+
+        # Seed a 3-win streak for every dire player BEFORE the match is
+        # recorded, so the corrected result (dire win) continues a 4-game
+        # streak while radiant players stay at multiplier 1.0.
+        for pid in dire_ids:
+            for _ in range(3):
+                match_repo.add_rating_history(pid, TEST_GUILD_ID, rating=1500.0, won=True)
+
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        match_service.correct_match_result(match_id, "dire", TEST_GUILD_ID, corrected_by=1)
+
+        # Independent recomputation from the pre-match snapshots.
+        history = match_repo.get_full_rating_history_for_match(match_id)
+        snap = {e["discord_id"]: e for e in history}
+        rating_system = match_service.rating_system
+
+        def _glicko(pid):
+            e = snap[pid]
+            return rating_system.create_player_from_rating(
+                e["rating_before"], e["rd_before"], e["volatility_before"]
+            )
+
+        multipliers = {}
+        expected_streaks = {}
+        for pid in radiant_ids + dire_ids:
+            outcomes = [True] * 3 if pid in dire_ids else []
+            slen, mult = rating_system.calculate_streak_multiplier(
+                outcomes, won=pid in dire_ids
+            )
+            multipliers[pid] = mult
+            expected_streaks[pid] = (slen, mult)
+        # The seeded streak must actually amplify — otherwise this test is a
+        # tautology that passes even when multipliers are ignored.
+        assert all(multipliers[pid] > 1.0 for pid in dire_ids)
+
+        team1, team2 = rating_system.update_ratings_after_match(
+            [(_glicko(pid), pid) for pid in dire_ids],
+            [(_glicko(pid), pid) for pid in radiant_ids],
+            1,
+            streak_multipliers=multipliers,
+        )
+        expected = {pid: rating for rating, _rd, _vol, pid in team1 + team2}
+        flat1, flat2 = rating_system.update_ratings_after_match(
+            [(_glicko(pid), pid) for pid in dire_ids],
+            [(_glicko(pid), pid) for pid in radiant_ids],
+            1,
+        )
+        unamplified = {pid: rating for rating, _rd, _vol, pid in flat1 + flat2}
+
+        for pid in player_ids:
+            stored = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)[0]
+            assert stored == pytest.approx(expected[pid], abs=1e-6), (
+                f"player {pid}: corrected rating must match streak-amplified recompute"
+            )
+        # The amplified values genuinely differ from the buggy no-multiplier
+        # path for the streaking winners.
+        assert any(abs(expected[pid] - unamplified[pid]) > 1e-6 for pid in dire_ids)
+
+        # rating_history reflects the corrected streak context.
+        conn = sqlite3.connect(correction_services["db_path"])
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT discord_id, streak_length, streak_multiplier FROM rating_history "
+            "WHERE match_id = ?",
+            (match_id,),
+        ).fetchall()
+        conn.close()
+        stored_streaks = {
+            r["discord_id"]: (r["streak_length"], r["streak_multiplier"]) for r in rows
+        }
+        for pid in player_ids:
+            slen, mult = expected_streaks[pid]
+            assert stored_streaks[pid] == (slen, pytest.approx(mult))
