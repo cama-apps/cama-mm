@@ -2406,7 +2406,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         now: int,
         cooldown_seconds: int,
     ) -> dict[str, int | str | bool | None]:
-        """Atomically charge for /pingedash and claim its persistent cooldown."""
+        """Atomically charge for /shop pingedash and claim its persistent cooldown."""
         if cost < 0:
             raise ValueError("Pingedash cost cannot be negative")
         if cooldown_seconds < 0:

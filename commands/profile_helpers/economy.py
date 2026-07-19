@@ -163,7 +163,7 @@ async def build_economy_embed(
         embed, cog, target_user, target_discord_id, guild_id
     )
 
-    embed.set_footer(text="Tip: Use /balance for quick check, /loan to borrow")
+    embed.set_footer(text="Tip: Use /balance for a quick check, /economy loan to borrow")
 
     return embed, chart_file
 

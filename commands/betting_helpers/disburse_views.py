@@ -1,4 +1,4 @@
-"""Discord UI views for the Jopacoin Reserve disbursement (`/disburse`) flow."""
+"""Discord UI views for the Jopacoin Reserve (`/economy disburse`) flow."""
 
 from __future__ import annotations
 

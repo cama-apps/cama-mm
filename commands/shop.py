@@ -155,6 +155,11 @@ ANNOUNCE_TARGET_MESSAGES = [
 class ShopCommands(commands.Cog):
     """Slash commands to spend jopacoin in the shop."""
 
+    shop_group = app_commands.Group(
+        name="shop",
+        description="Jopacoin and mana shop commands",
+    )
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -294,7 +299,7 @@ class ShopCommands(commands.Cog):
             all_items = [c for c in all_items if current.lower() in c.name.lower()]
         return all_items[:25]
 
-    @app_commands.command(name="shop", description="Spend jopacoin in the shop")
+    @shop_group.command(name="buy", description="Spend jopacoin in the shop")
     @app_commands.describe(
         item="What to buy",
         target="User to interact with (required for 'Announce + Tag', 'Soft Avoid', and 'Package Deal' options)",
@@ -402,7 +407,7 @@ class ShopCommands(commands.Cog):
                 "Recalibration is on cooldown.", ephemeral=True
             )
 
-    @app_commands.command(
+    @shop_group.command(
         name="pingedash",
         description=f"Spend {PINGEDASH_COST} jopacoin to send the Pingedash",
     )
@@ -439,7 +444,7 @@ class ShopCommands(commands.Cog):
         if not result["success"]:
             reason = result["reason"]
             if reason == "not_registered":
-                message = "You need to `/player register` before using `/pingedash`."
+                message = "You need to `/player register` before using `/shop pingedash`."
             elif reason == "on_cooldown":
                 message = (
                     "Pingedash is on cooldown. You can use it again "
@@ -1725,7 +1730,7 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private - target not notified).
         await safe_followup(interaction, embed=embed, ephemeral=True)
 
-    @app_commands.command(name="myavoids", description="View your active soft avoids")
+    @shop_group.command(name="avoids", description="View your active soft avoids")
     @require_guild
     async def myavoids(self, interaction: discord.Interaction):
         """View your active soft avoids."""
@@ -1765,7 +1770,7 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="mydeals", description="View your active package deals")
+    @shop_group.command(name="deals", description="View your active package deals")
     @require_guild
     async def mydeals(self, interaction: discord.Interaction):
         """View your active package deals."""
@@ -1805,7 +1810,7 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="manashop", description="Spend mana on color-exclusive items")
+    @shop_group.command(name="mana", description="Spend mana on color-exclusive items")
     @app_commands.describe(
         item="The mana item to purchase",
         target="Target player (Sanctuary, Blood Pact, Insight)",
@@ -1875,7 +1880,7 @@ class ShopCommands(commands.Cog):
             await interaction.followup.send("Mana system not available.", ephemeral=True)
             return
 
-        # Tap-state check: a tapped player has no active color, /manashop locked.
+        # Tap-state check: a tapped player has no active color, /shop mana locked.
         tapped = await asyncio.to_thread(mana_service.is_mana_consumed, user_id, guild_id)
         if tapped:
             await interaction.followup.send(

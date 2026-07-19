@@ -180,47 +180,59 @@ Show your active bet for the current match.
 #### `/balance`
 Check your jopacoin balance and debt status.
 
-#### `/tip`
+#### `/economy tip`
 Give jopacoin to another player (1% fee goes to the Jopacoin Reserve).
 
 **Options:**
 - `player`: The recipient
 - `amount`: Amount to tip
 
-#### `/paydebt`
+#### `/economy paydebt`
 Help another player pay off their debt.
 
 **Options:**
-- `user`: The player in debt
+- `player`: The player in debt
 - `amount`: Amount to pay
 
-#### `/bankruptcy`
+#### `/economy bankruptcy`
 Declare bankruptcy to clear debt. Has a 1-week cooldown and 5-game win reward penalty.
 
-#### `/loan`
+#### `/economy loan`
 Borrow jopacoin with a 20% fee. Auto-repaid after your next match.
 
 **Options:**
 - `amount`: Amount to borrow (max 100)
 
-#### `/nonprofit`
+#### `/economy reserve`
 View the Jopacoin Reserve, the server operations budget.
 
-#### `/disburse`
+#### `/economy disburse`
 Propose or manage Jopacoin Reserve allocation voting.
 
 **Options:**
-- `action`: "propose", "status", or "reset"
+- `action`: "propose", "status", "reset", "votes", or "execute"
 
 #### `/gamba`
 Spin the Wheel of Fortune for random jopacoin outcomes. Daily cooldown.
 
-#### `/shop`
+#### `/shop buy`
 Spend jopacoin in the shop for special items.
 
 **Options:**
 - `item`: The item to purchase
 - `target` (optional): Target player for certain items
+
+#### `/shop pingedash`
+Spend jopacoin to send the configured Pingedash. Has a 24-hour cooldown.
+
+#### `/shop avoids`
+View your active soft avoids.
+
+#### `/shop deals`
+View your active package deals.
+
+#### `/shop mana`
+Spend mana on color-exclusive items.
 
 ### Predictions
 
@@ -276,20 +288,20 @@ Head-to-head statistics between two players.
 - `user1`: First player
 - `user2`: Second player
 
-#### `/matchhistory`
+#### `/matches history`
 View recent matches with hero picks and stats.
 
 **Options:**
 - `user` (optional): Filter by player
 - `limit` (optional): Number of matches
 
-#### `/viewmatch`
+#### `/matches view`
 Detailed match embed with participant stats.
 
 **Options:**
 - `match_id`: The match ID to view
 
-#### `/recent`
+#### `/matches recent`
 Recent matches displayed as a formatted image table.
 
 **Options:**

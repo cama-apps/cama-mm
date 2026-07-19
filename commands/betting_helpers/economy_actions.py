@@ -102,7 +102,7 @@ async def tip_action(
     )
     if not rl.allowed:
         await interaction.response.send_message(
-            f"Please wait {rl.retry_after_seconds}s before using `/tip` again.",
+            f"Please wait {rl.retry_after_seconds}s before using `/economy tip` again.",
             ephemeral=True,
         )
         return
@@ -354,7 +354,7 @@ async def paydebt_action(
     )
     if not rl.allowed:
         await interaction.response.send_message(
-            f"Please wait {rl.retry_after_seconds}s before using `/paydebt` again.",
+            f"Please wait {rl.retry_after_seconds}s before using `/economy paydebt` again.",
             ephemeral=True,
         )
         return
@@ -546,7 +546,7 @@ async def bankruptcy_action(
         ephemeral=False,
     )
 
-    # Neon Degen Terminal hook - at most ONE neon event per /bankruptcy action
+    # Neon Degen Terminal hook - at most ONE neon event per /economy bankruptcy action
     neon = cog._get_neon_service()
     if neon:
         filing_number = await cog._get_bankruptcy_filing_number(user_id, guild_id)
@@ -970,6 +970,6 @@ async def nonprofit_action(
                 inline=False,
             )
 
-    embed.set_footer(text="Use /disburse propose to start a reserve allocation vote!")
+    embed.set_footer(text="Use /economy disburse and choose propose to start a reserve allocation vote!")
 
     await safe_followup(interaction, embed=embed)

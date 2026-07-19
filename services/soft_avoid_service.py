@@ -74,7 +74,7 @@ class SoftAvoidService:
         """
         Get all active avoids created by a user.
 
-        Used for /myavoids command.
+        Used for /shop avoids.
 
         Args:
             guild_id: Guild ID

@@ -149,7 +149,7 @@ class SoftAvoidRepository(BaseRepository, ISoftAvoidRepository):
         """
         Get all active avoids created by a user.
 
-        Used for /myavoids command.
+        Used for /shop avoids.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
 

@@ -255,7 +255,7 @@ class BankruptcyService:
             Result.fail(error_message, code) on failure
         """
         # Pre-check is best-effort UX; the atomic call below re-validates inside
-        # a write lock so two concurrent /bankruptcy calls cannot both succeed.
+        # a write lock so two concurrent /economy bankruptcy calls cannot both succeed.
         validation = self.validate_bankruptcy(discord_id, guild_id)
         if not validation.success:
             return Result.fail(validation.error, code=validation.error_code)

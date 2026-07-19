@@ -482,7 +482,7 @@ class SchemaManager:
             ("add_next_match_pot_to_nonprofit_fund", self._migration_add_next_match_pot_to_nonprofit_fund),
             # Remove storage left behind by the retired Wheel War feature.
             ("drop_retired_wheel_war_tables", self._migration_drop_retired_wheel_war_tables),
-            # Persistent per-guild cooldown for the paid /pingedash command.
+            # Persistent per-guild cooldown for the paid /shop pingedash command.
             ("add_last_pingedash_to_players", self._migration_add_last_pingedash_to_players),
             # Player-history trivia: immutable question snapshots and atomic
             # per-session scoring/reward state.
@@ -1104,7 +1104,7 @@ class SchemaManager:
             """
         )
 
-        # Disbursement history (for /nonprofit command)
+        # Disbursement history (for /economy reserve)
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS disburse_history (

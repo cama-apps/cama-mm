@@ -279,6 +279,11 @@ def _wheel_outcome_metadata(
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
 
+    economy = app_commands.Group(
+        name="economy",
+        description="Jopacoin transfers, debt, and Reserve commands",
+    )
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -1586,7 +1591,7 @@ class BettingCommands(commands.Cog):
                 target_display_name=getattr(interaction.user, "display_name", None),
             )
 
-    @app_commands.command(name="tip", description="Give jopacoin to another player")
+    @economy.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(
         player="Player to tip",
         amount="Amount of jopacoin to give",
@@ -1598,7 +1603,7 @@ class BettingCommands(commands.Cog):
         amount: int,
     ):
         await _tip_action(self, interaction, player, amount)
-    @app_commands.command(name="paydebt", description="Help another player pay off their debt")
+    @economy.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
         player="Player whose debt to pay",
         amount="Amount of jopacoin to pay toward their debt",
@@ -1610,7 +1615,7 @@ class BettingCommands(commands.Cog):
         amount: int,
     ):
         await _paydebt_action(self, interaction, player, amount)
-    @app_commands.command(
+    @economy.command(
         name="bankruptcy",
         description="Declare bankruptcy to clear your debt (once per week, with penalties)",
     )
@@ -1628,7 +1633,7 @@ class BettingCommands(commands.Cog):
             logger.warning("Failed to get bankruptcy filing number: %s", e)
         return 1
 
-    @app_commands.command(name="loan", description="Borrow jopacoin (with a fee)")
+    @economy.command(name="loan", description="Borrow jopacoin (with a fee)")
     @app_commands.describe(amount="Amount to borrow (max 100)")
     async def loan(
         self,
@@ -1636,10 +1641,10 @@ class BettingCommands(commands.Cog):
         amount: int,
     ):
         await _loan_action(self, interaction, amount)
-    @app_commands.command(name="nonprofit", description="View the Jopacoin Reserve")
+    @economy.command(name="reserve", description="View the Jopacoin Reserve")
     async def nonprofit(self, interaction: discord.Interaction):
         await _nonprofit_action(self, interaction)
-    @app_commands.command(
+    @economy.command(
         name="disburse", description="Propose or manage Jopacoin Reserve allocation"
     )
     @app_commands.describe(action="Action to perform")

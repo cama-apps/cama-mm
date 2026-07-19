@@ -1,4 +1,4 @@
-"""Embed builders for the Jopacoin Reserve disbursement (`/disburse`) flow."""
+"""Embed builders for the Jopacoin Reserve (`/economy disburse`) flow."""
 
 from __future__ import annotations
 
