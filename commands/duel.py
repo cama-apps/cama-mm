@@ -31,6 +31,15 @@ TRIAL_DETAILS = {
     DuelTrial.TRIAL_OF_FIVE: "Trial of Five: a lobby using Immortal Draft.",
 }
 
+TRIAL_BY_COMBAT_RULES = (
+    "Mirror matchups: both duelists play the same hero each game.\n"
+    "• Game 1 hero: recipient's pick\n"
+    "• Game 2 hero: challenger's pick\n"
+    "• Tiebreaker: Shadow Fiend, mid\n"
+    "• Victory: tower destruction, two kills, or 100 creep score\n"
+    "• Prohibited: farming the jungle, visiting other lanes"
+)
+
 
 class DuelResponseButton(discord.ui.Button):
     """A durable response button tied to one challenge and action."""
@@ -406,6 +415,8 @@ class DuelCommands(commands.Cog):
                 f"Both {challenge.wager} JC stakes are locked. "
                 f"{TRIAL_DETAILS[challenge.trial_type]}"
             )
+            if challenge.trial_type is DuelTrial.TRIAL_BY_COMBAT:
+                detail = f"{detail}\n{TRIAL_BY_COMBAT_RULES}"
         await safe_followup(
             interaction,
             content=f"{flavor}\n{detail}",
@@ -558,6 +569,15 @@ class DuelCommands(commands.Cog):
                 name="Trial",
                 value=self._trial_label(challenge.trial_type),
             )
+            if (
+                challenge.status is DuelStatus.ACCEPTED
+                and challenge.trial_type is DuelTrial.TRIAL_BY_COMBAT
+            ):
+                embed.add_field(
+                    name="Rules",
+                    value=TRIAL_BY_COMBAT_RULES,
+                    inline=False,
+                )
         if challenge.status is DuelStatus.RESOLVED:
             embed.add_field(name="Winner", value=f"<@{challenge.winner_id}>")
         if challenge.status is DuelStatus.VOIDED:

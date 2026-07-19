@@ -9,6 +9,7 @@ import discord
 import pytest
 
 from commands.duel import (
+    TRIAL_BY_COMBAT_RULES,
     DuelChallengeView,
     DuelCommands,
     DuelResponseButton,
@@ -479,6 +480,13 @@ async def test_acceptance_edits_original_and_posts_approved_trial_detail(
     assert "Challenge #7" in content
     assert f"<@{CHALLENGER_ID}> vs <@{RECIPIENT_ID}>" in content
     assert "500 JC" in content
+    fields = _fields(original.edit.await_args.kwargs["embed"])
+    if trial is DuelTrial.TRIAL_BY_COMBAT:
+        assert TRIAL_BY_COMBAT_RULES in content
+        assert fields["Rules"] == TRIAL_BY_COMBAT_RULES
+    else:
+        assert "Rules" not in fields
+        assert "Shadow Fiend" not in content
     _assert_mentions_disabled(announcement.kwargs["allowed_mentions"])
 
 
