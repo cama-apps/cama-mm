@@ -239,7 +239,9 @@ async def test_lobby_command_uses_guild_id(monkeypatch_safe_defer):
     assert 1 in lobby.players
     assert interaction.followup.messages
     assert "Lobby created and joined" in interaction.followup.messages[-1]["content"]
-    assert "📋" in interaction.channel.sent_messages[0].added_reactions
+    reactions = interaction.channel.sent_messages[0].added_reactions
+    assert "📋" in reactions
+    assert all("frogling" not in reaction for reaction in reactions)
 
 
 @pytest.mark.asyncio

@@ -205,6 +205,11 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
         patch.object(type(bot_module.bot), "guilds", new_callable=lambda: property(lambda _self: [])),
         patch.object(bot_module.bot, "player_service", None, create=True),
         patch.object(bot_module.bot, "reminder_service", None, create=True),
+        patch.object(
+            bot_module,
+            "_reconcile_persisted_lobby_messages",
+            AsyncMock(),
+        ) as reconcile_lobbies,
         patch.object(bot_module, "_supervised_loop", supervisor),
         patch.object(bot_module, "_log_task_exit", return_value=exit_callback) as log_exit,
     ):
@@ -215,6 +220,136 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
     log_exit.assert_called_once_with("duel_challenges")
     duel_task.add_done_callback.assert_called_once_with(exit_callback)
     assert bot_module._duel_challenge_task is duel_task
+    assert reconcile_lobbies.await_count == 2
+
+
+async def test_reconcile_persisted_lobby_message_removes_legacy_frogling_reaction(
+    bot_module,
+):
+    lobby = SimpleNamespace(status="open")
+    lobby_manager = SimpleNamespace(lobbies={42: lobby})
+    lobby_service = MagicMock(lobby_manager=lobby_manager)
+    lobby_service.get_lobby_message_id.return_value = 100
+    lobby_service.get_lobby_channel_id.return_value = 200
+
+    frogling_emoji = SimpleNamespace(id=1463270458848842003, name="frogling")
+    message = SimpleNamespace(
+        reactions=[SimpleNamespace(emoji=frogling_emoji)],
+        clear_reaction=AsyncMock(),
+    )
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(bot_module, "update_lobby_message", AsyncMock()) as update_message,
+    ):
+        await bot_module._reconcile_persisted_lobby_messages()
+
+    update_message.assert_awaited_once_with(message, lobby, 42)
+    message.clear_reaction.assert_awaited_once_with(frogling_emoji)
+
+
+async def test_update_lobby_message_reports_failed_edit(bot_module):
+    lobby = SimpleNamespace(get_player_count=MagicMock(return_value=1))
+    lobby_service = MagicMock()
+    lobby_service.build_lobby_embed.return_value = object()
+    message = SimpleNamespace(edit=AsyncMock(side_effect=RuntimeError("temporary")))
+
+    with (
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+    ):
+        updated = await bot_module.update_lobby_message(message, lobby, 42)
+
+    assert updated is False
+
+
+async def test_reconcile_persisted_lobby_message_retries_failed_edit(bot_module):
+    lobby = SimpleNamespace(status="open")
+    lobby_manager = SimpleNamespace(lobbies={42: lobby})
+    lobby_service = MagicMock(lobby_manager=lobby_manager)
+    lobby_service.get_lobby_message_id.return_value = 100
+    lobby_service.get_lobby_channel_id.return_value = 200
+    message = SimpleNamespace(reactions=[])
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(
+            bot_module,
+            "update_lobby_message",
+            AsyncMock(side_effect=[False, True]),
+        ) as update_message,
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        await bot_module._reconcile_persisted_lobby_messages()
+
+    assert update_message.await_count == 2
+    sleep.assert_awaited_once()
+
+
+async def test_reconcile_persisted_lobby_message_retries_failed_reaction_clear(
+    bot_module,
+):
+    lobby = SimpleNamespace(status="open")
+    lobby_manager = SimpleNamespace(lobbies={42: lobby})
+    lobby_service = MagicMock(lobby_manager=lobby_manager)
+    lobby_service.get_lobby_message_id.return_value = 100
+    lobby_service.get_lobby_channel_id.return_value = 200
+    frogling_emoji = SimpleNamespace(id=1463270458848842003, name="frogling")
+    message = SimpleNamespace(
+        reactions=[SimpleNamespace(emoji=frogling_emoji)],
+        clear_reaction=AsyncMock(side_effect=[RuntimeError("temporary"), None]),
+    )
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(bot_module, "update_lobby_message", AsyncMock(return_value=True)),
+        patch.object(bot_module.asyncio, "sleep", AsyncMock()) as sleep,
+    ):
+        await bot_module._reconcile_persisted_lobby_messages()
+
+    assert message.clear_reaction.await_count == 2
+    sleep.assert_awaited_once()
+
+
+async def test_retired_frogling_reaction_is_removed_from_active_lobby_message(
+    bot_module,
+):
+    payload = SimpleNamespace(
+        user_id=123,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=1463270458848842003, name="frogling"),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = 100
+    message = SimpleNamespace(id=100, remove_reaction=AsyncMock())
+    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    removed_emoji, removed_user = message.remove_reaction.await_args.args
+    assert removed_emoji is payload.emoji
+    assert removed_user.id == payload.user_id
+    lobby_service.join_lobby.assert_not_called()
+    lobby_service.join_lobby_conditional.assert_not_called()
 
 
 async def test_economy_event_loop_enforces_moratorium_before_activation(bot_module):

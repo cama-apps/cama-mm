@@ -63,30 +63,6 @@ class TestLobbyServicePendingMatchCheck:
         assert pending_info is None
         lobby_manager.join_lobby.assert_called_once()
 
-    def test_join_lobby_conditional_blocks_player_in_pending_match(self):
-        """Player in pending match cannot join conditional queue."""
-        lobby_manager = MagicMock(spec=LobbyManagerService)
-        player_repo = MagicMock()
-        match_state_service = MagicMock()
-
-        match_state_service.get_pending_match_for_player.return_value = {
-            "pending_match_id": 99,
-            "shuffle_message_jump_url": None,
-        }
-
-        service = LobbyService(
-            lobby_manager=lobby_manager,
-            player_repo=player_repo,
-            match_state_service=match_state_service,
-        )
-
-        success, reason, pending_info = service.join_lobby_conditional(discord_id=12345, guild_id=999)
-
-        assert success is False
-        assert reason == "in_pending_match"
-        assert pending_info["pending_match_id"] == 99
-        lobby_manager.join_lobby_conditional.assert_not_called()
-
     def test_join_lobby_without_match_state_service_works(self):
         """LobbyService works without match_state_service (backwards compat)."""
         lobby_manager = MagicMock(spec=LobbyManagerService)
@@ -154,14 +130,13 @@ class TestLobbyServicePendingMatchCheck:
         assert reason == "already_joined"
         assert pending_info is None
 
-    def test_join_lobby_conditional_returns_already_joined_reason(self):
-        """Test that already joined conditional returns correct reason code."""
+    def test_join_lobby_conditional_returns_deprecated_reason(self):
         lobby_manager = MagicMock(spec=LobbyManagerService)
         player_repo = MagicMock()
         match_state_service = MagicMock()
 
         match_state_service.get_pending_match_for_player.return_value = None
-        lobby_manager.join_lobby_conditional.return_value = "already_joined"
+        lobby_manager.join_lobby_conditional.return_value = "deprecated"
 
         service = LobbyService(
             lobby_manager=lobby_manager,
@@ -172,56 +147,8 @@ class TestLobbyServicePendingMatchCheck:
         success, reason, pending_info = service.join_lobby_conditional(discord_id=12345, guild_id=999)
 
         assert success is False
-        assert reason == "already_joined"
+        assert reason == "conditional_join_deprecated"
         assert pending_info is None
-
-    def test_join_lobby_conditional_allows_player_not_in_pending_match(self):
-        """Player not in pending match can join conditional queue."""
-        lobby_manager = MagicMock(spec=LobbyManagerService)
-        player_repo = MagicMock()
-        match_state_service = MagicMock()
-
-        match_state_service.get_pending_match_for_player.return_value = None
-        lobby_manager.join_lobby_conditional.return_value = "ok"
-
-        service = LobbyService(
-            lobby_manager=lobby_manager,
-            player_repo=player_repo,
-            match_state_service=match_state_service,
-        )
-
-        success, reason, pending_info = service.join_lobby_conditional(discord_id=12345, guild_id=999)
-
-        assert success is True
-        assert reason == ""
-        assert pending_info is None
-        lobby_manager.join_lobby_conditional.assert_called_once()
-
-    def test_join_lobby_conditional_returns_lobby_full_reason(self):
-        """Test that lobby full returns correct reason code for conditional join.
-
-        The capacity check lives inside the manager (under the state lock).
-        """
-        lobby_manager = MagicMock(spec=LobbyManagerService)
-        player_repo = MagicMock()
-        match_state_service = MagicMock()
-
-        match_state_service.get_pending_match_for_player.return_value = None
-        lobby_manager.join_lobby_conditional.return_value = "full"
-
-        service = LobbyService(
-            lobby_manager=lobby_manager,
-            player_repo=player_repo,
-            match_state_service=match_state_service,
-            max_players=12,
-        )
-
-        success, reason, pending_info = service.join_lobby_conditional(discord_id=12345, guild_id=999)
-
-        assert success is False
-        assert reason == "lobby_full"
-        assert pending_info is None
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

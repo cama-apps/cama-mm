@@ -301,8 +301,7 @@ async def test_stale_repost_prunes_afk_no_shows(monkeypatch):
     """Prune AFK non-responders; keep the trigger-er, active, and reacted."""
     env = _setup(
         monkeypatch,
-        regular={1: OFFLINE, 2: OFFLINE, 4: OFFLINE, 5: ONLINE, 6: OFFLINE},
-        conditional={3: OFFLINE},
+        regular={1: OFFLINE, 2: OFFLINE, 3: OFFLINE, 4: OFFLINE, 5: ONLINE, 6: OFFLINE},
         # Player 6 has left the server (not a guild member anymore).
         present={1, 2, 3, 4, 5},
     )
@@ -314,10 +313,10 @@ async def test_stale_repost_prunes_afk_no_shows(monkeypatch):
     status, info = await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
 
     assert status == "ok"
-    # Pruned: 2 (offline), 3 (conditional, offline), 6 (left server).
+    # Pruned: 2 and 3 (offline), plus 6 (left server).
     assert info["pruned_count"] == 3
     assert 2 not in env.lobby.players
-    assert 3 not in env.lobby.conditional_players
+    assert 3 not in env.lobby.players
     assert 6 not in env.lobby.players
     # Kept: 1 (trigger-er), 4 (reacted), 5 (active).
     assert {1, 4, 5}.issubset(env.lobby.players)

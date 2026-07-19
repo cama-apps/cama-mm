@@ -49,6 +49,24 @@ class TestLobby:
         assert lobby.status == "open"
         assert len(lobby.players) == 0
 
+    def test_legacy_conditional_players_are_ignored(self):
+        """Persisted Frogling entries no longer participate in the lobby."""
+        lobby = Lobby.from_dict(
+            {
+                "lobby_id": 1,
+                "created_by": 12345,
+                "created_at": datetime.now().isoformat(),
+                "players": list(range(1, 10)),
+                "conditional_players": [99],
+                "player_join_times": {"1": 100.0, "99": 200.0},
+            }
+        )
+
+        assert lobby.players == set(range(1, 10))
+        assert lobby.conditional_players == set()
+        assert lobby.get_total_count() == 9
+        assert lobby.player_join_times == {1: 100.0}
+
     def test_add_player(self):
         """Test adding a player to the lobby."""
         lobby = Lobby(lobby_id=1, created_by=12345, created_at=datetime.now())
@@ -217,6 +235,34 @@ class TestLobbyManager:
 
 class TestLobbyPersistence:
     """Test lobby state persistence across bot restarts."""
+
+    def test_startup_persists_sanitized_legacy_conditional_state(self, repo_db_path):
+        guild_id = 42
+        repo = LobbyRepository(repo_db_path)
+        repo.save_lobby_state(
+            lobby_id=1,
+            guild_id=guild_id,
+            players=[1],
+            conditional_players=[99],
+            status="open",
+            created_by=1,
+            created_at=datetime.now().isoformat(),
+            message_id=100,
+            channel_id=200,
+            player_join_times={1: 1000.0, 99: 2000.0},
+        )
+
+        manager = LobbyManager(LobbyRepository(repo_db_path))
+
+        restored = manager.get_lobby(guild_id=guild_id)
+        stored = repo.load_lobby_state(1, guild_id=guild_id)
+        assert restored is not None
+        assert restored.conditional_players == set()
+        assert stored is not None
+        assert stored["conditional_players"] == []
+        assert stored["player_join_times"] == {1: 1000.0}
+        assert stored["message_id"] == 100
+        assert stored["channel_id"] == 200
 
     def test_message_and_channel_ids_persist_across_restart(self, repo_db_path):
         """Test that message_id and channel_id are restored after restart."""
@@ -708,22 +754,18 @@ class TestStaleReadycheckPrune:
         assert 102 not in lobby_after.players
         assert 104 not in lobby_after.players
 
-    def test_prune_conditional_players_removes_from_conditional_queue(self):
-        """Stale-prune of conditional (frogling) players uses leave_lobby_conditional."""
+    def test_conditional_lobby_join_is_deprecated(self):
         manager = LobbyManager(FakeLobbyRepo())
         guild_id = 0
 
-        manager.join_lobby(1, guild_id=guild_id)         # regular
-        manager.join_lobby_conditional(2, guild_id=guild_id)  # frogling
+        manager.join_lobby(1, guild_id=guild_id)
+        result = manager.join_lobby_conditional(2, guild_id=guild_id)
 
         lobby = manager.get_lobby(guild_id=guild_id)
-        assert 2 in lobby.conditional_players
-
-        manager.leave_lobby_conditional(2, guild_id=guild_id)
-
-        lobby_after = manager.get_lobby(guild_id=guild_id)
-        assert 2 not in lobby_after.conditional_players
-        assert 1 in lobby_after.players  # regular player is untouched
+        assert result == "deprecated"
+        assert lobby is not None
+        assert lobby.players == {1}
+        assert lobby.conditional_players == set()
 
     def test_prune_does_not_affect_other_guild(self):
         """Removing a player from guild A does not touch guild B's lobby."""

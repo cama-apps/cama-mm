@@ -778,30 +778,21 @@ class TestSpecifiedCaptains:
             lobby_at.add_player(i)
         assert lobby_at.get_player_count() >= 15, "15 players should meet threshold"
 
-    def test_lobby_player_count_includes_conditional(self):
-        """Verify total count includes both regular and conditional players.
-
-        Note: Immortal Draft triggers on regular_count >= 15, not total_count.
-        This test verifies the count methods work correctly.
-        """
+    def test_lobby_player_count_ignores_legacy_conditional_players(self):
         from datetime import datetime
 
         from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
-        # Add 10 regular players
-        for i in range(1, 11):
+        # Nine regular players are not enough even if legacy Frogling data exists.
+        for i in range(1, 10):
             lobby.add_player(i)
-        # Add 6 conditional players
-        for i in range(11, 17):
-            lobby.add_conditional_player(i)
+        lobby.conditional_players = set(range(11, 17))
 
         total = lobby.get_total_count()
         regular = lobby.get_player_count()
-        assert total == 16
-        assert regular == 10
-        # Immortal Draft requires 15+ regular players, so this would NOT trigger it
-        assert regular < 15
+        assert total == 9
+        assert regular == 9
 
 
 class TestCaptainEligibility:
@@ -1467,14 +1458,13 @@ class TestExecuteDraft:
         assert len(interaction.channel.sent) == 1
         assert "Draft starting!" in interaction.channel.sent[0].content
 
-    async def test_conditional_exclusions_are_deferred_and_classified(self, player_repository):
+    async def test_legacy_conditional_players_are_ignored(self, player_repository):
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 16)
         regular_ids = player_ids[:14]
         conditional_ids = player_ids[14:]
         lobby = _make_lobby(regular_ids)
-        for pid in conditional_ids:
-            lobby.add_conditional_player(pid)
+        lobby.conditional_players.update(conditional_ids)
         exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
 
         cog = _make_draft_cog(player_repository)
@@ -1486,7 +1476,8 @@ class TestExecuteDraft:
         state = cog.draft_state_manager.get_state(guild_id)
         assert state is not None
         assert set(state.full_exclusion_increment_ids) == set(state.excluded_player_ids)
-        assert set(state.half_exclusion_increment_ids) == set(conditional_ids)
+        assert state.half_exclusion_increment_ids == []
+        assert set(state.player_pool_ids).isdisjoint(conditional_ids)
         assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
 
     async def test_captain_eligibility_flags_do_not_limit_selection(self, player_repository):

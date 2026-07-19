@@ -6,7 +6,7 @@ import discord
 
 from rating_system import CamaRatingSystem
 from utils.embed_safety import truncate_field
-from utils.formatting import FROGLING_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
+from utils.formatting import ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 from utils.region import summarize_region
 
@@ -118,7 +118,6 @@ def format_player_list(
 
 def create_lobby_embed(
     lobby, players, player_ids,
-    conditional_players=None, conditional_ids=None,
     ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None,
     guild_id: int | None = None,
 ):
@@ -128,8 +127,6 @@ def create_lobby_embed(
         lobby: Lobby object
         players: List of regular Player objects
         player_ids: List of regular player Discord IDs
-        conditional_players: List of conditional (frogling) Player objects
-        conditional_ids: List of conditional player Discord IDs
         ready_threshold: Minimum players needed to shuffle
         max_players: Maximum players allowed in lobby
         bankruptcy_repo: BankruptcyRepository instance
@@ -137,8 +134,7 @@ def create_lobby_embed(
     """
     lookup_guild_id = guild_id if guild_id is not None else getattr(lobby, "guild_id", None)
     regular_count = lobby.get_player_count()
-    conditional_count = lobby.get_conditional_count()
-    total_count = lobby.get_total_count()
+    total_count = regular_count
 
     if lobby.created_at:
         timestamp_text = f"Opened at <t:{int(lobby.created_at.timestamp())}:t>"
@@ -166,21 +162,9 @@ def create_lobby_embed(
         inline=False,
     )
 
-    # Conditional (frogling) players section - only show if there are any
-    if conditional_players and conditional_ids:
-        conditional_list, _ = format_player_list(
-            conditional_players, conditional_ids, bankruptcy_repo,
-            guild_id=lookup_guild_id,
-        )
-        embed.add_field(
-            name=f"**Conditional ({conditional_count})** {FROGLING_EMOTE}",
-            value=truncate_field(conditional_list),
-            inline=False,
-        )
-
     embed.add_field(
         name="🌎 Lobby Region",
-        value=summarize_region(list(players or []) + list(conditional_players or [])),
+        value=summarize_region(list(players or [])),
         inline=False,
     )
 

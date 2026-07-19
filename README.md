@@ -8,7 +8,7 @@ A Discord bot for balanced team shuffling in Dota 2 inhouse games for the Camara
 - **Balanced Team Matching**: Minimizes team value difference using Glicko-2 ratings with role-based optimization
 - **Captain's Draft Mode**: Coinflip-based captain selection, side/pick choice, and snake draft
 - **Dual Rating Systems**: Glicko-2 (primary) and OpenSkill Plackett-Luce (fantasy-weighted)
-- **Lobby System**: React-based lobby system for matchmaking with conditional "Frogling" players
+- **Lobby System**: React-based lobby system for matchmaking
 - **Win/Loss Tracking**: Tracks match results for statistics and rating updates
 - **Role Distribution**: Role-based balancing with off-role penalties
 - **Match Recording**: Record match results with Radiant/Dire team support and voting system

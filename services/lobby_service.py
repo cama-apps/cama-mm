@@ -91,26 +91,8 @@ class LobbyService:
     def join_lobby_conditional(
         self, discord_id: int, guild_id: int | None = 0
     ) -> tuple[bool, str, PendingMatchState | None]:
-        """
-        Add a player to the conditional (frogling) queue.
-        """
-        # Check if player is in a pending match FIRST
-        if self.match_state_service:
-            pending_match = self.match_state_service.get_pending_match_for_player(
-                guild_id, discord_id
-            )
-            if pending_match:
-                return False, "in_pending_match", pending_match
-
-        # Delegate entirely to manager — capacity check is inside the lock.
-        reason = self.lobby_manager.join_lobby_conditional(
-            discord_id, self.max_players, guild_id=guild_id
-        )
-        if reason == "ok":
-            return True, "", None
-        if reason == "full":
-            return False, "lobby_full", None
-        return False, "already_joined", None
+        """Reject joins to the deprecated conditional queue."""
+        return False, "conditional_join_deprecated", None
 
     def leave_lobby(self, discord_id: int, guild_id: int | None = None) -> bool:
         return self.lobby_manager.leave_lobby(discord_id, guild_id=guild_id)
@@ -118,7 +100,7 @@ class LobbyService:
     def leave_lobby_conditional(
         self, discord_id: int, guild_id: int | None = None
     ) -> bool:
-        """Remove a player from the conditional (frogling) queue."""
+        """Remove legacy conditional state during compatibility cleanup."""
         return self.lobby_manager.leave_lobby_conditional(
             discord_id, guild_id=guild_id
         )
@@ -236,21 +218,16 @@ class LobbyService:
         return player_ids, players
 
     def get_conditional_players(self, lobby: Lobby, guild_id: int | None = None) -> tuple[list[int], list]:
-        """Get conditional (frogling) player IDs and Player objects."""
-        player_ids = list(lobby.conditional_players)
-        players = self.player_repo.get_by_ids(player_ids, guild_id)
-        return player_ids, players
+        """Return an empty roster for the deprecated conditional queue."""
+        return [], []
 
     def build_lobby_embed(self, lobby: Lobby, guild_id: int | None = None) -> object | None:
         if not lobby:
             return None
         player_ids, players = self.get_lobby_players(lobby, guild_id)
-        conditional_ids, conditional_players = self.get_conditional_players(lobby, guild_id)
 
         return create_lobby_embed(
             lobby, players, player_ids,
-            conditional_players=conditional_players,
-            conditional_ids=conditional_ids,
             ready_threshold=self.ready_threshold,
             max_players=self.max_players,
             bankruptcy_repo=self.bankruptcy_repo,
@@ -258,5 +235,5 @@ class LobbyService:
         )
 
     def is_ready(self, lobby: Lobby) -> bool:
-        """Ready if combined total meets threshold."""
-        return lobby.get_total_count() >= self.ready_threshold
+        """Ready if the regular-player count meets the threshold."""
+        return lobby.get_player_count() >= self.ready_threshold

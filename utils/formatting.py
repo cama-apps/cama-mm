@@ -24,10 +24,6 @@ ROLE_NAMES = {
 JOPACOIN_EMOTE = "<:jopacoin:954159801049440297>"
 JOPACOIN_EMOJI_ID = 954159801049440297
 
-# Custom frogling emote for conditional lobby players
-FROGLING_EMOTE = "<:frogling:1463270458848842003>"
-FROGLING_EMOJI_ID = 1463270458848842003
-
 # Tombstone emoji for bankrupted players
 TOMBSTONE_EMOJI = "🪦"
 

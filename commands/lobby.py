@@ -18,8 +18,6 @@ from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import (
-    FROGLING_EMOJI_ID,
-    FROGLING_EMOTE,
     JOPACOIN_EMOJI_ID,
     format_duration_short,
 )
@@ -117,7 +115,7 @@ class LobbyCommands(commands.Cog):
         user: discord.User | discord.Member,
         guild_id: int | None = None,
     ) -> None:
-        """Remove a user's lobby reactions (sword and frogling) from the channel lobby message."""
+        """Remove a user's sword reaction from the channel lobby message."""
         message_id = await asyncio.to_thread(
             self.lobby_service.get_lobby_message_id, guild_id=guild_id
         )
@@ -132,17 +130,10 @@ class LobbyCommands(commands.Cog):
             if not channel:
                 channel = await self.bot.fetch_channel(channel_id)
             message = await channel.fetch_message(message_id)
-            # Remove sword reaction
             try:
                 await message.remove_reaction("⚔️", user)
             except Exception as e:
                 logger.debug("Failed to remove sword reaction: %s", e)
-            # Remove frogling reaction
-            try:
-                frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
-                await message.remove_reaction(frogling_emoji, user)
-            except Exception as e:
-                logger.debug("Failed to remove frogling reaction: %s", e)
         except discord.Forbidden:
             logger.warning("Cannot remove reaction: missing Manage Messages permission.")
         except Exception as exc:
@@ -288,8 +279,7 @@ class LobbyCommands(commands.Cog):
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
 
-        # Already in lobby (regular or conditional)
-        if user_id in lobby.players or user_id in lobby.conditional_players:
+        if user_id in lobby.players:
             return False, None
 
         # Check if player has roles set
@@ -440,14 +430,10 @@ class LobbyCommands(commands.Cog):
             # Pin the lobby message for visibility
             await self._safe_pin(channel_msg)
 
-            # Add reaction emojis for joining (sword for regular, frogling for conditional,
-            # jopacoin for gamba notifications, clipboard for near-full alerts,
-            # and bell for the /readycheck shortcut)
+            # Add reactions for joining, gamba notifications, rally alerts,
+            # and the readycheck shortcut.
             try:
                 await channel_msg.add_reaction("⚔️")
-                # Add frogling emoji using PartialEmoji with ID
-                frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
-                await channel_msg.add_reaction(frogling_emoji)
                 # Add jopacoin emoji for subscribing to gamba notifications
                 jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
                 await channel_msg.add_reaction(jopacoin_emoji)
@@ -541,25 +527,15 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        # Check if player is in regular or conditional set
-        in_regular = player.id in lobby.players
-        in_conditional = player.id in lobby.conditional_players
-
-        if not in_regular and not in_conditional:
+        if player.id not in lobby.players:
             await safe_followup(
                 interaction, content=f"⚠️ {player.mention} is not in the lobby.", ephemeral=True
             )
             return
 
-        # Remove from whichever set they're in
-        if in_regular:
-            removed = await asyncio.to_thread(
-                self.lobby_service.leave_lobby, player.id, guild_id
-            )
-        else:
-            removed = await asyncio.to_thread(
-                self.lobby_service.leave_lobby_conditional, player.id, guild_id
-            )
+        removed = await asyncio.to_thread(
+            self.lobby_service.leave_lobby, player.id, guild_id
+        )
         if removed:
             await safe_followup(
                 interaction, content=f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
@@ -571,7 +547,7 @@ class LobbyCommands(commands.Cog):
             # Update both channel message and thread embed
             await self._sync_lobby_displays(lobby, guild_id)
 
-            # Remove kicked player's lobby reactions (sword and frogling)
+            # Remove the kicked player's lobby reaction.
             await self._remove_user_lobby_reactions(player, guild_id=guild_id)
 
             # Post kick activity in thread
@@ -692,7 +668,7 @@ class LobbyCommands(commands.Cog):
         try:
             neon = get_neon_service(self.bot)
             if neon and lobby:
-                queue_position = len(lobby.players) + len(lobby.conditional_players)
+                queue_position = len(lobby.players)
                 neon_result = await neon.on_lobby_join(
                     interaction.user.id, guild_id, queue_position
                 )
@@ -722,22 +698,13 @@ class LobbyCommands(commands.Cog):
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
 
-        in_regular = interaction.user.id in lobby.players
-        in_conditional = interaction.user.id in lobby.conditional_players
-
-        if not in_regular and not in_conditional:
+        if interaction.user.id not in lobby.players:
             await safe_followup(interaction, content="⚠️ You're not in the lobby.", ephemeral=True)
             return
 
-        # Remove from appropriate queue
-        if in_regular:
-            await asyncio.to_thread(
-                self.lobby_service.leave_lobby, interaction.user.id, guild_id
-            )
-        else:
-            await asyncio.to_thread(
-                self.lobby_service.leave_lobby_conditional, interaction.user.id, guild_id
-            )
+        await asyncio.to_thread(
+            self.lobby_service.leave_lobby, interaction.user.id, guild_id
+        )
 
         # Re-fetch lobby after removal so the embed reflects the current state.
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
@@ -934,7 +901,7 @@ class LobbyCommands(commands.Cog):
         if not rl.allowed:
             return "cooldown", {"retry_after_seconds": rl.retry_after_seconds}
 
-        all_player_ids = list(lobby.players | lobby.conditional_players)
+        all_player_ids = list(lobby.players)
         current_lobby_set = set(all_player_ids)
 
         # Classify every player — store structured data for later rebuilds
@@ -954,7 +921,6 @@ class LobbyCommands(commands.Cog):
                         "group": "afk",
                         "signals": "🔴",
                         "name": fallback_name,
-                        "is_conditional": pid in lobby.conditional_players,
                         "join_ts": lobby.player_join_times.get(pid),
                         "is_member": False,
                     }
@@ -998,7 +964,6 @@ class LobbyCommands(commands.Cog):
                 "group": "afk" if is_afk else "active",
                 "signals": "".join(signals),
                 "name": member.display_name,
-                "is_conditional": pid in lobby.conditional_players,
                 "join_ts": join_ts,
                 "is_member": True,
             }
@@ -1051,14 +1016,9 @@ class LobbyCommands(commands.Cog):
                         guild_id,
                     )
                 for pid in pruned_ids:
-                    if pid in lobby.conditional_players:
-                        await asyncio.to_thread(
-                            self.lobby_service.leave_lobby_conditional, pid, guild_id
-                        )
-                    else:
-                        await asyncio.to_thread(
-                            self.lobby_service.leave_lobby, pid, guild_id
-                        )
+                    await asyncio.to_thread(
+                        self.lobby_service.leave_lobby, pid, guild_id
+                    )
                     player_data.pop(pid, None)
                     current_lobby_set.discard(pid)
                     await self._remove_user_lobby_reactions(
@@ -1223,16 +1183,15 @@ def build_readycheck_embed(
             continue
         if d["is_member"]:
             mention_ids.append(pid)
-        frogling = f" {FROGLING_EMOTE}" if d["is_conditional"] else ""
         join_ts = d.get("join_ts")
         time_str = f" ({format_duration_short(now - join_ts)})" if join_ts else ""
         if d["group"] == "active":
-            active_lines.append(f"{d['name']} {d['signals']}{frogling}{time_str}")
+            active_lines.append(f"{d['name']} {d['signals']}{time_str}")
         else:
             if d["is_member"]:
-                afk_lines.append(f"<@{pid}> {d['signals']}{frogling}{time_str}")
+                afk_lines.append(f"<@{pid}> {d['signals']}{time_str}")
             else:
-                afk_lines.append(f"{d['name']} {d['signals']}{frogling}{time_str}")
+                afk_lines.append(f"{d['name']} {d['signals']}{time_str}")
 
     if active_lines:
         embed.add_field(
