@@ -188,16 +188,11 @@ class ManaEffectsService:
                     recipient_id=discord_id,
                     clamp_to_balance=True,
                 )
-                if isinstance(outcome, dict):
-                    applied = int(outcome.get("applied_loss", outcome.get("applied", amount)))
-                    absorbed = int(outcome.get("absorbed_amount", outcome.get("absorbed", 0)))
-                else:
-                    applied = int(
-                        getattr(outcome, "applied_loss", getattr(outcome, "applied", amount))
-                    )
-                    absorbed = int(
-                        getattr(outcome, "absorbed_amount", getattr(outcome, "absorbed", 0))
-                    )
+                # ``outcome`` is a HostileLossResult; read its fields directly
+                # rather than shape-sniffing with a default that would report
+                # the full attempted amount on a mismatch.
+                applied = int(outcome.applied_loss)
+                absorbed = int(outcome.absorbed_amount)
             else:
                 self.player_repo.steal_atomic(
                     thief_discord_id=discord_id,

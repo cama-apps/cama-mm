@@ -106,11 +106,28 @@ class ManaCommands(commands.Cog):
                     if any("ash" in role.name.lower() for role in member.roles):
                         ash_fan_ids.add(member.id)
 
-            await asyncio.to_thread(
+            new_assignments = await asyncio.to_thread(
                 mana_service.assign_all_daily_mana,
                 guild_id,
                 ash_fan_ids=ash_fan_ids,
             )
+            # White stipend rides on a fresh Plains claim regardless of which
+            # path performed it — mirror the self-claim branch below. Fresh
+            # claims only, so a later /mana all can't re-pay anyone.
+            mana_fx = getattr(interaction.client, "mana_effects_service", None)
+            if mana_fx is not None:
+                for assignment in new_assignments:
+                    if assignment.get("land") != "Plains":
+                        continue
+                    try:
+                        await asyncio.to_thread(
+                            mana_fx.apply_bankrupt_stipend,
+                            assignment["discord_id"],
+                            guild_id,
+                            "Plains",
+                        )
+                    except Exception:
+                        logger.exception("Failed to apply White stipend")
             rows = await asyncio.to_thread(mana_service.mana_repo.get_all_mana, guild_id)
 
             # Build display-name lookup from guild cache
@@ -141,12 +158,22 @@ class ManaCommands(commands.Cog):
                 if interaction.guild
                 else False
             )
-            result = await asyncio.to_thread(
-                mana_service.assign_daily_mana,
-                target.id,
-                guild_id,
-                is_ash_fan=is_ash_fan,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    mana_service.assign_daily_mana,
+                    target.id,
+                    guild_id,
+                    is_ash_fan=is_ash_fan,
+                )
+            except ValueError:
+                # Lost a same-day claim race (e.g. a double-tap inside the
+                # cooldown window): the atomic claim already happened.
+                await safe_followup(
+                    interaction,
+                    content="You've already claimed your mana for today.",
+                    ephemeral=True,
+                )
+                return
             stipend_paid = 0
             mana_fx = getattr(interaction.client, "mana_effects_service", None)
             if mana_fx is not None:
@@ -247,7 +274,9 @@ def _build_single_embed(
     )
     embed.add_field(name="Land", value=f"{emoji} **{land}** · {color_name} Mana", inline=False)
     embed.add_field(name="Assigned", value=date_label, inline=True)
-    if land == "Plains" and not mana.get("consumed", False):
+    # The aura only exists for today's assignment — a stale Plains row from a
+    # previous day has no active shield to display.
+    if land == "Plains" and assigned_date == today and not mana.get("consumed", False):
         remaining = int(mana.get("guardian_remaining", 0) or 0)
         retro_refund = int(mana.get("retro_refund", 0) or 0)
         retro_line = (
