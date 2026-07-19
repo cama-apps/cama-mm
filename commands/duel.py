@@ -426,6 +426,28 @@ class DuelCommands(commands.Cog):
     async def deliver_due_result(self, result: DuelDueResult) -> None:
         """Deliver an already-claimed reminder or expiry result."""
         challenge = result.challenge
+        channel = await self._get_channel(challenge.channel_id)
+        if channel is None:
+            logger.warning(
+                "duel lifecycle channel unavailable challenge=%s guild=%s channel=%s",
+                challenge.challenge_id,
+                challenge.guild_id,
+                challenge.channel_id,
+            )
+            return
+        if result.kind is not DuelDueKind.EXPIRED:
+            expected_status = (
+                DuelStatus.PENDING
+                if result.kind is DuelDueKind.REMINDER
+                else DuelStatus.ACCEPTED
+            )
+            current = await asyncio.to_thread(
+                self.duel_service.get_challenge,
+                challenge.challenge_id,
+                challenge.guild_id,
+            )
+            if current is None or current.status is not expected_status:
+                return
         event = {
             DuelDueKind.REMINDER: DuelFlavorEvent.REMINDER,
             DuelDueKind.EXPIRED: DuelFlavorEvent.EXPIRED,
@@ -436,15 +458,6 @@ class DuelCommands(commands.Cog):
             challenge.guild_id,
             self._flavor_details(challenge),
         )
-        channel = await self._get_channel(challenge.channel_id)
-        if channel is None:
-            logger.warning(
-                "duel lifecycle channel unavailable challenge=%s guild=%s channel=%s",
-                challenge.challenge_id,
-                challenge.guild_id,
-                challenge.channel_id,
-            )
-            return
 
         if result.kind is DuelDueKind.EXPIRED:
             await self._edit_original(challenge, flavor)
@@ -512,15 +525,43 @@ class DuelCommands(commands.Cog):
         now: int,
     ) -> None:
         """Atomically claim one due challenge, then deliver its result."""
+        challenge = await asyncio.to_thread(
+            self.duel_service.get_challenge, challenge_id, guild_id
+        )
+        if challenge is None:
+            return
+        deferred = await self._channel_transiently_unavailable(challenge.channel_id)
         result = await asyncio.to_thread(
             self.duel_service.process_due,
             challenge_id,
             guild_id,
             now,
+            claim_reminders=not deferred,
         )
         if result is None:
             return
         await self.deliver_due_result(result)
+
+    async def _channel_transiently_unavailable(self, channel_id: int) -> bool:
+        """True only for channel failures worth retrying on the next wake.
+
+        A reminder claim burns that day's ping, so a transient fetch failure
+        defers claiming instead. NotFound and Forbidden are permanent — the
+        claim proceeds normally rather than re-checking a dead channel every
+        wake."""
+        if self.bot.get_channel(channel_id) is not None:
+            return False
+        try:
+            await self.bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden):
+            return False
+        except discord.DiscordException:
+            logger.exception(
+                "Duel channel fetch failed; deferring reminder claim for channel %s",
+                channel_id,
+            )
+            return True
+        return False
 
     def build_challenge_embed(
         self,

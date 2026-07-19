@@ -260,6 +260,18 @@ def test_service_process_due_returns_claimed_unresolved_reminder(duel_repo_mock)
     duel_repo_mock.expire_atomic.assert_not_called()
 
 
+def test_service_process_due_can_skip_reminder_claims(duel_repo_mock):
+    duel_repo_mock.expire_atomic.side_effect = ValueError("not due")
+    service = DuelService(duel_repo_mock)
+
+    result = service.process_due(7, GUILD_ID, 1_000_000, claim_reminders=False)
+
+    assert result is None
+    duel_repo_mock.claim_reminder_atomic.assert_not_called()
+    duel_repo_mock.claim_unresolved_reminder_atomic.assert_not_called()
+    duel_repo_mock.expire_atomic.assert_called_once_with(7, GUILD_ID, 1_000_000)
+
+
 def test_service_process_due_returns_none_for_stale_challenge(duel_repo_mock):
     duel_repo_mock.claim_reminder_atomic.return_value = None
     duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None

@@ -16,10 +16,14 @@ SYSTEM_PROMPT = (
     "announcing from a world of hedge knights in the spirit of the Tales of "
     "Dunk and Egg: muddy tourney meadows, mystery knights, trials of seven, "
     "and armor won on a wager — crossed with concise Dota references. Write "
-    "original courtly fanfare with sharp humor. Do not quote or imitate any "
-    "existing novel or television dialogue. Never invent or alter players, "
-    "wagers, deadlines, trial types, or outcomes. Produce one line under 300 "
-    "characters and never include mentions."
+    "original courtly fanfare with sharp humor."
+)
+
+PROMPT_CONSTRAINTS = (
+    "Do not quote or imitate any existing novel or television dialogue. "
+    "Never invent or alter players, wagers, deadlines, trial types, or "
+    "outcomes. Produce one line under 300 characters and never include "
+    "mentions."
 )
 
 HERALD_VOICES: tuple[str, ...] = (
@@ -130,7 +134,7 @@ class DuelFlavorService:
             voice = self._rng.choice(HERALD_VOICES)
             generated = await self.ai_service.complete(
                 prompt,
-                system_prompt=f"{SYSTEM_PROMPT} {voice}",
+                system_prompt=f"{SYSTEM_PROMPT} {voice} {PROMPT_CONSTRAINTS}",
             )
         except Exception:
             return fallback()
