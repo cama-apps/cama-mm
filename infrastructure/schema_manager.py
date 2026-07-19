@@ -542,9 +542,57 @@ class SchemaManager:
                 "drop_protected_hero_purchases_table",
                 self._migration_drop_protected_hero_purchases_table,
             ),
+            # Metadata-only audit trail for each actual LLM provider attempt.
+            # Prompt/response content and credentials are intentionally excluded.
+            (
+                "create_llm_request_attempts_table",
+                self._migration_create_llm_request_attempts_table,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_create_llm_request_attempts_table(self, cursor) -> None:
+        """Create the metadata-only LLM request telemetry table."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS llm_request_attempts (
+                attempt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature          TEXT NOT NULL CHECK(length(trim(feature)) > 0),
+                operation        TEXT NOT NULL CHECK(length(trim(operation)) > 0),
+                provider         TEXT NOT NULL CHECK(length(trim(provider)) > 0),
+                model            TEXT NOT NULL CHECK(length(trim(model)) > 0),
+                success          INTEGER NOT NULL CHECK(success IN (0, 1)),
+                latency_ms       INTEGER NOT NULL CHECK(latency_ms >= 0),
+                prompt_tokens    INTEGER CHECK(prompt_tokens >= 0),
+                completion_tokens INTEGER CHECK(completion_tokens >= 0),
+                total_tokens     INTEGER CHECK(total_tokens >= 0),
+                error_type       TEXT,
+                created_at       INTEGER NOT NULL
+                    DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_attempts_created
+            ON llm_request_attempts(created_at, attempt_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_attempts_workload
+            ON llm_request_attempts(
+                feature, operation, provider, model, created_at DESC
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_attempts_provider_model
+            ON llm_request_attempts(provider, model, created_at DESC)
+            """
+        )
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
         """Idempotency claim for the post-core bonus credits.

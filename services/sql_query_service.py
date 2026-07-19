@@ -57,6 +57,8 @@ BLOCKED_TABLES: set[str] = {
     "match_predictions",
     "match_corrections",
     "economy_ledger_context",
+    # Internal provider telemetry; never expose operational LLM metadata to /ask.
+    "llm_request_attempts",
 }
 
 # Tables with no guild_id column that are deliberately queryable anyway.

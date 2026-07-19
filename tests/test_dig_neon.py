@@ -7,6 +7,7 @@ marquee-near-certain).
 
 import io
 import random
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
@@ -97,6 +98,23 @@ def _force_roll(service, value):
 
 @pytest.mark.asyncio
 class TestDigNeonHooks:
+    async def test_dig_llm_env_switch_uses_static_caption(self):
+        ai_service = AsyncMock()
+        svc = NeonDegenService(
+            ai_service=ai_service,
+            dig_llm_enabled=False,
+        )
+        _force_roll(svc, True)
+
+        caption = await svc._dig_caption(
+            "boss_victory",
+            "defeated a guardian",
+            guild_id=0,
+        )
+
+        assert caption
+        ai_service.complete.assert_not_awaited()
+
     async def test_boss_victory_fires_with_attribution(self, enabled):
         svc = NeonDegenService()
         _force_roll(svc, True)

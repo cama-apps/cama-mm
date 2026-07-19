@@ -69,12 +69,21 @@ class TestServiceContainerInitialization:
         captured = {}
 
         class CapturingAIService:
-            def __init__(self, *, model, api_key, timeout, max_tokens):
+            def __init__(
+                self,
+                *,
+                model,
+                api_key,
+                timeout,
+                max_tokens,
+                request_repo,
+            ):
                 captured.update(
                     model=model,
                     api_key=api_key,
                     timeout=timeout,
                     max_tokens=max_tokens,
+                    request_repo=request_repo,
                 )
 
         monkeypatch.setattr(ai_service_module, "AIService", CapturingAIService)
@@ -83,7 +92,26 @@ class TestServiceContainerInitialization:
         container.initialize()
 
         assert captured["api_key"] == "sentinel-key"
+        assert captured["request_repo"] is container._components["llm_request_repo"]
         assert isinstance(container._components["ai_service"], CapturingAIService)
+
+    def test_dig_llm_hard_switch_preserves_other_ai_services(
+        self,
+        repo_db_path,
+    ):
+        """The Dig kill switch suppresses Dig LLM wiring without disabling /ask."""
+        container = ServiceContainer(
+            repo_db_path,
+            llm_api_key="sentinel-key",
+            dig_llm_enabled=False,
+        )
+
+        container.initialize()
+
+        assert container._components["ai_service"] is not None
+        assert container._components["sql_query_service"] is not None
+        assert container._components["dig_flavor_service"] is None
+        assert container._components["neon_degen_service"].dig_llm_enabled is False
 
 
 class TestServiceContainerBotExposure:

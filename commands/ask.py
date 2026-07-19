@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
+from config import AI_RATE_LIMIT_REQUESTS, AI_RATE_LIMIT_WINDOW
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import RateLimiter
 
@@ -70,8 +71,8 @@ class AskCommands(commands.Cog):
             scope="ai_query",
             guild_id=guild_id,
             user_id=interaction.user.id,
-            limit=10,  # 10 requests
-            per_seconds=60,  # per minute
+            limit=AI_RATE_LIMIT_REQUESTS,
+            per_seconds=AI_RATE_LIMIT_WINDOW,
         )
         if not rl_result.allowed:
             await interaction.response.send_message(
@@ -146,7 +147,7 @@ async def setup(bot: commands.Bot):
 
     if sql_query_service is None:
         logger.warning(
-            "ask cog: sql_query_service not available (CEREBRAS_API_KEY not set?), skipping"
+            "ask cog: sql_query_service not configured or initialized; skipping"
         )
         return
 

@@ -19,7 +19,7 @@ A Discord bot for balanced team shuffling in Dota 2 inhouse games for the Camara
 - **Dota 2 Reference**: Hero and ability lookup with autocomplete
 - **Trivia**: Dota 2 trivia with escalating difficulty streaks, covering heroes, items, abilities, facets, and voicelines
 - **Stats Visualization**: Image generation for match tables, radar graphs, and charts
-- **AI Features** (optional): Flavor text and natural language queries via Cerebras LLM
+- **AI Features** (optional): Narrative/flavor text and natural language queries via the configured Groq or Cerebras LLM
 - **SQLite Database**: Lightweight database with automatic migrations
 
 ## How It Works
@@ -352,7 +352,7 @@ Analyze and compare rating systems with subcommands:
 ### AI Features (Optional)
 
 #### `/ask`
-Ask a question and get an AI-powered answer. Opens a modal for input.
+Ask a question about league data and get an AI-powered answer.
 
 ### Help
 
@@ -485,8 +485,12 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 - `RECALIBRATION_COOLDOWN_SECONDS` - Time between rating resets
 
 **AI (Optional):**
-- `CEREBRAS_API_KEY` - AI service API key
-- `AI_FEATURES_ENABLED` - Global AI toggle (default: False)
+- `GROQ_API_KEY`, `CEREBRAS_API_KEY` - Credentials for the configured LLM provider
+- `AI_MODEL` - LiteLLM model identifier (`provider/model`)
+- `AI_FEATURES_ENABLED` - Default AI setting for guilds without an explicit override (default: False)
+- `DIG_LLM_ENABLED` - Process-wide hard kill switch for Dig LLM requests (default: True; restart required)
+
+Without an `AI_MODEL` override, startup selects `groq/qwen/qwen3.6-27b` when a Groq key is present; otherwise it selects the Cerebras fallback, `cerebras/gemma-4-31b`. This is startup selection, not runtime failover: failed Groq requests are not retried on Cerebras. Cerebras access is free-trial and quota-limited.
 
 ## Testing
 

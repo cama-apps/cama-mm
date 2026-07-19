@@ -41,7 +41,8 @@ class ServiceContainer:
         economy_events_enabled: bool = False,
         economy_recovery_mode: bool = False,
         llm_api_key: str | None = None,
-        ai_model: str = "groq/qwen/qwen3-32b",
+        ai_model: str = "groq/qwen/qwen3.6-27b",
+        dig_llm_enabled: bool = True,
         # Defaults mirror config.py (AI_TIMEOUT_SECONDS / AI_MAX_TOKENS) so a
         # container built without these kwargs gets the same model budget as prod.
         ai_timeout_seconds: int = 15,
@@ -59,6 +60,7 @@ class ServiceContainer:
         self.economy_recovery_mode = economy_recovery_mode
         self.llm_api_key = llm_api_key
         self.ai_model = ai_model
+        self.dig_llm_enabled = dig_llm_enabled
         self.ai_timeout_seconds = ai_timeout_seconds
         self.ai_max_tokens = ai_max_tokens
 
@@ -114,6 +116,7 @@ class ServiceContainer:
         from repositories.economy_event_repository import EconomyEventRepository
         from repositories.economy_ledger_repository import EconomyLedgerRepository
         from repositories.guild_config_repository import GuildConfigRepository
+        from repositories.llm_request_repository import LLMRequestRepository
         from repositories.loan_repository import LoanRepository
         from repositories.lobby_repository import LobbyRepository
         from repositories.mafia_repository import MafiaRepository
@@ -149,6 +152,7 @@ class ServiceContainer:
             "duel_repo": DuelChallengeRepository(p),
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
+            "llm_request_repo": LLMRequestRepository(p),
             "economy_ledger_repo": EconomyLedgerRepository(p),
             "economy_event_repo": EconomyEventRepository(p),
             "tax_repo": TaxRepository(p),
@@ -340,6 +344,7 @@ class ServiceContainer:
                     api_key=self.llm_api_key,
                     timeout=self.ai_timeout_seconds,
                     max_tokens=self.ai_max_tokens,
+                    request_repo=c["llm_request_repo"],
                 )
                 ai_query_repo = AIQueryRepository(self.db_path)
                 sql_query_service = SQLQueryService(
@@ -476,7 +481,7 @@ class ServiceContainer:
 
         # Wire LLM flavor layer if AI is available
         ai_service = c.get("ai_service")
-        if ai_service:
+        if ai_service and self.dig_llm_enabled:
             try:
                 from services.dig_dm_context import DigDMContextBuilder
                 from services.dig_flavor_service import DigFlavorService
@@ -491,11 +496,14 @@ class ServiceContainer:
                     dig_repo=c["dig_repo"],
                     player_repo=c["player_repo"],
                     context_builder=context_builder,
+                    guild_config_repo=c["guild_config_repo"],
                 )
             except Exception:
                 logger.warning("Failed to initialize DigFlavorService", exc_info=True)
                 c["dig_flavor_service"] = None
         else:
+            if ai_service and not self.dig_llm_enabled:
+                logger.info("Dig LLM disabled by DIG_LLM_ENABLED")
             c["dig_flavor_service"] = None
 
     def _init_mafia_service(self) -> None:
@@ -535,6 +543,8 @@ class ServiceContainer:
             ai_service=c["ai_service"],
             flavor_text_service=c["flavor_text_service"],
             neon_event_repo=c["neon_event_repo"],
+            guild_config_repo=c["guild_config_repo"],
+            dig_llm_enabled=self.dig_llm_enabled,
         )
         c["wrapped_service"] = WrappedService(
             wrapped_repo=c["wrapped_repo"],

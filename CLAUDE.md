@@ -19,7 +19,7 @@ Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements
 - **Jopacoin economy**: Loans, nonprofit disbursements, shop purchases, tipping, Wheel of Fortune
 - **Match enrichment** via OpenDota for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
 - **Dota 2 reference** commands for hero/ability lookup (via dotabase)
-- **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations) - **AI features** (optional): Flavor text generation, natural language SQL queries via Cerebras LLM
+- **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations) - **AI features** (optional): Flavor text generation and natural language SQL queries via the configured Groq or Cerebras LLM
 
 ## Commands
 
