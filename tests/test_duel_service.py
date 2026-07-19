@@ -219,6 +219,7 @@ def test_service_get_due_challenge_ids_is_thin_wrapper(duel_repo_mock):
 def test_service_process_due_returns_expiry_after_reminder_declines(duel_repo_mock):
     expired = object()
     duel_repo_mock.claim_reminder_atomic.return_value = None
+    duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None
     duel_repo_mock.expire_atomic.return_value = expired
     service = DuelService(duel_repo_mock)
 
@@ -228,6 +229,7 @@ def test_service_process_due_returns_expiry_after_reminder_declines(duel_repo_mo
     assert result.challenge is expired
     assert duel_repo_mock.method_calls == [
         call.claim_reminder_atomic(7, GUILD_ID, 1_000_000),
+        call.claim_unresolved_reminder_atomic(7, GUILD_ID, 1_000_000),
         call.expire_atomic(7, GUILD_ID, 1_000_000),
     ]
 
@@ -241,11 +243,26 @@ def test_service_process_due_returns_claimed_reminder(duel_repo_mock):
     duel_repo_mock.claim_reminder_atomic.assert_called_once_with(
         7, GUILD_ID, 1_000_000
     )
+    duel_repo_mock.claim_unresolved_reminder_atomic.assert_not_called()
+    duel_repo_mock.expire_atomic.assert_not_called()
+
+
+def test_service_process_due_returns_claimed_unresolved_reminder(duel_repo_mock):
+    unresolved = object()
+    duel_repo_mock.claim_reminder_atomic.return_value = None
+    duel_repo_mock.claim_unresolved_reminder_atomic.return_value = unresolved
+    service = DuelService(duel_repo_mock)
+
+    assert service.process_due(7, GUILD_ID, 1_000_000) is unresolved
+    duel_repo_mock.claim_unresolved_reminder_atomic.assert_called_once_with(
+        7, GUILD_ID, 1_000_000
+    )
     duel_repo_mock.expire_atomic.assert_not_called()
 
 
 def test_service_process_due_returns_none_for_stale_challenge(duel_repo_mock):
     duel_repo_mock.claim_reminder_atomic.return_value = None
+    duel_repo_mock.claim_unresolved_reminder_atomic.return_value = None
     duel_repo_mock.expire_atomic.side_effect = ValueError("stale")
     service = DuelService(duel_repo_mock)
 
@@ -312,3 +329,28 @@ def test_service_process_due_real_repository_returns_none_when_not_due(repo_db_p
     result = service.process_due(challenge.challenge_id, GUILD_ID, NOW + DAY - 1)
 
     assert result is None
+
+
+def test_service_process_due_real_repository_cycles_unresolved_until_resolution(
+    repo_db_path,
+):
+    service, challenge = create_real_pending_duel(repo_db_path)
+    accepted = service.respond(GUILD_ID, 2, "trial_by_combat")
+    assert accepted.status is DuelStatus.ACCEPTED
+    assert accepted.next_reminder_at == NOW + DAY
+
+    result = service.process_due(challenge.challenge_id, GUILD_ID, NOW + DAY)
+
+    assert result is not None
+    assert result.kind is DuelDueKind.UNRESOLVED
+    assert result.challenge.challenge_id == challenge.challenge_id
+    assert result.challenge.next_reminder_at == NOW + 2 * DAY
+
+    service.resolve(
+        GUILD_ID, 99, challenge.challenge_id, "challenger_victory"
+    )
+
+    assert (
+        service.process_due(challenge.challenge_id, GUILD_ID, NOW + 2 * DAY)
+        is None
+    )

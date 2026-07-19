@@ -479,13 +479,14 @@ class DuelChallengeRepository(BaseRepository):
                 """
                 UPDATE duel_challenges
                 SET status = 'accepted', trial_type = ?, responded_at = ?,
-                    next_reminder_at = NULL
+                    next_reminder_at = ?
                 WHERE challenge_id = ? AND guild_id = ? AND status = 'pending'
                   AND recipient_id = ? AND expires_at > ?
                 """,
                 (
                     trial.value,
                     now,
+                    now + 86400,
                     challenge_id,
                     guild_id,
                     recipient_id,
@@ -738,20 +739,31 @@ class DuelChallengeRepository(BaseRepository):
                 """
                 SELECT challenge_id, guild_id
                 FROM duel_challenges
-                WHERE status = 'pending'
-                  AND message_id IS NOT NULL
-                  AND (
-                      expires_at <= ?
-                      OR (next_reminder_at IS NOT NULL AND next_reminder_at <= ?)
+                WHERE (
+                      status = 'pending'
+                      AND message_id IS NOT NULL
+                      AND (
+                          expires_at <= ?
+                          OR (next_reminder_at IS NOT NULL AND next_reminder_at <= ?)
+                      )
                   )
-                ORDER BY CASE WHEN expires_at <= ? THEN 0 ELSE 1 END,
+                  OR (
+                      status = 'accepted'
+                      AND next_reminder_at IS NOT NULL
+                      AND next_reminder_at <= ?
+                  )
+                ORDER BY CASE
+                             WHEN status = 'pending' AND expires_at <= ? THEN 0
+                             ELSE 1
+                         END,
                          CASE
-                             WHEN expires_at <= ? THEN expires_at
+                             WHEN status = 'pending' AND expires_at <= ?
+                             THEN expires_at
                              ELSE next_reminder_at
                          END,
                          challenge_id
                 """,
-                (now, now, now, now),
+                (now, now, now, now, now),
             ).fetchall()
         return [
             (int(row["challenge_id"]), int(row["guild_id"])) for row in rows
@@ -813,3 +825,46 @@ class DuelChallengeRepository(BaseRepository):
                 remaining_seconds=remaining_seconds,
                 ping_recipient=remaining_seconds <= 48 * 3600,
             )
+
+    def claim_unresolved_reminder_atomic(
+        self, challenge_id: int, guild_id: int, now: int
+    ) -> DuelDueResult | None:
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            challenge = self._challenge_from_row(
+                cursor.execute(
+                    """
+                    SELECT * FROM duel_challenges
+                    WHERE challenge_id = ? AND guild_id = ? AND status = 'accepted'
+                    """,
+                    (challenge_id, guild_id),
+                ).fetchone()
+            )
+            if challenge is None:
+                return None
+            if challenge.next_reminder_at is None or challenge.next_reminder_at > now:
+                return None
+
+            anchor = challenge.responded_at or challenge.created_at
+            next_reminder_at = anchor + ((now - anchor) // 86400 + 1) * 86400
+            cursor.execute(
+                """
+                UPDATE duel_challenges
+                SET next_reminder_at = ?
+                WHERE challenge_id = ? AND guild_id = ? AND status = 'accepted'
+                  AND next_reminder_at IS NOT NULL AND next_reminder_at <= ?
+                """,
+                (next_reminder_at, challenge_id, guild_id, now),
+            )
+            if cursor.rowcount != 1:
+                return None
+            claimed = self._challenge_from_row(
+                cursor.execute(
+                    "SELECT * FROM duel_challenges WHERE challenge_id = ? AND guild_id = ?",
+                    (challenge_id, guild_id),
+                ).fetchone()
+            )
+            if claimed is None:
+                raise RuntimeError("Claimed unresolved duel reminder could not be read.")
+            return DuelDueResult(kind=DuelDueKind.UNRESOLVED, challenge=claimed)

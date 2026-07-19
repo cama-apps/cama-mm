@@ -531,6 +531,12 @@ class SchemaManager:
                 "add_lantern_stub_date_to_tunnels",
                 self._migration_add_lantern_stub_date_to_tunnels,
             ),
+            # Accepted duels used to null next_reminder_at; daily unresolved
+            # reminders reuse it, so re-arm rows accepted before the change.
+            (
+                "schedule_unresolved_duel_reminders",
+                self._migration_schedule_unresolved_duel_reminders,
+            ),
         ]
 
     # --- Migrations ---
@@ -546,6 +552,15 @@ class SchemaManager:
         fails to claim skips the credits."""
         self._add_column_if_not_exists(
             cursor, "matches", "bonuses_paid", "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    def _migration_schedule_unresolved_duel_reminders(self, cursor) -> None:
+        cursor.execute(
+            """
+            UPDATE duel_challenges
+            SET next_reminder_at = CAST(strftime('%s', 'now') AS INTEGER) + 86400
+            WHERE status = 'accepted' AND next_reminder_at IS NULL
+            """
         )
 
     def _migration_add_lantern_stub_date_to_tunnels(self, cursor) -> None:

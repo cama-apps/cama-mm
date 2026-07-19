@@ -118,6 +118,11 @@ class DuelService:
         reminder = self.repo.claim_reminder_atomic(challenge_id, guild_id, now)
         if reminder is not None:
             return reminder
+        unresolved = self.repo.claim_unresolved_reminder_atomic(
+            challenge_id, guild_id, now
+        )
+        if unresolved is not None:
+            return unresolved
         try:
             expired = self.repo.expire_atomic(challenge_id, guild_id, now)
         except ValueError:

@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from services.duel_flavor_service import (
+    HERALD_VOICES,
     SYSTEM_PROMPT,
     DuelFlavorEvent,
     DuelFlavorService,
@@ -27,12 +28,11 @@ async def test_flavor_uses_dedicated_prompt_and_sanitizes_output():
     assert "@here" not in result
     assert "@" not in result
     assert "\n" not in result
-    assert "Game of Thrones" not in ai.complete.await_args.kwargs["system_prompt"]
-    assert (
-        "medieval tournament herald"
-        in ai.complete.await_args.kwargs["system_prompt"]
-    )
-    assert ai.complete.await_args.kwargs["system_prompt"] == SYSTEM_PROMPT
+    system_prompt = ai.complete.await_args.kwargs["system_prompt"]
+    assert "Game of Thrones" not in system_prompt
+    assert "Tales of Dunk and Egg" in system_prompt
+    assert "Do not quote or imitate" in system_prompt
+    assert system_prompt == f"{SYSTEM_PROMPT} {HERALD_VOICES[0]}"
     assert len(result) <= 300
 
 
