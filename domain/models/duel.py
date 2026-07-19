@@ -41,6 +41,7 @@ class DuelResolution(StrEnum):
 class DuelDueKind(StrEnum):
     REMINDER = "reminder"
     EXPIRED = "expired"
+    UNRESOLVED = "unresolved"
 
 
 @dataclass(frozen=True, slots=True)

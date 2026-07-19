@@ -31,6 +31,15 @@ TRIAL_DETAILS = {
     DuelTrial.TRIAL_OF_FIVE: "Trial of Five: a lobby using Immortal Draft.",
 }
 
+TRIAL_BY_COMBAT_RULES = (
+    "Mirror matchups: both duelists play the same hero each game.\n"
+    "• Game 1 hero: recipient's pick\n"
+    "• Game 2 hero: challenger's pick\n"
+    "• Tiebreaker: Shadow Fiend, mid\n"
+    "• Victory: tower destruction, two kills, or 100 creep score\n"
+    "• Prohibited: farming the jungle, visiting other lanes"
+)
+
 
 class DuelResponseButton(discord.ui.Button):
     """A durable response button tied to one challenge and action."""
@@ -406,6 +415,8 @@ class DuelCommands(commands.Cog):
                 f"Both {challenge.wager} JC stakes are locked. "
                 f"{TRIAL_DETAILS[challenge.trial_type]}"
             )
+            if challenge.trial_type is DuelTrial.TRIAL_BY_COMBAT:
+                detail = f"{detail}\n{TRIAL_BY_COMBAT_RULES}"
         await safe_followup(
             interaction,
             content=f"{flavor}\n{detail}",
@@ -415,16 +426,6 @@ class DuelCommands(commands.Cog):
     async def deliver_due_result(self, result: DuelDueResult) -> None:
         """Deliver an already-claimed reminder or expiry result."""
         challenge = result.challenge
-        event = (
-            DuelFlavorEvent.REMINDER
-            if result.kind is DuelDueKind.REMINDER
-            else DuelFlavorEvent.EXPIRED
-        )
-        flavor = await self.flavor_service.generate(
-            event,
-            challenge.guild_id,
-            self._flavor_details(challenge),
-        )
         channel = await self._get_channel(challenge.channel_id)
         if channel is None:
             logger.warning(
@@ -434,6 +435,29 @@ class DuelCommands(commands.Cog):
                 challenge.channel_id,
             )
             return
+        if result.kind is not DuelDueKind.EXPIRED:
+            expected_status = (
+                DuelStatus.PENDING
+                if result.kind is DuelDueKind.REMINDER
+                else DuelStatus.ACCEPTED
+            )
+            current = await asyncio.to_thread(
+                self.duel_service.get_challenge,
+                challenge.challenge_id,
+                challenge.guild_id,
+            )
+            if current is None or current.status is not expected_status:
+                return
+        event = {
+            DuelDueKind.REMINDER: DuelFlavorEvent.REMINDER,
+            DuelDueKind.EXPIRED: DuelFlavorEvent.EXPIRED,
+            DuelDueKind.UNRESOLVED: DuelFlavorEvent.UNRESOLVED,
+        }[result.kind]
+        flavor = await self.flavor_service.generate(
+            event,
+            challenge.guild_id,
+            self._flavor_details(challenge),
+        )
 
         if result.kind is DuelDueKind.EXPIRED:
             await self._edit_original(challenge, flavor)
@@ -443,6 +467,28 @@ class DuelCommands(commands.Cog):
                 f"The {challenge.decline_penalty} JC penalty was paid to the challenger."
             )
             allowed_mentions = discord.AllowedMentions.none()
+        elif result.kind is DuelDueKind.UNRESOLVED:
+            trial = (
+                self._trial_label(challenge.trial_type)
+                if challenge.trial_type is not None
+                else "The trial"
+            )
+            content = (
+                f"<@{challenge.challenger_id}> <@{challenge.recipient_id}>\n"
+                f"{flavor}\n"
+                f"Challenge #{challenge.challenge_id} awaits its verdict: "
+                f"{trial}, {challenge.wager} JC a side. Settle it, then have "
+                "an admin record the outcome with /duel resolve."
+            )
+            allowed_mentions = discord.AllowedMentions(
+                everyone=False,
+                roles=False,
+                users=[
+                    discord.Object(id=challenge.challenger_id),
+                    discord.Object(id=challenge.recipient_id),
+                ],
+                replied_user=False,
+            )
         else:
             mention = f"<@{challenge.recipient_id}>" if result.ping_recipient else ""
             content = (
@@ -479,15 +525,43 @@ class DuelCommands(commands.Cog):
         now: int,
     ) -> None:
         """Atomically claim one due challenge, then deliver its result."""
+        challenge = await asyncio.to_thread(
+            self.duel_service.get_challenge, challenge_id, guild_id
+        )
+        if challenge is None:
+            return
+        deferred = await self._channel_transiently_unavailable(challenge.channel_id)
         result = await asyncio.to_thread(
             self.duel_service.process_due,
             challenge_id,
             guild_id,
             now,
+            claim_reminders=not deferred,
         )
         if result is None:
             return
         await self.deliver_due_result(result)
+
+    async def _channel_transiently_unavailable(self, channel_id: int) -> bool:
+        """True only for channel failures worth retrying on the next wake.
+
+        A reminder claim burns that day's ping, so a transient fetch failure
+        defers claiming instead. NotFound and Forbidden are permanent — the
+        claim proceeds normally rather than re-checking a dead channel every
+        wake."""
+        if self.bot.get_channel(channel_id) is not None:
+            return False
+        try:
+            await self.bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.Forbidden):
+            return False
+        except discord.DiscordException:
+            logger.exception(
+                "Duel channel fetch failed; deferring reminder claim for channel %s",
+                channel_id,
+            )
+            return True
+        return False
 
     def build_challenge_embed(
         self,
@@ -558,6 +632,15 @@ class DuelCommands(commands.Cog):
                 name="Trial",
                 value=self._trial_label(challenge.trial_type),
             )
+            if (
+                challenge.status is DuelStatus.ACCEPTED
+                and challenge.trial_type is DuelTrial.TRIAL_BY_COMBAT
+            ):
+                embed.add_field(
+                    name="Rules",
+                    value=TRIAL_BY_COMBAT_RULES,
+                    inline=False,
+                )
         if challenge.status is DuelStatus.RESOLVED:
             embed.add_field(name="Winner", value=f"<@{challenge.winner_id}>")
         if challenge.status is DuelStatus.VOIDED:
