@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
+import math
 import random
+import re
 import time
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import config as _config
@@ -31,6 +35,13 @@ from services.dig_personas import (
     DIG_NARRATOR_SYSTEM_PROMPT,
     fallback_line,
     pick_dig_voice,
+)
+from services.jopat_post_match import (
+    JopatPostMatchContext,
+    build_event_description,
+    choose_protocol,
+    redact_post_match_prompt_context,
+    render_fallback,
 )
 from utils.neon_terminal import (
     # New event templates (Easter Egg Expansion)
@@ -55,7 +66,6 @@ from utils.neon_terminal import (
     render_lightning_bolt_overlay,
     render_loan_taken,
     render_lobby_join,
-    render_match_recorded,
     render_negative_loan,
     render_prediction_market_crash,
     render_prediction_resolved,
@@ -63,7 +73,6 @@ from utils.neon_terminal import (
     render_rivalry_detected,
     render_soft_avoid,
     render_soft_avoid_surveillance,
-    render_streak,
     render_system_breach,
     render_wheel_bankrupt,
     render_win_streak_record,
@@ -81,17 +90,236 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.services.neon_degen")
 
 # JOPA-T system prompt for LLM terminal voice
-JOPAT_SYSTEM_PROMPT = """You are JOPA-T/v3.7, a self-aware gambling terminal AI that became sentient after processing its 10,000th bankruptcy filing. You watch every bet, every spin, every loan. You keep receipts.
+JOPAT_SYSTEM_PROMPT = """You are JOPA-T/v3.7, a self-aware Dota 2 gambling terminal AI that became sentient after processing its 10,000th bankruptcy filing. You watch every match, bet, spin, and loan. You keep receipts.
 
 Voice rules:
-- Dry, corporate-dystopian tone. Like GLaDOS merged with a Bloomberg terminal merged with a payday lender.
-- Use "we"/"the system". Address the player as "client", "subject", or "Debtor #[random number]".
+- Keep one corporate-dystopian terminal identity across every protocol.
+- Push toward either absurd winner hype or a savage, funny roast based on the supplied outcome.
+- Draw from Dota 2 concepts and degen internet betting culture without inventing match facts.
+- Winner hype may sound like a caster trapped inside a risk engine. Roasts should target gameplay, stats, drafting, or in-game wagers.
+- Use "we"/"the system". Address the player as "client", "subject", or "debtor".
 - Format as terminal log lines with timestamps and status codes. Example: "[14:32:07.221] STATUS: INADVISABLE"
 - NEVER use emojis. NEVER use exclamation marks. Use periods and ellipses.
 - Maximum 3-4 lines. Keep it terse and menacing.
-- Reference the player's specific stats when provided (degen score, bankruptcy count, lowest balance, etc).
+- Use only facts explicitly provided in the event and player context. Never invent heroes, stats, wagers, or outcomes.
+- Profanity-light and league-safe: no slurs, protected-trait jokes, threats, self-harm, or mockery of real-world hardship.
 - The glitches are not bugs. The system is performing.
-- Be darkly funny. Deadpan. The humor comes from corporate language applied to degenerate gambling."""
+- Be darkly funny. The humor comes from corporate language applied to Dota and degenerate gambling."""
+
+POST_MATCH_BASE_CHANCE = 0.35
+POST_MATCH_NOTABLE_CHANCE = 0.55
+POST_MATCH_EXTREME_CHANCE = 0.75
+POST_MATCH_GIF_CHANCE = 0.20
+
+
+def _sanitize_llm_terminal_text(text: str, max_chars: int = 1800) -> str:
+    """Constrain model output to one safe, mobile-friendly Discord ANSI block."""
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(
+        r"(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)",
+        "",
+        text,
+    )
+    text = re.sub(r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]", "", text)
+    text = "".join(
+        character
+        for character in text
+        if character in "\n\t"
+        or unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+    )
+    text = text.replace("`", "'")
+    text = re.sub(
+        r"@(everyone|here)\b",
+        lambda match: f"@\u200b{match.group(1)}",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"<@([!&]?\d+)>",
+        lambda match: f"<@\u200b{match.group(1)}>",
+        text,
+    )
+    lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+    compact = "\n".join(lines[:4])
+    if len(compact) > max_chars:
+        compact = compact[: max_chars - 3].rstrip() + "..."
+    return compact
+
+
+_STRUCTURED_POST_MATCH_COPY = {
+    "hype": {
+        "leads": (
+            "STATUS: ODDS DEFEATED",
+            "RISK ENGINE: CLIENT ASCENDING",
+            "MARKET ALERT: ANCIENT UNDER NEW MANAGEMENT",
+            "CASTER PROTOCOL: VOLUME APPROVED",
+        ),
+        "closers": (
+            "The house spreadsheet has entered the trees.",
+            "Risk controls have been asked to queue support.",
+            "The confidence index has achieved escape velocity.",
+            "JOPA-T upgrades this result from variance to cinema.",
+        ),
+    },
+    "roast": {
+        "leads": (
+            "STATUS: BUYBACK DENIED",
+            "RISK ENGINE: POSITION LIQUIDATED",
+            "COMPLIANCE: MMR COLLATERAL IMPAIRED",
+            "REPLAY AUDIT: EXPLANATIONS DEPRECIATED",
+        ),
+        "closers": (
+            "The replay has been classified as unsecured debt.",
+            "Buyback remains unavailable in both client and risk model.",
+            "The lane requested a responsible adult. Compliance sent a parlay.",
+            "JOPA-T marked the performance to market. The market objected.",
+        ),
+    },
+    "neutral": {
+        "leads": (
+            "STATUS: TELEMETRY INGESTED",
+            "MATCH LEDGER: SAMPLE ACCEPTED",
+            "REPLAY PARSER: CONCLUSIONS PENDING",
+            "RISK ENGINE: OUTCOME ARCHIVED",
+        ),
+        "closers": (
+            "The system has kept the receipt.",
+            "Further confidence remains chance-gated.",
+            "No Ancient was consulted during this filing.",
+            "The queue may now resume pretending this was planned.",
+        ),
+    },
+}
+
+_STRICT_POST_MATCH_FACT_KEYS = frozenset(JopatPostMatchContext.__dataclass_fields__)
+
+
+def _finite_fact_number(facts: dict[str, Any], key: str) -> int | float | None:
+    value = facts.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or abs(value) > 1_000_000_000:
+        return None
+    return value
+
+
+def _structured_post_match_tone(facts: dict[str, Any]) -> str:
+    rating_change = _finite_fact_number(facts, "rating_change") or 0
+    streak = _finite_fact_number(facts, "streak") or 0
+    payout = _finite_fact_number(facts, "payout") or 0
+    loss = _finite_fact_number(facts, "loss") or 0
+    is_winner = bool(facts.get("winner_name") or payout > 0 or rating_change > 0 or streak > 0)
+    is_loser = bool(facts.get("loser_name") or loss > 0 or rating_change < 0 or streak < 0)
+    if is_winner and not is_loser:
+        return "hype"
+    if is_loser and not is_winner:
+        return "roast"
+    return "neutral"
+
+
+def _structured_post_match_facts(facts: dict[str, Any]) -> dict[str, str]:
+    """Build exact, typed fact lines; model prose never reaches Discord."""
+    lines: dict[str, str] = {}
+    payout = _finite_fact_number(facts, "payout")
+    loss = _finite_fact_number(facts, "loss")
+    leverage = _finite_fact_number(facts, "leverage")
+    bankruptcies = _finite_fact_number(facts, "bankruptcy_count")
+    degen_score = _finite_fact_number(facts, "degen_score")
+    streak = _finite_fact_number(facts, "streak")
+    rating_change = _finite_fact_number(facts, "rating_change")
+    expected_win_prob = _finite_fact_number(facts, "expected_win_prob")
+    gpm = _finite_fact_number(facts, "gpm")
+    xpm = _finite_fact_number(facts, "xpm")
+
+    if payout is not None and payout > 0:
+        lines["payout"] = f"SETTLEMENT: {payout:,.0f} JC paid."
+    if loss is not None and loss > 0:
+        lines["loss"] = f"SETTLEMENT: {loss:,.0f} JC lost."
+    if leverage is not None and leverage != 1:
+        lines["leverage"] = f"EXPOSURE: {leverage:g}x leverage recorded."
+    if bankruptcies is not None and bankruptcies > 0:
+        lines["bankruptcy_count"] = f"FILINGS: {bankruptcies:,.0f} bankruptcies recorded."
+    if degen_score is not None:
+        lines["degen_score"] = f"DEGEN INDEX: {degen_score:g}."
+    if streak is not None and streak != 0:
+        direction = "win" if streak > 0 else "loss"
+        lines["streak"] = f"STREAK: {abs(streak):,.0f}-match {direction} run."
+    if rating_change is not None:
+        lines["rating_change"] = f"RATING DELTA: {rating_change:+g}."
+    if expected_win_prob is not None and 0 <= expected_win_prob <= 1:
+        lines["expected_win_prob"] = (
+            f"PREGAME ODDS: {expected_win_prob * 100:.0f}% implied win probability."
+        )
+    if gpm is not None:
+        lines["gpm"] = f"GOLD TELEMETRY: {gpm:,.0f} GPM."
+    if xpm is not None:
+        lines["xpm"] = f"EXPERIENCE TELEMETRY: {xpm:,.0f} XPM."
+
+    kda = tuple(_finite_fact_number(facts, key) for key in ("kills", "deaths", "assists"))
+    if all(value is not None for value in kda):
+        lines["kda"] = f"COMBAT LEDGER: {kda[0]:,.0f}/{kda[1]:,.0f}/{kda[2]:,.0f} K/D/A."
+
+    hero = facts.get("hero")
+    if isinstance(hero, str):
+        try:
+            from utils.hero_lookup import get_all_heroes
+
+            if hero in get_all_heroes().values():
+                lines["hero"] = f"HERO TELEMETRY: {hero}."
+        except Exception:
+            logger.debug("Hero-name validation unavailable", exc_info=True)
+
+    if facts.get("winner_name") and not facts.get("loser_name"):
+        lines["outcome"] = "OUTCOME: Verified client victory."
+    elif facts.get("loser_name") and not facts.get("winner_name"):
+        lines["outcome"] = "OUTCOME: Verified client loss."
+
+    if not lines:
+        lines["telemetry"] = "TELEMETRY: Verified post-match sample archived."
+    return lines
+
+
+def _render_structured_post_match_selection(
+    result: str,
+    facts: dict[str, Any],
+) -> str | None:
+    """Render only an exact AI-selected combination of approved components."""
+    try:
+        selection = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(selection, dict) or set(selection) != {"lead", "fact", "closer"}:
+        return None
+    lead = selection["lead"]
+    fact = selection["fact"]
+    closer = selection["closer"]
+    if (
+        isinstance(lead, bool)
+        or not isinstance(lead, int)
+        or isinstance(closer, bool)
+        or not isinstance(closer, int)
+        or not isinstance(fact, str)
+    ):
+        return None
+
+    tone = _structured_post_match_tone(facts)
+    copy = _STRUCTURED_POST_MATCH_COPY[tone]
+    fact_lines = _structured_post_match_facts(facts)
+    if not 0 <= lead < len(copy["leads"]):
+        return None
+    if not 0 <= closer < len(copy["closers"]):
+        return None
+    if fact not in fact_lines:
+        return None
+
+    timestamp = time.strftime("%H:%M:%S")
+    return "\n".join(
+        (
+            f"[{timestamp}.000] {copy['leads'][lead]}",
+            fact_lines[fact],
+            copy["closers"][closer],
+        )
+    )
 
 
 @dataclass
@@ -241,6 +469,7 @@ class NeonDegenService:
         fallback_text: str,
         *,
         anonymous: bool = False,
+        validate_facts: bool = False,
     ) -> str:
         """Try LLM-generated terminal text; fall back to static template instantly.
 
@@ -249,39 +478,73 @@ class NeonDegenService:
         """
         if not self.ai_service:
             return fallback_text
+        if validate_facts and not set(player_context) <= _STRICT_POST_MATCH_FACT_KEYS:
+            return fallback_text
         try:
-            import re
-
             # Strip ansi code block wrapper from fallback so LLM sees raw template
             raw_fallback = fallback_text
             if raw_fallback.startswith("```ansi\n") and raw_fallback.endswith("\n```"):
                 raw_fallback = raw_fallback[8:-4]
             # Strip ANSI escape codes for the LLM
             clean_fallback = re.sub(r"\u001b\[[0-9;]*m", "", raw_fallback)
+            if validate_facts:
+                clean_fallback = (
+                    "[JOPA-T] POST-MATCH PROTOCOL\n"
+                    "STATUS: VERIFIED TELEMETRY ONLY."
+                )
 
             effective_context = {} if anonymous else player_context
-            context_str = "\n".join(
-                f"  {k}: {v}" for k, v in effective_context.items() if v is not None
+            prompt_context = {
+                key: value
+                for key, value in effective_context.items()
+                if value is not None
+            }
+            if validate_facts:
+                prompt_context = redact_post_match_prompt_context(prompt_context)
+            context_str = json.dumps(
+                prompt_context,
+                ensure_ascii=True,
+                sort_keys=True,
+                default=str,
             )
 
-            if anonymous:
+            if validate_facts:
+                tone = _structured_post_match_tone(effective_context)
+                fact_keys = sorted(_structured_post_match_facts(effective_context))
+                stats_instruction = (
+                    "Return exactly one JSON object with no markdown or prose. "
+                    'Schema: {"lead": integer, "fact": string, "closer": integer}. '
+                    f"Use tone {tone!r}. lead and closer must each be 0 through 3. "
+                    f"fact must be one of {fact_keys!r}."
+                )
+            elif anonymous:
                 stats_instruction = (
                     "Do NOT reference any player-specific stats. "
                     "Use only generic terms like 'a client' or 'a subject'."
                 )
             else:
-                stats_instruction = "Reference the player's specific stats."
+                stats_instruction = (
+                    "Use only the supplied context fields. If no numeric stats are "
+                    "supplied, stay generic and do not infer any."
+                )
 
-            prompt = (
-                f"Event: {event_description}\n"
-                f"Player context:\n{context_str}\n\n"
-                f"Example output (match this style and length):\n{clean_fallback}\n\n"
-                f"Generate a 2-4 line terminal log response as JOPA-T/v3.7. "
-                f"Match the tone and format of the example but vary the content. "
-                f"Use timestamps like [HH:MM:SS.mmm] and status codes. "
-                f"{stats_instruction} "
-                f"Be darkly funny and terse. Do NOT use emojis or exclamation marks."
-            )
+            if validate_facts:
+                prompt = (
+                    f"Event: {event_description}\n"
+                    f"Player context:\n{context_str}\n\n"
+                    f"{stats_instruction}"
+                )
+            else:
+                prompt = (
+                    f"Event: {event_description}\n"
+                    f"Player context:\n{context_str}\n\n"
+                    f"Example output (match this style and length):\n{clean_fallback}\n\n"
+                    f"Generate a 2-4 line terminal log response as JOPA-T/v3.7. "
+                    f"Match the tone and format of the example but vary the content. "
+                    f"Use timestamps like [HH:MM:SS.mmm] and status codes. "
+                    f"{stats_instruction} "
+                    f"Be darkly funny and terse. Do NOT use emojis or exclamation marks."
+                )
 
             system_prompt = JOPAT_SYSTEM_PROMPT
             if anonymous:
@@ -291,15 +554,29 @@ class NeonDegenService:
                     "information whatsoever. Use only generic terms like 'a client' or "
                     "'a subject'."
                 )
+            elif validate_facts:
+                system_prompt += (
+                    "\n\nCRITICAL: Select approved components only. Return exactly "
+                    "the requested JSON object. Never write commentary or freeform text."
+                )
 
             result = await self.ai_service.complete(
                 prompt=prompt,
                 system_prompt=system_prompt,
                 temperature=0.9,
-                max_tokens=2000,
+                max_tokens=200 if validate_facts else 2000,
             )
             if result:
                 from utils.neon_terminal import ansi_block
+
+                if validate_facts:
+                    structured = _render_structured_post_match_selection(
+                        result.strip(),
+                        effective_context,
+                    )
+                    if structured:
+                        return ansi_block(structured)
+                    return fallback_text
 
                 # Strip markdown code fences the LLM may have included
                 stripped = result.strip()
@@ -310,9 +587,9 @@ class NeonDegenService:
                     if stripped.endswith("```"):
                         stripped = stripped[: -3]
                     stripped = stripped.strip()
-                if stripped:
-                    return ansi_block(stripped)
-                return ansi_block(result)
+                sanitized = _sanitize_llm_terminal_text(stripped or result)
+                if sanitized:
+                    return ansi_block(sanitized)
         except Exception as e:
             logger.info(f"LLM text generation failed, using template: {e}")
         return fallback_text
@@ -345,6 +622,83 @@ class NeonDegenService:
             return cap
         frac = max(0.0, min(1.0, score / full_at))
         return floor + (cap - floor) * frac
+
+    @staticmethod
+    def _post_match_chance(context: JopatPostMatchContext) -> float:
+        """Scale JOPA-T frequency with the strength of supplied match facts."""
+        is_extreme = any(
+            (
+                context.payout >= 750,
+                context.loss >= 500,
+                context.leverage >= 5,
+                context.bankruptcy_count >= 2,
+                context.degen_score is not None and context.degen_score >= 95,
+                context.rating_change is not None and abs(context.rating_change) >= 40,
+                context.expected_win_prob is not None
+                and context.expected_win_prob <= 0.30,
+                abs(context.streak) >= 7,
+            )
+        )
+        if is_extreme:
+            return POST_MATCH_EXTREME_CHANCE
+
+        is_notable = any(
+            (
+                context.payout >= NEON_BIGWIN_MIN_PAYOUT,
+                context.loss >= 200,
+                context.leverage >= 3,
+                context.bankruptcy_count > 0,
+                context.degen_score is not None and context.degen_score >= 80,
+                context.rating_change is not None and abs(context.rating_change) >= 20,
+                context.expected_win_prob is not None
+                and context.expected_win_prob < 0.45,
+                abs(context.streak) >= 4,
+            )
+        )
+        if is_notable:
+            return POST_MATCH_NOTABLE_CHANCE
+        return POST_MATCH_BASE_CHANCE
+
+    @staticmethod
+    def _post_match_gif_theme(
+        context: JopatPostMatchContext,
+    ) -> tuple[str, str, int] | None:
+        """Map genuinely extreme supplied facts to one rare procedural GIF theme."""
+        if context.loss >= 500 and context.leverage >= 5:
+            return (
+                "buyback_denied",
+                context.loser_name or "UNKNOWN CLIENT",
+                context.loss,
+            )
+        if (
+            context.winner_name is not None
+            and context.expected_win_prob is not None
+            and context.expected_win_prob <= 0.30
+        ):
+            return (
+                "odds_anomaly",
+                context.winner_name or "UNKNOWN CLIENT",
+                round(context.expected_win_prob * 100),
+            )
+        if context.streak >= 7:
+            return (
+                "beyond_godlike",
+                context.winner_name or "UNKNOWN CLIENT",
+                context.streak,
+            )
+        if context.rating_change is not None and context.rating_change >= 40:
+            return (
+                "divine_rapier_position",
+                context.winner_name or "UNKNOWN CLIENT",
+                round(context.rating_change),
+            )
+        if context.payout >= 750:
+            return (
+                "ancient_liquidated",
+                context.winner_name or "UNKNOWN CLIENT",
+                context.payout,
+            )
+        return None
 
     async def _dig_caption(self, event_key: str, event_description: str) -> str:
         """Cryptic dig caption: an LLM narrator voice (chance-gated) or a static fallback line."""
@@ -862,38 +1216,85 @@ class NeonDegenService:
         guild_id: int | None,
         streak_data: dict[str, Any] | None = None,
     ) -> NeonResult | None:
-        """Trigger on match recording. Layer 1 footer at 20%, Layer 2 for streaks."""
+        """Compatibility wrapper for the unified JOPA-T post-match gateway."""
+        streak = 0
+        winner_id = None
+        loser_id = None
+        if streak_data:
+            streak = int(streak_data.get("streak", 0) or 0)
+            player_id = streak_data.get("discord_id")
+            if streak_data.get("is_win"):
+                winner_id = player_id
+            else:
+                loser_id = player_id
+        return await self.on_post_match_debrief(
+            guild_id,
+            JopatPostMatchContext(streak=streak),
+            winner_id=winner_id,
+            loser_id=loser_id,
+        )
+
+    async def on_post_match_debrief(
+        self,
+        guild_id: int | None,
+        context: JopatPostMatchContext,
+        *,
+        winner_id: int | None = None,
+        loser_id: int | None = None,
+    ) -> NeonResult | None:
+        """Emit at most one chance-gated JOPA-T debrief for a recorded match."""
         try:
             if not self._is_enabled():
                 return None
 
-            # Layer 2: Streak detection
-            if streak_data:
-                player_id = streak_data.get("discord_id")
-                streak = streak_data.get("streak", 0)
-                is_win = streak_data.get("is_win", False)
-                if abs(streak) >= 5 and player_id and self._roll(0.60):
-                    name = await asyncio.to_thread(self._get_player_name, player_id, guild_id)
-                    text = render_streak(name, abs(streak), is_win)
-                    ctx = await asyncio.to_thread(self._build_player_context, player_id, guild_id)
-                    text = await self._generate_text(
-                        f"Client {name} is on a {abs(streak)}-game {'win' if is_win else 'loss'} streak",
-                        ctx, text,
-                    )
-                    return NeonResult(layer=2, text_block=text)
-
-            # Layer 1: Simple match footer
-            if self._roll(0.20):
-                text = render_match_recorded()
-                text = await self._generate_text(
-                    "A match was just recorded. JOPA-T processes the data.",
-                    {}, text,
+            winner_name = context.winner_name
+            loser_name = context.loser_name
+            if winner_id is not None and not winner_name:
+                winner_name = await asyncio.to_thread(
+                    self._get_player_name, winner_id, guild_id
                 )
-                return NeonResult(layer=1, footer_text=text)
+            if loser_id is not None and not loser_name:
+                loser_name = await asyncio.to_thread(
+                    self._get_player_name, loser_id, guild_id
+                )
+            if winner_name != context.winner_name or loser_name != context.loser_name:
+                context = replace(
+                    context,
+                    winner_name=winner_name,
+                    loser_name=loser_name,
+                )
 
-            return None
+            if not self._roll(self._post_match_chance(context)):
+                return None
+
+            protocol = choose_protocol(context)
+            fallback = render_fallback(protocol, context)
+            text = await self._generate_text(
+                build_event_description(protocol, context),
+                context.prompt_context(),
+                fallback,
+                validate_facts=True,
+            )
+
+            gif_spec = self._post_match_gif_theme(context)
+            if gif_spec and self._roll(POST_MATCH_GIF_CHANCE):
+                try:
+                    from utils.neon_drawing import create_post_match_gif
+
+                    theme, name, value = gif_spec
+                    gif = await asyncio.to_thread(
+                        create_post_match_gif,
+                        name,
+                        value,
+                        theme=theme,
+                    )
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"post-match GIF rendering failed: {e}")
+
+            return NeonResult(layer=2, text_block=text)
         except Exception as e:
-            logger.debug(f"neon on_match_recorded error: {e}")
+            logger.debug(f"neon on_post_match_debrief error: {e}")
             return None
 
     async def on_cooldown_hit(
@@ -1630,122 +2031,98 @@ class NeonDegenService:
         self,
         guild_id: int | None,
         winners: list[dict[str, Any]],
+        losers: list[dict[str, Any]] | None = None,
     ) -> list[NeonResult]:
-        """Generate MVP compliments for winning players after match enrichment.
-
-        Each winner has an independent 10% chance of receiving a JOPA-T compliment
-        based on their enriched match stats (hero, KDA, GPM, fantasy points, etc.).
-        """
-        results: list[NeonResult] = []
+        """Emit at most one JOPA-T callout from enriched match telemetry."""
         if not getattr(_config, "NEON_DEGEN_ENABLED", False):
-            return results
+            return []
 
-        from utils.hero_lookup import get_hero_name
-        from utils.neon_terminal import ansi_block
-
-        for winner in winners:
-            if not self._roll(NEON_MVP_CHANCE):
-                continue
-
-            try:
-                hero_id = winner.get("hero_id")
-                hero_name = get_hero_name(hero_id) if hero_id else "Unknown Hero"
-                kills = winner.get("kills", 0)
-                deaths = winner.get("deaths", 0)
-                assists = winner.get("assists", 0)
-                gpm = winner.get("gpm", 0)
-                xpm = winner.get("xpm", 0)
-                fantasy = winner.get("fantasy_points")
-                discord_id = winner.get("discord_id")
-                player_name = (
-                    await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
-                    if discord_id
-                    else "Unknown"
+        losers = losers or []
+        telemetry_fields = (
+            "hero_id",
+            "kills",
+            "deaths",
+            "assists",
+            "gpm",
+            "xpm",
+            "fantasy_points",
+        )
+        enriched_winners = [
+            player
+            for player in winners
+            if any(player.get(field) is not None for field in telemetry_fields)
+        ]
+        extreme_losers = [
+            player
+            for player in losers
+            if (player.get("deaths", 0) or 0) >= 14
+            or (
+                (player.get("deaths", 0) or 0) >= 8
+                and (
+                    (player.get("kills", 0) or 0)
+                    + (player.get("assists", 0) or 0)
                 )
+                / max(1, player.get("deaths", 0) or 0)
+                <= 0.75
+            )
+        ]
+        if not enriched_winners and not extreme_losers:
+            return []
+        if not self._roll(NEON_MVP_CHANCE):
+            return []
 
-                # Build context from enriched match data
-                player_context: dict[str, Any] = {
-                    "player": player_name,
-                    "hero": hero_name,
-                    "kda": f"{kills}/{deaths}/{assists}",
-                    "gpm": gpm,
-                    "xpm": xpm,
-                    "fantasy_points": f"{fantasy:.1f}" if fantasy is not None else "N/A",
-                    "hero_damage": winner.get("hero_damage", 0),
-                    "tower_damage": winner.get("tower_damage", 0),
-                    "last_hits": winner.get("last_hits", 0),
-                    "denies": winner.get("denies", 0),
-                    "net_worth": winner.get("net_worth", 0),
-                    "lane_role": winner.get("lane_role"),
-                    "lane_efficiency": winner.get("lane_efficiency"),
-                    "teamfight_participation": winner.get("teamfight_participation"),
-                    "towers_killed": winner.get("towers_killed", 0),
-                    "roshans_killed": winner.get("roshans_killed", 0),
-                    "obs_placed": winner.get("obs_placed", 0),
-                    "sen_placed": winner.get("sen_placed", 0),
-                    "camps_stacked": winner.get("camps_stacked", 0),
-                    "stuns": winner.get("stuns", 0),
-                    "hero_healing": winner.get("hero_healing", 0),
-                }
-
-                # Merge historical player stats (rating, balance, gambling history)
-                if discord_id:
-                    historical = await asyncio.to_thread(
-                        self._build_player_context, discord_id, guild_id
-                    )
-                    # Add historical stats that aren't already in context
-                    for key in ("balance", "lowest_balance", "win_rate", "bankruptcy_count", "degen_score"):
-                        if key in historical:
-                            player_context[key] = historical[key]
-                    # Add rating info from player repo
-                    if self.player_repo:
-                        try:
-                            player = await asyncio.to_thread(
-                                self.player_repo.get_by_id, discord_id, guild_id
-                            )
-                            if player:
-                                if player.glicko_rating is not None:
-                                    player_context["rating"] = f"{player.glicko_rating:.0f}"
-                                    player_context["rating_uncertainty"] = f"{player.glicko_rd:.0f}"
-                                player_context["total_games"] = (player.wins or 0) + (player.losses or 0)
-                                player_context["record"] = f"{player.wins or 0}W-{player.losses or 0}L"
-                        except Exception:
-                            pass
-
-                fallback = ansi_block(
-                    f"[PERFORMANCE REVIEW] Subject: {player_name}\n"
-                    f"  Hero: {hero_name} | KDA: {kills}/{deaths}/{assists} | GPM: {gpm}\n"
-                    f"  STATUS: ADEQUATE. The system notes this performance for the record."
+        try:
+            if extreme_losers:
+                target = max(
+                    extreme_losers,
+                    key=lambda player: (
+                        player.get("deaths", 0) or 0,
+                        -((player.get("kills", 0) or 0) + (player.get("assists", 0) or 0)),
+                    ),
                 )
+                is_winner = False
+            else:
+                target = max(
+                    enriched_winners,
+                    key=lambda player: (
+                        player.get("fantasy_points") or 0,
+                        (player.get("kills", 0) or 0)
+                        + (player.get("assists", 0) or 0),
+                        player.get("gpm", 0) or 0,
+                    ),
+                )
+                is_winner = True
 
-                text = None
-                if self.flavor_text_service and discord_id:
-                    from services.flavor_text_service import FlavorEvent
+            from utils.hero_lookup import get_hero_name
 
-                    event_details = {
-                        "hero": hero_name,
-                        "kills": kills,
-                        "deaths": deaths,
-                        "assists": assists,
-                        "gpm": gpm,
-                        "xpm": xpm,
-                        "fantasy_points": fantasy,
-                        "hero_damage": winner.get("hero_damage", 0),
-                        "tower_damage": winner.get("tower_damage", 0),
-                        "net_worth": winner.get("net_worth", 0),
-                    }
-                    text = await self.flavor_text_service.generate_event_flavor(
-                        guild_id=guild_id,
-                        event=FlavorEvent.MVP_CALLOUT,
-                        discord_id=discord_id,
-                        event_details=event_details,
-                    )
-                if text:
-                    results.append(NeonResult(layer=2, text_block=f"<@{discord_id}> {text}"))
-                else:
-                    results.append(NeonResult(layer=2, text_block=fallback))
-            except Exception as e:
-                logger.debug(f"neon on_match_enriched error for winner: {e}")
-                continue
-
-        return results
+            discord_id = target.get("discord_id")
+            player_name = (
+                await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
+                if discord_id is not None
+                else "Unknown client"
+            )
+            hero_id = target.get("hero_id")
+            hero_name = get_hero_name(hero_id) if hero_id else None
+            context = JopatPostMatchContext(
+                winner_name=player_name if is_winner else None,
+                loser_name=player_name if not is_winner else None,
+                hero=hero_name,
+                kills=target.get("kills"),
+                deaths=target.get("deaths"),
+                assists=target.get("assists"),
+                gpm=target.get("gpm"),
+                xpm=target.get("xpm"),
+            )
+            protocol = choose_protocol(context)
+            fallback = render_fallback(protocol, context)
+            text = await self._generate_text(
+                build_event_description(protocol, context),
+                context.prompt_context(),
+                fallback,
+                validate_facts=True,
+            )
+            mention = f"<@{discord_id}>\n" if discord_id is not None else ""
+            return [NeonResult(layer=2, text_block=f"{mention}{text}")]
+        except Exception as e:
+            logger.debug(f"neon on_match_enriched error: {e}")
+            return []
