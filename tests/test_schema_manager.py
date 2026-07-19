@@ -87,6 +87,38 @@ def test_schema_manager_initialize_is_idempotent(tmp_path):
     assert applied > 0
 
 
+def test_soft_avoid_duration_migration_caps_legacy_stacks(tmp_path):
+    db_path = str(tmp_path / "legacy-soft-avoid-stack.db")
+    manager = SchemaManager(db_path)
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO soft_avoids
+                (guild_id, avoider_discord_id, avoided_discord_id, games_remaining, created_at, updated_at)
+            VALUES (123, 100, 200, 25, 1, 1)
+            """
+        )
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("cap_soft_avoid_games_remaining",),
+        )
+
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        games_remaining = conn.execute(
+            """
+            SELECT games_remaining
+            FROM soft_avoids
+            WHERE guild_id = 123 AND avoider_discord_id = 100 AND avoided_discord_id = 200
+            """
+        ).fetchone()[0]
+
+    assert games_remaining == 10
+
+
 def test_failed_pending_batch_rolls_back_all_schema_and_migration_rows(tmp_path):
     db_path = str(tmp_path / "failed-pending-batch.db")
     manager = SchemaManager(db_path)

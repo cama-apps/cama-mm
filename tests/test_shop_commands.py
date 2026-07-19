@@ -20,6 +20,7 @@ from commands.shop import (
     SHOP_RECALIBRATE_COST,
     SHOP_WITCHS_CURSE_COST,
     ShopCommands,
+    _calculate_soft_avoid_cost,
 )
 
 
@@ -48,15 +49,22 @@ async def test_pingedash_is_not_a_shop_item():
 
 
 @pytest.mark.asyncio
-async def test_shop_pricing_autocomplete_labels_do_not_claim_free_or_minimum_soft_avoid():
+async def test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum():
     commands = ShopCommands(MagicMock(), MagicMock())
     choices = await commands.item_autocomplete(_make_interaction(guild_id=9000), "")
     labels = {choice.value: choice.name for choice in choices}
 
     assert "FREE" not in labels["package_deal"]
     assert "0 active" in labels["package_deal"]
-    assert "from 750" not in labels["soft_avoid"]
     assert "dynamic" in labels["soft_avoid"]
+    assert "minimum 250" in labels["soft_avoid"]
+
+
+def test_soft_avoid_floor_applies_to_configured_default(monkeypatch):
+    monkeypatch.setattr("commands.shop.SHOP_SOFT_AVOID_COST", 100)
+
+    assert _calculate_soft_avoid_cost(None) == 250
+    assert _calculate_soft_avoid_cost({"games_together": 2, "wins_together": 0}) == 250
 
 
 @pytest.mark.asyncio
@@ -377,14 +385,15 @@ async def test_handle_jopa_coin_success_deducts_balance():
 @pytest.mark.asyncio
 async def test_handle_soft_avoid_prices_from_teammate_winrate(monkeypatch):
     bot = MagicMock()
-    bot.soft_avoid_service.create_or_extend_avoid.return_value = SimpleNamespace(games_remaining=10)
+    bot.soft_avoid_service.purchase_avoid.return_value = SimpleNamespace(
+        success=True, reason=None, balance=571, avoid=SimpleNamespace(games_remaining=10)
+    )
     bot.pairings_service.get_head_to_head.return_value = {
         "games_together": 7,
         "wins_together": 2,
     }
     player_service = MagicMock()
     player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = 429
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
     monkeypatch.setattr("commands.shop.get_neon_service", lambda _bot: None)
@@ -400,26 +409,28 @@ async def test_handle_soft_avoid_prices_from_teammate_winrate(monkeypatch):
         target.id,
         interaction.guild.id,
     )
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id,
-        interaction.guild.id,
-        -429,
+    player_service.adjust_balance.assert_not_called()
+    bot.soft_avoid_service.purchase_avoid.assert_called_once_with(
+        guild_id=interaction.guild.id,
+        avoider_id=interaction.user.id,
+        avoided_id=target.id,
+        cost=429,
+        games=10,
     )
-    bot.soft_avoid_service.create_or_extend_avoid.assert_called_once()
-    assert bot.soft_avoid_service.create_or_extend_avoid.call_args.kwargs["avoided_id"] == target.id
 
 
 @pytest.mark.asyncio
 async def test_handle_soft_avoid_uses_default_price_before_three_games(monkeypatch):
     bot = MagicMock()
-    bot.soft_avoid_service.create_or_extend_avoid.return_value = SimpleNamespace(games_remaining=10)
+    bot.soft_avoid_service.purchase_avoid.return_value = SimpleNamespace(
+        success=True, reason=None, balance=0, avoid=SimpleNamespace(games_remaining=10)
+    )
     bot.pairings_service.get_head_to_head.return_value = {
         "games_together": 2,
         "wins_together": 2,
     }
     player_service = MagicMock()
     player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = 750
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
     monkeypatch.setattr("commands.shop.get_neon_service", lambda _bot: None)
@@ -430,21 +441,25 @@ async def test_handle_soft_avoid_uses_default_price_before_three_games(monkeypat
 
     await commands._handle_soft_avoid(interaction, target=target)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id,
-        interaction.guild.id,
-        -750,
+    player_service.adjust_balance.assert_not_called()
+    bot.soft_avoid_service.purchase_avoid.assert_called_once_with(
+        guild_id=interaction.guild.id,
+        avoider_id=interaction.user.id,
+        avoided_id=target.id,
+        cost=750,
+        games=10,
     )
 
 
 @pytest.mark.asyncio
 async def test_handle_soft_avoid_uses_default_price_with_no_pairing_data(monkeypatch):
     bot = MagicMock()
-    bot.soft_avoid_service.create_or_extend_avoid.return_value = SimpleNamespace(games_remaining=10)
+    bot.soft_avoid_service.purchase_avoid.return_value = SimpleNamespace(
+        success=True, reason=None, balance=0, avoid=SimpleNamespace(games_remaining=10)
+    )
     bot.pairings_service.get_head_to_head.return_value = None
     player_service = MagicMock()
     player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = 750
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
     monkeypatch.setattr("commands.shop.get_neon_service", lambda _bot: None)
@@ -455,21 +470,23 @@ async def test_handle_soft_avoid_uses_default_price_with_no_pairing_data(monkeyp
 
     await commands._handle_soft_avoid(interaction, target=target)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id,
-        interaction.guild.id,
-        -750,
+    player_service.adjust_balance.assert_not_called()
+    bot.soft_avoid_service.purchase_avoid.assert_called_once_with(
+        guild_id=interaction.guild.id,
+        avoider_id=interaction.user.id,
+        avoided_id=target.id,
+        cost=750,
+        games=10,
     )
 
 
 @pytest.mark.asyncio
-async def test_handle_soft_avoid_refunds_when_create_fails_after_debit(monkeypatch):
+async def test_handle_soft_avoid_purchase_failure_does_not_charge(monkeypatch):
     bot = MagicMock()
-    bot.soft_avoid_service.create_or_extend_avoid.side_effect = RuntimeError("db locked")
+    bot.soft_avoid_service.purchase_avoid.side_effect = RuntimeError("db locked")
     bot.pairings_service.get_head_to_head.return_value = None
     player_service = MagicMock()
     player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = 750
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     safe_followup = AsyncMock()
     monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
@@ -481,19 +498,16 @@ async def test_handle_soft_avoid_refunds_when_create_fails_after_debit(monkeypat
 
     await commands._handle_soft_avoid(interaction, target=target)
 
-    assert [call.args for call in player_service.adjust_balance.call_args_list] == [
-        (interaction.user.id, interaction.guild.id, -750),
-        (interaction.user.id, interaction.guild.id, 750),
-    ]
+    player_service.adjust_balance.assert_not_called()
     kwargs = safe_followup.call_args.kwargs
     assert kwargs["ephemeral"] is True
-    assert "refund" in kwargs["content"].lower()
+    assert "not charged" in kwargs["content"].lower()
 
 
 @pytest.mark.asyncio
-async def test_handle_soft_avoid_zero_price_create_failure_does_not_claim_refund(monkeypatch):
+async def test_handle_soft_avoid_minimum_price_purchase_failure_does_not_charge(monkeypatch):
     bot = MagicMock()
-    bot.soft_avoid_service.create_or_extend_avoid.side_effect = RuntimeError("db locked")
+    bot.soft_avoid_service.purchase_avoid.side_effect = RuntimeError("db locked")
     bot.pairings_service.get_head_to_head.return_value = {
         "games_together": 3,
         "wins_together": 0,
@@ -513,14 +527,15 @@ async def test_handle_soft_avoid_zero_price_create_failure_does_not_claim_refund
 
     player_service.adjust_balance.assert_not_called()
     message = safe_followup.call_args.kwargs["content"].lower()
-    assert "refund" not in message
     assert "not charged" in message
 
 
 @pytest.mark.asyncio
-async def test_handle_soft_avoid_allows_zero_price_after_three_losses(monkeypatch):
+async def test_handle_soft_avoid_charges_minimum_price_after_three_losses(monkeypatch):
     bot = MagicMock()
-    bot.soft_avoid_service.create_or_extend_avoid.return_value = SimpleNamespace(games_remaining=10)
+    bot.soft_avoid_service.purchase_avoid.return_value = SimpleNamespace(
+        success=True, reason=None, balance=0, avoid=SimpleNamespace(games_remaining=10)
+    )
     bot.pairings_service.get_head_to_head.return_value = {
         "games_together": 3,
         "wins_together": 0,
@@ -541,9 +556,104 @@ async def test_handle_soft_avoid_allows_zero_price_after_three_losses(monkeypatc
 
     player_service.get_balance.assert_not_called()
     player_service.adjust_balance.assert_not_called()
+    bot.soft_avoid_service.purchase_avoid.assert_called_once_with(
+        guild_id=interaction.guild.id,
+        avoider_id=interaction.user.id,
+        avoided_id=target.id,
+        cost=250,
+        games=10,
+    )
     safe_defer.assert_awaited_once_with(interaction, ephemeral=True)
     safe_followup.assert_awaited_once()
-    bot.soft_avoid_service.create_or_extend_avoid.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_soft_avoid_rejects_active_duplicate_without_charge(monkeypatch):
+    bot = MagicMock()
+    bot.soft_avoid_service.get_user_avoids.return_value = [
+        SimpleNamespace(avoided_discord_id=2002, games_remaining=6)
+    ]
+    bot.pairings_service.get_head_to_head.return_value = None
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [object(), object()]
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_soft_avoid(interaction, target=target)
+
+    interaction.response.send_message.assert_awaited_once()
+    message = interaction.response.send_message.call_args.args[0]
+    assert "already active" in message.lower()
+    assert "6 games remaining" in message.lower()
+    bot.pairings_service.get_head_to_head.assert_not_called()
+    player_service.get_balance.assert_not_called()
+    player_service.adjust_balance.assert_not_called()
+    bot.soft_avoid_service.purchase_avoid.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_soft_avoid_handles_concurrent_duplicate_without_charge(monkeypatch):
+    bot = MagicMock()
+    bot.soft_avoid_service.get_user_avoids.return_value = []
+    bot.soft_avoid_service.purchase_avoid.return_value = SimpleNamespace(
+        success=False,
+        reason="already_active",
+        balance=750,
+        avoid=SimpleNamespace(games_remaining=6),
+    )
+    bot.pairings_service.get_head_to_head.return_value = None
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [object(), object()]
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_soft_avoid(interaction, target=target)
+
+    message = safe_followup.call_args.kwargs["content"].lower()
+    assert "already active" in message
+    assert "6 games remaining" in message
+    player_service.adjust_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_soft_avoid_handles_atomic_insufficient_balance(monkeypatch):
+    bot = MagicMock()
+    bot.soft_avoid_service.get_user_avoids.return_value = []
+    bot.soft_avoid_service.purchase_avoid.return_value = SimpleNamespace(
+        success=False,
+        reason="insufficient_balance",
+        balance=200,
+        avoid=None,
+    )
+    bot.pairings_service.get_head_to_head.return_value = {
+        "games_together": 3,
+        "wins_together": 0,
+    }
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [object(), object()]
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_soft_avoid(interaction, target=target)
+
+    message = safe_followup.call_args.kwargs["content"].lower()
+    assert "need 250" in message
+    assert "only have 200" in message
+    player_service.adjust_balance.assert_not_called()
 
 
 @pytest.mark.asyncio

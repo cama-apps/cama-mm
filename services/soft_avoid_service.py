@@ -2,7 +2,12 @@
 Service layer for soft avoid operations.
 """
 
-from repositories.soft_avoid_repository import SoftAvoid, SoftAvoidRepository
+from domain.soft_avoid_constants import SOFT_AVOID_GAMES
+from repositories.soft_avoid_repository import (
+    SoftAvoid,
+    SoftAvoidPurchaseResult,
+    SoftAvoidRepository,
+)
 
 
 class SoftAvoidService:
@@ -15,17 +20,17 @@ class SoftAvoidService:
     def __init__(self, soft_avoid_repo: SoftAvoidRepository):
         self.soft_avoid_repo = soft_avoid_repo
 
-    def create_or_extend_avoid(
+    def create_or_reactivate_avoid(
         self,
         guild_id: int | None,
         avoider_id: int,
         avoided_id: int,
-        games: int = 10,
+        games: int = SOFT_AVOID_GAMES,
     ) -> SoftAvoid:
         """
-        Create a new soft avoid or extend existing one.
+        Create a new soft avoid or reactivate an expired one.
 
-        If an avoid already exists for this pair, adds games to games_remaining.
+        If an avoid is already active for this pair, the repository rejects it.
 
         Args:
             guild_id: Guild ID
@@ -34,15 +39,33 @@ class SoftAvoidService:
             games: Number of games for the avoid
 
         Returns:
-            The created/updated SoftAvoid
+            The created/reactivated SoftAvoid
 
         Raises:
             ValueError: If avoider_id equals avoided_id
         """
-        return self.soft_avoid_repo.create_or_extend_avoid(
+        return self.soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=avoider_id,
             avoided_id=avoided_id,
+            games=games,
+        )
+
+    def purchase_avoid(
+        self,
+        guild_id: int | None,
+        avoider_id: int,
+        avoided_id: int,
+        *,
+        cost: int,
+        games: int = SOFT_AVOID_GAMES,
+    ) -> SoftAvoidPurchaseResult:
+        """Atomically debit and activate a soft avoid when allowed."""
+        return self.soft_avoid_repo.purchase_avoid(
+            guild_id=guild_id,
+            avoider_id=avoider_id,
+            avoided_id=avoided_id,
+            cost=cost,
             games=games,
         )
 

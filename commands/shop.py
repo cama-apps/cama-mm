@@ -35,9 +35,9 @@ from config import (
     SHOP_RECALIBRATE_COST,
     SHOP_SOFT_AVOID_COST,
     SHOP_WITCHS_CURSE_COST,
-    SOFT_AVOID_GAMES_DURATION,
     WITCHS_CURSE_DURATION_DAYS,
 )
+from domain.soft_avoid_constants import SOFT_AVOID_GAMES
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
@@ -66,6 +66,7 @@ SOUL_HARVEST_DRAIN_PER_TARGET = 2
 SOUL_HARVEST_BONUS_DRAIN_CHANCE = 0.20
 PINGEDASH_TENOR_URL = "https://tenor.com/view/hiash-gif-25282310"
 SOFT_AVOID_MIN_TEAMMATE_GAMES = 3
+SOFT_AVOID_MIN_COST = 250
 SOFT_AVOID_WINRATE_COST_SCALE = 1500
 PACKAGE_DEAL_NO_ACTIVE_COST = 1
 
@@ -92,15 +93,17 @@ def _protection_result_int(result, field: str, default: int = 0) -> int:
 
 
 def _calculate_soft_avoid_cost(pairing: dict | None) -> int:
+    default_cost = max(SOFT_AVOID_MIN_COST, SHOP_SOFT_AVOID_COST)
     if not pairing:
-        return SHOP_SOFT_AVOID_COST
+        return default_cost
 
     games_together = pairing.get("games_together", 0)
     if games_together < SOFT_AVOID_MIN_TEAMMATE_GAMES:
-        return SHOP_SOFT_AVOID_COST
+        return default_cost
 
     wins_together = pairing.get("wins_together", 0)
-    return (SOFT_AVOID_WINRATE_COST_SCALE * wins_together + games_together - 1) // games_together
+    winrate_cost = (SOFT_AVOID_WINRATE_COST_SCALE * wins_together + games_together - 1) // games_together
+    return max(SOFT_AVOID_MIN_COST, winrate_cost)
 
 
 def _calculate_package_deal_cost(
@@ -258,8 +261,9 @@ class ShopCommands(commands.Cog):
             ),
             app_commands.Choice(
                 name=(
-                    f"Soft Avoid (dynamic, default {SHOP_SOFT_AVOID_COST} jopacoin "
-                    f"for {SOFT_AVOID_GAMES_DURATION} games)"
+                    f"Soft Avoid (dynamic, minimum {SOFT_AVOID_MIN_COST}, "
+                    f"default {max(SOFT_AVOID_MIN_COST, SHOP_SOFT_AVOID_COST)} jopacoin "
+                    f"for {SOFT_AVOID_GAMES} games)"
                 ),
                 value="soft_avoid",
             ),
@@ -1503,6 +1507,25 @@ class ShopCommands(commands.Cog):
             )
             return
 
+        active_avoids = await asyncio.to_thread(
+            soft_avoid_service.get_user_avoids,
+            guild_id,
+            user_id,
+        )
+        existing_avoid = next(
+            (avoid for avoid in active_avoids if avoid.avoided_discord_id == target.id),
+            None,
+        )
+        if existing_avoid:
+            await interaction.response.send_message(
+                (
+                    f"Your soft avoid for **{target.display_name}** is already active "
+                    f"with {existing_avoid.games_remaining} games remaining."
+                ),
+                ephemeral=True,
+            )
+            return
+
         pairings_service = getattr(self.bot, "pairings_service", None)
         pairing = None
         if pairings_service:
@@ -1514,55 +1537,53 @@ class ShopCommands(commands.Cog):
             )
         cost = _calculate_soft_avoid_cost(pairing)
 
-        # Check balance
-        if cost > 0:
-            balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-            if balance < cost:
-                await interaction.response.send_message(
-                    f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
-                    ephemeral=True,
-                )
-                return
-
         # Defer before the write so a slow DB call cannot leave a created avoid
         # behind a failed Discord interaction.
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        if cost > 0:
-            # Deduct cost
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-
         try:
-            # Create or extend avoid
-            avoid = await asyncio.to_thread(
+            purchase = await asyncio.to_thread(
                 functools.partial(
-                    soft_avoid_service.create_or_extend_avoid,
+                    soft_avoid_service.purchase_avoid,
                     guild_id=guild_id,
                     avoider_id=user_id,
                     avoided_id=target.id,
-                    games=SOFT_AVOID_GAMES_DURATION,
+                    cost=cost,
+                    games=SOFT_AVOID_GAMES,
                 )
             )
         except Exception:
-            logger.exception("Failed to create soft avoid purchase")
-            if cost > 0:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
-                failure_message = (
-                    "Soft avoid purchase failed before it could be activated. "
-                    "Your jopacoin was refunded."
-                )
-            else:
-                failure_message = (
-                    "Soft avoid purchase failed before it could be activated. "
-                    "You were not charged."
-                )
+            logger.exception("Failed to complete soft avoid purchase")
             await safe_followup(
                 interaction,
-                content=failure_message,
+                content=(
+                    "Soft avoid purchase failed before it could be activated. "
+                    "You were not charged."
+                ),
                 ephemeral=True,
             )
             return
+
+        if not purchase.success:
+            if purchase.reason == "already_active" and purchase.avoid is not None:
+                content = (
+                    f"Your soft avoid for **{target.display_name}** is already active "
+                    f"with {purchase.avoid.games_remaining} games remaining."
+                )
+            elif purchase.reason == "insufficient_balance":
+                content = (
+                    f"You need {cost} {JOPACOIN_EMOTE} for this, "
+                    f"but you only have {purchase.balance}."
+                )
+            else:
+                content = "Soft avoid purchase could not be completed. You were not charged."
+            await safe_followup(interaction, content=content, ephemeral=True)
+            return
+
+        avoid = purchase.avoid
+        if avoid is None:
+            raise RuntimeError("Successful soft avoid purchase did not return an activation")
 
         # Build confirmation embed (ephemeral)
         embed = discord.Embed(
@@ -1588,7 +1609,7 @@ class ShopCommands(commands.Cog):
                 neon_result = await neon.on_soft_avoid(
                     user_id, guild_id,
                     cost=cost,
-                    games=SOFT_AVOID_GAMES_DURATION,
+                    games=SOFT_AVOID_GAMES,
                 )
                 if neon_result:
                     msg = None

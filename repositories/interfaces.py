@@ -1001,14 +1001,27 @@ class ISoftAvoidRepository(ABC):
     """Repository for soft avoid feature data access."""
 
     @abstractmethod
-    def create_or_extend_avoid(
+    def create_or_reactivate_avoid(
         self,
         guild_id: int | None,
         avoider_id: int,
         avoided_id: int,
         games: int = 10,
     ):
-        """Create a new soft avoid or extend existing one."""
+        """Create a new soft avoid or reactivate an expired one."""
+        ...
+
+    @abstractmethod
+    def purchase_avoid(
+        self,
+        guild_id: int | None,
+        avoider_id: int,
+        avoided_id: int,
+        *,
+        cost: int,
+        games: int = 10,
+    ):
+        """Atomically debit and activate a soft avoid when allowed."""
         ...
 
     @abstractmethod
