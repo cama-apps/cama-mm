@@ -115,6 +115,9 @@ class ManaService:
         if row is None:
             return None
         land = row["current_land"]
+        # Guardian/tap state only makes sense for today's assignment; a stale
+        # row from a previous day must not present yesterday's shield as live.
+        assigned_today = row["assigned_date"] == get_today_pst()
         return {
             "land": land,
             "color": LAND_COLORS.get(land, "Unknown"),
@@ -122,10 +125,10 @@ class ManaService:
             "assigned_date": row["assigned_date"],
             "guardian_remaining": (
                 int(row.get("white_shield_remaining", 0) or 0)
-                if land == "Plains"
+                if (land == "Plains" and assigned_today)
                 else 0
             ),
-            "consumed": bool(row.get("consumed_today", 0)),
+            "consumed": bool(row.get("consumed_today", 0)) if assigned_today else False,
         }
 
     def is_mana_consumed(self, discord_id: int, guild_id: int | None) -> bool:
@@ -137,29 +140,40 @@ class ManaService:
 
     def assign_all_daily_mana(
         self, guild_id: int | None, *, ash_fan_ids: set[int] | None = None
-    ) -> None:
+    ) -> list[dict]:
         """Assign today's mana to every registered player who hasn't been assigned yet.
 
         Args:
             guild_id: Guild to process.
             ash_fan_ids: Discord IDs that have an "ash" role (checked by the command layer).
+
+        Returns:
+            One :meth:`assign_daily_mana` result dict (plus ``discord_id``) per
+            player who was freshly assigned by this call, so the command layer
+            can run once-per-claim side effects (e.g. the White stipend)
+            exactly as the self-claim path does.
         """
         gid = self.player_repo.normalize_guild_id(guild_id)
         players = self.player_repo.get_all(gid)
         ash_fan_ids = ash_fan_ids or set()
 
+        new_assignments: list[dict] = []
         for player in players:
             if player.discord_id is None:
                 continue
             if self.has_assigned_today(player.discord_id, guild_id):
                 continue
             try:
-                self.assign_daily_mana(
+                result = self.assign_daily_mana(
                     player.discord_id, guild_id,
                     is_ash_fan=player.discord_id in ash_fan_ids,
                 )
             except ValueError:
                 logger.debug("Race condition: mana already assigned for player %s in guild %s", player.discord_id, guild_id)
+                continue
+            result["discord_id"] = player.discord_id
+            new_assignments.append(result)
+        return new_assignments
 
     def assign_daily_mana(
         self, discord_id: int, guild_id: int | None, *, is_ash_fan: bool = False

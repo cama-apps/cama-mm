@@ -9,7 +9,8 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -309,3 +310,96 @@ class TestTriviaBankruptMultiplier:
         jc = max(1, int(jc * red.trivia_payout_multiplier))  # 2 * 1.5 = 3
         jc = max(1, int(jc * TRIVIA_BANKRUPT_MULTIPLIER))    # 3 * 2 = 6
         assert jc == 6
+
+
+# =============================================================================
+# White stipend via the /mana all guild-board path
+# =============================================================================
+
+
+class TestWhiteStipendManaAll:
+    """/mana all must pay the stipend for freshly assigned bankrupt Plains
+    players exactly once per day, matching the self-claim path."""
+
+    @pytest.fixture
+    def env(self, repo_db_path):
+        mana_repo = ManaRepository(repo_db_path)
+        player_repo = PlayerRepository(repo_db_path)
+        mana_service = _make_mana_service(mana_repo, player_repo)
+        # Unlike the flag/stipend tests above, this one rolls a real land —
+        # calculate_land_weights compares these fields with >=, so they must
+        # be real numbers rather than bare MagicMock attributes.
+        mana_service.gambling_stats_service.calculate_degen_score.return_value = (
+            SimpleNamespace(
+                total=0,
+                max_leverage_score=0,
+                loss_chase_score=0,
+                bet_size_score=0,
+                negative_loan_bonus=0,
+                bankruptcy_score=0,
+                debt_depth_score=0,
+            )
+        )
+        mana_service.gambling_stats_service.get_player_bet_outcomes.return_value = []
+        loan_service = MagicMock()
+        loan_service.get_nonprofit_fund.return_value = 1000
+        effects_service = ManaEffectsService(
+            mana_service=mana_service,
+            player_repo=player_repo,
+            mana_repo=mana_repo,
+            loan_service=loan_service,
+        )
+        return {
+            "mana_service": mana_service,
+            "effects": effects_service,
+            "player_repo": player_repo,
+            "loan_service": loan_service,
+        }
+
+    async def test_mana_all_pays_stipend_once_across_both_paths(self, env, monkeypatch):
+        import commands.mana as mana_commands
+        from config import WHITE_BANKRUPT_STIPEND
+
+        # Deep in debt so the player stays stipend-eligible after one payout —
+        # a double-pay would be visible in the balance.
+        _register(env["player_repo"], 81001, balance=-500)
+        monkeypatch.setattr(
+            "services.mana_service.random.choices",
+            lambda lands, weights=None, k=1: ["Plains"],
+        )
+        monkeypatch.setattr(
+            mana_commands, "require_gamba_channel", AsyncMock(return_value=True)
+        )
+        monkeypatch.setattr(mana_commands, "safe_defer", AsyncMock(return_value=True))
+        monkeypatch.setattr(mana_commands, "safe_followup", AsyncMock())
+
+        client = SimpleNamespace(
+            mana_service=env["mana_service"],
+            mana_effects_service=env["effects"],
+        )
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=GID, members=[]),
+            user=SimpleNamespace(id=81001, roles=[], display_name="Bankrupt"),
+            client=client,
+            channel=None,
+        )
+        cog = mana_commands.ManaCommands(SimpleNamespace())
+
+        # /mana all → fresh Plains claim → stipend paid once.
+        await cog.mana.callback(cog, interaction, None, True)
+        assert (
+            env["player_repo"].get_balance(81001, GID)
+            == -500 + WHITE_BANKRUPT_STIPEND
+        )
+        env["loan_service"].subtract_from_nonprofit_fund.assert_called_once()
+
+        # Second /mana all: nothing freshly assigned → no re-pay.
+        await cog.mana.callback(cog, interaction, None, True)
+        # Self-claim after the board roll: already assigned → no re-pay either.
+        await cog.mana.callback(cog, interaction, None, False)
+
+        assert (
+            env["player_repo"].get_balance(81001, GID)
+            == -500 + WHITE_BANKRUPT_STIPEND
+        )
+        env["loan_service"].subtract_from_nonprofit_fund.assert_called_once()
