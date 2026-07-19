@@ -551,27 +551,8 @@ class IMatchRepository(ABC):
     def consume_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> dict | None: ...
 
     @abstractmethod
-    def purchase_protected_hero_atomic(
-        self,
-        *,
-        guild_id: int | None,
-        pending_match_id: int,
-        discord_id: int,
-        hero_id: int,
-        team_side: str,
-        cost: int,
-    ) -> dict:
-        """Atomically debit a player and store their protected hero purchase."""
-        ...
-
-    @abstractmethod
     def get_player_hero_stats(self, discord_id: int, guild_id: int) -> dict:
         """Get hero statistics for a player from enriched matches."""
-        ...
-
-    @abstractmethod
-    def get_player_protected_hero_stats(self, discord_id: int, guild_id: int) -> dict:
-        """Get protected-hero purchase outcomes for a player."""
         ...
 
     @abstractmethod

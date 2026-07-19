@@ -32,7 +32,7 @@ def test_schema_manager_initializes_tables(tmp_path):
         "economy_ledger_context",
     }
     assert required.issubset(tables)
-    assert {"wheel_wars", "war_bets"}.isdisjoint(tables)
+    assert {"wheel_wars", "war_bets", "protected_hero_purchases"}.isdisjoint(tables)
 
 
 def test_schema_manager_drops_retired_wheel_war_tables(tmp_path):
@@ -49,6 +49,26 @@ def test_schema_manager_drops_retired_wheel_war_tables(tmp_path):
             SELECT name
             FROM sqlite_master
             WHERE type = 'table' AND name IN ('wheel_wars', 'war_bets')
+            """
+        ).fetchall()
+
+    assert remaining == []
+
+
+def test_schema_manager_drops_retired_protected_hero_table(tmp_path):
+    db_path = str(tmp_path / "legacy-protected-heroes.db")
+    manager = SchemaManager(db_path)
+    with sqlite3.connect(db_path) as conn:
+        manager._migration_create_protected_hero_purchases_table(conn.cursor())
+
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        remaining = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'protected_hero_purchases'
             """
         ).fetchall()
 

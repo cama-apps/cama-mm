@@ -552,16 +552,6 @@ def _seed_snapshot_guild(trivia_repo, guild_id: int, base_id: int) -> dict[str, 
             """,
             (guild_id, base_id, player1, stamp + 17, stamp + 18),
         )
-        conn.execute(
-            """
-            INSERT INTO protected_hero_purchases (
-                guild_id, pending_match_id, match_id, discord_id, team_side,
-                hero_id, cost, status, purchased_at, resolved_at
-            ) VALUES (?, ?, ?, ?, 'radiant', 2, 4, 'recorded', ?, ?)
-            """,
-            (guild_id, base_id, match_id, player1, stamp + 19, stamp + 20),
-        )
-
     return {
         "player1": player1,
         "player2": player2,
@@ -599,7 +589,6 @@ def test_load_snapshot_is_complete_deterministic_private_and_guild_scoped(trivia
         "recalibrations",
         "trivia_sessions",
         "disburse_vote_history",
-        "protected_heroes",
     ]
     assert all(rows for rows in snapshot.values())
     assert all(row["guild_id"] == TEST_GUILD_ID for rows in snapshot.values() for row in rows)

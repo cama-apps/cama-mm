@@ -486,26 +486,6 @@ class PlayerTriviaRepository(BaseRepository):
                 ORDER BY voted_at ASC, proposal_id ASC, discord_id ASC
                 """,
             ),
-            (
-                "protected_heroes",
-                """
-                SELECT
-                    guild_id,
-                    purchase_id,
-                    pending_match_id,
-                    match_id,
-                    discord_id,
-                    team_side,
-                    hero_id,
-                    cost,
-                    status,
-                    purchased_at,
-                    resolved_at
-                FROM protected_hero_purchases
-                WHERE guild_id = ?
-                ORDER BY purchased_at ASC, purchase_id ASC
-                """,
-            ),
         ]
 
         snapshot: dict[str, list[dict]] = {}

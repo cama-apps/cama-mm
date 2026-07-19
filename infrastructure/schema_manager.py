@@ -537,6 +537,11 @@ class SchemaManager:
                 "schedule_unresolved_duel_reminders",
                 self._migration_schedule_unresolved_duel_reminders,
             ),
+            # Remove storage left behind by the retired Protect Hero shop item.
+            (
+                "drop_protected_hero_purchases_table",
+                self._migration_drop_protected_hero_purchases_table,
+            ),
         ]
 
     # --- Migrations ---
@@ -606,6 +611,9 @@ class SchemaManager:
     def _migration_drop_retired_wheel_war_tables(self, cursor) -> None:
         cursor.execute("DROP TABLE IF EXISTS war_bets")
         cursor.execute("DROP TABLE IF EXISTS wheel_wars")
+
+    def _migration_drop_protected_hero_purchases_table(self, cursor) -> None:
+        cursor.execute("DROP TABLE IF EXISTS protected_hero_purchases")
 
     def _migration_add_last_pingedash_to_players(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "last_pingedash", "INTEGER")
