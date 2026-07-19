@@ -16,7 +16,12 @@ from services.ai_service import (
     _suppress_litellm_pydantic_warnings,
 )
 from services.flavor_text_service import FlavorEvent, FlavorTextService, PlayerContext
-from services.sql_query_service import BLOCKED_COLUMNS, BLOCKED_TABLES, SQLQueryService
+from services.sql_query_service import (
+    BLOCKED_COLUMNS,
+    BLOCKED_TABLES,
+    UNSCOPED_TABLE_ALLOWLIST,
+    SQLQueryService,
+)
 
 
 class TestAIService:
@@ -289,12 +294,26 @@ class TestAIService:
         assert result == "This is the AI response."
 
 
+def _validator_service(ai_query_repo=None):
+    """Build a SQLQueryService for validator tests.
+
+    The structural guild-scoping check needs an ai_query_repo for schema ground
+    truth; the default stub reports no unscoped tables so tests of the static
+    rules are unaffected by it.
+    """
+    if ai_query_repo is None:
+        ai_query_repo = MagicMock()
+        ai_query_repo.get_all_tables.return_value = []
+        ai_query_repo.get_guild_scoped_tables.return_value = set()
+    return SQLQueryService(ai_service=MagicMock(), ai_query_repo=ai_query_repo)
+
+
 class TestSQLQueryService:
     """Tests for SQLQueryService validation and query execution."""
 
     def test_validate_sql_rejects_non_select(self):
         """Test that non-SELECT queries are rejected."""
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         is_valid, error = service._validate_sql("INSERT INTO players VALUES (1, 'test')")
         assert not is_valid
@@ -310,7 +329,7 @@ class TestSQLQueryService:
 
     def test_validate_sql_rejects_dangerous_keywords(self):
         """Test that dangerous SQL keywords are blocked."""
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         # Test each dangerous keyword
         dangerous_queries = [
@@ -325,7 +344,7 @@ class TestSQLQueryService:
 
     def test_validate_sql_rejects_blocked_columns(self):
         """Test that blocked columns are not allowed."""
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         for column in BLOCKED_COLUMNS:
             query = f"SELECT {column} FROM players"
@@ -335,7 +354,7 @@ class TestSQLQueryService:
 
     def test_validate_sql_allows_valid_select(self):
         """Test that valid SELECT queries pass validation."""
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         valid_queries = [
             "SELECT discord_username, wins, losses FROM players",
@@ -355,7 +374,7 @@ class TestSQLQueryService:
         the projection before the first FROM, so the second SELECT of a UNION
         leaked PII (discord_id / steam_id) into the visible results.
         """
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         # A blocked column in a UNION branch (over a non-blocked table) must be
         # caught by the projection scan of every branch.
@@ -382,7 +401,7 @@ class TestSQLQueryService:
         contents, so the column/table/`*` scans were blind to it while SQLite
         still resolved it to the real column.
         """
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         for query in [
             'SELECT "discord_id" FROM players',
@@ -402,7 +421,7 @@ class TestSQLQueryService:
         the first FROM, hiding a projected discord_id from the prefix-only scan.
         Also covers a subquery whose own output is a blocked column under an alias.
         """
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         for query in [
             "SELECT (SELECT 1 FROM matches LIMIT 1) AS a, discord_id FROM players",
@@ -418,7 +437,7 @@ class TestSQLQueryService:
         Guards against the per-SELECT projection scan over-blocking legitimate
         correlated subqueries — discord_id here is a join predicate, not output.
         """
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         query = (
             "SELECT (SELECT COUNT(*) FROM bets WHERE discord_id = p.discord_id) AS bet_count, "
@@ -433,7 +452,7 @@ class TestSQLQueryService:
         Regression for the multi-statement guard splitting on ';' naively and
         falsely rejecting a legitimate single SELECT whose value contains ';'.
         """
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         is_valid, error = service._validate_sql(
             "SELECT discord_username FROM players WHERE discord_username = 'a;b'"
@@ -442,7 +461,7 @@ class TestSQLQueryService:
 
     def test_validate_sql_literal_value_does_not_trip_keyword_guard(self):
         """A dangerous keyword appearing only as a string value is harmless data."""
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         is_valid, error = service._validate_sql(
             "SELECT discord_username FROM players WHERE discord_username = 'DROP'"
@@ -457,7 +476,7 @@ class TestSQLQueryService:
         rows, so such references must be rejected. Alias-qualified refs (``p.``)
         and a literal value of 'main' must still be allowed.
         """
-        service = SQLQueryService.__new__(SQLQueryService)
+        service = _validator_service()
 
         for query in [
             "SELECT discord_username FROM main.players",
@@ -478,12 +497,91 @@ class TestSQLQueryService:
         )
         assert ok_literal
 
+    def test_validate_sql_rejects_comment_tokens(self):
+        """SQL comments must be rejected outright.
+
+        SQLite treats a comment as whitespace, so ``main/**/.players`` reads
+        past the per-guild TEMP views, ``FROM/**/soft_avoids`` hides a table
+        from the blocklist scan, and ``SELECT/**/*`` hides the wildcard — the
+        regex-based structural checks do not model comment tokens. Regression
+        for that whole bypass class.
+        """
+        service = _validator_service()
+
+        for query in [
+            "SELECT discord_username FROM main/**/.players",
+            "SELECT reason FROM/**/soft_avoids",
+            "SELECT/**/* FROM players",
+            "SELECT reason FROM--\nsoft_avoids",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"Comment token must be rejected: {query!r}"
+            assert "comment" in error.lower()
+
+    def test_validate_sql_allows_comment_chars_inside_string_literal(self):
+        """'--' or '/*' appearing inside a string literal is data, not a comment."""
+        service = _validator_service()
+
+        for query in [
+            "SELECT discord_username FROM players WHERE discord_username = '--'",
+            "SELECT discord_username FROM players WHERE discord_username = 'a/*b'",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert is_valid, f"Comment chars inside a literal should pass: {query!r}, got: {error}"
+
+    def test_validate_sql_rejects_player_trivia_tables(self):
+        """player_trivia_questions embeds <@discord_id> mentions and live answer
+        keys, and has no guild_id column; sessions is internal per-player state.
+        Both must be blocked."""
+        service = _validator_service()
+
+        for query in [
+            "SELECT question_text FROM player_trivia_questions",
+            "SELECT score FROM player_trivia_sessions",
+        ]:
+            is_valid, error = service._validate_sql(query)
+            assert not is_valid, f"Trivia table must be blocked: {query}"
+            assert "not allowed" in error.lower()
+
+    def test_validate_sql_blocks_unscoped_table_not_in_blocklist(self):
+        """A table with no guild_id column is blocked even when BLOCKED_TABLES
+        does not name it (fail closed): the per-guild TEMP views cannot shadow
+        it, so it would expose every guild's rows."""
+        repo = MagicMock()
+        repo.get_all_tables.return_value = ["players", "new_global_table"]
+        repo.get_guild_scoped_tables.return_value = {"players"}
+        service = _validator_service(repo)
+
+        is_valid, _ = service._validate_sql("SELECT label FROM new_global_table")
+        assert not is_valid, "Unscoped table must be blocked without a BLOCKED_TABLES entry"
+
+        is_valid, error = service._validate_sql("SELECT discord_username FROM players")
+        assert is_valid, f"Guild-scoped table must stay allowed: {error}"
+
+    def test_no_guild_id_tables_are_blocked_or_allowlisted(self, repo_db_path):
+        """Every base table in the live schema without a guild_id column must be
+        named in BLOCKED_TABLES or UNSCOPED_TABLE_ALLOWLIST.
+
+        The structural check in _validate_sql enforces the blocking at runtime;
+        this pins the documented lists against schema drift so a new global
+        table must be consciously classified."""
+        repo = AIQueryRepository(repo_db_path)
+        unscoped = set(repo.get_all_tables()) - repo.get_guild_scoped_tables()
+        unclassified = {
+            t for t in unscoped if t not in BLOCKED_TABLES and t not in UNSCOPED_TABLE_ALLOWLIST
+        }
+        assert not unclassified, (
+            f"Tables without guild_id must be blocked or explicitly allowlisted: {unclassified}"
+        )
+
     def test_blocked_tables_blocklist(self):
         """Test that sensitive tables are in the blocklist."""
         assert "sqlite_sequence" in BLOCKED_TABLES
         assert "schema_migrations" in BLOCKED_TABLES
         assert "pending_matches" in BLOCKED_TABLES
         assert "guild_config" in BLOCKED_TABLES
+        assert "player_trivia_questions" in BLOCKED_TABLES
+        assert "player_trivia_sessions" in BLOCKED_TABLES
 
     def test_blocked_columns_blocklist(self):
         """Test that sensitive columns are in the blocklist."""

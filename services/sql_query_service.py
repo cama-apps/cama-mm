@@ -42,9 +42,14 @@ BLOCKED_TABLES: set[str] = {
     # Sensitive social information
     "soft_avoids",
     "package_deals",
+    # Internal player-trivia state: question_text embeds <@discord_id> mentions
+    # and correct_index is a live answer key for in-progress sessions.
+    "player_trivia_sessions",
+    "player_trivia_questions",
     # Tables with no guild_id column: the per-guild TEMP VIEW isolation cannot
-    # shadow them, so an AI query would read every guild's rows. Blocked outright
-    # since they carry user- or guild-attributable data with no cross-guild use.
+    # shadow them, so an AI query would read every guild's rows. Listed here for
+    # documentation; the enforcement is structural — _validate_sql rejects any
+    # table lacking a guild_id column unless it is in UNSCOPED_TABLE_ALLOWLIST.
     "player_steam_ids",
     "prediction_positions",
     "prediction_trades",
@@ -53,6 +58,12 @@ BLOCKED_TABLES: set[str] = {
     "match_corrections",
     "economy_ledger_context",
 }
+
+# Tables with no guild_id column that are deliberately queryable anyway.
+# Every other table lacking guild_id is blocked structurally (fail closed) so a
+# new global table is safe by default instead of relying on someone remembering
+# to extend BLOCKED_TABLES above.
+UNSCOPED_TABLE_ALLOWLIST: set[str] = set()
 
 # Columns that should never appear in SELECT results (PII/internal)
 BLOCKED_COLUMNS: set[str] = {
@@ -246,6 +257,7 @@ class SQLQueryService:
         self.ai_query_repo = ai_query_repo
         self.guild_config_repo = guild_config_repo
         self._schema_cache: str | None = None
+        self._blocked_tables_cache: set[str] | None = None
 
     async def query(
         self,
@@ -354,14 +366,17 @@ class SQLQueryService:
 
         lines = ["## Available Tables\n"]
 
-        # Get all tables from DB, filter out blocked ones
+        # Get all tables from DB, filter out blocked ones (including tables
+        # blocked structurally for lacking a guild_id column)
         try:
             all_tables = self.ai_query_repo.get_all_tables()
+            blocked_lower = self._blocked_table_names()
         except Exception as e:
             logger.error(f"Failed to get tables: {e}")
             all_tables = []
+            blocked_lower = {b.lower() for b in BLOCKED_TABLES}
 
-        allowed_tables = [t for t in all_tables if t.lower() not in {b.lower() for b in BLOCKED_TABLES}]
+        allowed_tables = [t for t in all_tables if t.lower() not in blocked_lower]
 
         for table_name in sorted(allowed_tables):
             try:
@@ -401,7 +416,7 @@ class SQLQueryService:
                     from_col = fk["from"]
                     to_col = fk["to"]
                     # Only include if referenced table is also allowed
-                    if ref_table.lower() not in {b.lower() for b in BLOCKED_TABLES}:
+                    if ref_table.lower() not in blocked_lower:
                         fk_relationships.add(f"- {table_name}.{from_col} = {ref_table}.{to_col}")
             except Exception as e:
                 logger.debug(f"Failed to get FKs for {table_name}: {e}")
@@ -411,6 +426,24 @@ class SQLQueryService:
 
         self._schema_cache = "\n".join(lines)
         return self._schema_cache
+
+    def _blocked_table_names(self) -> set[str]:
+        """Lowercased names of every table AI queries must not touch.
+
+        Combines BLOCKED_TABLES with schema ground truth: any base table that
+        lacks a guild_id column cannot be shadowed by the per-guild TEMP views,
+        so querying it would read every guild's rows. Such tables are blocked
+        unless explicitly named in UNSCOPED_TABLE_ALLOWLIST (fail closed — the
+        hand-written no-guild-id entries in BLOCKED_TABLES are documentation;
+        this check is the enforcement). Cached: the schema is static at runtime.
+        """
+        if self._blocked_tables_cache is None:
+            all_tables = {t.lower() for t in self.ai_query_repo.get_all_tables()}
+            scoped = {t.lower() for t in self.ai_query_repo.get_guild_scoped_tables()}
+            allowed = {t.lower() for t in UNSCOPED_TABLE_ALLOWLIST}
+            blocked = {t.lower() for t in BLOCKED_TABLES}
+            self._blocked_tables_cache = blocked | (all_tables - scoped - allowed)
+        return self._blocked_tables_cache
 
     def _validate_sql(self, sql: str) -> tuple[bool, str]:
         """
@@ -438,6 +471,15 @@ class SQLQueryService:
         # hiding a real second statement.
         masked = self._mask_string_literals(sql)
         masked_upper = masked.upper().strip()
+
+        # 0. Reject SQL comments outright. SQLite treats a comment as
+        # whitespace, so `main/**/.players` or `FROM/**/soft_avoids` would slip
+        # past the regex-based checks below, which do not model comment tokens.
+        # Rejecting (rather than stripping) keeps the executed SQL identical to
+        # what was validated. String-literal contents are masked above, so '--'
+        # inside a quoted value does not trigger this.
+        if "--" in masked or "/*" in masked:
+            return False, "SQL comments are not allowed"
 
         # 1. Must start with SELECT
         if not masked_upper.startswith("SELECT"):
@@ -468,9 +510,15 @@ class SQLQueryService:
         if re.search(r"\b(?:main|temp)\s*\.\s*\w", masked, re.IGNORECASE):
             return False, "Schema-qualified table references are not allowed"
 
-        # 5. Extract and validate table names against blocklist
+        # 5. Extract and validate table names against the blocklist, which
+        # includes (fail closed) every base table without a guild_id column
+        # that is not explicitly allowlisted — see _blocked_table_names.
+        try:
+            blocked_tables_lower = self._blocked_table_names()
+        except Exception as e:
+            logger.error(f"Could not resolve blocked tables: {e}")
+            return False, "Could not verify table guild scoping"
         tables = self._extract_tables(masked)
-        blocked_tables_lower = {t.lower() for t in BLOCKED_TABLES}
         for table in tables:
             if table.lower() in blocked_tables_lower:
                 return False, f"Table not allowed: {table}"
