@@ -507,6 +507,7 @@ class SchemaManager:
                 "create_economy_policy_tables",
                 self._migration_create_economy_policy_tables,
             ),
+            ("cap_soft_avoid_games_remaining", self._migration_cap_soft_avoid_games_remaining),
         ]
 
     # --- Migrations ---
@@ -2091,6 +2092,10 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_soft_avoids_expired "
             "ON soft_avoids(guild_id, games_remaining) WHERE games_remaining <= 0"
         )
+
+    def _migration_cap_soft_avoid_games_remaining(self, cursor) -> None:
+        """Cap durations accumulated by legacy repeat purchases."""
+        cursor.execute("UPDATE soft_avoids SET games_remaining = 10 WHERE games_remaining > 10")
 
     def _migration_add_player_join_times_to_lobby(self, cursor) -> None:
         """Add player_join_times column to lobby_state for ready check join timestamps."""

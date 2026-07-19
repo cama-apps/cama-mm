@@ -774,7 +774,7 @@ class TestE2ESoftAvoid:
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -797,7 +797,7 @@ class TestE2ESoftAvoid:
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -825,7 +825,7 @@ class TestE2ESoftAvoid:
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -873,13 +873,13 @@ class TestE2ESoftAvoid:
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create bidirectional avoids
-        soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
             games=10,
         )
-        soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[1],
             avoided_id=discord_ids[0],
@@ -915,7 +915,7 @@ class TestE2ESoftAvoid:
             (discord_ids[4], discord_ids[5]),
         ]
         for avoider_id, avoided_id in avoid_pairs:
-            soft_avoid_repo.create_or_extend_avoid(
+            soft_avoid_repo.create_or_reactivate_avoid(
                 guild_id=guild_id,
                 avoider_id=avoider_id,
                 avoided_id=avoided_id,
@@ -957,7 +957,7 @@ class TestE2ESoftAvoid:
         discord_ids = _register_soft_avoid_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        avoid = soft_avoid_repo.create_or_extend_avoid(
+        avoid = soft_avoid_repo.create_or_reactivate_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],

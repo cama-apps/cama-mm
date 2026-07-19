@@ -5,11 +5,19 @@ Repository for soft avoid data access.
 import logging
 import time
 from dataclasses import dataclass
+from typing import Literal
 
+from domain.soft_avoid_constants import SOFT_AVOID_GAMES
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import ISoftAvoidRepository
 
 logger = logging.getLogger("cama_bot.repositories.soft_avoid")
+SOFT_AVOID_MAX_GAMES = SOFT_AVOID_GAMES
+
+
+def _validate_soft_avoid_games(games: int) -> None:
+    if not 1 <= games <= SOFT_AVOID_MAX_GAMES:
+        raise ValueError(f"Soft avoid duration must be between 1 and {SOFT_AVOID_MAX_GAMES} games")
 
 
 @dataclass
@@ -24,48 +32,76 @@ class SoftAvoid:
     updated_at: int
 
 
+@dataclass(frozen=True)
+class SoftAvoidPurchaseResult:
+    """Outcome of an atomic soft-avoid purchase attempt."""
+
+    success: bool
+    reason: Literal["already_active", "insufficient_balance"] | None
+    balance: int
+    avoid: SoftAvoid | None
+
+
 class SoftAvoidRepository(BaseRepository, ISoftAvoidRepository):
     """Repository for soft avoid feature."""
 
-    def create_or_extend_avoid(
+    def create_or_reactivate_avoid(
         self,
         guild_id: int | None,
         avoider_id: int,
         avoided_id: int,
-        games: int = 10,
+        games: int = SOFT_AVOID_GAMES,
     ) -> SoftAvoid:
         """
-        Create a new soft avoid or extend existing one.
+        Create a new soft avoid or reactivate an expired one.
 
-        If an avoid already exists for this pair, adds games to games_remaining.
-        Returns the created/updated avoid.
+        Active avoids cannot be extended. Returns the created/reactivated avoid.
 
         Raises:
             ValueError: If avoider_id equals avoided_id (cannot avoid oneself)
         """
         if avoider_id == avoided_id:
             raise ValueError("Cannot create soft avoid: avoider and avoided cannot be the same player")
+        _validate_soft_avoid_games(games)
 
         normalized_guild = self.normalize_guild_id(guild_id)
         now = int(time.time())
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            # Use UPSERT for atomic create-or-extend operation
-            # ON CONFLICT updates games_remaining by adding the new games
             cursor.execute(
                 """
-                INSERT INTO soft_avoids
-                    (guild_id, avoider_discord_id, avoided_discord_id, games_remaining, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id, avoider_discord_id, avoided_discord_id)
-                DO UPDATE SET
-                    games_remaining = games_remaining + excluded.games_remaining,
-                    updated_at = excluded.updated_at
+                SELECT id, games_remaining
+                FROM soft_avoids
+                WHERE guild_id = ? AND avoider_discord_id = ? AND avoided_discord_id = ?
                 """,
-                (normalized_guild, avoider_id, avoided_id, games, now, now),
+                (normalized_guild, avoider_id, avoided_id),
             )
+            existing = cursor.fetchone()
+            if existing and existing["games_remaining"] > 0:
+                raise ValueError(
+                    f"Soft avoid is already active with {existing['games_remaining']} games remaining"
+                )
+
+            if existing:
+                cursor.execute(
+                    """
+                    UPDATE soft_avoids
+                    SET games_remaining = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (games, now, existing["id"]),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO soft_avoids
+                        (guild_id, avoider_discord_id, avoided_discord_id, games_remaining, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (normalized_guild, avoider_id, avoided_id, games, now, now),
+                )
 
             # Fetch the resulting row to return complete avoid data
             cursor.execute(
@@ -81,7 +117,7 @@ class SoftAvoidRepository(BaseRepository, ISoftAvoidRepository):
 
             if row is None:
                 raise RuntimeError(
-                    f"UPSERT succeeded but row not found for avoid "
+                    f"Soft avoid write succeeded but row not found for avoid "
                     f"({avoider_id} -> {avoided_id}, guild={normalized_guild})"
                 )
 
@@ -93,6 +129,139 @@ class SoftAvoidRepository(BaseRepository, ISoftAvoidRepository):
                 games_remaining=row["games_remaining"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
+            )
+
+    def purchase_avoid(
+        self,
+        guild_id: int | None,
+        avoider_id: int,
+        avoided_id: int,
+        *,
+        cost: int,
+        games: int = SOFT_AVOID_GAMES,
+    ) -> SoftAvoidPurchaseResult:
+        """Atomically debit and activate a soft avoid when allowed."""
+        if avoider_id == avoided_id:
+            raise ValueError("Cannot create soft avoid: avoider and avoided cannot be the same player")
+        if cost < 0:
+            raise ValueError("Soft avoid cost cannot be negative")
+        _validate_soft_avoid_games(games)
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            player_row = cursor.execute(
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance
+                FROM players
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (avoider_id, normalized_guild),
+            ).fetchone()
+            if player_row is None:
+                raise RuntimeError(
+                    f"Registered player row not found for soft avoid buyer {avoider_id} "
+                    f"in guild {normalized_guild}"
+                )
+            balance = int(player_row["balance"])
+
+            existing = cursor.execute(
+                """
+                SELECT id, guild_id, avoider_discord_id, avoided_discord_id,
+                       games_remaining, created_at, updated_at
+                FROM soft_avoids
+                WHERE guild_id = ? AND avoider_discord_id = ? AND avoided_discord_id = ?
+                """,
+                (normalized_guild, avoider_id, avoided_id),
+            ).fetchone()
+            if existing and existing["games_remaining"] > 0:
+                return SoftAvoidPurchaseResult(
+                    success=False,
+                    reason="already_active",
+                    balance=balance,
+                    avoid=SoftAvoid(**dict(existing)),
+                )
+            if balance < cost:
+                return SoftAvoidPurchaseResult(
+                    success=False,
+                    reason="insufficient_balance",
+                    balance=balance,
+                    avoid=None,
+                )
+
+            self._set_economy_ledger_context(
+                cursor,
+                source="soft_avoid",
+                actor_id=avoider_id,
+                related_type="player",
+                related_id=avoided_id,
+                reason="soft avoid purchase",
+                metadata={"cost": cost, "games": games},
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND COALESCE(jopacoin_balance, 0) >= ?
+                    """,
+                    (cost, avoider_id, normalized_guild, cost),
+                )
+                if cursor.rowcount == 0:
+                    raise RuntimeError("Soft avoid debit failed after balance validation")
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (avoider_id, normalized_guild),
+            )
+
+            if existing:
+                cursor.execute(
+                    """
+                    UPDATE soft_avoids
+                    SET games_remaining = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (games, now, existing["id"]),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO soft_avoids
+                        (guild_id, avoider_discord_id, avoided_discord_id, games_remaining, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (normalized_guild, avoider_id, avoided_id, games, now, now),
+                )
+
+            row = cursor.execute(
+                """
+                SELECT id, guild_id, avoider_discord_id, avoided_discord_id,
+                       games_remaining, created_at, updated_at
+                FROM soft_avoids
+                WHERE guild_id = ? AND avoider_discord_id = ? AND avoided_discord_id = ?
+                """,
+                (normalized_guild, avoider_id, avoided_id),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Soft avoid purchase succeeded but activation row was not found")
+
+            return SoftAvoidPurchaseResult(
+                success=True,
+                reason=None,
+                balance=balance - cost,
+                avoid=SoftAvoid(**dict(row)),
             )
 
     def get_active_avoids_for_players(
