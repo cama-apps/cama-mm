@@ -508,6 +508,75 @@ class TestPersistedHPCarry:
             "Mechanic should not pause when the boss dies before its trigger round."
         )
 
+    def test_resumed_duel_preserves_active_boss_max_hp(
+        self, dig_service, dig_repo, player_repository, monkeypatch, deterministic_rng,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        progress = json.dumps({
+            "25": {
+                "boss_id": "grothak",
+                "status": "active",
+                "hp_remaining": 10,
+                "hp_max": 20,
+                "last_engaged_at": int(time.time()),
+            },
+        })
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+
+        # Two hits wound the boss to 8 HP before Grothak's round-three prompt.
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+        start = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=10,
+        )
+        assert start.get("pending_prompt")
+        assert start["boss_hp"] == 8
+        assert start["boss_hp_max"] == 20
+
+        # Miss every remaining attack so the resumed fight loses at the round
+        # cap and persists its HP. The original active cap must survive the
+        # pause instead of being reconstructed from the partial round log.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = dig_service.resume_boss_duel(
+            10001,
+            TEST_GUILD_ID,
+            option_idx=start["pending_prompt"]["safe_option_idx"],
+        )
+        assert result["success"] is True
+        assert result["won"] is False
+
+        fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        entry = json.loads(fresh["boss_progress"])["25"]
+        assert entry["hp_remaining"] == 8
+        assert entry["hp_max"] == 20
+
+    def test_scout_uses_active_boss_hp_for_every_risk_tier(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        progress = json.dumps({
+            "25": {
+                "boss_id": "grothak",
+                "status": "active",
+                "hp_remaining": 7,
+                "hp_max": 12,
+                "last_engaged_at": int(time.time()),
+            },
+        })
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+
+        result = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        assert result["success"] is True
+        assert {
+            tier: details["boss_hp"]
+            for tier, details in result["odds"].items()
+        } == {
+            "cautious": 7,
+            "bold": 7,
+            "reckless": 7,
+        }
+
     def test_loss_write_preserves_other_boundaries(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
