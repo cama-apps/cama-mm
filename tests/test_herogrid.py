@@ -385,6 +385,14 @@ class TestResolvePlayerIds:
         assert set(ids) == {1, 2, 3}
         assert label == "Lobby"
 
+    def test_resolve_lobby_ignores_legacy_conditional_players(self):
+        cog = _make_cog(lobby_players=[1, 2], conditional_players=[99])
+
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+
+        assert set(ids) == {1, 2}
+        assert label == "Lobby"
+
     def test_resolve_pending_match_fallback(self):
         """No lobby, pending match exists -> uses match IDs."""
         from domain.models.pending_match_state import PendingMatchState

@@ -29,7 +29,6 @@ from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from utils.embeds import create_enriched_match_embed
 from utils.formatting import (
-    FROGLING_EMOTE,
     JOPACOIN_EMOTE,
     ROLE_EMOJIS,
     ROLE_NAMES,
@@ -91,47 +90,14 @@ def _chunk_discord_content(
     return chunks
 
 
-def priority_key(player) -> tuple[float, float]:
-    """Priority key for conditional player selection: higher rating first,
-    then lower RD."""
-    rating = player.glicko_rating if player.glicko_rating else 1500.0
-    rd = player.glicko_rd if player.glicko_rd else 350.0
-    return (rating, -rd)
-
-
 def select_players_for_shuffle(
     regular_player_ids: list[int],
     regular_players: list,
     conditional_player_ids: list[int],
     conditional_players: list,
 ) -> tuple[list[int], list, list[int], list[int]]:
-    """Pick the shuffle roster, filling from the conditional queue (highest
-    priority first) when the regular queue is short of 10.
-
-    Returns ``(player_ids, players, included_conditional_ids,
-    excluded_conditional_ids)``.
-    """
-    player_ids = list(regular_player_ids)
-    players = list(regular_players)
-    included_conditional_ids: list[int] = []
-    excluded_conditional_ids: list[int] = []
-
-    regular_count = len(regular_player_ids)
-    if regular_count < 10:
-        conditional_pairs = list(zip(conditional_player_ids, conditional_players))
-        conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
-
-        slots_available = 10 - regular_count
-        for cid, cplayer in conditional_pairs[:slots_available]:
-            player_ids.append(cid)
-            players.append(cplayer)
-            included_conditional_ids.append(cid)
-
-        excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
-    else:
-        excluded_conditional_ids = list(conditional_player_ids)
-
-    return player_ids, players, included_conditional_ids, excluded_conditional_ids
+    """Return the regular-player roster while tolerating the legacy signature."""
+    return list(regular_player_ids), list(regular_players), [], []
 
 
 class MatchCommands(commands.Cog):
@@ -514,10 +480,7 @@ class MatchCommands(commands.Cog):
             return None
 
         user_id = interaction.user.id
-        is_in_lobby = (
-            user_id in getattr(lobby, "players", set())
-            or user_id in getattr(lobby, "conditional_players", set())
-        )
+        is_in_lobby = user_id in getattr(lobby, "players", set())
         if not is_in_lobby and not has_admin_permission(interaction):
             await interaction.followup.send(
                 "❌ Only admins or players in the current lobby can shuffle.",
@@ -525,13 +488,10 @@ class MatchCommands(commands.Cog):
             )
             return None
 
-        regular_count = lobby.get_player_count()
-        conditional_count = lobby.get_conditional_count()
-        total_count = lobby.get_total_count()
-        if total_count < 10:
+        player_count = lobby.get_player_count()
+        if player_count < 10:
             await interaction.followup.send(
-                f"❌ Need at least 10 players in lobby. Currently {total_count}/10 "
-                f"({regular_count} regular, {conditional_count} conditional).",
+                f"❌ Need at least 10 players in lobby. Currently {player_count}/10.",
                 ephemeral=True,
             )
             return None
@@ -541,25 +501,11 @@ class MatchCommands(commands.Cog):
     async def _select_shuffle_roster(
         self, lobby, guild_id: int | None
     ) -> tuple[list[int], list, list[int], list[int]]:
-        """Pick exactly 10 players for the shuffle, filling from the conditional
-        queue when the regular queue is short. Returns ``(player_ids, players,
-        conditional_included, excluded_conditional_ids)``."""
+        """Return the active regular-player roster for the shuffle."""
         player_ids, players = await asyncio.to_thread(
             self.lobby_service.get_lobby_players, lobby, guild_id
         )
-
-        all_conditional_ids, all_conditional_players = await asyncio.to_thread(
-            self.lobby_service.get_conditional_players,
-            lobby,
-            guild_id,
-        )
-
-        return select_players_for_shuffle(
-            player_ids,
-            players,
-            all_conditional_ids,
-            all_conditional_players,
-        )
+        return select_players_for_shuffle(player_ids, players, [], [])
 
     async def _execute_shuffle(
         self,
@@ -607,7 +553,7 @@ class MatchCommands(commands.Cog):
         (
             player_ids,
             players,
-            conditional_player_ids_included,
+            _conditional_player_ids_included,
             excluded_conditional_ids,
         ) = await self._select_shuffle_roster(lobby, guild_id)
 
@@ -867,7 +813,7 @@ class MatchCommands(commands.Cog):
             f"**Value diff:** {value_diff:.0f}\n"
             f"**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {radiant_off + dire_off})"
         )
-        # Build excluded list - combine regular excluded + excluded conditional players
+        # Build the regular-player exclusion list.
         all_excluded_names = []
         if excluded_ids:
             for pid in excluded_ids:
@@ -878,30 +824,8 @@ class MatchCommands(commands.Cog):
                 else:
                     all_excluded_names.append(f"Unknown({pid})")
 
-        # Add excluded conditional players with frogling emoji
-        if excluded_conditional_ids:
-            for pid in excluded_conditional_ids:
-                player_obj = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
-                if player_obj:
-                    display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
-                    all_excluded_names.append(f"{FROGLING_EMOTE} {display_name}")
-                else:
-                    all_excluded_names.append(f"{FROGLING_EMOTE} Unknown({pid})")
-
         if all_excluded_names:
             balance_info += f"\n**Excluded:** {', '.join(all_excluded_names)}"
-
-        # Show conditional players who were pulled into the shuffle
-        if conditional_player_ids_included:
-            conditional_names = []
-            for pid in conditional_player_ids_included:
-                player_obj = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
-                if player_obj:
-                    display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
-                    conditional_names.append(display_name)
-                else:
-                    conditional_names.append(f"Unknown({pid})")
-            balance_info += f"\n{FROGLING_EMOTE} **Pulled from conditional:** {', '.join(conditional_names)}"
         if streaming_bonus_names:
             balance_info += f"\n📺 **Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}):** {', '.join(streaming_bonus_names)}"
         embed.add_field(name="📊 Balance", value=balance_info, inline=False)

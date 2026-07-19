@@ -44,8 +44,6 @@ class HeroGridCommands(commands.Cog):
         lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
         if lobby and lobby.players:
             player_ids = list(lobby.players)
-            if lobby.conditional_players:
-                player_ids.extend(lobby.conditional_players)
             return player_ids, "Lobby"
 
         # Priority 2: Pending match (post-shuffle)

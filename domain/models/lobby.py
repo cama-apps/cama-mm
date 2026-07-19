@@ -18,7 +18,8 @@ class Lobby:
     created_at: datetime
     guild_id: int = 0  # Normalized guild id; 0 for DMs or single-guild tests
     players: set[int] = field(default_factory=set)
-    conditional_players: set[int] = field(default_factory=set)  # "Frogling" players
+    # Retained only so lobby rows written before Frogling's deprecation can be read.
+    conditional_players: set[int] = field(default_factory=set)
     player_join_times: dict[int, float] = field(default_factory=dict)  # discord_id -> unix timestamp
     status: str = "open"
 
@@ -43,17 +44,8 @@ class Lobby:
         return False
 
     def add_conditional_player(self, discord_id: int) -> bool:
-        """Add a player to the conditional queue. Removes from regular if present."""
-        if self.status != "open":
-            return False
-        if discord_id in self.conditional_players:
-            return False
-        # Remove from regular if switching
-        self.players.discard(discord_id)
-        self.conditional_players.add(discord_id)
-        # Preserve original join time if switching queues
-        self.player_join_times.setdefault(discord_id, datetime.now().timestamp())
-        return True
+        """Reject joins to the deprecated conditional queue."""
+        return False
 
     def remove_conditional_player(self, discord_id: int) -> bool:
         if discord_id in self.conditional_players:
@@ -68,23 +60,21 @@ class Lobby:
         return len(self.players)
 
     def get_conditional_count(self) -> int:
-        """Return count of conditional players."""
-        return len(self.conditional_players)
+        """The deprecated conditional queue never contributes players."""
+        return 0
 
     def get_total_count(self) -> int:
-        """Return combined count of regular and conditional players."""
-        return len(self.players) + len(self.conditional_players)
+        """Return the active regular-player count."""
+        return len(self.players)
 
     def is_ready(self, min_players: int = 10) -> bool:
-        """Ready if combined total meets threshold."""
+        """Ready if the regular-player total meets threshold."""
         return self.get_total_count() >= min_players
 
     def can_create_teams(self, player_roles: dict[int, list[str]]) -> bool:
         role_counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
 
-        # Include both regular and conditional players
-        all_players = self.players | self.conditional_players
-        for player_id in all_players:
+        for player_id in self.players:
             if player_id in player_roles and player_roles[player_id]:
                 primary_role = player_roles[player_id][0]
                 if primary_role in role_counts:
@@ -99,7 +89,7 @@ class Lobby:
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat(),
             "players": list(self.players),
-            "conditional_players": list(self.conditional_players),
+            "conditional_players": [],
             "player_join_times": {str(k): v for k, v in self.player_join_times.items()},
             "status": self.status,
         }
@@ -109,15 +99,18 @@ class Lobby:
         created_at = data.get("created_at")
         created_at_dt = datetime.fromisoformat(created_at) if created_at else datetime.now()
         players = set(data.get("players", []))
-        conditional_players = set(data.get("conditional_players", []))
-        player_join_times = {int(k): v for k, v in data.get("player_join_times", {}).items()}
+        player_join_times = {
+            int(k): v
+            for k, v in data.get("player_join_times", {}).items()
+            if int(k) in players
+        }
         return cls(
             lobby_id=data.get("lobby_id", 1),
             guild_id=data.get("guild_id", 0),
             created_by=data.get("created_by", 0),
             created_at=created_at_dt,
             players=players,
-            conditional_players=conditional_players,
+            conditional_players=set(),
             player_join_times=player_join_times,
             status=data.get("status", "open"),
         )

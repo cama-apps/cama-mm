@@ -876,18 +876,18 @@ class TestNotifyLobbyRally:
 
         eligible = MagicMock(id=10, bot=False, mention="<@10>")
         regular = MagicMock(id=11, bot=False, mention="<@11>")
-        conditional = MagicMock(id=12, bot=False, mention="<@12>")
+        former_conditional = MagicMock(id=12, bot=False, mention="<@12>")
         bot_user = MagicMock(id=13, bot=True, mention="<@13>")
         clipboard = MagicMock()
         clipboard.emoji = "📋"
-        clipboard.users.return_value = AsyncUsers([eligible, regular, conditional, bot_user])
+        clipboard.users.return_value = AsyncUsers([eligible, regular, former_conditional, bot_user])
 
         lobby_message = MagicMock(reactions=[clipboard])
         reaction_channel = MagicMock(id=111)
         reaction_channel.fetch_message = AsyncMock(return_value=lobby_message)
         reaction_channel.send = AsyncMock()
         thread = MagicMock(send=AsyncMock())
-        lobby = MagicMock(players={11}, conditional_players={12})
+        lobby = MagicMock(players={11})
         lobby.get_total_count.return_value = 8
 
         mock_bot = MagicMock()
@@ -905,10 +905,10 @@ class TestNotifyLobbyRally:
 
         assert result is True
         send_kwargs = reaction_channel.send.await_args.kwargs
-        assert send_kwargs["content"] == "<@10>"
+        assert send_kwargs["content"] == "<@10> <@12>"
         assert send_kwargs["allowed_mentions"].users is True
         assert "<@11>" not in send_kwargs["content"]
-        assert "<@12>" not in send_kwargs["content"]
+        assert "<@12>" in send_kwargs["content"]
         assert "<@13>" not in send_kwargs["content"]
 
     @pytest.mark.asyncio

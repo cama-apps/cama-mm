@@ -639,12 +639,12 @@ class DraftCommands(commands.Cog):
             generic failure message when this returns False.
         """
         regular_players = list(lobby.players)
-        conditional_players = list(lobby.conditional_players)
-        lobby_player_ids = regular_players + conditional_players
+        lobby_player_ids = regular_players
 
         logger.info(
-            "Immortal Draft starting: guild=%s, %d regular + %d conditional player(s)",
-            guild_id, len(regular_players), len(conditional_players),
+            "Immortal Draft starting: guild=%s, %d player(s)",
+            guild_id,
+            len(regular_players),
         )
 
         players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
@@ -667,7 +667,7 @@ class DraftCommands(commands.Cog):
             pool_result = await asyncio.to_thread(
                 self.draft_service.select_player_pool,
                 regular_player_ids=regular_players,
-                conditional_player_ids=conditional_players,
+                conditional_player_ids=[],
                 exclusion_counts=exclusion_counts,
                 player_ratings=player_ratings,
                 forced_include_ids=forced_captain_ids,
@@ -687,12 +687,8 @@ class DraftCommands(commands.Cog):
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return False
 
-        full_exclusion_increment_ids = [
-            pid for pid in pool_result.excluded_ids if pid in regular_players
-        ]
-        half_exclusion_increment_ids = [
-            pid for pid in pool_result.excluded_ids if pid in conditional_players
-        ]
+        full_exclusion_increment_ids = list(pool_result.excluded_ids)
+        half_exclusion_increment_ids: list[int] = []
 
         # Create draft state
         try:
@@ -916,21 +912,17 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Use total count (regular + conditional) like /shuffle does
-        regular_count = lobby.get_player_count()
-        conditional_count = lobby.get_conditional_count()
-        total_count = lobby.get_total_count()
+        player_count = lobby.get_player_count()
 
-        if total_count < LOBBY_READY_THRESHOLD:
+        if player_count < LOBBY_READY_THRESHOLD:
             await interaction.followup.send(
                 f"❌ Need at least {LOBBY_READY_THRESHOLD} players in lobby. "
-                f"Currently have {total_count} ({regular_count} regular, {conditional_count} conditional).",
+                f"Currently have {player_count}.",
                 ephemeral=True,
             )
             return
 
-        # All lobby players (regular + conditional) for captain validation
-        all_lobby_player_ids = set(lobby.players) | set(lobby.conditional_players)
+        all_lobby_player_ids = set(lobby.players)
 
         # Validate specified captains are in lobby
         specified_captain1_id = captain1.id if captain1 else None

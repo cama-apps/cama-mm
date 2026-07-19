@@ -8,7 +8,6 @@ from datetime import datetime
 from unittest.mock import MagicMock
 
 import discord
-import pytest
 
 from domain.models.lobby import Lobby
 from services.lobby_manager_service import LobbyManagerService
@@ -20,25 +19,20 @@ from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 class TestLobbyJoinTimestamps:
-    @pytest.mark.parametrize(
-        ("method_name", "discord_id"),
-        [("add_player", 100), ("add_conditional_player", 200)],
-    )
-    def test_add_player_sets_join_time(self, monkeypatch, method_name, discord_id):
+    def test_add_player_sets_join_time(self, monkeypatch):
         fixed_now = datetime(2026, 7, 14, 12, 34, 56, 123456)
         fake_datetime = MagicMock()
         fake_datetime.now.return_value = fixed_now
         monkeypatch.setattr("domain.models.lobby.datetime", fake_datetime)
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
 
-        getattr(lobby, method_name)(discord_id)
+        lobby.add_player(100)
 
-        assert lobby.player_join_times[discord_id] == fixed_now.timestamp()
+        assert lobby.player_join_times[100] == fixed_now.timestamp()
 
-    def test_switch_queue_preserves_original_join_time(self):
-        """Switching from conditional to regular should keep the original timestamp."""
+    def test_regular_join_clears_legacy_conditional_state(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
-        lobby.add_conditional_player(100)
+        lobby.conditional_players.add(100)
 
         # Pin an explicit, deterministic original timestamp that is nowhere near
         # "now". If the switch wrongly re-stamps the join time with the current
@@ -51,7 +45,7 @@ class TestLobbyJoinTimestamps:
         assert 100 in lobby.players
         assert 100 not in lobby.conditional_players
 
-    def test_switch_regular_to_conditional_preserves_join_time(self):
+    def test_conditional_join_is_rejected_without_moving_regular_player(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         lobby.add_player(100)
 
@@ -59,10 +53,11 @@ class TestLobbyJoinTimestamps:
         original_time = 1_000_000.0
         lobby.player_join_times[100] = original_time
 
-        lobby.add_conditional_player(100)
+        joined = lobby.add_conditional_player(100)
+        assert joined is False
         assert lobby.player_join_times[100] == original_time
-        assert 100 in lobby.conditional_players
-        assert 100 not in lobby.players
+        assert 100 not in lobby.conditional_players
+        assert 100 in lobby.players
 
     def test_remove_player_clears_join_time(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
@@ -72,12 +67,12 @@ class TestLobbyJoinTimestamps:
         lobby.remove_player(100)
         assert 100 not in lobby.player_join_times
 
-    def test_remove_conditional_player_clears_join_time(self):
+    def test_remove_legacy_conditional_player_clears_join_time(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
-        lobby.add_conditional_player(200)
-        assert 200 in lobby.player_join_times
+        lobby.conditional_players.add(200)
+        lobby.player_join_times[200] = 1_000_000.0
 
-        lobby.remove_conditional_player(200)
+        assert lobby.remove_conditional_player(200) is True
         assert 200 not in lobby.player_join_times
 
     def test_remove_nonexistent_player_no_error(self):
@@ -95,24 +90,19 @@ class TestLobbyJoinTimeSerialization:
     def test_to_dict_includes_join_times(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         lobby.add_player(100)
-        lobby.add_conditional_player(200)
 
         data = lobby.to_dict()
         assert "player_join_times" in data
-        # Keys should be strings in serialized form
         assert "100" in data["player_join_times"]
-        assert "200" in data["player_join_times"]
 
     def test_roundtrip_preserves_join_times(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         lobby.add_player(100)
-        lobby.add_conditional_player(200)
 
         data = lobby.to_dict()
         restored = Lobby.from_dict(data)
 
         assert restored.player_join_times[100] == lobby.player_join_times[100]
-        assert restored.player_join_times[200] == lobby.player_join_times[200]
 
     def test_from_dict_missing_join_times_defaults_empty(self):
         """Backward compatibility: old lobbies without player_join_times."""
@@ -168,7 +158,6 @@ class TestLobbyRepositoryJoinTimes:
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         lobby.add_player(100)
         lobby.add_player(200)
-        lobby.add_conditional_player(300)
 
         lobby_repository.save_lobby_state(
             lobby_id=lobby.lobby_id,
@@ -185,7 +174,6 @@ class TestLobbyRepositoryJoinTimes:
 
         assert restored.player_join_times[100] == lobby.player_join_times[100]
         assert restored.player_join_times[200] == lobby.player_join_times[200]
-        assert restored.player_join_times[300] == lobby.player_join_times[300]
 
 
 # ---------------------------------------------------------------------------
@@ -255,14 +243,13 @@ class TestReadycheckPreconditions:
             lobby.add_player(i)
         assert lobby.get_total_count() >= 10
 
-    def test_lobby_mixed_regular_and_conditional(self):
-        """Combined count of regular + conditional should count toward 10."""
+    def test_lobby_ignores_legacy_conditional_players(self):
         lobby = Lobby(lobby_id=1, created_by=0, created_at=datetime.now())
         for i in range(7):
             lobby.add_player(i)
-        for i in range(7, 10):
-            lobby.add_conditional_player(i)
-        assert lobby.get_total_count() == 10
+        lobby.conditional_players = set(range(7, 10))
+        assert lobby.get_total_count() == 7
+        assert lobby.is_ready() is False
 
 
 # ---------------------------------------------------------------------------

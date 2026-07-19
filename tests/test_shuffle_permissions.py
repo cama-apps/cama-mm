@@ -55,15 +55,18 @@ async def test_shuffle_preconditions_allow_regular_lobby_member(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_shuffle_preconditions_allow_conditional_lobby_member(monkeypatch):
+async def test_shuffle_preconditions_reject_legacy_conditional_lobby_member(monkeypatch):
     lobby = _ready_lobby(players=range(1, 10), conditional_players={99})
     cog = _make_cog(lobby, monkeypatch=monkeypatch)
     interaction = _make_interaction(99)
 
     result = await cog._validate_shuffle_preconditions(interaction, TEST_GUILD_ID)
 
-    assert result is lobby
-    interaction.followup.send.assert_not_called()
+    assert result is None
+    interaction.followup.send.assert_awaited_once_with(
+        "❌ Only admins or players in the current lobby can shuffle.",
+        ephemeral=True,
+    )
 
 
 @pytest.mark.asyncio

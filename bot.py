@@ -69,7 +69,7 @@ from utils.command_registry import (
     summarize_command_tree,
 )
 from utils.economy_event_display import build_public_economy_event_embed
-from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
+from utils.formatting import JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 from utils.thread_safety import ensure_thread_writable
 
 # Bot setup
@@ -82,6 +82,12 @@ intents.presences = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 usage_monitor = UsageMonitor()
 set_global_usage_monitor(usage_monitor)
+
+# Kept locally for one-way cleanup of lobby messages created before the
+# conditional queue was retired. It is not a supported lobby reaction.
+_LEGACY_FROGLING_EMOJI_ID = 1463270458848842003
+_LOBBY_RECONCILE_MAX_ATTEMPTS = 3
+_LOBBY_RECONCILE_RETRY_SECONDS = 1
 
 # Lazy-initialized service container
 _container: ServiceContainer | None = None
@@ -632,7 +638,7 @@ async def _load_extensions():
 
 
 
-async def update_lobby_message(message, lobby, guild_id=None):
+async def update_lobby_message(message, lobby, guild_id=None) -> bool:
     """Refresh lobby embed on the pinned lobby message (also updates thread since msg is thread starter)."""
     _init_services()  # Ensure services are initialized
     try:
@@ -640,8 +646,98 @@ async def update_lobby_message(message, lobby, guild_id=None):
         if embed:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
+            return True
     except Exception as exc:
         logger.error(f"Error updating lobby message: {exc}", exc_info=True)
+    return False
+
+
+def _snapshot_restored_lobbies(lobby_manager) -> list[tuple[int, object]]:
+    """Copy restored lobby entries outside the async command path."""
+    return list(lobby_manager.lobbies.items())
+
+
+async def _reconcile_persisted_lobby_messages() -> None:
+    """Refresh restored lobby UI and remove the retired Frogling reaction."""
+    lobby_service = getattr(bot, "lobby_service", None)
+    lobby_manager = getattr(lobby_service, "lobby_manager", None)
+    if not lobby_service or not lobby_manager:
+        return
+
+    restored_lobbies = await asyncio.to_thread(
+        _snapshot_restored_lobbies,
+        lobby_manager,
+    )
+    pending_lobbies = [
+        (guild_id, lobby)
+        for guild_id, lobby in restored_lobbies
+        if lobby.status == "open"
+    ]
+    for attempt in range(_LOBBY_RECONCILE_MAX_ATTEMPTS):
+        failed_lobbies = []
+        for guild_id, lobby in pending_lobbies:
+            try:
+                message_id, channel_id = await asyncio.gather(
+                    asyncio.to_thread(
+                        lobby_service.get_lobby_message_id,
+                        guild_id=guild_id,
+                    ),
+                    asyncio.to_thread(
+                        lobby_service.get_lobby_channel_id,
+                        guild_id=guild_id,
+                    ),
+                )
+                if not message_id or not channel_id:
+                    continue
+
+                channel = bot.get_channel(channel_id)
+                if not channel:
+                    channel = await bot.fetch_channel(channel_id)
+                message = await channel.fetch_message(message_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not reconcile restored lobby message for guild %s: %s",
+                    guild_id,
+                    exc,
+                )
+                failed_lobbies.append((guild_id, lobby))
+                continue
+
+            updated = await update_lobby_message(message, lobby, guild_id)
+            reaction_removed = True
+            legacy_reaction = next(
+                (
+                    reaction
+                    for reaction in message.reactions
+                    if getattr(reaction.emoji, "id", None)
+                    == _LEGACY_FROGLING_EMOJI_ID
+                ),
+                None,
+            )
+            if legacy_reaction:
+                try:
+                    await message.clear_reaction(legacy_reaction.emoji)
+                except Exception as exc:
+                    reaction_removed = False
+                    logger.warning(
+                        "Could not remove retired Frogling reaction for guild %s: %s",
+                        guild_id,
+                        exc,
+                    )
+
+            if not updated or not reaction_removed:
+                failed_lobbies.append((guild_id, lobby))
+
+        if not failed_lobbies:
+            return
+        pending_lobbies = failed_lobbies
+        if attempt + 1 < _LOBBY_RECONCILE_MAX_ATTEMPTS:
+            await asyncio.sleep(_LOBBY_RECONCILE_RETRY_SECONDS * (2**attempt))
+
+    logger.warning(
+        "Lobby message reconciliation still incomplete for %d guild(s)",
+        len(pending_lobbies),
+    )
 
 
 async def notify_lobby_ready(channel, guild_id: int = 0):
@@ -772,7 +868,7 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
                 if not lobby_channel:
                     lobby_channel = await bot.fetch_channel(lobby_channel_id)
                 lobby_message = await lobby_channel.fetch_message(lobby_message_id)
-                excluded_ids = set(lobby.players) | set(lobby.conditional_players)
+                excluded_ids = set(lobby.players)
                 for reaction in lobby_message.reactions:
                     if str(reaction.emoji) != "📋":
                         continue
@@ -875,6 +971,8 @@ async def on_ready():
         _log_command_registration("Post-sync")
     except Exception as exc:
         logger.error(f"Failed to sync commands: {exc}", exc_info=True)
+
+    await _reconcile_persisted_lobby_messages()
 
     # Warm trivia image cache in background. Use bot.loop.create_task with a
     # done-callback so a failure inside warm_cache surfaces in logs instead of
@@ -997,69 +1095,15 @@ def _is_sword_emoji(emoji) -> bool:
     return emoji.name == "⚔️"
 
 
-def _is_frogling_emoji(emoji) -> bool:
-    """Check if the emoji is the frogling emoji for conditional lobby joining."""
-    # Custom emoji: check by ID or name
-    return emoji.id == FROGLING_EMOJI_ID or emoji.name == "frogling"
+def _is_legacy_frogling_emoji(emoji) -> bool:
+    """Identify the retired lobby reaction so it can be removed."""
+    return getattr(emoji, "id", None) == _LEGACY_FROGLING_EMOJI_ID
 
 
 def _is_jopacoin_emoji(emoji) -> bool:
     """Check if the emoji is the jopacoin emoji for gamba notifications."""
     # Custom emoji: check by ID or name
     return emoji.id == JOPACOIN_EMOJI_ID or emoji.name == "jopacoin"
-
-
-def _should_force_regular_join_for_conditional_click(
-    lobby,
-    user_id: int,
-    ready_threshold: int = LOBBY_READY_THRESHOLD,
-) -> bool:
-    """Return True when a frogling click should fill a regular lobby slot."""
-    if not lobby:
-        return False
-
-    players = getattr(lobby, "players", set())
-    conditional_players = getattr(lobby, "conditional_players", set())
-    already_in_lobby = user_id in players or user_id in conditional_players
-    projected_total = lobby.get_total_count() if already_in_lobby else lobby.get_total_count() + 1
-    return projected_total <= ready_threshold
-
-
-async def _user_still_has_sword_reaction(message, user_id: int) -> bool:
-    """Return True if the user's ⚔️ reaction is still on the lobby message."""
-    for reaction in message.reactions:
-        if str(reaction.emoji) != "⚔️":
-            continue
-        async for reactor in reaction.users():
-            if reactor.id == user_id:
-                return True
-        return False
-    return False
-
-
-async def _leave_lobby_for_frogling_removal(
-    lobby_service, message, lobby, user_id: int, guild_id
-) -> bool:
-    """Leave the lobby for a removed frogling reaction.
-
-    Try a conditional leave first. If the player is instead in the regular
-    roster (a frogling click can force-join a full-enough lobby as regular,
-    leaving the frogling as their only reaction), fall back to a regular
-    leave — unless they still hold a ⚔️, which means this removal is the bot
-    clearing a stale frogling right after a sword join and must not undo it.
-    """
-    left = await asyncio.to_thread(
-        lobby_service.leave_lobby_conditional, user_id, guild_id
-    )
-    if left:
-        return True
-    if user_id not in getattr(lobby, "players", set()):
-        return False
-    if await _user_still_has_sword_reaction(message, user_id):
-        return False
-    return bool(
-        await asyncio.to_thread(lobby_service.leave_lobby, user_id, guild_id)
-    )
 
 
 @bot.event
@@ -1133,10 +1177,34 @@ async def on_raw_reaction_add(payload):
         return
 
     is_sword = _is_sword_emoji(payload.emoji)
-    is_frogling = _is_frogling_emoji(payload.emoji)
+    is_legacy_frogling = _is_legacy_frogling_emoji(payload.emoji)
     is_jopacoin = _is_jopacoin_emoji(payload.emoji)
 
-    if not is_sword and not is_frogling and not is_jopacoin:
+    if is_legacy_frogling:
+        _init_services()
+        lobby_message_id = await asyncio.to_thread(
+            bot.lobby_service.get_lobby_message_id,
+            guild_id=payload.guild_id,
+        )
+        if payload.message_id != lobby_message_id:
+            return
+        try:
+            channel = bot.get_channel(payload.channel_id)
+            if not channel:
+                channel = await bot.fetch_channel(payload.channel_id)
+            message = await channel.fetch_message(payload.message_id)
+            await message.remove_reaction(
+                payload.emoji,
+                discord.Object(id=payload.user_id),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not remove re-added retired Frogling reaction: %s",
+                exc,
+            )
+        return
+
+    if not is_sword and not is_jopacoin:
         return
 
     _init_services()  # Ensure services are initialized
@@ -1161,8 +1229,7 @@ async def on_raw_reaction_add(payload):
 
         # Handle jopacoin reaction for gamba notifications
         if is_jopacoin:
-            # Only ping if user is NOT already in the lobby (regular or conditional)
-            already_in_lobby = payload.user_id in lobby.players or payload.user_id in lobby.conditional_players
+            already_in_lobby = payload.user_id in lobby.players
             if not already_in_lobby:
                 thread_id = await asyncio.to_thread(
                     bot.lobby_service.get_lobby_thread_id, guild_id=payload_guild_id
@@ -1199,7 +1266,7 @@ async def on_raw_reaction_add(payload):
                     logger.debug(f"Neon gamba spectator hook failed: {exc}")
             return
 
-        # Rest of the handler is for sword/frogling (lobby joining)
+        # The rest of the handler is for sword-based lobby joining.
         guild_id = payload.guild_id
         player = await asyncio.to_thread(bot.player_service.get_player, payload.user_id, guild_id)
         if not player:
@@ -1230,67 +1297,9 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
-        ready_threshold = getattr(bot.lobby_service, "ready_threshold", LOBBY_READY_THRESHOLD)
-        force_regular_from_frogling = is_frogling and _should_force_regular_join_for_conditional_click(
-            lobby,
-            payload.user_id,
-            ready_threshold,
+        success, reason, pending_info = await asyncio.to_thread(
+            bot.lobby_service.join_lobby, payload.user_id, guild_id
         )
-        if force_regular_from_frogling:
-            # Re-check against a fresh roster right before the forced add: the
-            # lobby snapshot above predates this join, so two simultaneous
-            # frogling clicks at 9 players would otherwise both project 10.
-            fresh_lobby = await asyncio.to_thread(
-                bot.lobby_service.get_lobby, guild_id=payload_guild_id
-            )
-            if fresh_lobby:
-                lobby = fresh_lobby
-                force_regular_from_frogling = _should_force_regular_join_for_conditional_click(
-                    lobby,
-                    payload.user_id,
-                    ready_threshold,
-                )
-
-        # Handle mutual exclusivity: join first (atomically moves between sets),
-        # then remove the old reaction. This order prevents on_raw_reaction_remove
-        # from seeing the player still in the old set and posting a spurious leave.
-        post_join_activity = True
-        if is_sword or force_regular_from_frogling:
-            success, reason, pending_info = await asyncio.to_thread(
-                bot.lobby_service.join_lobby, payload.user_id, guild_id
-            )
-            join_type = "regular"
-            if (
-                not success
-                and force_regular_from_frogling
-                and reason == "already_joined"
-                and payload.user_id in lobby.players
-            ):
-                success = True
-                reason = ""
-                post_join_activity = False
-            if success and is_sword:
-                # Remove any stale frogling after a sword join so the
-                # reaction_remove handler finds nothing to leave. A forced
-                # regular join (frogling click) keeps its frogling — it is the
-                # player's only reaction, and removing it would leave them with
-                # no reaction that can ever take them out of the lobby.
-                try:
-                    frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
-                    await message.remove_reaction(frogling_emoji, user)
-                except Exception:
-                    pass
-        else:
-            success, reason, pending_info = await asyncio.to_thread(
-                bot.lobby_service.join_lobby_conditional, payload.user_id, guild_id
-            )
-            join_type = "conditional"
-            if success:
-                # Remove sword after join so the reaction_remove handler finds nothing to leave
-                try:
-                    await message.remove_reaction("⚔️", user)
-                except Exception:
-                    pass
 
         if not success:
             try:
@@ -1328,9 +1337,6 @@ async def on_raw_reaction_add(payload):
         if not lobby:
             return
 
-        if not post_join_activity:
-            return
-
         await update_lobby_message(message, lobby, payload.guild_id)
 
         # Mention user in thread to subscribe them
@@ -1343,10 +1349,7 @@ async def on_raw_reaction_add(payload):
                 thread = bot.get_channel(thread_id)
                 if not thread:
                     thread = await bot.fetch_channel(thread_id)
-                if join_type == "conditional":
-                    await thread.send(f"{FROGLING_EMOTE} {user.mention} joined as conditional!")
-                else:
-                    await thread.send(f"✅ {user.mention} joined the lobby!")
+                await thread.send(f"✅ {user.mention} joined the lobby!")
             except Exception as exc:
                 logger.warning(f"Failed to post join activity in thread: {exc}")
 
@@ -1398,9 +1401,8 @@ async def on_raw_reaction_remove(payload):
         return
 
     is_sword = _is_sword_emoji(payload.emoji)
-    is_frogling = _is_frogling_emoji(payload.emoji)
 
-    if not is_sword and not is_frogling:
+    if not is_sword:
         return
 
     _init_services()  # Ensure services are initialized
@@ -1420,15 +1422,9 @@ async def on_raw_reaction_remove(payload):
         if not lobby or lobby.status != "open":
             return
 
-        # Remove from appropriate set based on which emoji was removed
-        if is_sword:
-            left = await asyncio.to_thread(
-                bot.lobby_service.leave_lobby, payload.user_id, payload_guild_id
-            )
-        else:
-            left = await _leave_lobby_for_frogling_removal(
-                bot.lobby_service, message, lobby, payload.user_id, payload_guild_id
-            )
+        left = await asyncio.to_thread(
+            bot.lobby_service.leave_lobby, payload.user_id, payload_guild_id
+        )
 
         if left:
             await update_lobby_message(message, lobby, payload.guild_id)

@@ -152,20 +152,8 @@ class LobbyManagerService:
     def join_lobby_conditional(
         self, discord_id: int, max_players: int = 12, guild_id: int | None = None
     ) -> str:
-        """Add player to conditional queue (frogling).
-
-        Returns one of: "ok", "full", "already_joined".
-        """
-        with self._state_lock:
-            lobby = self.get_or_create_lobby(guild_id=guild_id)
-            # Capacity check inside the lock — authoritative, race-free.
-            if lobby.get_total_count() >= max_players:
-                return "full"
-            success = lobby.add_conditional_player(discord_id)
-            if success:
-                self._persist_lobby(lobby.guild_id)
-                return "ok"
-            return "already_joined"
+        """Reject joins to the deprecated conditional queue."""
+        return "deprecated"
 
     def leave_lobby(self, discord_id: int, guild_id: int | None = None) -> bool:
         normalized = self._normalize_guild_id(guild_id)
@@ -357,7 +345,7 @@ class LobbyManagerService:
             lobby_id=self.DEFAULT_LOBBY_ID,
             guild_id=normalized,
             players=list(lobby.players),
-            conditional_players=list(lobby.conditional_players),
+            conditional_players=[],
             status=lobby.status,
             created_by=lobby.created_by,
             created_at=lobby.created_at.isoformat(),
@@ -407,7 +395,8 @@ class LobbyManagerService:
             if not data:
                 continue
             data.setdefault("guild_id", guild_id)
-            self.lobbies[guild_id] = Lobby.from_dict(data)
+            lobby = Lobby.from_dict(data)
+            self.lobbies[guild_id] = lobby
             if data.get("message_id") is not None:
                 self.lobby_message_ids[guild_id] = data["message_id"]
             if data.get("channel_id") is not None:
@@ -418,5 +407,11 @@ class LobbyManagerService:
                 self.lobby_embed_message_ids[guild_id] = data["embed_message_id"]
             if data.get("origin_channel_id") is not None:
                 self.origin_channel_ids[guild_id] = data["origin_channel_id"]
+
+            persisted_join_times = data.get("player_join_times", {})
+            if data.get("conditional_players") or len(persisted_join_times) != len(
+                lobby.player_join_times
+            ):
+                self._persist_lobby(guild_id)
 
 

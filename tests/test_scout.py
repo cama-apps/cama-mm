@@ -621,11 +621,10 @@ class TestResolveTeamContext:
         assert set(ctx.flat) == {5, 6, 7}
         assert ctx.source_label == "Lobby"
 
-    def test_lobby_includes_conditional_players(self):
-        """Conditional (frogling) players are appended to the lobby list."""
+    def test_lobby_ignores_legacy_conditional_players(self):
         lobby = SimpleNamespace(players={5, 6}, conditional_players={9})
         ctx = _make_scout_cog(lobby=lobby)._resolve_team_context(TEST_GUILD_ID)
-        assert set(ctx.flat) == {5, 6, 9}
+        assert set(ctx.flat) == {5, 6}
 
     def test_pending_shuffle_splits_teams(self):
         """A post-shuffle pending match yields radiant/dire with split=True."""
