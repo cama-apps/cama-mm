@@ -22,7 +22,7 @@ from config import (
     OPENSKILL_SHUFFLE_CHANCE,
     STREAMING_BONUS,
 )
-from services.flavor_text_service import FlavorEvent
+from services.jopat_post_match import JopatPostMatchContext
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
 from services.match_service import MatchService
@@ -135,7 +135,6 @@ class MatchCommands(commands.Cog):
         *,
         guild_config_service=None,
         bankruptcy_repo=None,
-        flavor_text_service=None,
     ):
         self.bot = bot
         self.lobby_service = lobby_service
@@ -144,7 +143,6 @@ class MatchCommands(commands.Cog):
         self.guild_config_service = guild_config_service
         # bankruptcy_repo kept for embed builders that need bankruptcy status display
         self.bankruptcy_repo = bankruptcy_repo
-        self.flavor_text_service = flavor_text_service
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
@@ -330,15 +328,13 @@ class MatchCommands(commands.Cog):
         self,
         match_id: int,
         winning_ids: list[int],
-        exclude_id: int | None = None,
     ) -> tuple[int | None, dict]:
         """
-        Pick the most notable winner for PMA flavor text.
+        Pick the most notable winner for post-match commentary.
 
         Args:
             match_id: The match ID to look up
             winning_ids: List of winning player discord IDs
-            exclude_id: Optional discord_id to exclude (e.g., already mentioned in bet flavor)
 
         Returns: (discord_id, event_details) or (None, {})
 
@@ -350,20 +346,13 @@ class MatchCommands(commands.Cog):
         if not winning_ids:
             return None, {}
 
-        # Filter out excluded player if specified
-        available_winners = (
-            [w for w in winning_ids if w != exclude_id] if exclude_id else winning_ids
-        )
-        if not available_winners:
-            return None, {}  # All winners excluded
-
         # Get rating history for this match
         rating_data = self.match_service.get_rating_history_for_match(match_id)
-        winner_data = [r for r in rating_data if r["discord_id"] in available_winners]
+        winner_data = [r for r in rating_data if r["discord_id"] in winning_ids]
 
         if not winner_data:
             # Fallback: random winner, no details
-            return random.choice(available_winners), {}
+            return random.choice(winning_ids), {}
 
         # Check for underdog (lowest expected win probability who won)
         underdog = min(
@@ -1276,9 +1265,6 @@ class MatchCommands(commands.Cog):
         )
         distribution_text += self._format_stake_distribution(record_result)
         distribution_text += self._format_streak_bonus(distributions)
-        flavor_text = await self._generate_record_flavor(
-            guild_id, winners, losers, record_result
-        )
         distribution_text += await self._award_streaming_bonus_at_record(
             guild, guild_id, record_result
         )
@@ -1298,7 +1284,7 @@ class MatchCommands(commands.Cog):
             else ""
         )
         message = f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
-        await self._send_record_announcement(interaction, message, flavor_text)
+        await self._send_record_announcement(interaction, message)
 
         self._spawn_curse_flames(interaction, guild, guild_id, winners, losers, record_result)
 
@@ -1315,13 +1301,9 @@ class MatchCommands(commands.Cog):
         self,
         interaction: discord.Interaction,
         result_message: str,
-        flavor_text: str,
     ) -> None:
-        """Send result details and flavor separately, chunking either if needed."""
+        """Send the reliable result details, chunked when needed."""
         for content in _chunk_discord_content(result_message):
-            await interaction.followup.send(content, ephemeral=False)
-
-        for content in _chunk_discord_content(flavor_text):
             await interaction.followup.send(content, ephemeral=False)
 
     def _format_bet_distribution(
@@ -1480,108 +1462,6 @@ class MatchCommands(commands.Cog):
             return "\n\n🔥 **Streak Bonus:**\n" + "\n".join(streak_lines)
         return ""
 
-    async def _generate_record_flavor(
-        self,
-        guild_id: int | None,
-        winners: list[dict],
-        losers: list[dict],
-        record_result: dict,
-    ) -> str:
-        """Generate AI bet/match flavor text — pick targets synchronously, fire LLM
-        calls in parallel. Returns the formatted flavor block, or "" if disabled/empty.
-        """
-        if not self.flavor_text_service:
-            return ""
-
-        ai_flavor = None
-        match_flavor = None
-        try:
-            # --- Synchronous: pick notable bettor ---
-            notable_bettor = None  # Track for exclusion from match flavor
-            flavor_event = None
-            event_details = {}
-            if winners or losers:
-                leveraged_losers = [
-                    entry
-                    for entry in losers
-                    if (entry.get("leverage", 1) or 1) > 1 and not entry.get("refunded")
-                ]
-                if leveraged_losers:
-                    notable_bettor = max(
-                        leveraged_losers, key=lambda e: e.get("effective_bet", e["amount"])
-                    )
-                    flavor_event = FlavorEvent.LEVERAGE_LOSS
-                    event_details = {
-                        "amount": notable_bettor["amount"],
-                        "leverage": notable_bettor.get("leverage", 1),
-                        "effective_loss": notable_bettor.get(
-                            "effective_bet", notable_bettor["amount"]
-                        ),
-                        "team": notable_bettor.get("team", "unknown"),
-                    }
-                elif winners:
-                    notable_bettor = max(winners, key=lambda e: e.get("payout", 0))
-                    flavor_event = FlavorEvent.BET_WON
-                    event_details = {
-                        "amount": notable_bettor["amount"],
-                        "payout": notable_bettor.get("payout", 0),
-                        "leverage": notable_bettor.get("leverage", 1),
-                        "team": notable_bettor.get("team", "unknown"),
-                        "multiplier": notable_bettor.get("multiplier"),
-                    }
-
-            # --- Synchronous: pick notable winner ---
-            bettor_id = notable_bettor["discord_id"] if notable_bettor else None
-            notable_winner = None
-            match_details = {}
-            if record_result.get("winning_player_ids"):
-                notable_winner, match_details = await asyncio.to_thread(
-                    self._get_notable_winner,
-                    match_id=record_result["match_id"],
-                    winning_ids=record_result["winning_player_ids"],
-                    exclude_id=bettor_id,
-                )
-
-            # --- Parallel: fire both LLM calls concurrently ---
-            async def _gen_bet_flavor():
-                if not (notable_bettor and flavor_event):
-                    return None
-                result = await self.flavor_text_service.generate_event_flavor(
-                    guild_id=guild_id,
-                    event=flavor_event,
-                    discord_id=notable_bettor["discord_id"],
-                    event_details=event_details,
-                )
-                if result:
-                    return f"<@{notable_bettor['discord_id']}> {result}"
-                return None
-
-            async def _gen_match_flavor():
-                if not notable_winner:
-                    return None
-                result = await self.flavor_text_service.generate_event_flavor(
-                    guild_id=guild_id,
-                    event=FlavorEvent.MATCH_WIN,
-                    discord_id=notable_winner,
-                    event_details=match_details,
-                )
-                if result:
-                    return f"<@{notable_winner}> {result}"
-                return None
-
-            ai_flavor, match_flavor = await asyncio.gather(
-                _gen_bet_flavor(), _gen_match_flavor()
-            )
-        except Exception as e:
-            logger.warning(f"Failed to generate AI flavor: {e}")
-
-        flavor_text = ""
-        if ai_flavor:
-            flavor_text += f"\n\n💬 {ai_flavor}"
-        if match_flavor:
-            flavor_text += f"\n\n🎮 {match_flavor}"
-        return flavor_text
-
     async def _award_streaming_bonus_at_record(
         self,
         guild: discord.Guild | None,
@@ -1729,8 +1609,7 @@ class MatchCommands(commands.Cog):
         losers: list[dict],
         record_result: dict,
     ) -> None:
-        """Run Neon Degen Terminal hooks for a recorded match (footer / streak,
-        bet-settled, leverage loss, degen milestone, easter eggs).
+        """Run prioritized Neon/JOPA-T hooks for a recorded match.
 
         At most one neon event is sent per match.
         """
@@ -1758,15 +1637,6 @@ class MatchCommands(commands.Cog):
                     if bw:
                         await send_neon_result(interaction, bw)
                         neon_sent = True
-
-            if not neon_sent:
-                neon_result = await neon.on_match_recorded(
-                    guild_id,
-                    streak_data=record_result.get("notable_streak"),
-                )
-                if neon_result:
-                    await send_neon_result(interaction, neon_result)
-                    neon_sent = True
 
             # Wire on_bet_settled + on_leverage_loss for losers (max ONE per match)
             if not neon_sent and losers:
@@ -1859,6 +1729,107 @@ class MatchCommands(commands.Cog):
                     if rv_result:
                         await send_neon_result(interaction, rv_result)
                         neon_sent = True
+
+            # Consolidated chance-gated debrief runs only after rarer, higher-impact
+            # events decline their slot. Plain match/bet flavor does not bypass this.
+            if not neon_sent:
+                eligible_losers = [
+                    entry for entry in losers if not entry.get("refunded")
+                ]
+                notable_loser = max(
+                    eligible_losers,
+                    key=lambda entry: (
+                        entry.get("leverage", 1) or 1,
+                        entry.get("effective_bet", entry.get("amount", 0)) or 0,
+                    ),
+                    default=None,
+                )
+                top_bet_winner = max(
+                    winners,
+                    key=lambda entry: entry.get("payout", 0) or 0,
+                    default=None,
+                )
+
+                winner_id = None
+                match_details: dict = {}
+                if record_result.get("winning_player_ids"):
+                    winner_id, match_details = await asyncio.to_thread(
+                        self._get_notable_winner,
+                        match_id=record_result["match_id"],
+                        winning_ids=record_result["winning_player_ids"],
+                    )
+                streak_data = record_result.get("notable_streak") or {}
+                streak = int(streak_data.get("streak", 0) or 0)
+                if streak and not streak_data.get("is_win", False):
+                    streak = -abs(streak)
+
+                # Keep every fact attached to the player it describes. Select the
+                # strongest candidate instead of blending unrelated bettors,
+                # rating changes, and streaks into one misleading prompt.
+                candidates: list[
+                    tuple[JopatPostMatchContext, int | None, int | None]
+                ] = []
+                if top_bet_winner:
+                    candidates.append(
+                        (
+                            JopatPostMatchContext(
+                                payout=top_bet_winner.get("payout", 0) or 0,
+                            ),
+                            top_bet_winner.get("discord_id"),
+                            None,
+                        )
+                    )
+                if notable_loser:
+                    candidates.append(
+                        (
+                            JopatPostMatchContext(
+                                loss=notable_loser.get(
+                                    "effective_bet", notable_loser.get("amount", 0)
+                                )
+                                or 0,
+                                leverage=notable_loser.get("leverage", 1) or 1,
+                            ),
+                            None,
+                            notable_loser.get("discord_id"),
+                        )
+                    )
+                streak_player_id = streak_data.get("discord_id")
+                if streak and streak_player_id is not None:
+                    candidates.append(
+                        (
+                            JopatPostMatchContext(streak=streak),
+                            streak_player_id if streak > 0 else None,
+                            streak_player_id if streak < 0 else None,
+                        )
+                    )
+                if winner_id is not None:
+                    candidates.append(
+                        (
+                            JopatPostMatchContext(
+                                rating_change=match_details.get("rating_change"),
+                                expected_win_prob=match_details.get(
+                                    "expected_win_prob"
+                                ),
+                            ),
+                            winner_id,
+                            None,
+                        )
+                    )
+                if not candidates:
+                    candidates.append((JopatPostMatchContext(), None, None))
+
+                context, context_winner_id, context_loser_id = max(
+                    candidates,
+                    key=lambda candidate: neon._post_match_chance(candidate[0]),
+                )
+                debrief = await neon.on_post_match_debrief(
+                    guild_id,
+                    context,
+                    winner_id=context_winner_id,
+                    loser_id=context_loser_id,
+                )
+                if debrief:
+                    await send_neon_result(interaction, debrief)
 
         except Exception as exc:
             logger.debug(f"Neon match hook failed: {exc}")
@@ -2020,7 +1991,10 @@ class MatchCommands(commands.Cog):
                         winning_team = match_data.get("winning_team", 1)
                         winning_side = "radiant" if winning_team == 1 else "dire"
                         winners = [p for p in participants if p.get("side") == winning_side]
-                        mvp_results = await neon.on_match_enriched(guild_id, winners)
+                        losers = [p for p in participants if p.get("side") != winning_side]
+                        mvp_results = await neon.on_match_enriched(
+                            guild_id, winners, losers
+                        )
                         for neon_result in mvp_results:
                             if neon_result and neon_result.text_block:
                                 mvp_msg = await channel.send(neon_result.text_block)
@@ -2215,7 +2189,6 @@ async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     guild_config_service = getattr(bot, "guild_config_service", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
-    flavor_text_service = getattr(bot, "flavor_text_service", None)
     await bot.add_cog(
         MatchCommands(
             bot,
@@ -2224,6 +2197,5 @@ async def setup(bot: commands.Bot):
             player_service,
             guild_config_service=guild_config_service,
             bankruptcy_repo=bankruptcy_repo,
-            flavor_text_service=flavor_text_service,
         )
     )
