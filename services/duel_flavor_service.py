@@ -135,6 +135,7 @@ class DuelFlavorService:
             generated = await self.ai_service.complete(
                 prompt,
                 system_prompt=f"{SYSTEM_PROMPT} {voice} {PROMPT_CONSTRAINTS}",
+                feature=f"duel.{event.value}",
             )
         except Exception:
             return fallback()

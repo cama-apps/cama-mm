@@ -46,6 +46,7 @@ from config import (
     AI_MODEL,
     AI_TIMEOUT_SECONDS,
     DB_PATH,
+    DIG_LLM_ENABLED,
     ECONOMY_EVENT_TRIGGER_HOUR_LOCAL,
     ECONOMY_EVENT_WAKE_SECONDS,
     ECONOMY_EVENTS_ENABLED,
@@ -564,6 +565,7 @@ def _init_services():
         ai_model=AI_MODEL,
         ai_timeout_seconds=AI_TIMEOUT_SECONDS,
         ai_max_tokens=AI_MAX_TOKENS,
+        dig_llm_enabled=DIG_LLM_ENABLED,
     )
     container.initialize()
     monitoring_service = MonitoringService(DB_PATH, usage_monitor=usage_monitor)

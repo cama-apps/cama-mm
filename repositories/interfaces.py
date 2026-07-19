@@ -1242,6 +1242,45 @@ class IAIQueryRepository(ABC):
         ...
 
 
+class ILLMRequestRepository(ABC):
+    """Metadata-only persistence for actual LLM provider attempts."""
+
+    @abstractmethod
+    def record_attempt(
+        self,
+        *,
+        feature: str,
+        operation: str,
+        provider: str,
+        model: str,
+        success: bool,
+        latency_ms: int | float,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        error_type: str | None = None,
+        created_at: int | None = None,
+    ) -> int:
+        """Persist one provider attempt and return its generated identifier."""
+        ...
+
+    @abstractmethod
+    def get_usage_summary(
+        self,
+        *,
+        since: int | None = None,
+        until: int | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Aggregate attempts by feature, operation, provider, and model."""
+        ...
+
+    @abstractmethod
+    def prune_before(self, cutoff_created_at: int, *, limit: int = 10_000) -> int:
+        """Delete at most ``limit`` attempts older than ``cutoff_created_at``."""
+        ...
+
+
 class ILoanRepository(ABC):
     """Repository for loan state and nonprofit fund data access."""
 

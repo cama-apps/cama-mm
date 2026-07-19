@@ -324,14 +324,39 @@ TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%
 # AI/LLM Configuration (Groq or Cerebras via LiteLLM)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
-# Prefer Groq, fall back to Cerebras
-LLM_API_KEY = GROQ_API_KEY or CEREBRAS_API_KEY
-AI_MODEL = os.getenv("AI_MODEL", "groq/qwen/qwen3-32b" if GROQ_API_KEY else "cerebras/qwen-3-235b-a22b-instruct-2507")
+_DEFAULT_GROQ_MODEL = "groq/qwen/qwen3.6-27b"
+_DEFAULT_CEREBRAS_MODEL = "cerebras/gemma-4-31b"
+
+
+def _select_llm_config(
+    groq_key: str | None,
+    cerebras_key: str | None,
+    model_override: str | None,
+) -> tuple[str, str | None]:
+    """Select the startup model and its matching provider credential."""
+    model = model_override or (
+        _DEFAULT_GROQ_MODEL if groq_key else _DEFAULT_CEREBRAS_MODEL
+    )
+    if model.startswith("groq/"):
+        return model, groq_key
+    if model.startswith("cerebras/"):
+        return model, cerebras_key
+    return model, None
+
+
+# Bind credentials to the selected provider. This avoids accidentally sending
+# the Groq key when AI_MODEL explicitly selects Cerebras (or vice versa).
+AI_MODEL, LLM_API_KEY = _select_llm_config(
+    GROQ_API_KEY,
+    CEREBRAS_API_KEY,
+    os.getenv("AI_MODEL"),
+)
 AI_TIMEOUT_SECONDS = _parse_float("AI_TIMEOUT_SECONDS", 15.0)
 AI_MAX_TOKENS = _parse_int("AI_MAX_TOKENS", 500)
 AI_RATE_LIMIT_REQUESTS = _parse_int("AI_RATE_LIMIT_REQUESTS", 10)  # Requests per window
 AI_RATE_LIMIT_WINDOW = _parse_int("AI_RATE_LIMIT_WINDOW", 60)  # Window in seconds
 AI_FEATURES_ENABLED = _parse_bool("AI_FEATURES_ENABLED", False)  # Global default for AI flavor text
+DIG_LLM_ENABLED = _parse_bool("DIG_LLM_ENABLED", True)  # Hard kill switch for Dig LLM calls
 
 # Glicko-2 rating system configuration
 CALIBRATION_RD_THRESHOLD = _parse_float("CALIBRATION_RD_THRESHOLD", 100.0)  # Players with RD <= this are considered calibrated

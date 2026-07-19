@@ -489,6 +489,45 @@ class TestDigFlavorServiceFlavor:
 
         assert result["llm_narrative"] == "The walls listen. They have always listened."
         assert result["llm_tone"] == "cryptic_folkloric"
+        assert svc.ai_service.call_with_tools.call_args.kwargs["feature"] == "dig.flavor"
+
+    @pytest.mark.asyncio
+    async def test_flavor_skips_parked_boss_reopen(
+        self,
+        dig_repo,
+        player_repository,
+    ):
+        """A successful command that consumed no Dig must spend no LLM call."""
+        svc = self._make_service(dig_repo, player_repository)
+        result = {
+            "success": True,
+            "dig_consumed": False,
+            "boss_pending": True,
+        }
+
+        returned = await svc.flavor(result, 10001, TEST_GUILD_ID)
+
+        assert returned is result
+        svc.ai_service.call_with_tools.assert_not_called()
+        svc.context_builder.build.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flavor_honors_guild_ai_disable(
+        self,
+        dig_repo,
+        player_repository,
+    ):
+        """The guild-wide AI setting gates Dig at the service boundary."""
+        svc = self._make_service(dig_repo, player_repository)
+        svc.guild_config_repo = MagicMock()
+        svc.guild_config_repo.get_ai_enabled.return_value = False
+        result = {"success": True, "dig_consumed": True, "jc_earned": 4}
+
+        returned = await svc.flavor(result, 10001, TEST_GUILD_ID)
+
+        assert returned is result
+        svc.ai_service.call_with_tools.assert_not_called()
+        svc.context_builder.build.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("side_effect", [TimeoutError(), RuntimeError("API down")])

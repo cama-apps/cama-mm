@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from typing import TYPE_CHECKING
 
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
@@ -46,6 +47,9 @@ from services.dig_llm_prompts import (
     build_player_state_context,
     build_splash_narration_messages,
 )
+
+if TYPE_CHECKING:
+    from repositories.interfaces import IGuildConfigRepository
 
 logger = logging.getLogger("cama_bot.services.dig_flavor")
 
@@ -107,11 +111,22 @@ class DigFlavorService:
         dig_repo: DigRepository,
         player_repo: PlayerRepository,
         context_builder: DigDMContextBuilder,
+        guild_config_repo: IGuildConfigRepository | None = None,
     ) -> None:
         self.ai_service = ai_service
         self.dig_repo = dig_repo
         self.player_repo = player_repo
         self.context_builder = context_builder
+        self.guild_config_repo = guild_config_repo
+
+    async def _is_ai_enabled(self, guild_id: int) -> bool:
+        """Honor the same per-guild AI switch as every other LLM feature."""
+        if self.guild_config_repo is None:
+            return True
+        return await asyncio.to_thread(
+            self.guild_config_repo.get_ai_enabled,
+            guild_id,
+        )
 
     # ------------------------------------------------------------------
     # Internal: gather + build messages
@@ -220,6 +235,13 @@ class DigFlavorService:
         ``is_boss=True`` switches the outcome serialization to the boss
         outcome shape (shared narrate_dig tool).
         """
+        # Reopening a parked boss is successful command handling but consumes
+        # no dig. It must not spend an LLM request each time the view is opened.
+        if not is_boss and result.get("dig_consumed") is False:
+            return result
+        if not await self._is_ai_enabled(guild_id):
+            return result
+
         try:
             (
                 tunnel, balance, personality, social_actions,
@@ -274,6 +296,7 @@ class DigFlavorService:
                         "function": {"name": "narrate_dig"},
                     },
                     max_tokens=600,
+                    feature="dig.boss" if is_boss else "dig.flavor",
                 ),
                 timeout=5.0,
             )
@@ -408,6 +431,8 @@ class DigFlavorService:
         """
         if not victims:
             return ""
+        if not await self._is_ai_enabled(guild_id):
+            return ""
         try:
             ids = [int(v["discord_id"]) for v in victims if "discord_id" in v]
             ids_with_digger = list({digger_id, *ids})
@@ -450,6 +475,7 @@ class DigFlavorService:
                         "function": {"name": "narrate_splash"},
                     },
                     max_tokens=200,
+                    feature="dig.splash",
                 ),
                 timeout=3.0,
             )

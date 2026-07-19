@@ -1,5 +1,5 @@
 """
-Tests for the /ask command — natural-language SQL via Cerebras LLM.
+Tests for the /ask command — natural-language SQL via the configured LLM.
 
 These tests exercise the AskCommands cog with a mocked SQLQueryService,
 focusing on:
@@ -142,6 +142,25 @@ class TestAskValidation:
 
 
 class TestAskRateLimit:
+    @pytest.mark.asyncio
+    async def test_uses_configured_rate_limit(self, monkeypatch):
+        cog, _ = make_cog(QueryResult(success=True, results=[], row_count=0))
+        interaction = FakeInteraction()
+        captured = {}
+
+        def check(**kwargs):
+            captured.update(kwargs)
+            return types.SimpleNamespace(allowed=False, retry_after_seconds=1)
+
+        monkeypatch.setattr(ask_module, "AI_RATE_LIMIT_REQUESTS", 3)
+        monkeypatch.setattr(ask_module, "AI_RATE_LIMIT_WINDOW", 17)
+        monkeypatch.setattr(ask_module.AI_RATE_LIMITER, "check", check)
+
+        await cog.ask.callback(cog, interaction, "what is the average rating?")
+
+        assert captured["limit"] == 3
+        assert captured["per_seconds"] == 17
+
     @pytest.mark.asyncio
     async def test_rate_limit_short_circuits(self, monkeypatch):
         cog, sql = make_cog(QueryResult(success=True, results=[], row_count=0))

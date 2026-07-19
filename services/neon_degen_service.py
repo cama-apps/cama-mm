@@ -80,7 +80,7 @@ from utils.neon_terminal import (
 
 if TYPE_CHECKING:
     from repositories.bet_repository import BetRepository
-    from repositories.interfaces import IPlayerRepository
+    from repositories.interfaces import IGuildConfigRepository, IPlayerRepository
     from repositories.neon_event_repository import NeonEventRepository
     from services.ai_service import AIService
     from services.bankruptcy_service import BankruptcyService
@@ -351,6 +351,8 @@ class NeonDegenService:
         ai_service: AIService | None = None,
         flavor_text_service: FlavorTextService | None = None,
         neon_event_repo: NeonEventRepository | None = None,
+        guild_config_repo: IGuildConfigRepository | None = None,
+        dig_llm_enabled: bool = True,
     ):
         self.player_repo = player_repo
         self.bet_repo = bet_repo
@@ -359,6 +361,8 @@ class NeonDegenService:
         self.ai_service = ai_service
         self.flavor_text_service = flavor_text_service
         self.neon_event_repo = neon_event_repo
+        self.guild_config_repo = guild_config_repo
+        self.dig_llm_enabled = dig_llm_enabled
 
         # Per-user cooldown: {(discord_id, guild_id): last_trigger_time}
         self._cooldowns: dict[tuple[int, int], float] = {}
@@ -371,6 +375,21 @@ class NeonDegenService:
     def _is_enabled(self) -> bool:
         """Check if the neon degen system is enabled."""
         return _config.NEON_DEGEN_ENABLED
+
+    async def _is_ai_enabled(self, guild_id: int | None) -> bool:
+        """Honor the per-guild AI switch before any Neon provider call."""
+        if self.guild_config_repo is None:
+            return True
+        if guild_id is None:
+            return False
+        try:
+            return await asyncio.to_thread(
+                self.guild_config_repo.get_ai_enabled,
+                guild_id,
+            )
+        except Exception:
+            logger.warning("Failed to read guild AI setting; disabling Neon AI", exc_info=True)
+            return False
 
     def _check_cooldown(self, discord_id: int, guild_id: int | None) -> bool:
         """Check if user is on cooldown. Returns True if OK to fire."""
@@ -470,6 +489,7 @@ class NeonDegenService:
         *,
         anonymous: bool = False,
         validate_facts: bool = False,
+        guild_id: int | None = None,
     ) -> str:
         """Try LLM-generated terminal text; fall back to static template instantly.
 
@@ -477,6 +497,8 @@ class NeonDegenService:
         instruction tells it to avoid any identifying information.
         """
         if not self.ai_service:
+            return fallback_text
+        if not await self._is_ai_enabled(guild_id):
             return fallback_text
         if validate_facts and not set(player_context) <= _STRICT_POST_MATCH_FACT_KEYS:
             return fallback_text
@@ -565,6 +587,7 @@ class NeonDegenService:
                 system_prompt=system_prompt,
                 temperature=0.9,
                 max_tokens=200 if validate_facts else 2000,
+                feature="neon.post_match" if validate_facts else "neon.event",
             )
             if result:
                 from utils.neon_terminal import ansi_block
@@ -596,7 +619,7 @@ class NeonDegenService:
 
     def _build_player_context(self, discord_id: int, guild_id: int | None) -> dict[str, Any]:
         """Build player context dict for LLM calls."""
-        ctx: dict[str, Any] = {"discord_id": discord_id}
+        ctx: dict[str, Any] = {}
         if self.player_repo:
             try:
                 player = self.player_repo.get_by_id(discord_id, guild_id)
@@ -700,11 +723,21 @@ class NeonDegenService:
             )
         return None
 
-    async def _dig_caption(self, event_key: str, event_description: str) -> str:
+    async def _dig_caption(
+        self,
+        event_key: str,
+        event_description: str,
+        guild_id: int | None = None,
+    ) -> str:
         """Cryptic dig caption: an LLM narrator voice (chance-gated) or a static fallback line."""
         voice = pick_dig_voice(event_key)
         line = fallback_line(event_key)
-        if self.ai_service and self._roll(NEON_LLM_CHANCE):
+        if (
+            self.dig_llm_enabled
+            and self.ai_service
+            and await self._is_ai_enabled(guild_id)
+            and self._roll(NEON_LLM_CHANCE)
+        ):
             try:
                 prompt = (
                     f"A lone digger {event_description}, far beneath the earth. "
@@ -716,6 +749,7 @@ class NeonDegenService:
                     system_prompt=DIG_NARRATOR_SYSTEM_PROMPT,
                     temperature=1.0,
                     max_tokens=120,
+                    feature="neon.dig_caption",
                 )
                 if result and result.strip():
                     cleaned = result.strip()
@@ -778,7 +812,7 @@ class NeonDegenService:
                 )
                 event_key, desc = "boss_victory", f"has struck down the guardian {boss_name}"
 
-            text = await self._dig_caption(event_key, desc)
+            text = await self._dig_caption(event_key, desc, guild_id)
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=3, text_block=text, gif_file=gif)
         except Exception as e:
@@ -823,7 +857,7 @@ class NeonDegenService:
             else:
                 return None  # common / uncommon do not animate
 
-            text = await self._dig_caption(event_key, desc)
+            text = await self._dig_caption(event_key, desc, guild_id)
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=3, text_block=text, gif_file=gif)
         except Exception as e:
@@ -855,7 +889,9 @@ class NeonDegenService:
             from utils import dig_drawing
             gif = await asyncio.to_thread(dig_drawing.animate_cave_in, layer_name, depth_before, depth_after)
             text = await self._dig_caption(
-                "cave_in", "has lost their footing to a cave-in, the dark swallowing the way down"
+                "cave_in",
+                "has lost their footing to a cave-in, the dark swallowing the way down",
+                guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=3, text_block=text, gif_file=gif)
@@ -879,7 +915,11 @@ class NeonDegenService:
 
             from utils import dig_drawing
             gif = await asyncio.to_thread(dig_drawing.animate_pinnacle, prestige=True)
-            text = await self._dig_caption("prestige", "has ascended, prestiging beyond the deepest dark")
+            text = await self._dig_caption(
+                "prestige",
+                "has ascended, prestiging beyond the deepest dark",
+                guild_id,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=3, text_block=text, gif_file=gif)
         except Exception as e:
@@ -919,7 +959,10 @@ class NeonDegenService:
             )
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
-                f"Client {name} won big: +{payout} JC on {source} betting.", ctx, fallback
+                f"Client {name} won big: +{payout} JC on {source} betting.",
+                ctx,
+                fallback,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=3, text_block=text, gif_file=gif)
@@ -944,7 +987,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} checked their balance: {balance} JC",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -975,7 +1020,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client placed {amount} JC bet on {team}{lev_note}",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -1004,7 +1051,9 @@ class NeonDegenService:
                 text = render_system_breach(name)
                 text = await self._generate_text(
                     f"Client hit MAX_DEBT floor of {-MAX_DEBT} JC",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
@@ -1014,7 +1063,9 @@ class NeonDegenService:
                 text = render_balance_zero(name)
                 text = await self._generate_text(
                     "Client's balance hit exactly 0 JC after a lost bet",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
@@ -1047,7 +1098,12 @@ class NeonDegenService:
                     from utils.neon_drawing import create_terminal_crash_gif
                     gif = await asyncio.to_thread(create_terminal_crash_gif, name, filing_number)
                     text = render_bankruptcy_filing(name, debt_cleared, filing_number)
-                    text = await self._generate_text(event_desc, ctx, text)
+                    text = await self._generate_text(
+                        event_desc,
+                        ctx,
+                        text,
+                        guild_id=guild_id,
+                    )
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
                 except Exception as e:
@@ -1060,7 +1116,12 @@ class NeonDegenService:
                     from utils.neon_drawing import create_void_welcome_gif
                     gif = await asyncio.to_thread(create_void_welcome_gif, name)
                     text = render_bankruptcy_filing(name, debt_cleared, filing_number)
-                    text = await self._generate_text(event_desc, ctx, text)
+                    text = await self._generate_text(
+                        event_desc,
+                        ctx,
+                        text,
+                        guild_id=guild_id,
+                    )
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
                 except Exception as e:
@@ -1068,7 +1129,12 @@ class NeonDegenService:
 
             # Layer 2: Standard bankruptcy filing (100% chance)
             text = render_bankruptcy_filing(name, debt_cleared, filing_number)
-            text = await self._generate_text(event_desc, ctx, text)
+            text = await self._generate_text(
+                event_desc,
+                ctx,
+                text,
+                guild_id=guild_id,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
         except Exception as e:
@@ -1099,7 +1165,9 @@ class NeonDegenService:
                     text = render_negative_loan(name, amount, new_debt)
                     text = await self._generate_text(
                         f"Client took a loan of {amount} JC while in debt",
-                        ctx, text,
+                        ctx,
+                        text,
+                        guild_id=guild_id,
                     )
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=2, text_block=text)
@@ -1115,7 +1183,9 @@ class NeonDegenService:
             text = render_loan_taken(amount, total_owed)
             text = await self._generate_text(
                 f"Client took a loan of {amount} JC. Total owed: {total_owed} JC",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -1150,7 +1220,9 @@ class NeonDegenService:
                 text = render_wheel_bankrupt(name, result_value)
                 text = await self._generate_text(
                     f"Client hit BANKRUPT on the wheel. Lost {abs(result_value)} JC",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
@@ -1195,6 +1267,7 @@ class NeonDegenService:
                     f"Lightning Bolt struck {players_hit} players for {total_taxed} JC total. All went to nonprofit.",
                     await asyncio.to_thread(self._build_player_context, discord_id, guild_id),
                     text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
@@ -1204,6 +1277,7 @@ class NeonDegenService:
                     f"Lightning Bolt struck {players_hit} players for {total_taxed} JC total. Wry commentary on suffering.",
                     await asyncio.to_thread(self._build_player_context, discord_id, guild_id),
                     text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=1, text_block=text)
@@ -1274,6 +1348,7 @@ class NeonDegenService:
                 context.prompt_context(),
                 fallback,
                 validate_facts=True,
+                guild_id=guild_id,
             )
 
             gif_spec = self._post_match_gif_theme(context)
@@ -1313,7 +1388,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client tried to use {cooldown_type} but hit the cooldown",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -1344,7 +1421,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client lost a {leverage}x leveraged bet of {amount} JC. Now in debt: {debt} JC",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
 
@@ -1417,7 +1496,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {display_name} is watching the lobby. Spectator mode.",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -1449,7 +1530,9 @@ class NeonDegenService:
                 text = render_tip_surveillance(sender_name, recipient_name, amount, fee)
                 text = await self._generate_text(
                     f"Client {sender_name} transferred {amount} JC to {recipient_name}. Fee: {fee} JC",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
@@ -1460,7 +1543,9 @@ class NeonDegenService:
                 text = render_tip(sender_name, recipient_name, amount)
                 text = await self._generate_text(
                     f"Client {sender_name} tipped {amount} JC to {recipient_name}",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=1, text_block=text)
@@ -1497,7 +1582,9 @@ class NeonDegenService:
                 text = render_don_win(name, final_balance)
                 text = await self._generate_text(
                     f"Client won Double or Nothing. Balance: {final_balance} JC",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=1, text_block=text)
@@ -1512,7 +1599,9 @@ class NeonDegenService:
                     text = render_don_loss_box(name, balance_at_risk)
                     text = await self._generate_text(
                         f"Client lost {balance_at_risk} JC in Double or Nothing. Balance: 0",
-                        ctx, text,
+                        ctx,
+                        text,
+                        guild_id=guild_id,
                     )
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
@@ -1525,7 +1614,9 @@ class NeonDegenService:
                 text = render_don_loss_box(name, balance_at_risk)
                 text = await self._generate_text(
                     f"Client lost {balance_at_risk} JC in Double or Nothing. Balance: 0",
-                    ctx, text,
+                    ctx,
+                    text,
+                    guild_id=guild_id,
                 )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
@@ -1534,7 +1625,9 @@ class NeonDegenService:
             text = render_don_lose(name, balance_at_risk)
             text = await self._generate_text(
                 f"Client lost {balance_at_risk} JC in Double or Nothing",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -1563,7 +1656,9 @@ class NeonDegenService:
             text = render_coinflip(winner_name, loser_name)
             text = await self._generate_text(
                 f"Draft coinflip: {winner_name} won, {loser_name} lost",
-                {"winner": winner_name, "loser": loser_name}, text,
+                {"winner": winner_name, "loser": loser_name},
+                text,
+                guild_id=guild_id,
             )
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -1588,7 +1683,9 @@ class NeonDegenService:
             text = render_registration(player_name)
             text = await self._generate_text(
                 f"New player '{player_name}' just registered. 3 JC starting balance.",
-                {"name": player_name}, text,
+                {"name": player_name},
+                text,
+                guild_id=guild_id,
             )
             await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "registration", layer=1)
             self._set_cooldown(discord_id, guild_id)
@@ -1625,7 +1722,12 @@ class NeonDegenService:
                     text = render_prediction_market_crash(
                         question, total_pool, outcome, winner_count, loser_count
                     )
-                    text = await self._generate_text(event_desc, pred_ctx, text)
+                    text = await self._generate_text(
+                        event_desc,
+                        pred_ctx,
+                        text,
+                        guild_id=guild_id,
+                    )
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
                 except Exception as e:
                     logger.debug(f"Market crash GIF failed: {e}")
@@ -1636,7 +1738,12 @@ class NeonDegenService:
                 text = render_prediction_market_crash(
                     question, total_pool, outcome, winner_count, loser_count
                 )
-                text = await self._generate_text(event_desc, pred_ctx, text)
+                text = await self._generate_text(
+                    event_desc,
+                    pred_ctx,
+                    text,
+                    guild_id=guild_id,
+                )
                 return NeonResult(layer=2, text_block=text)
 
             # Layer 1: Any resolution at 30%
@@ -1644,7 +1751,12 @@ class NeonDegenService:
                 return None
 
             text = render_prediction_resolved(question, outcome, total_pool)
-            text = await self._generate_text(event_desc, pred_ctx, text)
+            text = await self._generate_text(
+                event_desc,
+                pred_ctx,
+                text,
+                guild_id=guild_id,
+            )
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
             logger.debug(f"neon on_prediction_resolved error: {e}")
@@ -1673,14 +1785,26 @@ class NeonDegenService:
             # Layer 2: Surveillance report (10%)
             if self._roll(0.10):
                 text = render_soft_avoid_surveillance(cost, games)
-                text = await self._generate_text(event_desc, {}, text, anonymous=True)
+                text = await self._generate_text(
+                    event_desc,
+                    {},
+                    text,
+                    anonymous=True,
+                    guild_id=guild_id,
+                )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
 
             # Layer 1: One-liner (25%)
             if self._roll(0.25):
                 text = render_soft_avoid(cost, games)
-                text = await self._generate_text(event_desc, {}, text, anonymous=True)
+                text = await self._generate_text(
+                    event_desc,
+                    {},
+                    text,
+                    anonymous=True,
+                    guild_id=guild_id,
+                )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=1, text_block=text)
 
@@ -1721,7 +1845,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} went ALL-IN with {amount} JC ({percentage:.0f}% of balance)",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
@@ -1752,7 +1878,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} placed bet with only {seconds_remaining}s remaining",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
@@ -1812,7 +1940,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} joined the queue at position {queue_position}",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
@@ -1885,7 +2015,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} has played {total_games} games",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
@@ -1931,7 +2063,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} broke their personal win streak record: {current_streak} games",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
@@ -1961,7 +2095,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} used leverage for the first time: {leverage}x",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "first_leverage", layer=1)
             self._set_cooldown(discord_id, guild_id)
@@ -1992,7 +2128,9 @@ class NeonDegenService:
             ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} has placed 100 total bets",
-                ctx, text,
+                ctx,
+                text,
+                guild_id=guild_id,
             )
             await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "100_bets", layer=2)
             self._set_cooldown(discord_id, guild_id)
@@ -2120,6 +2258,7 @@ class NeonDegenService:
                 context.prompt_context(),
                 fallback,
                 validate_facts=True,
+                guild_id=guild_id,
             )
             mention = f"<@{discord_id}>\n" if discord_id is not None else ""
             return [NeonResult(layer=2, text_block=f"{mention}{text}")]

@@ -296,6 +296,7 @@ def test_init_services_passes_only_the_unified_llm_api_key(monkeypatch):
         "ai_model": bot_module.AI_MODEL,
         "ai_timeout_seconds": bot_module.AI_TIMEOUT_SECONDS,
         "ai_max_tokens": bot_module.AI_MAX_TOKENS,
+        "dig_llm_enabled": bot_module.DIG_LLM_ENABLED,
     }
     assert container.kwargs["llm_api_key"] == "sentinel-key"
     assert "cerebras_api_key" not in container.kwargs

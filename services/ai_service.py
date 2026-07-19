@@ -1,14 +1,16 @@
 """
-AI Service wrapper for LiteLLM with Cerebras integration.
+Provider-neutral AI service wrapper built on LiteLLM.
 
 Provides unified interface for LLM calls with tool calling support.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -19,14 +21,15 @@ from litellm import acompletion
 from services.monitoring_service import get_global_usage_monitor
 
 if TYPE_CHECKING:
+    from repositories.interfaces import ILLMRequestRepository
     from services.flavor_personas import FlavorPersona
 
 logger = logging.getLogger("cama_bot.services.ai")
 
 _LITELLM_PYDANTIC_SERIALIZER_WARNING = (
-        r"Pydantic serializer warnings:\n\s+"
-        r"PydanticSerializationUnexpectedValue\(Expected 10 fields but got 5: "
-        r"Expected `Message`"
+    r"Pydantic serializer warnings:\n\s+"
+    r"PydanticSerializationUnexpectedValue\(Expected 10 fields but got 5: "
+    r"Expected `Message`"
 )
 
 
@@ -51,6 +54,37 @@ def _sanitize_for_prompt(value: str | None, *, fallback: str = "Unknown", max_le
         return fallback
     cleaned = _PROMPT_UNSAFE_CHARS.sub("", value).strip()
     return (cleaned[:max_len] or fallback)
+
+
+def _token_count(value: Any) -> int | None:
+    """Return a provider token count without coercing mock/arbitrary objects."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    count = int(value)
+    return count if count >= 0 else None
+
+
+def _extract_usage_tokens(response: Any) -> tuple[int | None, int | None, int | None]:
+    """Extract standard token metadata from LiteLLM object or mapping responses."""
+    if response is None:
+        return None, None, None
+    if isinstance(response, dict):
+        usage = response.get("usage")
+    else:
+        usage = getattr(response, "usage", None)
+    if usage is None:
+        return None, None, None
+
+    def read(name: str) -> Any:
+        if isinstance(usage, dict):
+            return usage.get(name)
+        return getattr(usage, name, None)
+
+    return (
+        _token_count(read("prompt_tokens")),
+        _token_count(read("completion_tokens")),
+        _token_count(read("total_tokens")),
+    )
 
 
 # Tool definitions for structured outputs
@@ -112,7 +146,7 @@ class ToolCallResult:
 
 class AIService:
     """
-    Wrapper for LiteLLM to interact with Cerebras AI models.
+    Provider-neutral LiteLLM wrapper for Groq and Cerebras models.
 
     Provides methods for:
     - General completions
@@ -127,36 +161,130 @@ class AIService:
         api_key: str,
         timeout: float = 3.0,
         max_tokens: int = 500,
+        request_repo: ILLMRequestRepository | None = None,
     ):
         """
         Initialize AIService.
 
         Args:
-            model: LiteLLM model identifier (e.g., "cerebras/zai-glm-4.7")
+            model: LiteLLM model identifier (e.g., "cerebras/gemma-4-31b")
             api_key: API key for the model provider
             timeout: Request timeout in seconds (default 3s to avoid Discord interaction timeout)
             max_tokens: Maximum tokens in response
+            request_repo: Optional metadata-only LLM request telemetry repository
         """
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.request_repo = request_repo
+        self.provider, separator, provider_model = model.partition("/")
+        if not separator:
+            self.provider = "unknown"
+            provider_model = model
+        self.provider_model = provider_model
         self._is_groq = model.startswith("groq/")
-
-        # Configure LiteLLM - set provider-specific API key
-        import os
-
-        if self._is_groq:
-            os.environ["GROQ_API_KEY"] = api_key
-        elif model.startswith("cerebras/"):
-            os.environ["CEREBRAS_API_KEY"] = api_key
-        else:
-            os.environ["CEREBRAS_API_KEY"] = api_key
 
         # Disable LiteLLM's automatic retries - we want to fail fast
         litellm.num_retries = 0
 
-        logger.info(f"AIService initialized with model: {model}")
+        logger.info("AIService initialized with model: %s", model)
+
+    def _apply_provider_options(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        tool_call: bool,
+    ) -> None:
+        """Apply only options supported by the selected Groq model family."""
+        if not self._is_groq:
+            return
+
+        if self.provider_model.startswith("openai/gpt-oss-"):
+            # GPT-OSS accepts reasoning_effort but rejects Groq's
+            # reasoning_format parameter.
+            kwargs["reasoning_effort"] = "low"
+        elif self.provider_model.startswith("qwen/"):
+            # Keep chain-of-thought out of content. Current Qwen 3.6 supports
+            # reasoning_effort=none at Groq even though the pinned LiteLLM
+            # model metadata has not caught up yet.
+            kwargs["reasoning_format"] = "parsed"
+            if tool_call:
+                kwargs["reasoning_effort"] = "none"
+                if "qwen3.6" in self.provider_model:
+                    kwargs["allowed_openai_params"] = ["reasoning_effort"]
+
+        if tool_call:
+            kwargs["parallel_tool_calls"] = False
+
+    async def _record_attempt(
+        self,
+        *,
+        feature: str,
+        operation: str,
+        success: bool,
+        latency_ms: float,
+        response: Any = None,
+        error_type: str | None = None,
+    ) -> None:
+        """Persist request metadata without ever storing request/response bodies."""
+        if self.request_repo is None:
+            return
+
+        prompt_tokens, completion_tokens, total_tokens = _extract_usage_tokens(response)
+        try:
+            await asyncio.to_thread(
+                self.request_repo.record_attempt,
+                feature=feature,
+                operation=operation,
+                provider=self.provider,
+                model=self.provider_model,
+                success=success,
+                latency_ms=latency_ms,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                error_type=error_type,
+            )
+        except Exception:
+            logger.warning("Failed to persist LLM request telemetry", exc_info=True)
+
+    async def _invoke(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        feature: str,
+        operation: str,
+    ) -> Any:
+        """Make one provider attempt and record its operational metadata."""
+        monitor = get_global_usage_monitor()
+        if monitor is not None:
+            monitor.record_api_request("ai")
+
+        started = time.perf_counter()
+        try:
+            response = await asyncio.wait_for(
+                acompletion(**kwargs),
+                timeout=self.timeout,
+            )
+        except BaseException as exc:
+            await self._record_attempt(
+                feature=feature,
+                operation=operation,
+                success=False,
+                latency_ms=(time.perf_counter() - started) * 1000,
+                error_type=type(exc).__name__,
+            )
+            raise
+
+        await self._record_attempt(
+            feature=feature,
+            operation=operation,
+            success=True,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            response=response,
+        )
+        return response
 
     async def complete(
         self,
@@ -164,6 +292,7 @@ class AIService:
         system_prompt: str | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        feature: str = "llm.complete",
     ) -> str | None:
         """
         Simple completion without tool calling.
@@ -173,6 +302,7 @@ class AIService:
             system_prompt: Optional system message
             temperature: Sampling temperature (0.0-1.0)
             max_tokens: Override max tokens (default: use instance setting)
+            feature: Stable workload label used by request telemetry
 
         Returns:
             Generated text or None on error
@@ -183,26 +313,20 @@ class AIService:
         messages.append({"role": "user", "content": prompt})
 
         try:
-            import asyncio
-
-            monitor = get_global_usage_monitor()
-            if monitor is not None:
-                monitor.record_api_request("ai")
             kwargs: dict[str, Any] = {
                 "model": self.model,
+                "api_key": self.api_key,
                 "messages": messages,
                 "temperature": temperature,
                 "timeout": self.timeout,
-                "max_tokens": max_tokens or self.max_tokens,
+                "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
                 "num_retries": 0,  # No retries - fail fast
             }
-            # Groq embeds <think> tags in content by default; use parsed mode
-            # to separate reasoning into its own field
-            if self._is_groq:
-                kwargs["reasoning_format"] = "parsed"
-            response = await asyncio.wait_for(
-                acompletion(**kwargs),
-                timeout=self.timeout,
+            self._apply_provider_options(kwargs, tool_call=False)
+            response = await self._invoke(
+                kwargs,
+                feature=feature,
+                operation="completion",
             )
             message = response.choices[0].message
             # Only use content field - never use reasoning_content (thinking chain)
@@ -227,6 +351,7 @@ class AIService:
         tool_choice: str | dict[str, Any] = "auto",
         max_tokens: int | None = None,
         temperature: float | None = None,
+        feature: str = "llm.tool_call",
     ) -> ToolCallResult:
         """
         Call LLM with tool definitions and return tool call results.
@@ -236,37 +361,29 @@ class AIService:
             tools: List of tool definitions
             tool_choice: Tool selection mode ("auto", "none", or specific tool)
             temperature: Optional sampling temperature override
+            feature: Stable workload label used by request telemetry
 
         Returns:
             ToolCallResult with tool name, args, and raw response
         """
         try:
-            import asyncio
-
-            monitor = get_global_usage_monitor()
-            if monitor is not None:
-                monitor.record_api_request("ai")
             kwargs: dict[str, Any] = {
                 "model": self.model,
+                "api_key": self.api_key,
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": tool_choice,
                 "timeout": self.timeout,
-                "max_tokens": max_tokens or 2000,
+                "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
                 "num_retries": 0,  # No retries - fail fast
             }
             if temperature is not None:
                 kwargs["temperature"] = temperature
-            # Qwen reasoning frequently corrupts forced tool-call JSON on Groq.
-            # This path only needs short structured output, so disable reasoning
-            # and parallel tool calls to keep the emitted arguments valid.
-            if self._is_groq:
-                kwargs["reasoning_format"] = "parsed"
-                kwargs["reasoning_effort"] = "none"
-                kwargs["parallel_tool_calls"] = False
-            response = await asyncio.wait_for(
-                acompletion(**kwargs),
-                timeout=self.timeout,
+            self._apply_provider_options(kwargs, tool_call=True)
+            response = await self._invoke(
+                kwargs,
+                feature=feature,
+                operation="tool_call",
             )
 
             message = response.choices[0].message
@@ -381,6 +498,7 @@ Bad: SELECT * FROM players JOIN loan_state... (too many columns)""",
             messages=messages,
             tools=[SQL_TOOL],
             tool_choice={"type": "function", "function": {"name": "execute_sql_query"}},
+            feature="ask.sql",
         )
 
         if result.tool_name == "execute_sql_query" and result.tool_args.get("sql"):
@@ -791,6 +909,7 @@ Generate a PERSONALIZED roast referencing their specific history."""
             tools=[FLAVOR_TOOL],
             tool_choice="auto",  # Use auto instead of required - more compatible
             temperature=call_temperature,
+            feature=f"flavor.{event_type}",
         )
 
         if result.tool_name == "generate_flavor_text":
@@ -807,6 +926,7 @@ Generate a PERSONALIZED roast referencing their specific history."""
                 system_prompt=messages[0]["content"]
                 + "\n\nRespond with just the roast, nothing else.",
                 temperature=call_temperature if call_temperature is not None else 0.9,
+                feature=f"flavor.{event_type}",
             )
             return fallback_result
         except Exception:

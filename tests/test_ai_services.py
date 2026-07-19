@@ -80,10 +80,10 @@ class TestAIService:
         assert result.tool_args["explanation"] == "Get all players"
 
     @pytest.mark.asyncio
-    async def test_groq_tool_calls_disable_reasoning(self):
-        """Groq/Qwen tool calls are brittle when reasoning emits tool JSON."""
+    async def test_groq_gpt_oss_tool_calls_use_supported_reasoning_params(self):
+        """GPT-OSS must not receive Groq's incompatible reasoning_format."""
         ai_service = AIService(
-            model="groq/qwen/qwen3-32b",
+            model="groq/openai/gpt-oss-120b",
             api_key="test-api-key",
             timeout=30.0,
             max_tokens=500,
@@ -106,9 +106,57 @@ class TestAIService:
 
         call_kwargs = mock_completion.call_args.kwargs
         assert result.tool_name == "execute_sql_query"
+        assert "reasoning_format" not in call_kwargs
+        assert call_kwargs["reasoning_effort"] == "low"
+        assert call_kwargs["parallel_tool_calls"] is False
+
+    @pytest.mark.asyncio
+    async def test_default_groq_qwen_tool_calls_use_litellm_param_allowlist(self):
+        """The Qwen 3.6 default disables reasoning safely for tool calls."""
+        ai_service = AIService(
+            model="groq/qwen/qwen3.6-27b",
+            api_key="test-api-key",
+            timeout=30.0,
+            max_tokens=500,
+        )
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(tool_calls=[]))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            await ai_service.call_with_tools(
+                messages=[{"role": "user", "content": "test"}],
+                tools=[SQL_TOOL],
+            )
+
+        call_kwargs = mock_completion.call_args.kwargs
         assert call_kwargs["reasoning_format"] == "parsed"
         assert call_kwargs["reasoning_effort"] == "none"
+        assert call_kwargs["allowed_openai_params"] == ["reasoning_effort"]
         assert call_kwargs["parallel_tool_calls"] is False
+
+    @pytest.mark.asyncio
+    async def test_default_groq_qwen_completion_uses_parsed_reasoning_only(self):
+        """Plain Qwen calls parse reasoning without tool-only parameters."""
+        ai_service = AIService(
+            model="groq/qwen/qwen3.6-27b",
+            api_key="test-api-key",
+            timeout=30.0,
+            max_tokens=500,
+        )
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="done"))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            result = await ai_service.complete("test")
+
+        call_kwargs = mock_completion.call_args.kwargs
+        assert result == "done"
+        assert call_kwargs["reasoning_format"] == "parsed"
+        assert "reasoning_effort" not in call_kwargs
+        assert "allowed_openai_params" not in call_kwargs
+        assert "parallel_tool_calls" not in call_kwargs
 
     @pytest.mark.asyncio
     async def test_generate_sql_returns_sql_and_explanation(self, ai_service):
@@ -292,6 +340,76 @@ class TestAIService:
             result = await ai_service.complete("Test prompt", system_prompt="Be helpful")
 
         assert result == "This is the AI response."
+
+    @pytest.mark.asyncio
+    async def test_request_telemetry_records_metadata_and_token_usage(self):
+        """Each provider attempt is attributed without storing prompt content."""
+        request_repo = MagicMock()
+        ai_service = AIService(
+            model="groq/openai/gpt-oss-20b",
+            api_key="test-api-key",
+            timeout=30.0,
+            max_tokens=500,
+            request_repo=request_repo,
+        )
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock(message=MagicMock(content="done"))]
+        mock_response.usage.prompt_tokens = 41
+        mock_response.usage.completion_tokens = 7
+        mock_response.usage.total_tokens = 48
+
+        with (
+            patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion,
+            patch("services.ai_service.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+        ):
+            mock_completion.return_value = mock_response
+            mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
+            result = await ai_service.complete(
+                "secret prompt body",
+                feature="dig.flavor",
+            )
+
+        assert result == "done"
+        telemetry = request_repo.record_attempt.call_args.kwargs
+        assert telemetry["feature"] == "dig.flavor"
+        assert telemetry["operation"] == "completion"
+        assert telemetry["provider"] == "groq"
+        assert telemetry["model"] == "openai/gpt-oss-20b"
+        assert telemetry["success"] is True
+        assert telemetry["prompt_tokens"] == 41
+        assert telemetry["completion_tokens"] == 7
+        assert telemetry["total_tokens"] == 48
+        assert "prompt" not in telemetry
+        assert "response" not in telemetry
+        assert "api_key" not in telemetry
+
+    @pytest.mark.asyncio
+    async def test_request_telemetry_records_failures(self):
+        request_repo = MagicMock()
+        ai_service = AIService(
+            model="cerebras/zai-glm-4.7",
+            api_key="test-api-key",
+            timeout=30.0,
+            request_repo=request_repo,
+        )
+
+        with (
+            patch(
+                "services.ai_service.acompletion",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("provider unavailable"),
+            ),
+            patch("services.ai_service.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+        ):
+            mock_to_thread.side_effect = lambda func, *args, **kwargs: func(*args, **kwargs)
+            result = await ai_service.complete("prompt", feature="ask.sql")
+
+        assert result is None
+        telemetry = request_repo.record_attempt.call_args.kwargs
+        assert telemetry["feature"] == "ask.sql"
+        assert telemetry["success"] is False
+        assert telemetry["error_type"] == "RuntimeError"
+        assert telemetry["prompt_tokens"] is None
 
 
 def _validator_service(ai_query_repo=None):
@@ -580,6 +698,7 @@ class TestSQLQueryService:
         assert "schema_migrations" in BLOCKED_TABLES
         assert "pending_matches" in BLOCKED_TABLES
         assert "guild_config" in BLOCKED_TABLES
+        assert "llm_request_attempts" in BLOCKED_TABLES
         assert "player_trivia_questions" in BLOCKED_TABLES
         assert "player_trivia_sessions" in BLOCKED_TABLES
 

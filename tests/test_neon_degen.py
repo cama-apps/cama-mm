@@ -2,7 +2,7 @@
 
 import io
 import random
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -472,6 +472,33 @@ class TestNeonDegenPersistence:
 class TestNeonDegenPrivacy:
     """Sensitive events must not leak PII in public neon messages."""
 
+    def test_player_context_does_not_send_discord_id(self):
+        svc = NeonDegenService()
+
+        context = svc._build_player_context(123456789, 456)
+
+        assert "discord_id" not in context
+
+    @pytest.mark.asyncio
+    async def test_guild_ai_disable_uses_static_fallback(self):
+        ai_service = AsyncMock()
+        guild_config_repo = MagicMock()
+        guild_config_repo.get_ai_enabled.return_value = False
+        svc = NeonDegenService(
+            ai_service=ai_service,
+            guild_config_repo=guild_config_repo,
+        )
+
+        result = await svc._generate_text(
+            "event",
+            {"name": "Player"},
+            "fallback",
+            guild_id=456,
+        )
+
+        assert result == "fallback"
+        ai_service.complete.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_on_soft_avoid_neon_output_never_contains_buyer_name(self):
         from unittest.mock import MagicMock
@@ -558,6 +585,7 @@ class TestNeonDegenPrivacy:
         assert "100" in prompt_sent
         assert "Use only the supplied context fields" in prompt_sent
         assert "ANONYMOUS" not in system_sent
+        assert call_kwargs.kwargs["feature"] == "neon.event"
 
     @pytest.mark.asyncio
     async def test_generate_text_serializes_context_values_as_data(self):

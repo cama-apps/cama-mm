@@ -623,6 +623,7 @@ Focus on key takeaways: who should team with whom, who to avoid, notable pattern
 Be clear and informative. Keep it conversational but not too casual.""",
                 temperature=0.7,
                 max_tokens=2000,  # Reasoning models need more tokens to complete
+                feature=f"stats.{data_type}_insight",
             )
             return result
         except Exception as e:
@@ -820,6 +821,7 @@ Be clear and informative. Keep it conversational but not too casual.""",
                 system_prompt=system_prompt,
                 temperature=0.9,
                 max_tokens=120,
+                feature="curse.flame",
             )
         except Exception as e:
             logger.warning("generate_curse_flame failed: %s", e)

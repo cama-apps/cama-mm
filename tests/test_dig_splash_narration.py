@@ -152,6 +152,7 @@ class TestNarrateSplash:
             victims=[{"discord_id": 30002, "amount": 4}],
         )
         assert out == "Something gentle and luminous happens."
+        assert svc.ai_service.call_with_tools.call_args.kwargs["feature"] == "dig.splash"
 
     @pytest.mark.asyncio
     async def test_empty_victims_returns_empty_without_calling_llm(
@@ -166,6 +167,28 @@ class TestNarrateSplash:
             splash_mode="burn",
             victims=[],
         )
+        assert out == ""
+        svc.ai_service.call_with_tools.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_guild_ai_disable_skips_splash_llm(
+        self,
+        dig_repo,
+        player_repository,
+    ):
+        svc = self._make_service(dig_repo, player_repository)
+        svc.guild_config_repo = MagicMock()
+        svc.guild_config_repo.get_ai_enabled.return_value = False
+
+        out = await svc.narrate_splash(
+            digger_id=30001,
+            guild_id=TEST_GUILD_ID,
+            event_name="Test",
+            event_description="Test",
+            splash_mode="burn",
+            victims=[{"discord_id": 30002, "amount": 5}],
+        )
+
         assert out == ""
         svc.ai_service.call_with_tools.assert_not_called()
 
