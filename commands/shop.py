@@ -1323,6 +1323,23 @@ class ShopCommands(commands.Cog):
             )
             return
 
+        # Atomically claim the cooldown before any money moves (admins bypass).
+        # The read-based check above is only a fast path for the friendly
+        # remaining-time message; concurrent presses could both pass it, so
+        # this check-and-set is the authoritative gate against double payouts.
+        if not is_admin:
+            claimed = await asyncio.to_thread(
+                self.player_service.player_repo.try_claim_double_or_nothing,
+                user_id, guild_id, now, DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
+            )
+            if not claimed:
+                await interaction.response.send_message(
+                    "You already tempted fate recently. "
+                    "Wait for your Double or Nothing cooldown before trying again.",
+                    ephemeral=True,
+                )
+                return
+
         # Defer - we'll send the result publicly
         if not await safe_defer(interaction, ephemeral=False):
             return

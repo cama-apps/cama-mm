@@ -46,7 +46,7 @@ def _parse_bool(env_var: str, default: bool) -> bool:
     raw = os.getenv(env_var)
     if raw is None:
         return default
-    return raw.lower() in {"1", "true", "yes", "on"}
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_int_list(env_var: str, default: list[int]) -> list[int]:

@@ -464,3 +464,46 @@ class TestMatchSummaryEmbed:
         link_fields = [f for f in embed.fields if f.name == "Links"]
         assert len(link_fields) == 1
         assert "9999999" in link_fields[0].value
+
+
+class TestFormatPlayerListMissingRows:
+    """format_player_list must pair ids with rows by discord_id, not position.
+
+    get_by_ids silently skips ids with no player row; a positional zip would
+    shift every later pairing (wrong mentions/ratings) and drop the last
+    player entirely.
+    """
+
+    def _player(self, discord_id: int, glicko_rating: float):
+        return SimpleNamespace(
+            discord_id=discord_id,
+            glicko_rating=glicko_rating,
+            mmr=None,
+            preferred_roles=None,
+            guild_id=None,
+        )
+
+    def test_missing_middle_id_does_not_shift_pairings(self):
+        from rating_system import CamaRatingSystem
+
+        rating_system = CamaRatingSystem()
+        # Id 2 has no player row (deleted/unregistered lobby member).
+        players = [self._player(1, 1000.0), self._player(3, 900.0)]
+        text, count = format_player_list(players, [1, 2, 3])
+
+        assert count == 3
+        lines = {pid: line for pid in (1, 2, 3) for line in text.split("\n") if f"<@{pid}>" in line}
+        # Each mention keeps its own rating (pre-fix, <@2> showed player 3's).
+        assert f"[{rating_system.rating_to_display(1000.0)}]" in lines[1]
+        assert f"[{rating_system.rating_to_display(900.0)}]" in lines[3]
+        # The missing member keeps a placeholder slot instead of stealing data.
+        assert "unregistered" in lines[2]
+        assert f"[{rating_system.rating_to_display(900.0)}]" not in lines[2]
+
+    def test_missing_last_id_is_not_dropped(self):
+        players = [self._player(1, 1000.0)]
+        text, count = format_player_list(players, [1, 2])
+
+        assert count == 2
+        assert "<@2>" in text
+        assert "unregistered" in text

@@ -561,13 +561,15 @@ def compute_player_calibration(
     favored_wins = sum(1 for h in favored_matches if h.get("won"))
     underdog_wins = sum(1 for h in underdog_matches if h.get("won"))
 
-    # Rating trend over the last 5 games
+    # Rating trend over the last 5 games. Each row's "rating" is the
+    # post-game value, so the span must start from the oldest counted game's
+    # pre-game rating ("rating_before") or it undercounts by one game; fall
+    # back to the post-game value for legacy rows without rating_before.
     last_5_delta: float | None = None
     if len(history) >= 2:
-        if len(history) > 5:
-            last_5_delta = (history[0].get("rating") or 0) - (history[4].get("rating") or 0)
-        else:
-            last_5_delta = (history[0].get("rating") or 0) - (history[-1].get("rating") or 0)
+        baseline = history[4] if len(history) > 5 else history[-1]
+        baseline_rating = baseline.get("rating_before") or baseline.get("rating") or 0
+        last_5_delta = (history[0].get("rating") or 0) - baseline_rating
 
     # Current streak
     streak = 0
