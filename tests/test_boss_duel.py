@@ -508,7 +508,7 @@ class TestDuelPayout:
 
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
-        # No chip damage → boss remains at the freshly rebased full cap and
+        # No chip damage → boss remains at the full active cap and
         # the soften line is suppressed.
         assert result["boss_hp_remaining"] == result["boss_hp_max"]
         assert result.get("soften_line") is None

@@ -360,35 +360,45 @@ class TestPersistedBossHP:
         hp, _ = self.service._resolve_persisted_boss_hp(bp, 25, fresh_hp=12, now=now)
         assert hp == 4
 
-    def test_fresh_cap_reduction_preserves_absolute_damage(self):
+    def test_fresh_cap_reduction_does_not_replace_active_boss_hp(self):
         bp = {"25": {"hp_remaining": 7, "hp_max": 12, "last_engaged_at": 0}}
 
         hp, hp_max = self.service._resolve_persisted_boss_hp(
             bp, 25, fresh_hp=9, now=0,
         )
 
-        assert hp == 4
-        assert hp_max == 9
+        assert hp == 7
+        assert hp_max == 12
 
-    def test_fresh_cap_increase_preserves_absolute_damage(self):
+    def test_fresh_cap_increase_does_not_heal_active_boss(self):
         bp = {"25": {"hp_remaining": 7, "hp_max": 12, "last_engaged_at": 0}}
 
         hp, hp_max = self.service._resolve_persisted_boss_hp(
             bp, 25, fresh_hp=15, now=0,
         )
 
-        assert hp == 10
-        assert hp_max == 15
+        assert hp == 7
+        assert hp_max == 12
 
-    def test_regen_applies_after_rebasing_onto_fresh_cap(self):
+    def test_regen_uses_active_boss_cap_when_fresh_cap_changes(self):
         bp = {"25": {"hp_remaining": 7, "hp_max": 12, "last_engaged_at": 0}}
 
         hp, hp_max = self.service._resolve_persisted_boss_hp(
             bp, 25, fresh_hp=9, now=2 * 24 * 3600,
         )
 
-        assert hp == 6
-        assert hp_max == 9
+        assert hp == 9
+        assert hp_max == 12
+
+    def test_missing_regen_timestamp_still_clamps_hp_to_active_cap(self):
+        bp = {"25": {"hp_remaining": 20, "hp_max": 12}}
+
+        hp, hp_max = self.service._resolve_persisted_boss_hp(
+            bp, 25, fresh_hp=15, now=0,
+        )
+
+        assert hp == 12
+        assert hp_max == 12
 
     def test_persist_after_loss_writes_entry(self):
         bp = {}

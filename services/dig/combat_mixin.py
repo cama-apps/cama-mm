@@ -165,9 +165,10 @@ class BossCombatMixin:
     ) -> tuple[int, int]:
         """Apply persisted-HP carry-over and time-based regen to a boss fight.
 
-        Returns ``(starting_hp, hp_max)``. ``hp_max`` is always ``fresh_hp``
-        (the freshly-computed scaled boss HP for this fight) so the boss can
-        regen back to it. ``starting_hp`` is:
+        Returns ``(starting_hp, hp_max)``. Once an unfinished engagement has
+        persisted HP, its stored maximum remains the cap for that active boss
+        instead of being replaced by newly computed encounter modifiers.
+        ``starting_hp`` is:
           - ``hp_remaining`` from the last unfinished engagement, plus regen
             of ``BOSS_HP_REGEN_PER_24_HOURS`` per 24-hour block since
             ``last_engaged_at``, capped at ``hp_max``;
@@ -188,9 +189,8 @@ class BossCombatMixin:
             stored_hp_max = int(stored_hp_max)
         except (TypeError, ValueError):
             return fresh_hp, fresh_hp
-        hp_max = max(1, int(fresh_hp))
-        damage_dealt = max(0, stored_hp_max - hp_remaining)
-        hp_remaining = max(1, hp_max - damage_dealt)
+        hp_max = max(1, stored_hp_max)
+        hp_remaining = max(1, min(hp_max, hp_remaining))
         last_engaged = entry.get("last_engaged_at")
         if last_engaged is not None:
             try:
@@ -1650,6 +1650,7 @@ class BossCombatMixin:
                         "attempts_this_fight": attempts,
                         "initial_win_chance": win_chance,
                         "multiplier": multiplier,
+                        "boss_hp_max": int(boss_hp_max),
                         # Snapshot the gear ids that fought THIS fight so the
                         # durability tick on resume hits these pieces, even
                         # if the player swapped gear during the pause.
@@ -1904,15 +1905,18 @@ class BossCombatMixin:
         self.dig_repo.clear_active_duel(discord_id, guild_id)
 
         snapshot_ids = status_effects.get("gear_snapshot_ids") or []
-        # Reconstruct boss_hp_max from the round log (highest post-hit value
-        # plus the player's per-round damage) to seed persisted-HP tracking.
-        approx_hp_max = max(
-            (int(r.get("boss_hp", 0)) for r in round_log if "boss_hp" in r),
-            default=int(boss_hp),
-        )
-        if approx_hp_max < int(boss_hp):
-            approx_hp_max = max(int(boss_hp), 1)
-        approx_hp_max += int(state_row["player_dmg"])
+        # New paused rows snapshot the authoritative active cap. Reconstruct
+        # it only for legacy rows created before that snapshot was persisted.
+        try:
+            resolved_hp_max = max(1, int(status_effects["boss_hp_max"]))
+        except (KeyError, TypeError, ValueError):
+            resolved_hp_max = max(
+                (int(r.get("boss_hp", 0)) for r in round_log if "boss_hp" in r),
+                default=int(boss_hp),
+            )
+            if resolved_hp_max < int(boss_hp):
+                resolved_hp_max = max(int(boss_hp), 1)
+            resolved_hp_max += int(state_row["player_dmg"])
         # Soften UX: best-effort starting HP for resumed fights is the
         # at-pause value (the post-pause portion of the fight is what gets
         # surfaced as soften progress).
@@ -1929,7 +1933,7 @@ class BossCombatMixin:
             attempts=attempts, boss_progress=boss_progress,
             depth=depth,
             gear_snapshot_ids=snapshot_ids,
-            ending_boss_hp=int(boss_hp), boss_hp_max=int(approx_hp_max),
+            ending_boss_hp=int(boss_hp), boss_hp_max=int(resolved_hp_max),
             starting_boss_hp=starting_boss_hp_for_resume,
             forced_no_wager_phase=bool(status_effects.get("forced_no_wager_phase")),
         )
@@ -2782,7 +2786,7 @@ class BossCombatMixin:
 
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
-        boss_progress = self._get_boss_progress(tunnel)
+        boss_progress = self._get_boss_progress_entries(tunnel)
         depth = tunnel.get("depth", 0)
         at_boss = self._at_boss_boundary(depth, boss_progress)
 
@@ -2848,7 +2852,10 @@ class BossCombatMixin:
                 prestige_level=prestige_level,
                 echo_applied=echo_applied,
             )
-            boss_hp = int(scaled["boss_hp"])
+            fresh_boss_hp = int(scaled["boss_hp"])
+            boss_hp, _ = self._resolve_persisted_boss_hp(
+                boss_progress, at_boss, fresh_boss_hp, now,
+            )
             boss_hit_chance = float(scaled["boss_hit"])
             boss_dmg_eff = int(scaled["boss_dmg"]) + lum_dmg_bonus
 
