@@ -26,6 +26,7 @@ from services.dig_constants import (
     CURSE_STRENGTH_MULT,
     DIG_EVENT_DEPTH_SETBACK_MULTIPLIER,
     DIG_EVENT_HARMFUL_WEIGHT_MULTIPLIER,
+    DIG_POSITIVE_JC_MULTIPLIER,
     EVENT_CHAIN_CHANCE,
     LUMINOSITY_BRIGHT,
     LUMINOSITY_DARK,
@@ -435,7 +436,9 @@ class EventsMixin:
                     "event_id": event_id, "choice": choice,
                     "jc_delta": jc_delta, "depth_delta": depth_delta,
                     "gross_jc": gross_jc,
-                    "reward_multiplier": 0.65 if gross_jc is not None else None,
+                    "reward_multiplier": (
+                        DIG_POSITIVE_JC_MULTIPLIER if gross_jc is not None else None
+                    ),
                 },
                 log_action_type="event",
             )
@@ -808,7 +811,9 @@ class EventsMixin:
                 "event_id": event_id, "choice": choice, "succeeded": succeeded,
                 "advance": advance, "jc": jc, "cave_in": cave_in,
                 "gross_jc": gross_jc,
-                "reward_multiplier": 0.65 if gross_jc is not None else None,
+                "reward_multiplier": (
+                    DIG_POSITIVE_JC_MULTIPLIER if gross_jc is not None else None
+                ),
                 "gear": gear_definition.item_id if gear_definition else None,
                 "consumable": consumable_reward_id,
                 "artifact": (

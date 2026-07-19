@@ -17,6 +17,7 @@ from services.dig._common import (
 )
 from services.dig_constants import (
     ARTIFACT_BY_ID,
+    DIG_POSITIVE_JC_MULTIPLIER,
     GEAR_BOSS_DROP_RATE,
     GEAR_DROP_DEPTH_TIER_MAP,
     GEAR_MAX_DURABILITY,
@@ -131,6 +132,11 @@ class GearMixin:
         if (
             not self._has_relic(discord_id, guild_id, "lantern_stub")
             or not self._is_first_dig_of_day(tunnel.get("last_dig_at"), today)
+            # Idempotency stamp: a dig that failed after the restore write
+            # leaves last_dig_at un-bumped, so the first-dig gate alone would
+            # re-apply the bonus on retry. The date stamp commits in the same
+            # UPDATE as the restore and closes the gate for the rest of the day.
+            or tunnel.get("lantern_stub_date") == today
         ):
             return luminosity
 
@@ -140,8 +146,13 @@ class GearMixin:
         luminosity += restored
         luminosity_info["luminosity_after"] = luminosity
         luminosity_info["lantern_stub_restored"] = restored
-        self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            luminosity=luminosity,
+            lantern_stub_date=today,
+        )
         tunnel["luminosity"] = luminosity
+        tunnel["lantern_stub_date"] = today
         return luminosity
 
     def _relic_storm_negates_hazard(
@@ -234,7 +245,7 @@ class GearMixin:
                     "claimed_today": already,
                     "credit": credit,
                     "gross_jc": gross_credit,
-                    "reward_multiplier": 0.65,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 },
             )
             return credit

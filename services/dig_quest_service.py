@@ -19,7 +19,10 @@ from collections.abc import Callable
 
 from repositories.dig_quest_repository import DigQuestRepository, QuestState
 from services.dig_constants import QUESTS, QuestDef
-from services.dig_data.balance import scale_positive_dig_jc
+from services.dig_data.balance import (
+    DIG_POSITIVE_JC_MULTIPLIER,
+    scale_positive_dig_jc,
+)
 
 logger = logging.getLogger("cama_bot.services.dig_quest")
 
@@ -290,7 +293,7 @@ class DigQuestService:
                 log_detail={
                     "quest_id": quest.quest_id,
                     "gross_jc": gross_jc,
-                    "reward_multiplier": 0.65,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "net_jc": net_jc,
                 },
             )

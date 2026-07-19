@@ -28,7 +28,10 @@ from services.dig_constants import (
     FREE_DIG_COOLDOWN_SECONDS,
     PHASE_TRANSITION_EVENTS,
 )
-from services.dig_data.balance import scale_positive_dig_jc
+from services.dig_data.balance import (
+    DIG_POSITIVE_JC_MULTIPLIER,
+    scale_positive_dig_jc,
+)
 from services.dig_service import DigService, _approx_duel_win_prob
 from tests.conftest import TEST_GUILD_ID
 
@@ -303,7 +306,7 @@ class TestDuelPayout:
         )[0]
         detail = json.loads(action["detail"])
         assert detail["gross_jc"] == BOSS_VICTORY_BASE_JC[25]
-        assert detail["reward_multiplier"] == 0.65
+        assert detail["reward_multiplier"] == DIG_POSITIVE_JC_MULTIPLIER
 
     @pytest.mark.parametrize("entrypoint", ["legacy", "state_machine"])
     def test_p4_ascension_scales_regular_boss_base_reward(

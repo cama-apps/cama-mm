@@ -400,8 +400,13 @@ class DigCommands(commands.Cog):
             relics = await asyncio.to_thread(
                 self.dig_service.get_owned_relics, interaction.user.id, guild_id
             )
+            # value must be the artifact id (what gift_relic matches on),
+            # not the display label. Discord caps choice values at 100 chars.
             choices = [
-                app_commands.Choice(name=r.get("name", str(r)), value=r.get("name", str(r)))
+                app_commands.Choice(
+                    name=r.get("name", str(r))[:100],
+                    value=str(r.get("id", ""))[:100],
+                )
                 for r in (relics or [])
                 if current.lower() in r.get("name", "").lower()
             ]
@@ -826,9 +831,10 @@ class DigCommands(commands.Cog):
             target_channel=target_channel,
         )
         if boon_event_file:
-            await self._send_public_dig(interaction, embed=event_embed, view=view, file=boon_event_file)
+            msg = await self._send_public_dig(interaction, embed=event_embed, view=view, file=boon_event_file)
         else:
-            await self._send_public_dig(interaction, embed=event_embed, view=view)
+            msg = await self._send_public_dig(interaction, embed=event_embed, view=view)
+        view.message = msg
 
     async def _send_choice_event_ui(
         self,
@@ -870,9 +876,10 @@ class DigCommands(commands.Cog):
             dig_flavor_service=self.dig_flavor_service,
         )
         if event_file:
-            await self._send_public_dig(interaction, embed=event_embed, view=view, file=event_file)
+            msg = await self._send_public_dig(interaction, embed=event_embed, view=view, file=event_file)
         else:
-            await self._send_public_dig(interaction, embed=event_embed, view=view)
+            msg = await self._send_public_dig(interaction, embed=event_embed, view=view)
+        view.message = msg
 
     async def _handle_boon_encounter(
         self,
@@ -1491,10 +1498,18 @@ class DigCommands(commands.Cog):
                 guild_id,
                 artifact,
             ))
+            if not getattr(result, "success", True):
+                await safe_followup(
+                    interaction,
+                    content=getattr(result, "error", "Gift failed."),
+                    ephemeral=True,
+                )
+                return
+            gifted_name = getattr(result, "artifact_name", artifact)
             await safe_followup(
                 interaction,
                 content=(
-                    f"You gifted **{artifact}** to **{user.display_name}**! "
+                    f"You gifted **{gifted_name}** to **{user.display_name}**! "
                     f"{getattr(result, 'message', '')}"
                 ),
             )
@@ -1915,7 +1930,9 @@ class DigCommands(commands.Cog):
                     self.dig_service, interaction.user.id, guild_id,
                     forced_d, unwrapped_choices, perks_view, perks_embed,
                 )
-                await safe_followup(interaction, embed=embed, view=mutation_view)
+                mutation_view.message = await safe_followup(
+                    interaction, embed=embed, view=mutation_view
+                )
                 return
 
         # No mutations — go straight to perk selection. Only list the 4
@@ -1925,7 +1942,7 @@ class DigCommands(commands.Cog):
             value="\n".join(f"**{p.get('name', '?')}**" for p in perks_view.perks),
             inline=False,
         )
-        await safe_followup(interaction, embed=embed, view=perks_view)
+        perks_view.message = await safe_followup(interaction, embed=embed, view=perks_view)
 
     # ------------------------------------------------------------------
     # 11. /dig_abandon — Abandon tunnel
@@ -2018,6 +2035,13 @@ class DigCommands(commands.Cog):
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.set_trap, interaction.user.id, guild_id
             ))
+            if not getattr(result, "success", True):
+                await safe_followup(
+                    interaction,
+                    content=getattr(result, "error", "Failed to set trap."),
+                    ephemeral=True,
+                )
+                return
             cost = getattr(result, "cost", 0)
             msg = "Trap set!"
             if cost:

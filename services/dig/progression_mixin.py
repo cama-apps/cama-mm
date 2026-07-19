@@ -26,6 +26,7 @@ from services.dig._common import (
 )
 from services.dig_constants import (
     CONSUMABLE_ITEMS,
+    DIG_POSITIVE_JC_MULTIPLIER,
     DIG_TIPS,
     GEAR_TIER_TABLES,
     HELLTIDE_MODIFIER_ID,
@@ -840,7 +841,7 @@ class ProgressionMixin:
                 "target_depth_before": target_depth, "target_depth_after": new_depth,
                 "mentor_bonus": mentor_active,
                 "gross_jc": helper_gross_jc,
-                "reward_multiplier": 0.65,
+                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
             },
         )
         if target_jc_bonus > 0:
@@ -858,7 +859,7 @@ class ProgressionMixin:
                         "advance": advance,
                         "bonus": target_jc_bonus,
                         "gross_jc": target_gross_jc,
-                        "reward_multiplier": 0.65,
+                        "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     },
                 )
             except Exception:
@@ -940,6 +941,27 @@ class ProgressionMixin:
             else:
                 if protection.blocked:
                     awarded_tip = 0 if protection.duplicate else victim_block_tip
+                    attempt_cost = 0
+                    if not awarded_tip:
+                        # Repeat attempt inside the shield window: no tip for
+                        # the victim, but the attempt still costs and is
+                        # logged — probing the shield isn't free or invisible.
+                        attempt_cost = cost
+                        self.dig_repo.atomic_sabotage(
+                            actor_id=actor_id,
+                            target_id=target_id,
+                            guild_id=guild_id,
+                            target_depth_delta=0,
+                            actor_jc_cost=cost,
+                            log_detail={
+                                "target_id": target_id,
+                                "absorbed": True,
+                                "duplicate_block": True,
+                                "cost": cost,
+                                "victim_tip": 0,
+                                "protection_source": protection.source,
+                            },
+                        )
                     if awarded_tip:
                         self.player_repo.add_balance(
                             target_id,
@@ -953,7 +975,7 @@ class ProgressionMixin:
                             metadata={
                                 "tip": awarded_tip,
                                 "gross_jc": victim_block_tip_gross,
-                                "reward_multiplier": 0.65,
+                                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                                 "protection_source": protection.source,
                             },
                         )
@@ -970,7 +992,7 @@ class ProgressionMixin:
                             }),
                         )
                     return self._ok(
-                        cost=0,
+                        cost=attempt_cost,
                         damage=0,
                         target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
                         trap_triggered=False,
@@ -998,7 +1020,7 @@ class ProgressionMixin:
                         metadata={
                             "tip": victim_block_tip,
                             "gross_jc": victim_block_tip_gross,
-                            "reward_multiplier": 0.65,
+                            "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                         },
                     )
                     return self._error(
@@ -1020,7 +1042,7 @@ class ProgressionMixin:
                         metadata={
                             "tip": victim_block_tip,
                             "gross_jc": victim_block_tip_gross,
-                            "reward_multiplier": 0.65,
+                            "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                         },
                     )
                     self.dig_repo.log_action(
@@ -1246,7 +1268,7 @@ class ProgressionMixin:
                             "target_depth": target_depth,
                             "amount": attacker_steal_jc,
                             "gross_jc": attacker_steal_gross_jc,
-                            "reward_multiplier": 0.65,
+                            "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                         },
                     )
             except Exception:
@@ -1292,7 +1314,7 @@ class ProgressionMixin:
                         "attacker_id": actor_id,
                         "damage": damage,
                         "gross_jc": vendetta_bonus_gross,
-                        "reward_multiplier": 0.65,
+                        "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     },
                 )
                 self.dig_repo.log_action(

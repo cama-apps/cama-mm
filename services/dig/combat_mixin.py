@@ -39,6 +39,7 @@ from services.dig_constants import (
     BOSS_TIER_BONUS,
     BOSS_VICTORY_BASE_JC,
     CHEER_COOLDOWN_SECONDS,
+    DIG_POSITIVE_JC_MULTIPLIER,
     PHASE_TRANSITION_EVENTS,
     PINNACLE_BOSSES,
     PINNACLE_DEPTH,
@@ -558,12 +559,16 @@ class BossCombatMixin:
         if not pool:
             raise ValueError(f"No boss pool for tier {depth}")
         boss = random.Random().choice(pool)
-        status = (
-            entry.get("status", "active")
-            if isinstance(entry, dict)
-            else (entry if isinstance(entry, str) else "active")
-        )
-        progress[str(depth)] = {"boss_id": boss.boss_id, "status": status}
+        # Merge the locked boss_id into the existing entry instead of
+        # replacing it — a just-persisted active_prep (or any other entry
+        # key) must survive the lock.
+        if isinstance(entry, dict):
+            merged = dict(entry)
+            merged.setdefault("status", "active")
+        else:
+            merged = {"status": entry if isinstance(entry, str) else "active"}
+        merged["boss_id"] = boss.boss_id
+        progress[str(depth)] = merged
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
             boss_progress=json.dumps(progress),
@@ -668,9 +673,13 @@ class BossCombatMixin:
             wager, risk_tier = carried
         elif carried is not None:
             self._clear_carried_wager(boss_progress, at_boss)
+            _encoded_progress = json.dumps(boss_progress)
             self.dig_repo.update_tunnel(
-                discord_id, guild_id, boss_progress=json.dumps(boss_progress),
+                discord_id, guild_id, boss_progress=_encoded_progress,
             )
+            # Keep the local tunnel copy current — _ensure_boss_locked later
+            # re-parses it and must not resurrect the cleared markers.
+            tunnel["boss_progress"] = _encoded_progress
             carried = None
 
         if risk_tier not in ("cautious", "bold", "reckless"):
@@ -1162,8 +1171,7 @@ class BossCombatMixin:
                     "wager": wager, "jc_delta": payout_delta,
                     "gross_jc": gross_base_reward,
                     "gross_payout": gross_payout,
-                    "reward_multiplier": 0.65,
-                    "gross_base_jc": gross_base_reward,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "scaled_base_jc": scaled_base_reward,
                     "wager_profit": wager_profit,
                     "stat_point_awarded": stat_point_awarded,
@@ -1351,9 +1359,13 @@ class BossCombatMixin:
             wager, risk_tier = carried
         elif carried is not None:
             self._clear_carried_wager(boss_progress, at_boss)
+            _encoded_progress = json.dumps(boss_progress)
             self.dig_repo.update_tunnel(
-                discord_id, guild_id, boss_progress=json.dumps(boss_progress),
+                discord_id, guild_id, boss_progress=_encoded_progress,
             )
+            # Keep the local tunnel copy current — _ensure_boss_locked later
+            # re-parses it and must not resurrect the cleared markers.
+            tunnel["boss_progress"] = _encoded_progress
             carried = None
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
@@ -1444,6 +1456,16 @@ class BossCombatMixin:
 
         # Ensure a specific boss is locked for this tunnel at this tier.
         boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
+        # Fold the locked boss_id into the local copy so the post-fight
+        # boss_progress write-backs don't drop it.
+        _lock_entry = boss_progress.get(str(at_boss))
+        if isinstance(_lock_entry, dict):
+            _lock_entry.setdefault("boss_id", boss.boss_id)
+        else:
+            boss_progress[str(at_boss)] = {
+                "boss_id": boss.boss_id,
+                "status": _lock_entry if isinstance(_lock_entry, str) else "active",
+            }
 
         # Pick which mechanic fires this fight (variance on what prompt fires).
         mechanic_id = ""
@@ -2491,8 +2513,7 @@ class BossCombatMixin:
                     "wager": wager, "jc_delta": net_payout,
                     "gross_jc": gross_base_reward,
                     "gross_payout": gross_payout,
-                    "reward_multiplier": 0.65,
-                    "gross_base_jc": gross_base_reward,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "scaled_base_jc": scaled_base_reward,
                     "wager_profit": wager_profit,
                     "stat_point_awarded": stat_point_awarded,
