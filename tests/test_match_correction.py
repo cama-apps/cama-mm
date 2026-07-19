@@ -739,3 +739,105 @@ class TestMatchCorrection:
         for pid in player_ids:
             slen, mult = expected_streaks[pid]
             assert stored_streaks[pid] == (slen, pytest.approx(mult))
+
+
+def test_correction_finishes_after_partial_win_bonus_failure(correction_services):
+    """A failure while awarding corrected winners must abort BEFORE the
+    winning_team flip so the identical correction stays retryable, and the
+    retry must complete the payout exactly once per player — skipping the
+    winner already paid on the failed attempt."""
+    match_service = correction_services["match_service"]
+    betting_service = correction_services["betting_service"]
+    player_repo = correction_services["player_repo"]
+    match_repo = correction_services["match_repo"]
+
+    player_ids = _create_players(player_repo, start_id=14000)
+    start = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in player_ids}
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    radiant_ids = pending.radiant_team_ids
+    dire_ids = pending.dire_team_ids
+    match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+    match_id = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)["match_id"]
+
+    # Fail the award for the SECOND corrected winner: the first is already
+    # paid and snapshotted when the correction dies.
+    real_award = betting_service.award_win_bonus
+    calls = {"n": 0}
+
+    def flaky_award(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_award(*args, **kwargs)
+
+    betting_service.award_win_bonus = flaky_award
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            match_service.correct_match_result(
+                match_id, "dire", TEST_GUILD_ID, corrected_by=99999
+            )
+    finally:
+        betting_service.award_win_bonus = real_award
+
+    # The flip never happened, so the same correction can simply be re-run.
+    assert match_repo.get_match(match_id, TEST_GUILD_ID)["winning_team"] == 1
+
+    match_service.correct_match_result(match_id, "dire", TEST_GUILD_ID, corrected_by=99999)
+
+    # Exactly-once for every player: old winners fully reversed (once), new
+    # winners hold participation plus exactly one win bonus.
+    for pid in radiant_ids:
+        assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid]
+    for pid in dire_ids:
+        assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+            start[pid] + JOPACOIN_PER_GAME + JOPACOIN_WIN_REWARD
+        )
+
+
+def test_win_bonus_reversal_marks_rows_and_never_double_debits(correction_services):
+    """The reversal must mark reversed rows with win_bonus_jc = 0 — not NULL,
+    because NULL means 'legacy pre-snapshot match' and falls back to a gross
+    debit — so recomputing the debits the way the correction does yields
+    nothing and a repeat reversal cannot double-debit."""
+    match_service = correction_services["match_service"]
+    match_repo = correction_services["match_repo"]
+    player_repo = correction_services["player_repo"]
+
+    player_ids = _create_players(player_repo, start_id=15000)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    radiant_ids = pending.radiant_team_ids
+    match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+    match_id = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)["match_id"]
+
+    def compute_debits():
+        participants = {
+            p["discord_id"]: p
+            for p in match_repo.get_match_participants(match_id, TEST_GUILD_ID)
+        }
+        debits = {}
+        for pid in radiant_ids:
+            stored = participants.get(pid, {}).get("win_bonus_jc")
+            amount = int(stored) if stored is not None else JOPACOIN_WIN_REWARD
+            if amount > 0:
+                debits[pid] = amount
+        return debits
+
+    first = compute_debits()
+    assert first == dict.fromkeys(radiant_ids, JOPACOIN_WIN_REWARD)
+    before = {pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in radiant_ids}
+    match_repo.apply_win_bonus_reversal_atomic(match_id, TEST_GUILD_ID, first)
+
+    participants = {
+        p["discord_id"]: p
+        for p in match_repo.get_match_participants(match_id, TEST_GUILD_ID)
+    }
+    for pid in radiant_ids:
+        assert participants[pid]["win_bonus_jc"] == 0
+    assert compute_debits() == {}
+    for pid in radiant_ids:
+        assert (
+            player_repo.get_balance(pid, TEST_GUILD_ID)
+            == before[pid] - JOPACOIN_WIN_REWARD
+        )

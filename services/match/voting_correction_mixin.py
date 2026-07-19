@@ -275,7 +275,60 @@ class VotingCorrectionMixin:
                     or (new_winning_team == "dire" and b["team_bet_on"] == "dire")
                 ]
 
-        # 8. Atomic core: swap wins/losses, apply new ratings, rewrite history,
+        # 8. JC win-bonus correction: the old "winners" keep their win bonus
+        # and the corrected winners never got theirs unless it moves here.
+        # This runs BEFORE the atomic winning_team flip so a failure anywhere
+        # in it aborts the correction with no visible flip, and the identical
+        # retry can finish the job — every sub-step is idempotent. New winners
+        # are awarded first, each through the existing award primitive (so
+        # current garnishment / bankruptcy rules apply) and snapshotted
+        # individually right after, so a retry skips winners already paid
+        # instead of double-crediting them. The reversal runs last: it debits
+        # each old winner's recorded win-bonus balance delta (win_bonus_jc,
+        # snapshotted at recording) and marks the row 0 in the same txn, so a
+        # re-run recomputes a zero debit and skips it; matches recorded before
+        # the snapshot existed fall back to the gross JOPACOIN_WIN_REWARD —
+        # the best recoverable figure, since garnishment stayed in the balance
+        # and any bankruptcy penalty withheld back then was never persisted
+        # per-player.
+        win_bonus_correction: dict = {}
+        if self.betting_service and hasattr(self.match_repo, "apply_win_bonus_reversal_atomic"):
+            from config import JOPACOIN_WIN_REWARD
+
+            participants_by_id = {p["discord_id"]: p for p in participants}
+
+            win_bonus_awarded: dict[int, int] = {}
+            can_snapshot = hasattr(self.match_repo, "update_participant_bonus_jc")
+            for pid in new_winner_ids:
+                stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
+                if stored is not None and int(stored) > 0:
+                    # Already paid by an earlier, partially-failed run of this
+                    # same correction.
+                    continue
+                awards = self.betting_service.award_win_bonus([pid], guild_id)
+                result = awards.get(pid, {})
+                delta = int(result.get("net", 0)) + int(result.get("garnished", 0))
+                win_bonus_awarded[pid] = delta
+                if can_snapshot:
+                    self.match_repo.update_participant_bonus_jc(
+                        match_id, guild_id, {}, win_bonus_by_player={pid: delta}
+                    )
+
+            win_bonus_debits: dict[int, int] = {}
+            for pid in old_winner_ids:
+                stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
+                amount = int(stored) if stored is not None else JOPACOIN_WIN_REWARD
+                if amount > 0:
+                    win_bonus_debits[pid] = amount
+            self.match_repo.apply_win_bonus_reversal_atomic(
+                match_id, guild_id, win_bonus_debits
+            )
+            win_bonus_correction = {
+                "reversed": win_bonus_debits,
+                "awarded": win_bonus_awarded,
+            }
+
+        # 9. Atomic core: swap wins/losses, apply new ratings, rewrite history,
         # flip matches.winning_team, re-apply pairings, and log the correction
         # — all in one BEGIN IMMEDIATE. Bet settlement stays outside.
         correction_id = self.match_repo.correct_match_result_atomic(
@@ -293,7 +346,7 @@ class VotingCorrectionMixin:
             corrected_by=corrected_by,
         )
 
-        # 9. Bet payout correction: reverse old winners, pay new winners, and
+        # 10. Bet payout correction: reverse old winners, pay new winners, and
         # apply the combined balance deltas — all folded into ONE atomic
         # transaction inside bet_repo so the bets-table payout rewrite and the
         # player-balance credits commit-or-rollback together. If this raises,
@@ -317,46 +370,6 @@ class VotingCorrectionMixin:
                 "old_winners_reversed": len(old_winning_bets),
                 "new_winners_paid": len(new_winning_bets),
                 "balance_changes": combined_bet_deltas,
-            }
-
-        # 10. JC win-bonus correction: the old "winners" keep their win bonus
-        # and the corrected winners never got theirs unless it moves here.
-        # The reversal debits each old winner's recorded win-bonus balance
-        # delta (win_bonus_jc, snapshotted at recording) in one atomic txn;
-        # matches recorded before the snapshot existed fall back to the gross
-        # JOPACOIN_WIN_REWARD — the best recoverable figure, since garnishment
-        # stayed in the balance and any bankruptcy penalty withheld back then
-        # was never persisted per-player. The re-award goes through the
-        # existing award primitive (so current garnishment / bankruptcy rules
-        # apply) and its delta is snapshotted so a repeat correction reverses
-        # exactly what was paid.
-        win_bonus_correction: dict = {}
-        if self.betting_service and hasattr(self.match_repo, "apply_win_bonus_reversal_atomic"):
-            from config import JOPACOIN_WIN_REWARD
-
-            participants_by_id = {p["discord_id"]: p for p in participants}
-            win_bonus_debits: dict[int, int] = {}
-            for pid in old_winner_ids:
-                stored = participants_by_id.get(pid, {}).get("win_bonus_jc")
-                amount = int(stored) if stored is not None else JOPACOIN_WIN_REWARD
-                if amount > 0:
-                    win_bonus_debits[pid] = amount
-            self.match_repo.apply_win_bonus_reversal_atomic(
-                match_id, guild_id, win_bonus_debits
-            )
-
-            new_win_awards = self.betting_service.award_win_bonus(new_winner_ids, guild_id)
-            win_bonus_awarded = {
-                pid: int(r.get("net", 0)) + int(r.get("garnished", 0))
-                for pid, r in new_win_awards.items()
-            }
-            if win_bonus_awarded and hasattr(self.match_repo, "update_participant_bonus_jc"):
-                self.match_repo.update_participant_bonus_jc(
-                    match_id, guild_id, {}, win_bonus_by_player=win_bonus_awarded
-                )
-            win_bonus_correction = {
-                "reversed": win_bonus_debits,
-                "awarded": win_bonus_awarded,
             }
 
         logger.info(

@@ -60,46 +60,59 @@ class RecordingMixin:
             for pid, amounts in awards.items():
                 bonus_net[pid] = bonus_net.get(pid, 0) + int(amounts.get("net", 0))
 
-        if bonuses_claimed:
-            _accumulate(
-                self.betting_service.award_participation(
-                    losing_ids, guild_id, is_bomb_pot=is_bomb_pot
-                )
-            )
-            if is_bomb_pot:
-                # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
+        # Any failure below, after the claim was consumed, would otherwise
+        # strand the match: retries see the consumed claim and skip the whole
+        # block, so players not yet paid could never be paid. Compensating the
+        # partial credits and returning the claim keeps both properties: no
+        # double-pay (nobody keeps a partial credit) and no permanent skip
+        # (the retry re-pays everyone exactly once).
+        try:
+            if bonuses_claimed:
                 _accumulate(
                     self.betting_service.award_participation(
-                        winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+                        losing_ids, guild_id, is_bomb_pot=is_bomb_pot
+                    )
+                )
+                if is_bomb_pot:
+                    # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
+                    _accumulate(
+                        self.betting_service.award_participation(
+                            winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+                        )
+                    )
+
+            distributions = self.betting_service.settle_bets(
+                match_id, guild_id, winning_team, pending_state=last_shuffle
+            )
+            distributions["streaks"] = {}
+            if not bonuses_claimed:
+                return distributions
+
+            win_awards = self.betting_service.award_win_bonus(winning_ids, guild_id)
+            _accumulate(win_awards)
+            if excluded_player_ids:
+                _accumulate(
+                    self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
+                )
+            excluded_conditional_ids = last_shuffle.excluded_conditional_player_ids
+            if excluded_conditional_ids:
+                _accumulate(
+                    self.betting_service.award_exclusion_bonus_half(
+                        excluded_conditional_ids, guild_id
                     )
                 )
 
-        distributions = self.betting_service.settle_bets(
-            match_id, guild_id, winning_team, pending_state=last_shuffle
-        )
-        distributions["streaks"] = {}
-        if not bonuses_claimed:
-            return distributions
-
-        win_awards = self.betting_service.award_win_bonus(winning_ids, guild_id)
-        _accumulate(win_awards)
-        if excluded_player_ids:
-            _accumulate(
-                self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
+            # Daily-play streak bonus. Only fires for actual players (winning_ids +
+            # losing_ids, never bench/excluded), and reuses the same 4 AM PST
+            # rollover that /dig uses so the two systems can't drift on day math.
+            streaks = self._award_dota_streak_bonuses(
+                winning_ids + losing_ids, guild_id, _accumulate
             )
-        excluded_conditional_ids = last_shuffle.excluded_conditional_player_ids
-        if excluded_conditional_ids:
-            _accumulate(
-                self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
-            )
-
-        # Daily-play streak bonus. Only fires for actual players (winning_ids +
-        # losing_ids, never bench/excluded), and reuses the same 4 AM PST
-        # rollover that /dig uses so the two systems can't drift on day math.
-        streaks = self._award_dota_streak_bonuses(
-            winning_ids + losing_ids, guild_id, _accumulate
-        )
-        distributions["streaks"] = streaks
+            distributions["streaks"] = streaks
+        except Exception:
+            if bonuses_claimed:
+                self._rollback_partial_bonuses(match_id, guild_id, bonus_net)
+            raise
 
         # Snapshot the win bonus separately as the balance delta it actually
         # produced (gross minus bankruptcy penalty / skims; garnishment is a
@@ -117,6 +130,42 @@ class RecordingMixin:
             )
 
         return distributions
+
+    def _rollback_partial_bonuses(
+        self, match_id: int, guild_id: int | None, bonus_net: dict[int, int]
+    ) -> None:
+        """Best-effort undo of a partially-paid bonus block, then return the claim.
+
+        Debits back each net balance credit made under this match's bonus claim
+        so a retry can pay everyone exactly once. Garnished portions stay where
+        they went (debt paydown): the retry re-garnishes from the fresh gross,
+        so cash is exactly-once and the residual is a small, player-favorable
+        extra debt paydown — never minted cash. If the compensation itself
+        fails, the claim stays consumed (fail closed, no double-pay possible)
+        and the exact per-player amounts are logged for manual repair.
+        """
+        try:
+            for pid, net in bonus_net.items():
+                if net:
+                    self.player_repo.add_balance(
+                        pid,
+                        guild_id,
+                        -int(net),
+                        source="match_bonus_rollback",
+                        related_type="match",
+                        related_id=match_id,
+                        reason="Bonus payout failed mid-match; compensating so a retry pays exactly once",
+                    )
+            if hasattr(self.match_repo, "release_match_bonuses_claim"):
+                self.match_repo.release_match_bonuses_claim(match_id, guild_id)
+        except Exception:
+            logger.critical(
+                "Match %s (guild %s) bonus rollback failed; claim stays consumed "
+                "so nothing can double-pay. Uncompensated nets: %s",
+                match_id,
+                guild_id,
+                bonus_net,
+            )
 
     def _award_dota_streak_bonuses(
         self,

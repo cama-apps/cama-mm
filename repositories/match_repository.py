@@ -1074,14 +1074,38 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.rowcount == 1
 
+    def release_match_bonuses_claim(self, match_id: int, guild_id: int | None) -> bool:
+        """Give back a consumed bonus claim after a failed, compensated payout.
+
+        Only meaningful when the caller has undone the credits it made under
+        the claim: releasing without compensating would re-pay the players
+        already credited on the next retry.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE matches
+                SET bonuses_paid = 0
+                WHERE match_id = ? AND guild_id = ?
+                  AND COALESCE(bonuses_paid, 0) = 1
+                """,
+                (match_id, normalized_guild),
+            )
+            return cursor.rowcount == 1
+
     def apply_win_bonus_reversal_atomic(
         self, match_id: int, guild_id: int | None, debits_by_player: dict[int, int]
     ) -> None:
         """Reverse previously-awarded win bonuses in one BEGIN IMMEDIATE.
 
         Debits each old winner's balance by the recorded win-bonus balance
-        delta and clears their ``win_bonus_jc`` snapshot (it no longer holds
-        a live bonus to reverse), so a repeat correction can't double-debit.
+        delta and marks their ``win_bonus_jc`` snapshot as 0 (no live bonus
+        left to reverse), so a repeat correction can't double-debit. The
+        marker must be 0, not NULL: callers treat NULL as "legacy pre-snapshot
+        match" and fall back to debiting the gross reward, which would re-debit
+        on retry.
         """
         if not debits_by_player:
             return
@@ -1115,7 +1139,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.executemany(
                 """
                 UPDATE match_participants
-                SET win_bonus_jc = NULL
+                SET win_bonus_jc = 0
                 WHERE match_id = ? AND discord_id = ? AND guild_id = ?
                 """,
                 [(match_id, discord_id, normalized_guild) for discord_id in debits_by_player],
