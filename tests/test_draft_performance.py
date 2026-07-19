@@ -1,9 +1,11 @@
 """Performance tests for draft pool selection algorithm.
 
 Tests beam search quality and performance compared to exhaustive search.
-"""
 
-import time
+Performance is asserted via deterministic work counts (calls to
+``_score_full_pool``, the dominant cost per shuffler.py) rather than
+wall-clock time, which flakes under ``-n auto`` CPU oversubscription.
+"""
 
 from domain.models.player import Player
 from shuffler import BalancedShuffler
@@ -23,6 +25,23 @@ def _make_player(
         preferred_roles=roles or ["1", "2", "3", "4", "5"],
         discord_id=discord_id or hash(name) % 100000,
     )
+
+
+def _count_score_evals(shuffler: BalancedShuffler) -> dict:
+    """Instrument shuffler._score_full_pool to count pool evaluations.
+
+    Pool scoring is the dominant cost of draft pool selection, so the call
+    count is a deterministic, load-independent proxy for wall-clock time.
+    """
+    calls = {"n": 0}
+    original = shuffler._score_full_pool
+
+    def counted(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    shuffler._score_full_pool = counted
+    return calls
 
 
 class TestBeamSearchQuality:
@@ -111,62 +130,65 @@ class TestBeamSearchQuality:
 
 
 class TestBeamSearchPerformance:
-    """Tests that beam search is fast enough for large candidate pools."""
+    """Tests that beam search does bounded work for large candidate pools.
 
-    def test_beam_search_15_candidates_under_3_seconds(self):
-        """15 candidates should complete in under 3 seconds."""
+    Eval budgets derive from the original wall-clock bounds (3s/4s/5s/8s) at
+    the ~3ms-per-eval cost documented in shuffler.py, so a regression that
+    blows up the number of scored pools (e.g. losing memoization, early exit,
+    or stagnation cutoff) still fails. For comparison, exhaustive search
+    scores C(n, 8) pools: 6435 at n=15, 735471 at n=24.
+    """
+
+    def test_beam_search_15_candidates_bounded_work(self):
+        """15 candidates should score at most ~1000 pools (was: < 3s)."""
         shuffler = BalancedShuffler()
+        calls = _count_score_evals(shuffler)
         captain_a = _make_player("CaptA", 1600)
         captain_b = _make_player("CaptB", 1550)
         candidates = [_make_player(f"P{i}", 1400 + i * 30) for i in range(15)]
 
-        start = time.time()
         result = shuffler.select_draft_pool_beam(captain_a, captain_b, candidates)
-        elapsed = time.time() - start
 
-        assert elapsed < 3.0, f"Beam search took {elapsed:.2f}s, expected < 3s"
+        assert calls["n"] <= 1000, f"Beam search scored {calls['n']} pools, expected <= 1000"
         assert len(result.selected_players) == 8
 
-    def test_beam_search_18_candidates_under_4_seconds(self):
-        """18 candidates should complete in under 4 seconds."""
+    def test_beam_search_18_candidates_bounded_work(self):
+        """18 candidates should score at most ~1300 pools (was: < 4s)."""
         shuffler = BalancedShuffler()
+        calls = _count_score_evals(shuffler)
         captain_a = _make_player("CaptA", 1600)
         captain_b = _make_player("CaptB", 1550)
         candidates = [_make_player(f"P{i}", 1400 + i * 25) for i in range(18)]
 
-        start = time.time()
         result = shuffler.select_draft_pool_beam(captain_a, captain_b, candidates)
-        elapsed = time.time() - start
 
-        assert elapsed < 4.0, f"Beam search took {elapsed:.2f}s, expected < 4s"
+        assert calls["n"] <= 1300, f"Beam search scored {calls['n']} pools, expected <= 1300"
         assert len(result.selected_players) == 8
 
-    def test_beam_search_20_candidates_under_5_seconds(self):
-        """20 candidates should complete in under 5 seconds."""
+    def test_beam_search_20_candidates_bounded_work(self):
+        """20 candidates should score at most ~1600 pools (was: < 5s)."""
         shuffler = BalancedShuffler()
+        calls = _count_score_evals(shuffler)
         captain_a = _make_player("CaptA", 1600)
         captain_b = _make_player("CaptB", 1550)
         candidates = [_make_player(f"P{i}", 1400 + i * 20) for i in range(20)]
 
-        start = time.time()
         result = shuffler.select_draft_pool_beam(captain_a, captain_b, candidates)
-        elapsed = time.time() - start
 
-        assert elapsed < 5.0, f"Beam search took {elapsed:.2f}s, expected < 5s"
+        assert calls["n"] <= 1600, f"Beam search scored {calls['n']} pools, expected <= 1600"
         assert len(result.selected_players) == 8
 
-    def test_beam_search_24_candidates_under_8_seconds(self):
-        """24 candidates (max supported) should complete in under 8 seconds."""
+    def test_beam_search_24_candidates_bounded_work(self):
+        """24 candidates (max supported) should score at most ~2600 pools (was: < 8s)."""
         shuffler = BalancedShuffler()
+        calls = _count_score_evals(shuffler)
         captain_a = _make_player("CaptA", 1600)
         captain_b = _make_player("CaptB", 1550)
         candidates = [_make_player(f"P{i}", 1400 + i * 15) for i in range(24)]
 
-        start = time.time()
         result = shuffler.select_draft_pool_beam(captain_a, captain_b, candidates)
-        elapsed = time.time() - start
 
-        assert elapsed < 8.0, f"Beam search took {elapsed:.2f}s, expected < 8s"
+        assert calls["n"] <= 2600, f"Beam search scored {calls['n']} pools, expected <= 2600"
         assert len(result.selected_players) == 8
         assert len(result.excluded_players) == 16
 
@@ -205,14 +227,22 @@ class TestSelectDraftPoolRouting:
         captain_b = _make_player("CaptB", 1550)
         candidates = [_make_player(f"P{i}", 1400 + i * 30) for i in range(13)]
 
-        start = time.time()
+        # Spy on the beam entry point to verify routing directly (the old
+        # wall-clock check only inferred it).
+        beam_calls = {"n": 0}
+        original_beam = shuffler.select_draft_pool_beam
+
+        def spying_beam(*args, **kwargs):
+            beam_calls["n"] += 1
+            return original_beam(*args, **kwargs)
+
+        shuffler.select_draft_pool_beam = spying_beam
+
         result = shuffler.select_draft_pool(captain_a, captain_b, candidates)
-        elapsed = time.time() - start
 
         assert len(result.selected_players) == 8
         assert len(result.excluded_players) == 5
-        # Should be fast (beam search)
-        assert elapsed < 3.0, f"Expected beam search but took {elapsed:.2f}s"
+        assert beam_calls["n"] == 1, "13 candidates should route to beam search"
 
 
 class TestEdgeCases:
@@ -272,6 +302,7 @@ class TestEarlyExit:
     def test_early_exit_with_balanced_pool(self):
         """With a well-balanced initial pool, beam search should exit early."""
         shuffler = BalancedShuffler()
+        calls = _count_score_evals(shuffler)
         # Identical captains
         captain_a = _make_player("CaptA", 1500, roles=["1", "2", "3", "4", "5"])
         captain_b = _make_player("CaptB", 1500, roles=["1", "2", "3", "4", "5"])
@@ -282,12 +313,12 @@ class TestEarlyExit:
             for i in range(15)
         ]
 
-        start = time.time()
         result = shuffler.select_draft_pool_beam(captain_a, captain_b, candidates)
-        elapsed = time.time() - start
 
         # Should exit early due to good initial pool
         # Score should be negative (due to RD priority bonus)
         assert result.pool_score < 150.0
-        # Should be very fast
-        assert elapsed < 1.0, f"Should exit early but took {elapsed:.2f}s"
+        # Early exit on the initial pool means exactly one pool was scored
+        assert calls["n"] == 1, (
+            f"Expected immediate early exit (1 pool scored), got {calls['n']}"
+        )

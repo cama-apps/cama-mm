@@ -398,32 +398,30 @@ class TestShuffler:
             shuffler.shuffle_from_pool(players)
 
     def test_off_role_penalty_applied(self):
-        """Test that off-role penalty is applied in scoring."""
-        # Create players where some must play off-role
+        """Off-role penalty steers selection away from off-role compositions."""
+        # Putting both carries (900/1100) on one team gives a perfectly balanced
+        # split (value diff 0) but forces 2 off-roles; separating the carries
+        # costs a 200 value diff but plays everyone on-role. With a high
+        # off-role penalty the shuffle must pick the on-role split.
         players = [
-            Player(name="P1", mmr=2000, preferred_roles=["1"]),
-            Player(name="P2", mmr=1900, preferred_roles=["1"]),  # Two carry players
-            Player(name="P3", mmr=1800, preferred_roles=["2"]),
-            Player(name="P4", mmr=1700, preferred_roles=["2"]),  # Two mid players
-            Player(name="P5", mmr=1600, preferred_roles=["3"]),
-            Player(name="P6", mmr=1500, preferred_roles=["3"]),  # Two offlane players
-            Player(name="P7", mmr=1400, preferred_roles=["4"]),
-            Player(name="P8", mmr=1300, preferred_roles=["4"]),  # Two soft support
-            Player(name="P9", mmr=1200, preferred_roles=["5"]),
-            Player(name="P10", mmr=1100, preferred_roles=["5"]),  # Two hard support
+            Player(name="CarryA", mmr=900, preferred_roles=["1"]),
+            Player(name="CarryB", mmr=1100, preferred_roles=["1"]),
         ]
-        shuffler = BalancedShuffler(use_glicko=False, off_role_flat_penalty=50.0)
+        for i, role in enumerate(["2", "2", "3", "3", "4", "4", "5", "5"]):
+            players.append(Player(name=f"Filler{i}", mmr=1000, preferred_roles=[role]))
+
+        shuffler = BalancedShuffler(
+            use_glicko=False,
+            off_role_flat_penalty=1000.0,
+            role_matchup_delta_weight=0.0,
+        )
         team1, team2 = shuffler.shuffle(players)
 
-        # At least one team should have some off-role players
-        # (since we have duplicates of each role)
-        off_roles_team1 = team1.get_off_role_count()
-        off_roles_team2 = team2.get_off_role_count()
-
-        # The algorithm should try to minimize off-roles
-        # But with this setup, some off-roles are inevitable
-        total_off_roles = off_roles_team1 + off_roles_team2
-        assert total_off_roles >= 0  # At least tracked correctly
+        total_off_roles = team1.get_off_role_count() + team2.get_off_role_count()
+        assert total_off_roles == 0, (
+            "With a high off-role penalty, the shuffle must choose the on-role "
+            "split even though an off-role split has a smaller rating difference"
+        )
 
     def test_role_assignments_consider_matchup_delta(self):
         """Higher-MMR cores should land in mid when matchups tie on off-role count."""
@@ -473,47 +471,29 @@ class TestShuffler:
         assert best_team1_roles[flex_mid_index] != "2"
 
     def test_shuffle_from_pool_with_exclusion_counts(self):
-        """Test that exclusion counts influence player selection."""
-        # Create 12 players with varying exclusion counts
-        players = []
-        exclusion_counts = {}
+        """Exclusion counts influence selection: the frequently-excluded players
+        are protected and the never-excluded player sits out."""
+        # 11 identical players; only exclusion counts differ, so the exclusion
+        # penalty is the sole discriminator between candidate exclusions.
+        players = [
+            Player(name=f"Player{i}", mmr=1500, preferred_roles=["1", "2", "3", "4", "5"])
+            for i in range(11)
+        ]
+        exclusion_counts = {p.name: 5 for p in players}
+        exclusion_counts["Player0"] = 0  # never sat out -> should be excluded
 
-        # Players 1-10: normal exclusion counts (0-2)
-        for i in range(10):
-            player = Player(name=f"Player{i}", mmr=1500, preferred_roles=["1"])
-            players.append(player)
-            exclusion_counts[player.name] = i % 3  # 0, 1, 2, 0, 1, 2, ...
+        shuffler = BalancedShuffler(use_glicko=False, exclusion_penalty_weight=500.0)
 
-        # Player 11: very high exclusion count (should be prioritized for inclusion)
-        high_exclusion_player = Player(name="HighExclusionPlayer", mmr=1500, preferred_roles=["2"])
-        players.append(high_exclusion_player)
-        exclusion_counts[high_exclusion_player.name] = 20
-
-        # Player 12: zero exclusion count (more likely to be excluded)
-        low_exclusion_player = Player(name="LowExclusionPlayer", mmr=1500, preferred_roles=["3"])
-        players.append(low_exclusion_player)
-        exclusion_counts[low_exclusion_player.name] = 0
-
-        # Shuffle multiple times and track how often each player is excluded
-        shuffler = BalancedShuffler(
-            use_glicko=False, off_role_flat_penalty=50.0, exclusion_penalty_weight=5.0
-        )
-
-        # Run shuffle once (deterministic for this test due to algorithm preference)
         team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
 
         assert len(team1.players) == 5
         assert len(team2.players) == 5
-        assert len(excluded) == 2
 
-
-        # At minimum, verify structure is correct
-        assert high_exclusion_player.name in [
-            p.name for p in team1.players + team2.players + excluded
-        ]
-        assert low_exclusion_player.name in [
-            p.name for p in team1.players + team2.players + excluded
-        ]
+        # Excluding any protected (count=5) player costs 5 * exclusion_penalty_weight
+        # more than excluding Player0, so Player0 must be the one sitting out.
+        assert [p.name for p in excluded] == ["Player0"], (
+            "The player with the lowest exclusion count should be excluded"
+        )
 
     def test_exclusion_penalty_calculation(self):
         """Test that exclusion penalty is calculated correctly."""
@@ -999,10 +979,12 @@ class TestShuffler14Players:
 class TestExclusionPenaltyWeightDefault:
     """Tests for the default exclusion penalty weight."""
 
-    def test_default_weight_is_60(self):
-        """Test that default exclusion penalty weight is 60."""
+    def test_default_weight_is_70(self):
+        """Default exclusion penalty weight is 70, sourced from SHUFFLER_SETTINGS."""
         from config import SHUFFLER_SETTINGS
         assert SHUFFLER_SETTINGS["exclusion_penalty_weight"] == 70.0
+        # BalancedShuffler must default to the config value, not its own literal.
+        assert BalancedShuffler().exclusion_penalty_weight == SHUFFLER_SETTINGS["exclusion_penalty_weight"]
 
     def test_higher_weight_prevents_repeat_exclusions(self):
         """

@@ -12,6 +12,7 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
+    BOSS_BOUNDARIES,
     PINNACLE_BASE_JC_REWARD,
     PINNACLE_BOSSES,
     PINNACLE_DEPTH,
@@ -132,9 +133,13 @@ class TestPhaseTransitionPersistsCarry:
 class TestRegularBossRetreatIgnoresCarry:
     """Retreating a regular boss phase ignores stale carry markers."""
 
-    def test_retreat_with_carried_wager_debits_half(
+    def test_retreat_with_stale_carry_charges_nothing(
         self, dig_service, dig_repo, player_repository, guild_id,
     ):
+        """Half-forfeit on retreat is a pinnacle-only mechanic: a stale
+        carry marker on a REGULAR boundary must not be debited. The live
+        half-forfeit path is pinned by TestPinnacleRetreatForfeitsHalfOfCarry.
+        """
         _register(player_repository)
         _seed_phase1_cleared(dig_repo, 10001, guild_id)
         balance_before = player_repository.get_balance(10001, guild_id)
@@ -218,6 +223,51 @@ def _finalize_pinnacle(dig_service, guild_id, *, tunnel, discord_id=20001,
         win_chance=win_chance, attempts=1, round_log=[], gear_broken_names=[],
         prestige_level=prestige_level, depth=PINNACLE_DEPTH, now=int(time.time()),
     )
+
+
+class TestPinnacleRetreatForfeitsHalfOfCarry:
+    """Retreating between PINNACLE phases forfeits half the carried wager —
+    the only place retreat_boss's half-forfeit fires (regular boundaries
+    ignore stale carry, see TestRegularBossRetreatIgnoresCarry)."""
+
+    def _seed_pinnacle_phase1_cleared(self, dig_repo, player_repository, guild_id):
+        _setup_pinnacle(dig_repo, player_repository, guild_id)
+        boss_progress = {str(b): {"status": "defeated"} for b in BOSS_BOUNDARIES}
+        boss_progress[str(PINNACLE_DEPTH)] = {
+            "boss_id": "forgotten_king",
+            "status": "phase1_defeated",
+            "carried_wager": 200,
+            "carried_risk_tier": "bold",
+        }
+        dig_repo.update_tunnel(
+            20001, guild_id, boss_progress=json.dumps(boss_progress),
+        )
+
+    def test_pinnacle_retreat_with_carried_wager_debits_half(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        self._seed_pinnacle_phase1_cleared(dig_repo, player_repository, guild_id)
+        balance_before = player_repository.get_balance(20001, guild_id)
+
+        result = dig_service.retreat_boss(20001, guild_id)
+
+        assert result["success"]
+        assert result["boundary"] == PINNACLE_DEPTH
+        assert result["carried_wager_forfeit"] == 100  # 200 // 2
+        assert player_repository.get_balance(20001, guild_id) == balance_before - 100
+
+    def test_pinnacle_retreat_clears_carry_markers(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        self._seed_pinnacle_phase1_cleared(dig_repo, player_repository, guild_id)
+
+        dig_service.retreat_boss(20001, guild_id)
+
+        entry = json.loads(
+            dig_repo.get_tunnel(20001, guild_id)["boss_progress"]
+        )[str(PINNACLE_DEPTH)]
+        assert "carried_wager" not in entry
+        assert "carried_risk_tier" not in entry
 
 
 class TestPinnacleWagerPayout:

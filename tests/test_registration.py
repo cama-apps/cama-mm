@@ -3,92 +3,15 @@ Tests for registration command logic.
 """
 
 
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
+from commands.registration import RegistrationCommands
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
 from tests.conftest import TEST_GUILD_ID
 from tests.repository_harness import RepositoryTestDatabase as Database
-
-
-class TestRoleDeduplication:
-    """Tests for the role deduplication in /setroles command."""
-
-    def test_duplicate_roles_are_removed(self):
-        """Test that duplicate roles are removed from input."""
-        # Simulating the logic from commands/registration.py set_roles method
-        roles = "111"
-        cleaned = roles.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
-
-        valid_choices = ["1", "2", "3", "4", "5"]
-        for r in role_list:
-            assert r in valid_choices
-
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        assert role_list == ["1"]
-
-    def test_duplicate_roles_preserve_order(self):
-        """Test that order is preserved when deduplicating roles."""
-        roles = "12321"
-        cleaned = roles.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
-
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        # Should be ["1", "2", "3"] - order of first appearance
-        assert role_list == ["1", "2", "3"]
-
-    def test_duplicate_roles_with_commas(self):
-        """Test that duplicates are removed even with comma-separated input."""
-        roles = "1,1,1"
-        cleaned = roles.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
-
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        assert role_list == ["1"]
-
-    def test_no_duplicates_unchanged(self):
-        """Test that input without duplicates is unchanged."""
-        roles = "123"
-        cleaned = roles.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
-
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        assert role_list == ["1", "2", "3"]
-
-    def test_all_roles_with_duplicates(self):
-        """Test a case with all roles but with duplicates."""
-        roles = "1234512345"
-        cleaned = roles.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
-
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        assert role_list == ["1", "2", "3", "4", "5"]
-
-    def test_extreme_duplicates(self):
-        """Test the bug case from the user report - 10 carry roles."""
-        roles = "1111111111"  # 10 ones
-        cleaned = roles.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
-
-        # Before deduplication: 10 items
-        assert len(role_list) == 10
-
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        # After deduplication: 1 item
-        assert role_list == ["1"]
 
 
 class TestPlayerServiceSetRoles:
@@ -331,8 +254,14 @@ class TestRegisterSteamIdValidation:
             )
 
 
-class TestSetRolesE2E:
-    """End-to-end tests for the /setroles command flow."""
+class TestSetRolesCommand:
+    """End-to-end tests for the /player roles command.
+
+    These drive the real command callback in commands/registration.py
+    (parse -> validate -> dedup -> PlayerService.set_roles -> DB) with a
+    mocked discord Interaction, asserting on the persisted roles or the
+    error message sent back — no re-implementation of the parsing logic.
+    """
 
     @pytest.fixture
     def test_db(self, repo_db_path):
@@ -344,94 +273,106 @@ class TestSetRolesE2E:
         """Create a PlayerService with test database."""
         return PlayerService(PlayerRepository(test_db.db_path))
 
-    def _simulate_setroles_command(self, roles_input: str):
-        """
-        Simulate the parsing and deduplication logic from the /setroles command.
-        Returns the processed role list that would be passed to player_service.set_roles().
-        """
-        # This mirrors the logic in commands/registration.py set_roles method
-        cleaned = roles_input.replace(",", "").replace(" ", "")
-        role_list = list(cleaned)
+    @pytest.fixture
+    def cog(self, player_service):
+        """RegistrationCommands cog wired to the real player service."""
+        return RegistrationCommands(bot=Mock(), player_service=player_service)
 
-        valid_choices = ["1", "2", "3", "4", "5"]
-        for r in role_list:
-            if r not in valid_choices:
-                raise ValueError(f"Invalid role: {r}")
+    def _make_interaction(self, user_id: int):
+        interaction = Mock()
+        interaction.user.id = user_id
+        interaction.guild.id = TEST_GUILD_ID
+        interaction.response = AsyncMock()
+        interaction.followup = AsyncMock()
+        return interaction
 
-        if not role_list:
-            raise ValueError("Please provide at least one role.")
+    @staticmethod
+    def _sent_messages(interaction) -> list[str]:
+        """Collect message contents sent via followup (positional or content=)."""
+        messages = []
+        for call in interaction.followup.send.call_args_list:
+            if call.args and isinstance(call.args[0], str):
+                messages.append(call.args[0])
+            content = call.kwargs.get("content")
+            if isinstance(content, str):
+                messages.append(content)
+        return messages
 
-        # Deduplicate while preserving order
-        role_list = list(dict.fromkeys(role_list))
-
-        return role_list
-
-    def test_e2e_duplicate_roles_deduplicated_and_persisted(self, test_db, player_service):
-        """E2E: Duplicate roles input is deduplicated and correctly persisted."""
-        user_id = 54321
-        player_repo = PlayerRepository(test_db.db_path)
-        player_repo.add(
+    def _add_player(self, test_db, user_id: int, roles=None):
+        PlayerRepository(test_db.db_path).add(
             discord_id=user_id,
-            discord_username="E2EPlayer",
-            guild_id=TEST_GUILD_ID,
-            initial_mmr=3000,
-            glicko_rating=1800.0,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-
-        # Simulate user entering "1111111111" (the bug case)
-        role_list = self._simulate_setroles_command("1111111111")
-        assert role_list == ["1"]  # Deduplicated
-
-        # Pass to service (as the command would)
-        player_service.set_roles(user_id, TEST_GUILD_ID, role_list)
-
-        # Verify final state in database
-        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
-        assert player.preferred_roles == ["1"]
-
-    def test_e2e_mixed_duplicates_preserve_order(self, test_db, player_service):
-        """E2E: Mixed duplicates preserve first-occurrence order and persist correctly."""
-        user_id = 54322
-        player_repo = PlayerRepository(test_db.db_path)
-        player_repo.add(
-            discord_id=user_id,
-            discord_username="E2EPlayer2",
+            discord_username=f"E2EPlayer{user_id}",
             guild_id=TEST_GUILD_ID,
             initial_mmr=2500,
+            preferred_roles=roles,
         )
 
-        # Simulate user entering "54321123" - should become ["5", "4", "3", "2", "1"]
-        role_list = self._simulate_setroles_command("54321123")
-        assert role_list == ["5", "4", "3", "2", "1"]
+    @pytest.mark.asyncio
+    async def test_duplicate_roles_deduplicated_and_persisted(self, test_db, cog):
+        """The bug case: '1111111111' (10 carries) collapses to a single role."""
+        user_id = 54321
+        self._add_player(test_db, user_id)
+        interaction = self._make_interaction(user_id)
 
-        player_service.set_roles(user_id, TEST_GUILD_ID, role_list)
+        await cog.set_roles.callback(cog, interaction, "1111111111")
 
-        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
+        player = PlayerRepository(test_db.db_path).get_by_id(user_id, TEST_GUILD_ID)
+        assert player.preferred_roles == ["1"]
+        assert any("Set your preferred roles" in m for m in self._sent_messages(interaction))
+
+    @pytest.mark.asyncio
+    async def test_mixed_duplicates_preserve_order(self, test_db, cog):
+        """Mixed duplicates keep first-occurrence order in the persisted roles."""
+        user_id = 54322
+        self._add_player(test_db, user_id)
+        interaction = self._make_interaction(user_id)
+
+        await cog.set_roles.callback(cog, interaction, "54321123")
+
+        player = PlayerRepository(test_db.db_path).get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["5", "4", "3", "2", "1"]
 
-    def test_e2e_comma_separated_with_duplicates(self, test_db, player_service):
-        """E2E: Comma-separated input with duplicates is handled correctly."""
+    @pytest.mark.asyncio
+    async def test_comma_separated_with_duplicates(self, test_db, cog):
+        """Comma/space-separated input with duplicates is parsed and deduped."""
         user_id = 54323
-        player_repo = PlayerRepository(test_db.db_path)
-        player_repo.add(
-            discord_id=user_id,
-            discord_username="E2EPlayer3",
-            guild_id=TEST_GUILD_ID,
-            initial_mmr=2000,
-        )
+        self._add_player(test_db, user_id)
+        interaction = self._make_interaction(user_id)
 
-        # Simulate user entering "1, 2, 1, 3, 2" with spaces and commas
-        role_list = self._simulate_setroles_command("1, 2, 1, 3, 2")
-        assert role_list == ["1", "2", "3"]
+        await cog.set_roles.callback(cog, interaction, "1, 2, 1, 3, 2")
 
-        player_service.set_roles(user_id, TEST_GUILD_ID, role_list)
-
-        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
+        player = PlayerRepository(test_db.db_path).get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["1", "2", "3"]
 
-    def test_e2e_invalid_role_rejected(self, test_db, player_service):
-        """E2E: Invalid role input is rejected before reaching the service."""
-        with pytest.raises(ValueError, match="Invalid role"):
-            self._simulate_setroles_command("126")  # 6 is invalid
+    @pytest.mark.asyncio
+    async def test_invalid_role_rejected_without_persisting(self, test_db, cog):
+        """An out-of-range role is rejected and existing roles stay untouched."""
+        user_id = 54324
+        self._add_player(test_db, user_id, roles=["2"])
+        interaction = self._make_interaction(user_id)
+
+        await cog.set_roles.callback(cog, interaction, "126")  # 6 is invalid
+
+        assert any("Invalid role: 6" in m for m in self._sent_messages(interaction))
+        player = PlayerRepository(test_db.db_path).get_by_id(user_id, TEST_GUILD_ID)
+        assert player.preferred_roles == ["2"]
+
+    @pytest.mark.asyncio
+    async def test_empty_roles_rejected(self, test_db, cog):
+        """Input that parses to no roles yields the 'at least one role' error."""
+        user_id = 54325
+        self._add_player(test_db, user_id)
+        interaction = self._make_interaction(user_id)
+
+        await cog.set_roles.callback(cog, interaction, ", ")
+
+        assert any("at least one role" in m for m in self._sent_messages(interaction))
+
+    @pytest.mark.asyncio
+    async def test_unregistered_player_gets_error(self, cog):
+        """The service's 'not registered' ValueError surfaces as a user error."""
+        interaction = self._make_interaction(98765)
+
+        await cog.set_roles.callback(cog, interaction, "123")
+
+        assert any("not registered" in m.lower() for m in self._sent_messages(interaction))

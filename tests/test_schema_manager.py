@@ -355,3 +355,50 @@ def test_followup_ledger_backfill_accounts_for_existing_deltas(tmp_path):
         ("player", 333, 25, 75, 100, "balance_update"),
         ("player", 333, 75, 0, 75, "ledger_backfill"),
     ]
+
+
+def test_tunnels_columns_stay_in_sync_with_dig_update_whitelist(tmp_path):
+    """Every tunnels column must be update_tunnel-writable or explicitly excluded.
+
+    Pins the known failure class where a migration adds a tunnels column
+    without adding it to DigRepository._TUNNEL_UPDATABLE_COLUMNS: the very
+    first update_tunnel(...) touching the new column raises ValueError at
+    runtime and breaks all digs. Adding a tunnels column requires updating
+    the whitelist (and _TUNNEL_INT_COLS if integer-typed), or listing it in
+    the exclusion set below with a reason.
+    """
+    from repositories.dig_repository import DigRepository
+
+    db_path = str(tmp_path / "test.db")
+    SchemaManager(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(tunnels)")}
+    assert columns, "tunnels table missing from initialized schema"
+
+    # Columns update_tunnel legitimately never writes:
+    excluded = {
+        "discord_id",  # composite PK half; only used in the UPDATE WHERE clause
+        "guild_id",  # composite PK half; only used in the UPDATE WHERE clause
+        "created_at",  # set once by create_tunnel's INSERT, never mutated
+        "retreat_cooldown_until",  # known-dormant column (no live writer)
+        "engine_mode",  # known-dormant column (no live writer)
+    }
+
+    whitelist = DigRepository._TUNNEL_UPDATABLE_COLUMNS
+    unaccounted = columns - whitelist - excluded
+    assert not unaccounted, (
+        f"tunnels columns missing from DigRepository._TUNNEL_UPDATABLE_COLUMNS: "
+        f"{sorted(unaccounted)}. Add them to the whitelist (and _TUNNEL_INT_COLS "
+        f"if integer-typed), or to this test's exclusion set with a reason."
+    )
+
+    # Reverse direction: a whitelisted or int-cast column with no migration
+    # would also fail at runtime (SQLite error on UPDATE / bogus int cast).
+    assert whitelist <= columns, (
+        f"whitelisted columns missing from tunnels table: {sorted(whitelist - columns)}"
+    )
+    assert columns >= DigRepository._TUNNEL_INT_COLS, (
+        f"_TUNNEL_INT_COLS entries missing from tunnels table: "
+        f"{sorted(DigRepository._TUNNEL_INT_COLS - columns)}"
+    )

@@ -10,6 +10,8 @@ These pin two hardening fixes:
 
 from __future__ import annotations
 
+import threading
+
 from repositories.dig_repository import DigRepository
 from tests.conftest import TEST_GUILD_ID
 
@@ -25,11 +27,10 @@ def _paused_duel_state() -> dict:
     }
 
 
-def test_claim_active_duel_is_atomic_read_and_delete(repo_db_path):
-    """First claim returns the row; the second returns None.
-
-    This is the guarantee ``resume_boss_duel`` relies on: the loser of the
-    race gets None and bails instead of resolving the duel a second time.
+def test_claim_active_duel_consumes_row_exactly_once(repo_db_path):
+    """Sequential contract: the first claim returns the row and deletes it,
+    so a second (later) claim returns None and every reader sees it gone.
+    The true concurrent race is covered by the threaded test below.
     """
     repo = DigRepository(repo_db_path)
     discord_id, guild_id = 77001, TEST_GUILD_ID
@@ -45,6 +46,42 @@ def test_claim_active_duel_is_atomic_read_and_delete(repo_db_path):
     assert second is None, "second claim must be a no-op — the row is consumed"
 
     # The row is gone for every reader afterwards.
+    assert repo.get_active_duel(discord_id, guild_id) is None
+
+
+def test_concurrent_claims_exactly_one_wins(repo_db_path):
+    """5 threads race ``claim_active_duel``; exactly one gets the row.
+
+    This is the guarantee ``resume_boss_duel`` relies on: two concurrent
+    modal submissions both pass the initial guard, but only the claim
+    winner resolves the duel — the losers get None and bail, so the paused
+    duel can never pay out (or drop gear/relics) twice.
+    """
+    repo = DigRepository(repo_db_path)
+    discord_id, guild_id = 77002, TEST_GUILD_ID
+    repo.create_tunnel(discord_id, guild_id, "Vault")
+    repo.save_active_duel(discord_id, guild_id, _paused_duel_state())
+
+    results: list[dict | None] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(5)
+
+    def try_claim() -> None:
+        barrier.wait()  # maximize overlap so the claims genuinely race
+        row = repo.claim_active_duel(discord_id, guild_id)
+        with lock:
+            results.append(row)
+
+    threads = [threading.Thread(target=try_claim) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    winners = [r for r in results if r is not None]
+    assert len(winners) == 1, f"expected exactly 1 winning claim, got {len(winners)}"
+    assert winners[0]["wager"] == 50
+    assert winners[0]["boss_id"] == "molemann"
     assert repo.get_active_duel(discord_id, guild_id) is None
 
 

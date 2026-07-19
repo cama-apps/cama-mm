@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from discord import app_commands
 
+from commands.admin import AdminCommands
 from commands.match import MatchCommands
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from repositories.lobby_repository import LobbyRepository
@@ -122,22 +123,64 @@ class TestE2EAdminCommands:
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
 
-    def test_resetuser_requires_admin(self, test_db):
-        """Test that resetuser command requires admin permissions."""
-        # Add a player
-        user_id = 200101
-        test_db.add_player(discord_id=user_id, discord_username="UserToReset", initial_mmr=1500)
+    @pytest.mark.asyncio
+    async def test_resetuser_requires_admin(self, test_db):
+        """/admin resetuser rejects non-admins and only deletes for admins.
 
-        # Verify player exists
-        assert test_db.get_player(user_id) is not None
+        Exercises the real has_admin_permission gate inside the resetuser
+        callback by constructing interactions with real (non-)admin guild
+        permissions — the permission check itself is not patched.
+        """
+        from types import SimpleNamespace
 
-        # In real bot, non-admin would get error message
-        # Here we test the database operation
-        deleted = test_db.delete_player(user_id)
-        assert deleted is True
+        player_repo = PlayerRepository(test_db.db_path)
+        player_service = PlayerService(player_repo)
+        # Unique guild id keeps the resetuser rate-limit bucket isolated.
+        guild_id = 424242
 
-        # Verify player is gone
-        assert test_db.get_player(user_id) is None
+        target_id = 200101
+        player_repo.add(
+            discord_id=target_id,
+            discord_username="UserToReset",
+            guild_id=guild_id,
+            initial_mmr=1500,
+        )
+
+        admin_cmd = AdminCommands(
+            bot=None, lobby_service=None, player_service=player_service
+        )
+        target_member = SimpleNamespace(
+            id=target_id, mention=f"<@{target_id}>", send=AsyncMock()
+        )
+        mock_guild = SimpleNamespace(id=guild_id)
+
+        # Non-admin: command must refuse and leave the player untouched.
+        non_admin = MockDiscordInteraction(880001, "RegularUser")
+        non_admin.guild = mock_guild
+        non_admin.user.guild_permissions = SimpleNamespace(
+            administrator=False, manage_guild=False
+        )
+
+        await admin_cmd.resetuser.callback(admin_cmd, non_admin, target_member)
+
+        call = non_admin.followup.send.call_args
+        message = call.kwargs.get("content") or (call.args[0] if call.args else "")
+        assert "Admin only" in message
+        assert player_repo.get_by_id(target_id, guild_id) is not None
+
+        # Positive control: the same command with admin permissions deletes.
+        admin = MockDiscordInteraction(880002, "AdminUser")
+        admin.guild = mock_guild
+        admin.user.guild_permissions = SimpleNamespace(
+            administrator=True, manage_guild=False
+        )
+
+        await admin_cmd.resetuser.callback(admin_cmd, admin, target_member)
+
+        call = admin.followup.send.call_args
+        message = call.kwargs.get("content") or (call.args[0] if call.args else "")
+        assert "Reset" in message
+        assert player_repo.get_by_id(target_id, guild_id) is None
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(60)

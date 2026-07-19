@@ -12,8 +12,11 @@ import pytest
 
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
+from repositories.player_repository import PlayerRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
+from services.player_service import PlayerService
 from shuffler import BalancedShuffler
+from tests.conftest import TEST_GUILD_ID
 from tests.repository_harness import RepositoryTestDatabase as Database
 
 # =============================================================================
@@ -29,27 +32,34 @@ class TestE2EOpenDotaIntegration:
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
 
-    @patch("opendota_integration.OpenDotaAPI.get_player_data")
     @patch("opendota_integration.OpenDotaAPI.get_player_mmr")
-    def test_register_with_opendota_failure(self, mock_get_mmr, mock_get_data, test_db):
-        """Test registration when OpenDota API fails."""
-        # Mock OpenDota API to return None (failure)
+    @patch("opendota_integration.OpenDotaAPI.get_player_data")
+    def test_register_with_opendota_failure(self, mock_get_data, mock_get_mmr, test_db):
+        """Registration aborts cleanly when OpenDota returns no player data.
+
+        Drives the real PlayerService.register_player flow with the OpenDota
+        client patched at the boundary: the failure must surface as a
+        ValueError and leave no player row or Steam-ID link behind.
+        """
         mock_get_data.return_value = None
         mock_get_mmr.return_value = None
 
-        # Simulate registration attempt
-        # In real bot, this would show error message
-        # Here we test that the system handles the failure gracefully
+        service = PlayerService(PlayerRepository(test_db.db_path))
         steam_id = 12345678
 
-        # The registration should fail if OpenDota returns None
-        # This tests the error handling path
-        player_data = mock_get_data(steam_id)
-        assert player_data is None, "OpenDota should return None on failure"
+        with pytest.raises(ValueError, match="Could not fetch player data from OpenDota"):
+            service.register_player(
+                discord_id=99999,
+                discord_username="FailedUser",
+                guild_id=TEST_GUILD_ID,
+                steam_id=steam_id,
+            )
 
-        # Verify player was not added to database
-        player = test_db.get_player(99999)  # Use non-existent ID
-        assert player is None
+        # The real path consulted OpenDota, and nothing was persisted.
+        mock_get_data.assert_called_once_with(steam_id)
+        repo = PlayerRepository(test_db.db_path)
+        assert repo.get_by_id(99999, TEST_GUILD_ID) is None
+        assert repo.get_steam_id_owner(steam_id) is None
 
     def test_register_with_invalid_steam_id(self, test_db):
         """Invalid Steam IDs are rejected by the production validator.
@@ -78,34 +88,48 @@ class TestE2EOpenDotaIntegration:
         player = test_db.get_player(99999)
         assert player is None
 
-    @patch("opendota_integration.OpenDotaAPI.get_player_data")
+    @patch("opendota_integration.OpenDotaAPI.get_player_counts")
     @patch("opendota_integration.OpenDotaAPI.get_player_mmr")
-    def test_register_with_valid_opendota_response(self, mock_get_mmr, mock_get_data, test_db):
-        """Test successful registration with valid OpenDota response."""
-        # Mock successful OpenDota response
+    @patch("opendota_integration.OpenDotaAPI.get_player_data")
+    def test_register_with_valid_opendota_response(
+        self, mock_get_data, mock_get_mmr, mock_get_counts, test_db
+    ):
+        """A successful OpenDota lookup registers the player with that MMR.
+
+        Runs the real PlayerService.register_player flow (no mmr_override, so
+        the OpenDota branch is exercised) and asserts on the persisted player
+        row: MMR from OpenDota, Glicko seeded from that MMR, and the primary
+        Steam ID recorded in the junction table.
+        """
         mock_get_data.return_value = {"rank_tier": 50, "leaderboard_rank": None}
         mock_get_mmr.return_value = 2000
+        mock_get_counts.return_value = None  # region inference: no API answer
 
         user_id = 100001
+        steam_id = 87654321
+        service = PlayerService(PlayerRepository(test_db.db_path))
 
-        # Simulate successful registration
-        rating_system = CamaRatingSystem()
-        glicko_player = rating_system.create_player_from_mmr(2000)
-
-        # Add player to database
-        test_db.add_player(
+        result = service.register_player(
             discord_id=user_id,
             discord_username="TestUser",
-            initial_mmr=2000,
-            glicko_rating=glicko_player.rating,
-            glicko_rd=glicko_player.rd,
-            glicko_volatility=glicko_player.vol,
+            guild_id=TEST_GUILD_ID,
+            steam_id=steam_id,
         )
 
-        # Verify player was added
-        player = test_db.get_player(user_id)
+        mock_get_mmr.assert_called_once_with(steam_id)
+        assert result["mmr"] == 2000
+
+        repo = PlayerRepository(test_db.db_path)
+        player = repo.get_by_id(user_id, TEST_GUILD_ID)
         assert player is not None
         assert player.mmr == 2000
+
+        # Glicko seeding must come from the OpenDota MMR, not a default.
+        expected = CamaRatingSystem().create_player_from_mmr(2000)
+        assert player.glicko_rating == pytest.approx(expected.rating)
+
+        # The primary Steam ID is recorded in the junction table.
+        assert repo.get_primary_steam_id(user_id) == steam_id
 
 
 # =============================================================================

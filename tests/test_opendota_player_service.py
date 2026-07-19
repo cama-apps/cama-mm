@@ -7,8 +7,48 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+import opendota_integration
+from opendota_integration import OpenDotaAPI
 from services.opendota_player_service import CACHE_TTL_SECONDS, OpenDotaPlayerService
 from tests.conftest import TEST_GUILD_ID
+
+# =============================================================================
+# Offline hardening (mirrors tests/test_opendota_http_hardening.py):
+# a cache-miss regression must fail fast, not fall through to real HTTP
+# plus retry sleeps.
+# =============================================================================
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_rate_limiter():
+    """Reset the shared singleton so tests don't share state."""
+    OpenDotaAPI._rate_limiter = None
+    yield
+    OpenDotaAPI._rate_limiter = None
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """Retries call time.sleep; make it a no-op so tests stay fast."""
+    monkeypatch.setattr(opendota_integration.time, "sleep", lambda _s: None)
+
+
+@pytest.fixture(autouse=True)
+def _fast_retry_delays(monkeypatch):
+    """Shrink the configured retry delay list so any accidental retry path
+    has a known, finite budget.
+    """
+    monkeypatch.setattr(opendota_integration, "ENRICHMENT_RETRY_DELAYS", [0, 0, 0])
+
+
+@pytest.fixture(autouse=True)
+def _block_real_http(monkeypatch):
+    """Any real network attempt fails immediately instead of reaching OpenDota."""
+
+    def _refuse(self, method, url, *args, **kwargs):
+        raise AssertionError(f"Test attempted real HTTP request: {method} {url}")
+
+    monkeypatch.setattr("requests.Session.request", _refuse)
 
 
 class TestOpenDotaPlayerService:

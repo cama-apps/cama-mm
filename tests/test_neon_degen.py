@@ -1,6 +1,7 @@
 """Tests for the Neon Degen Terminal easter egg system."""
 
 import io
+import random
 from unittest.mock import Mock
 
 import pytest
@@ -497,12 +498,23 @@ class TestNeonDegenPrivacy:
         player_repo = MagicMock()
         player_repo.get_by_id = MagicMock(return_value=fake_player)
 
+        # Seeded so the fire/no-fire sequence is deterministic — the
+        # fail-arm below can never flake. on_soft_avoid fires ~32% per
+        # iteration, so 200 seeded iterations always include fires.
+        random.seed(4242)
+        fired = 0
         for _ in range(200):
             svc = NeonDegenService(player_repo=player_repo)
             result = await svc.on_soft_avoid(888, 456, cost=50, games=3)
             if result and result.text_block:
+                fired += 1
                 assert buyer_name not in result.text_block
                 assert str(buyer_balance) not in result.text_block
+        if not fired:
+            pytest.fail(
+                "soft_avoid never fired in 200 seeded iterations — the "
+                "privacy assertions were never exercised"
+            )
 
     @pytest.mark.asyncio
     async def test_generate_text_anonymous_strips_player_context(self):
