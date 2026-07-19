@@ -322,6 +322,72 @@ class TestConcurrencyGuard:
                 start[pid] + JOPACOIN_PER_GAME
             ), f"loser {pid} must be credited participation exactly once"
 
+    def test_bonus_failure_compensates_and_releases_claim(
+        self, test_db, player_repo, test_players
+    ):
+        """Regression: a failure INSIDE the claimed bonus block must not strand
+        the match half-paid. The claim is consumed up front (to stop retries
+        double-paying), so a mid-block failure has to compensate the partial
+        credits and return the claim — otherwise the players not yet paid could
+        never be paid. The retry then pays everyone exactly once."""
+        match_repo = MatchRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        betting_service = BettingService(bet_repo, player_repo)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+            betting_service=betting_service,
+        )
+
+        start = {
+            pid: player_repo.get_balance(pid, TEST_GUILD_ID) for pid in test_players
+        }
+        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        radiant_ids = list(pending.radiant_team_ids)
+        dire_ids = list(pending.dire_team_ids)
+
+        # Fail INSIDE the claimed block: participation has already been
+        # credited to the losers when the win-bonus award raises.
+        original_award = betting_service.award_win_bonus
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated win-bonus failure")
+
+        betting_service.award_win_bonus = _boom
+        with pytest.raises(RuntimeError, match="simulated win-bonus failure"):
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        # Partial participation credits compensated, claim returned: nothing
+        # is half-paid while the failure stands.
+        conn = test_db.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COALESCE(bonuses_paid, 0) AS claimed FROM matches WHERE guild_id = ?",
+            (TEST_GUILD_ID,),
+        )
+        assert cursor.fetchone()["claimed"] == 0, (
+            "failed bonus block must return the claim after compensating"
+        )
+        conn.close()
+        for pid in test_players:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == start[pid], (
+                f"player {pid} must hold no partial bonus after compensation"
+            )
+
+        # Retry pays everyone exactly once.
+        betting_service.award_win_bonus = original_award
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        for pid in radiant_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_WIN_REWARD
+            )
+        for pid in dire_ids:
+            assert player_repo.get_balance(pid, TEST_GUILD_ID) == (
+                start[pid] + JOPACOIN_PER_GAME
+            )
+
     def test_consume_pending_match_is_single_use_idempotent(self, test_db):
         """consume_pending_match is single-use: the first call returns the exact
         saved payload (plus the pending_match_id), and any later call for the
