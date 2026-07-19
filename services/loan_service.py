@@ -261,22 +261,14 @@ class LoanService:
         Reset a player's loan cooldown (admin operation).
 
         Sets last_loan_at to 0 (epoch) so they can take a new loan immediately.
+        Delegates to a single conditional UPDATE so a loan landing concurrently
+        can never be clobbered by a stale read-modify-write snapshot.
 
         Args:
             discord_id: Player's Discord ID
             guild_id: Guild ID
         """
-        state = self.get_state(discord_id, guild_id)
-        self.loan_repo.upsert_state(
-            discord_id=discord_id,
-            guild_id=guild_id,
-            last_loan_at=0,
-            total_loans_taken=state.total_loans_taken,
-            total_fees_paid=state.total_fees_paid,
-            negative_loans_taken=state.negative_loans_taken,
-            outstanding_principal=state.outstanding_principal,
-            outstanding_fee=state.outstanding_fee,
-        )
+        self.loan_repo.reset_cooldown(discord_id, guild_id)
 
     # =========================================================================
     # Result-returning methods (new API)

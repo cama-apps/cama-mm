@@ -350,3 +350,212 @@ class TestPayoutConservation:
         assert all("refunded" not in loser for loser in distributions["losers"])
         assert player_repo.get_balance(d1, TEST_GUILD_ID) == 203 - 25
         assert player_repo.get_balance(d2, TEST_GUILD_ID) == 203 - 20
+
+
+@pytest.fixture
+def seeded_services(repo_db_path):
+    """Like ``services`` but with loan wiring so betting seeds get reserved."""
+    from repositories.loan_repository import LoanRepository
+    from services.loan_service import LoanService
+
+    player_repo = PlayerRepository(repo_db_path)
+    bet_repo = BetRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    loan_repo = LoanRepository(repo_db_path)
+    loan_service = LoanService(loan_repo, player_repo)
+    betting_service = BettingService(bet_repo, player_repo)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=True,
+        betting_service=betting_service,
+        loan_service=loan_service,
+    )
+    return {
+        "match_service": match_service,
+        "betting_service": betting_service,
+        "player_repo": player_repo,
+        "bet_repo": bet_repo,
+        "loan_repo": loan_repo,
+    }
+
+
+def _insert_match_row(bet_repo, match_id, winning_team_num):
+    with bet_repo.connection() as conn:
+        conn.execute(
+            "INSERT INTO matches (match_id, team1_players, team2_players, winning_team, guild_id) "
+            "VALUES (?, 'a', 'b', ?, ?)",
+            (match_id, winning_team_num, TEST_GUILD_ID),
+        )
+
+
+class TestCorrectionConservation:
+    """Winner correction must re-pay the pot the original settlement paid —
+    including seeds and the daily-event payout multiplier, which are only
+    recorded in the settled bets' payout column."""
+
+    def test_pool_correction_conserves_seeded_multiplied_pot(self, seeded_services):
+        match_service = seeded_services["match_service"]
+        betting_service = seeded_services["betting_service"]
+        player_repo = seeded_services["player_repo"]
+        bet_repo = seeded_services["bet_repo"]
+        loan_repo = seeded_services["loan_repo"]
+
+        player_ids = list(range(28000, 28010))
+        _seed_players(player_repo, player_ids)
+        a, b = 28100, 28101
+        _seed_players(player_repo, [a, b], balance=100)
+        loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 100)
+
+        pending = _open_shuffle(match_service, player_ids, mode="pool")
+        assert pending.bet_seed_radiant == 25
+        assert pending.bet_seed_dire == 25
+        betting_service.place_bet(TEST_GUILD_ID, a, "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, b, "dire", 30, pending)
+
+        # Settle directly with a 2x daily-event payout multiplier.
+        bet_repo.settle_pending_bets_atomic(
+            match_id=900,
+            guild_id=TEST_GUILD_ID,
+            since_ts=int(pending.shuffle_timestamp),
+            winning_team="radiant",
+            house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
+            betting_mode="pool",
+            pending_match_id=pending.pending_match_id,
+            payout_multiplier=2.0,
+        )
+        # Pool 50 + losing dire seed 25 = 75; A is the sole winner, so the
+        # 2x event multiplier pays ceil(75) * 2 = 150. Winning radiant seed 25
+        # returns to the fund (50 + 25).
+        assert player_repo.get_balance(a, TEST_GUILD_ID) == 103 - 20 + 150
+        assert player_repo.get_balance(b, TEST_GUILD_ID) == 103 - 30
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 75
+
+        _insert_match_row(bet_repo, 900, 1)
+        all_bets = bet_repo.get_settled_bets_for_match(900)
+        old_winners = [x for x in all_bets if x["team_bet_on"] == "radiant"]
+        new_winners = [x for x in all_bets if x["team_bet_on"] == "dire"]
+        assert sum(int(x["payout"] or 0) for x in old_winners) == 150
+
+        total_before = sum(
+            player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (a, b)
+        )
+        deltas = bet_repo.settle_bet_correction_atomic(
+            900, old_winners, new_winners, TEST_GUILD_ID, pool_mode=True
+        )
+
+        # The exact settled pot moves from A to B: seeds and multiplier carry.
+        assert deltas == {a: -150, b: 150}
+        assert player_repo.get_balance(a, TEST_GUILD_ID) == 103 - 20
+        assert player_repo.get_balance(b, TEST_GUILD_ID) == 103 - 30 + 150
+        assert (
+            sum(player_repo.get_balance(pid, TEST_GUILD_ID) for pid in (a, b))
+            == total_before
+        )
+        # Fund untouched by the correction.
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 75
+        corrected = bet_repo.get_settled_bets_for_match(900)
+        assert sum(int(x["payout"] or 0) for x in corrected) == 150
+        assert all(
+            x["payout"] is None for x in corrected if x["team_bet_on"] == "radiant"
+        )
+
+    def test_house_correction_redistributes_seed_bonus(self, seeded_services):
+        match_service = seeded_services["match_service"]
+        betting_service = seeded_services["betting_service"]
+        player_repo = seeded_services["player_repo"]
+        bet_repo = seeded_services["bet_repo"]
+        loan_repo = seeded_services["loan_repo"]
+
+        player_ids = list(range(28200, 28210))
+        _seed_players(player_repo, player_ids)
+        a, b = 28300, 28301
+        _seed_players(player_repo, [a, b], balance=100)
+        loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 100)
+
+        pending = _open_shuffle(match_service, player_ids, mode="house")
+        assert pending.bet_seed_bonus == 50
+        betting_service.place_bet(TEST_GUILD_ID, a, "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, b, "dire", 30, pending)
+
+        bet_repo.settle_pending_bets_atomic(
+            match_id=901,
+            guild_id=TEST_GUILD_ID,
+            since_ts=int(pending.shuffle_timestamp),
+            winning_team="radiant",
+            house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
+            betting_mode="house",
+            pending_match_id=pending.pending_match_id,
+        )
+        # A: 1:1 on 20 (40) + full seed bonus 50 = 90.
+        assert player_repo.get_balance(a, TEST_GUILD_ID) == 103 - 20 + 90
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 50
+
+        _insert_match_row(bet_repo, 901, 1)
+        all_bets = bet_repo.get_settled_bets_for_match(901)
+        old_winners = [x for x in all_bets if x["team_bet_on"] == "radiant"]
+        new_winners = [x for x in all_bets if x["team_bet_on"] == "dire"]
+
+        deltas = bet_repo.settle_bet_correction_atomic(
+            901, old_winners, new_winners, TEST_GUILD_ID, pool_mode=False
+        )
+
+        # B gets house odds on their own stake (60) plus the seed surplus the
+        # old winner received beyond plain house odds (90 - 40 = 50).
+        assert deltas == {a: -90, b: 110}
+        assert player_repo.get_balance(a, TEST_GUILD_ID) == 103 - 20
+        assert player_repo.get_balance(b, TEST_GUILD_ID) == 103 - 30 + 110
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 50
+        corrected = bet_repo.get_settled_bets_for_match(901)
+        new_payouts = {
+            x["discord_id"]: x["payout"]
+            for x in corrected
+            if x["payout"] is not None
+        }
+        assert new_payouts == {b: 110}
+
+
+class TestLegacyBetTagging:
+    """settle must tag every bet it pays, including legacy rows selected only
+    by timestamp — otherwise a settle retry pays them again."""
+
+    def test_settle_tags_legacy_bets_no_double_pay(self, services):
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+        bet_repo = services["bet_repo"]
+
+        player_ids = list(range(29000, 29010))
+        _seed_players(player_repo, player_ids)
+        spectator, legacy = 29100, 29101
+        _seed_players(player_repo, [spectator, legacy], balance=100)
+
+        pending = _open_shuffle(match_service, player_ids, mode="house")
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 20, pending)
+        # Legacy row: no pending_match_id, matched by timestamp only.
+        bet_repo.create_bet(
+            TEST_GUILD_ID, legacy, "radiant", 15, bet_time=int(time.time())
+        )
+
+        first = betting_service.settle_bets(
+            702, TEST_GUILD_ID, "radiant", pending_state=pending
+        )
+        assert len(first["winners"]) == 2
+        assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 103 - 20 + 40
+        # create_bet never debited the stake, so the legacy bettor just gains.
+        legacy_after_first = player_repo.get_balance(legacy, TEST_GUILD_ID)
+        assert legacy_after_first == 103 + 30
+
+        with bet_repo.connection() as conn:
+            row = conn.execute(
+                "SELECT match_id FROM bets WHERE discord_id = ? AND guild_id = ?",
+                (legacy, TEST_GUILD_ID),
+            ).fetchone()
+        assert row["match_id"] == 702, "paid legacy bet must be tagged as settled"
+
+        second = betting_service.settle_bets(
+            702, TEST_GUILD_ID, "radiant", pending_state=pending
+        )
+        assert second == {"winners": [], "losers": []}
+        assert player_repo.get_balance(legacy, TEST_GUILD_ID) == legacy_after_first
+        assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 103 - 20 + 40

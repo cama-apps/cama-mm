@@ -286,12 +286,25 @@ class BettingService:
         pending_state.bet_seed_bonus = 0
 
         if self.buff_service:
+            # Skim what each winner actually received: the payout column stays
+            # gross, but a bankruptcy-penalized winner only had payout - penalty
+            # credited (the penalty is netted inside the settlement txn), so
+            # aggregate profit per user and subtract their penalty first.
             pact_skims: dict[int, int] = {}
+            penalties = distributions.get("bankruptcy_penalties", {})
+            profits: dict[int, int] = {}
             for w in distributions.get("winners", []):
-                profit = int(w.get("payout", 0)) - int(w.get("effective_bet", w.get("amount", 0)))
-                skimmed = self._apply_blood_pact_skim(w["discord_id"], guild_id, profit)
+                pid = w["discord_id"]
+                profits[pid] = (
+                    profits.get(pid, 0)
+                    + int(w.get("payout", 0))
+                    - int(w.get("effective_bet", w.get("amount", 0)))
+                )
+            for pid, profit in profits.items():
+                net_profit = profit - int(penalties.get(pid, 0))
+                skimmed = self._apply_blood_pact_skim(pid, guild_id, net_profit)
                 if skimmed:
-                    pact_skims[w["discord_id"]] = pact_skims.get(w["discord_id"], 0) + skimmed
+                    pact_skims[pid] = skimmed
             if pact_skims:
                 distributions["blood_pact_skims"] = pact_skims
 
@@ -388,10 +401,14 @@ class BettingService:
 
         if self.buff_service:
             for pid, result in results.items():
-                gross = int(result.get("gross", 0)) + int(result.get("manashop_bonus", 0))
-                skimmed = self._apply_blood_pact_skim(pid, guild_id, gross)
+                # Skim what the player was actually credited: net already
+                # reflects garnishment, the bankruptcy penalty, and any
+                # manashop bonuses credited above (mirrors how prediction
+                # settlement nets the penalty into profit before skims).
+                net = int(result.get("net", 0))
+                skimmed = self._apply_blood_pact_skim(pid, guild_id, net)
                 if skimmed:
-                    result["net"] = int(result.get("net", 0)) - skimmed
+                    result["net"] = net - skimmed
                     result["blood_pact_skimmed"] = skimmed
 
         return results

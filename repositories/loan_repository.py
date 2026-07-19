@@ -75,6 +75,26 @@ class LoanRepository(BaseRepository, ILoanRepository):
                  negative_loans_taken, outstanding_principal, outstanding_fee),
             )
 
+    def reset_cooldown(self, discord_id: int, guild_id: int | None = None) -> None:
+        """Clear a player's loan cooldown without touching any other state.
+
+        Single conditional UPDATE so a loan landing concurrently cannot be
+        overwritten with a stale snapshot (a read-modify-write here could
+        clobber outstanding_principal back to 0, forgiving the loan). A player
+        with no loan_state row has no cooldown, so the missing-row case is a
+        no-op.
+        """
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE loan_state
+                SET last_loan_at = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, normalized_id),
+            )
 
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the total collected in the nonprofit fund for a guild."""
@@ -207,6 +227,10 @@ class LoanRepository(BaseRepository, ILoanRepository):
                     """,
                     (amount, discord_id, normalized_id),
                 )
+                if cursor.rowcount == 0:
+                    # No player row was debited; crediting the fund anyway
+                    # would mint coins. Raising rolls the whole txn back.
+                    raise ValueError("Player not found.")
                 cursor.execute(
                     """
                     INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)

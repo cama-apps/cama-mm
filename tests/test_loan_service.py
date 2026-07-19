@@ -758,3 +758,81 @@ class TestResultChaining:
         approval = result.unwrap_or(None)
 
         assert approval is None
+
+
+class TestResetLoanCooldown:
+    """reset_loan_cooldown must be a single conditional UPDATE, never a
+    read-modify-write that can clobber a concurrently-landed loan."""
+
+    def test_reset_preserves_outstanding_loan_state(self, db_and_repos, loan_service, monkeypatch):
+        player_repo = db_and_repos["player_repo"]
+        loan_repo = db_and_repos["loan_repo"]
+        pid = 88001
+        create_test_player(player_repo, pid, balance=0)
+
+        result = loan_service.execute_loan(pid, 100, TEST_GUILD_ID)
+        assert result.success
+
+        # Guard the contract: the reset must not read state and write it back.
+        # A stale get_state snapshot here is exactly what could overwrite
+        # outstanding_principal with 0 if a loan landed in between.
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("reset_loan_cooldown must not read-modify-write")
+
+        monkeypatch.setattr(loan_service, "get_state", _boom)
+        monkeypatch.setattr(loan_repo, "upsert_state", _boom)
+
+        loan_service.reset_loan_cooldown(pid, TEST_GUILD_ID)
+
+        monkeypatch.undo()
+        state = loan_service.get_state(pid, TEST_GUILD_ID)
+        assert state.is_on_cooldown is False
+        assert state.last_loan_at == 0
+        assert state.outstanding_principal == 100
+        assert state.outstanding_fee == 20
+        assert state.total_loans_taken == 1
+        # The preserved outstanding loan still blocks a second loan.
+        second = loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        assert not second.success
+        assert second.error_code == error_codes.LOAN_ALREADY_EXISTS
+
+    def test_reset_without_state_row_is_noop(self, db_and_repos, loan_service):
+        loan_repo = db_and_repos["loan_repo"]
+        pid = 88002
+
+        loan_service.reset_loan_cooldown(pid, TEST_GUILD_ID)
+
+        assert loan_repo.get_state(pid, TEST_GUILD_ID) is None
+        state = loan_service.get_state(pid, TEST_GUILD_ID)
+        assert state.is_on_cooldown is False
+        assert state.outstanding_principal == 0
+
+
+class TestTransferBalanceToNonprofit:
+    """The atomic player->fund transfer must never credit the fund without a
+    matching debit (that would mint coins)."""
+
+    def test_missing_player_raises_and_mints_nothing(self, db_and_repos, loan_service):
+        loan_repo = db_and_repos["loan_repo"]
+        loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 40)
+
+        with pytest.raises(ValueError, match="Player not found"):
+            loan_service.transfer_balance_to_nonprofit(
+                999999999, TEST_GUILD_ID, 20, source="test", reason="missing player"
+            )
+
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 40
+
+    def test_transfer_moves_exact_amount(self, db_and_repos, loan_service):
+        player_repo = db_and_repos["player_repo"]
+        loan_repo = db_and_repos["loan_repo"]
+        pid = 88003
+        create_test_player(player_repo, pid, balance=50)
+
+        total = loan_service.transfer_balance_to_nonprofit(
+            pid, TEST_GUILD_ID, 20, source="test", reason="tithe"
+        )
+
+        assert total == 20
+        assert player_repo.get_balance(pid, TEST_GUILD_ID) == 30
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 20

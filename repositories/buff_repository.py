@@ -283,6 +283,37 @@ class BuffRepository(BaseRepository):
                 (json.dumps(data), buff_id),
             )
 
+    def claim_blood_pact_extra_atomic(self, buff_id: int, amount: int) -> int:
+        """Reserve additional skim capacity on an already-claimed pact.
+
+        Used when an economy scale inflates a transfer above its reservation:
+        the actual coins moved must still count against the pact's cap.
+        Returns the capacity actually granted (0..amount), clamped to the cap.
+        """
+        if amount <= 0:
+            return 0
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT data FROM manashop_buffs WHERE id = ?",
+                (buff_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return 0
+            data = safe_json_loads(row["data"], {}, context="manashop_buffs.data")
+            cap = int(data.get("cap") or 0)
+            skimmed_total = int(data.get("skimmed_total") or 0)
+            granted = max(0, min(int(amount), cap - skimmed_total))
+            if granted <= 0:
+                return 0
+            data["skimmed_total"] = skimmed_total + granted
+            cursor.execute(
+                "UPDATE manashop_buffs SET data = ? WHERE id = ?",
+                (json.dumps(data), buff_id),
+            )
+            return granted
+
     def consume_data_charge_atomic(
         self,
         discord_id: int,

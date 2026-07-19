@@ -285,6 +285,25 @@ class BuffService:
         amount = scale_minigame_jc_delta(reserved_amount)
         skimmer_id = int(skim["skimmer_id"])
         buff_id = int(skim["buff_id"])
+        # ``accounted`` is the capacity currently reserved against the pact's
+        # cap. When the economy scale inflates the transfer above the
+        # reservation, reserve the extra too (or clamp the transfer to the
+        # remaining headroom) so the cap tracks actual coins moved in both
+        # directions, not just the pre-scale reservation.
+        accounted = reserved_amount
+        if amount > reserved_amount:
+            extra = 0
+            try:
+                extra = self.buff_repo.claim_blood_pact_extra_atomic(
+                    buff_id, amount - reserved_amount
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to reserve scaled Blood Pact capacity for buff %d",
+                    buff_id,
+                )
+            accounted = reserved_amount + extra
+            amount = accounted
         try:
             if self.protection_service is not None:
                 settlement = self.protection_service.apply_hostile_loss(
@@ -300,12 +319,12 @@ class BuffService:
                     metadata={"buff_id": buff_id, "earning": earning},
                 )
                 applied = int(settlement.applied)
-                if applied < reserved_amount:
+                if applied < accounted:
                     # Capacity is based on what the pact actually collected,
                     # not the portion White mana prevented.
                     try:
                         self.buff_repo.revert_blood_pact_skim(
-                            buff_id, reserved_amount - applied
+                            buff_id, accounted - applied
                         )
                     except Exception:
                         logger.exception(
@@ -317,10 +336,10 @@ class BuffService:
                 {target_id: -amount, skimmer_id: amount},
                 guild_id,
             )
-            if amount < reserved_amount:
+            if amount < accounted:
                 try:
                     self.buff_repo.revert_blood_pact_skim(
-                        buff_id, reserved_amount - amount
+                        buff_id, accounted - amount
                     )
                 except Exception:
                     logger.exception(
@@ -332,7 +351,7 @@ class BuffService:
                 "Failed to transfer Blood Pact skim for player %d", target_id
             )
             try:
-                self.buff_repo.revert_blood_pact_skim(buff_id, reserved_amount)
+                self.buff_repo.revert_blood_pact_skim(buff_id, accounted)
             except Exception:
                 logger.exception(
                     "Failed to revert Blood Pact skim for buff %d", buff_id
