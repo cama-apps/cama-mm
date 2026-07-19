@@ -93,28 +93,6 @@ class ShufflePendingMixin:
         """Clear the pending shuffle state (delegates to state_service)."""
         self.state_service.clear_last_shuffle(guild_id, pending_match_id)
 
-    def purchase_protected_hero(
-        self,
-        *,
-        guild_id: int | None,
-        pending_match_id: int,
-        discord_id: int,
-        hero_id: int,
-        team_side: str,
-        cost: int,
-    ) -> dict:
-        """Atomically buy a protect-hero reservation for a pending match."""
-        return self.match_repo.purchase_protected_hero_atomic(
-            guild_id=guild_id,
-            pending_match_id=pending_match_id,
-            discord_id=discord_id,
-            hero_id=hero_id,
-            team_side=team_side,
-            cost=cost,
-        )
-
-
-
     def _build_pending_match_payload(self, state: PendingMatchState) -> dict:
         """Build payload for database persistence (delegates to state_service)."""
         return self.state_service.build_pending_match_payload(state)

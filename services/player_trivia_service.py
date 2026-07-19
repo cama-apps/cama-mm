@@ -260,7 +260,6 @@ class PlayerTriviaService:
             self._build_mafia_questions,
             self._build_trivia_questions,
             self._build_disbursement_questions,
-            self._build_protected_hero_questions,
         )
         for builder in builders:
             try:
@@ -2060,51 +2059,3 @@ class PlayerTriviaService:
                     ),
                     identity=f"disburse:{outcome.casefold()}",
                 )
-
-    def _build_protected_hero_questions(self, context: _Context) -> None:
-        rows = [
-            row
-            for row in context.snapshot.get("protected_heroes", [])
-            if _as_int(row.get("discord_id")) in context.names
-            and str(row.get("status") or "").lower() == "recorded"
-            and _as_int(row.get("hero_id")) > 0
-        ]
-        purchase_counts = Counter(_as_int(row.get("discord_id")) for row in rows)
-        self._add_player_leader(
-            context,
-            key="protected-heroes:most_purchases",
-            category="protected heroes",
-            text="Who has bought hero protection for the most recorded matches?",
-            values=purchase_counts,
-            minimum=1,
-            explanation=lambda name, value: (
-                f"As of game start, {name} had {int(value)} recorded protect-hero purchases."
-            ),
-        )
-
-        heroes_by_player: dict[int, Counter[int]] = defaultdict(Counter)
-        all_heroes: set[str] = set()
-        for row in rows:
-            player_id = _as_int(row.get("discord_id"))
-            hero_id = _as_int(row.get("hero_id"))
-            heroes_by_player[player_id][hero_id] += 1
-            all_heroes.add(self._hero_name(hero_id))
-        for player_id, heroes in sorted(heroes_by_player.items()):
-            ordered = heroes.most_common()
-            if not ordered or (len(ordered) > 1 and ordered[0][1] == ordered[1][1]):
-                continue
-            hero_id, purchases = ordered[0]
-            hero_name = self._hero_name(hero_id)
-            self._add_value_question(
-                context,
-                key=f"protected-heroes:most_common:{player_id}",
-                category="protected heroes",
-                text=f"Which hero has {context.names[player_id]} protected most often?",
-                correct=hero_name,
-                distractors=(other for other in all_heroes if other != hero_name),
-                explanation=(
-                    f"As of game start, {context.names[player_id]} had protected "
-                    f"{hero_name} {purchases} times in recorded matches."
-                ),
-                identity=f"player:{player_id}",
-            )

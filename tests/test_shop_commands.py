@@ -49,6 +49,35 @@ async def test_pingedash_is_not_a_shop_item():
 
 
 @pytest.mark.asyncio
+async def test_protect_hero_is_not_a_shop_item():
+    commands = ShopCommands(MagicMock(), MagicMock())
+    choices = await commands.item_autocomplete(_make_interaction(guild_id=9000), "")
+
+    assert "protect_hero" not in {choice.value for choice in choices}
+
+
+def test_shop_buy_has_no_protect_hero_parameter():
+    assert "hero" not in {parameter.name for parameter in ShopCommands.shop.parameters}
+
+
+@pytest.mark.asyncio
+async def test_shop_rejects_retired_protect_hero_value(monkeypatch):
+    commands = ShopCommands(MagicMock(), MagicMock())
+    interaction = _make_interaction(guild_id=9000)
+    monkeypatch.setattr(
+        "commands.shop.GLOBAL_RATE_LIMITER.check",
+        lambda **_kwargs: SimpleNamespace(allowed=True, retry_after_seconds=0),
+    )
+
+    await commands.shop.callback(commands, interaction, "protect_hero")
+
+    interaction.response.send_message.assert_awaited_once_with(
+        "That shop item is no longer available.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum():
     commands = ShopCommands(MagicMock(), MagicMock())
     choices = await commands.item_autocomplete(_make_interaction(guild_id=9000), "")

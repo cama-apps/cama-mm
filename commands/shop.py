@@ -31,7 +31,6 @@ from config import (
     SHOP_NEW_MYSTERY_GIFT_COST,
     SHOP_PACKAGE_DEAL_BASE_COST,
     SHOP_PACKAGE_DEAL_RATING_DIVISOR,
-    SHOP_PROTECT_HERO_COST,
     SHOP_RECALIBRATE_COST,
     SHOP_SOFT_AVOID_COST,
     SHOP_WITCHS_CURSE_COST,
@@ -46,7 +45,7 @@ from utils.economy_scaling import (
     scale_minigame_jc_delta,
 )
 from utils.formatting import JOPACOIN_EMOTE
-from utils.hero_lookup import get_all_heroes, get_hero_color, get_hero_image_url, get_hero_name
+from utils.hero_lookup import get_hero_color, get_hero_image_url
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -214,18 +213,6 @@ class ShopCommands(commands.Cog):
             logger.exception("Daily economy event failed to adjust a mana reward")
             return adjusted
 
-    async def hero_autocomplete(
-        self, interaction: discord.Interaction, current: str
-    ) -> list[app_commands.Choice[str]]:
-        """Autocomplete for hero names."""
-        all_heroes = get_all_heroes()
-        matches = [
-            app_commands.Choice(name=hero_name, value=hero_id)
-            for hero_id, hero_name in all_heroes.items()
-            if current.lower() in hero_name.lower()
-        ]
-        return matches[:25]  # Discord limit
-
     async def item_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
@@ -238,10 +225,6 @@ class ShopCommands(commands.Cog):
             app_commands.Choice(
                 name=f"Announce Balance + Tag User ({SHOP_ANNOUNCE_TARGET_COST} jopacoin)",
                 value="announce_target",
-            ),
-            app_commands.Choice(
-                name=f"Protect Hero ({SHOP_PROTECT_HERO_COST} jopacoin)",
-                value="protect_hero",
             ),
             app_commands.Choice(
                 name=f"Jopa Coin(TM) ({SHOP_JOPA_COIN_COST} jopacoin)",
@@ -307,16 +290,14 @@ class ShopCommands(commands.Cog):
     @app_commands.describe(
         item="What to buy",
         target="User to interact with (required for 'Announce + Tag', 'Soft Avoid', and 'Package Deal' options)",
-        hero="Hero to protect from bans (required for 'Protect Hero' option)",
     )
-    @app_commands.autocomplete(item=item_autocomplete, hero=hero_autocomplete)
+    @app_commands.autocomplete(item=item_autocomplete)
     @require_guild
     async def shop(
         self,
         interaction: discord.Interaction,
         item: str,
         target: discord.Member | None = None,
-        hero: str | None = None,
     ):
         """Buy items from the shop with jopacoin."""
         guild_id = interaction.guild.id
@@ -347,16 +328,6 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_announce(interaction, target=target)
-        elif item == "protect_hero":
-            # Protect hero from bans - require hero selection
-            if not hero:
-                await interaction.response.send_message(
-                    "You selected 'Protect Hero' but didn't specify a hero. "
-                    "Please provide a hero to protect!",
-                    ephemeral=True,
-                )
-                return
-            await self._handle_protect_hero(interaction, hero=hero)
         elif item == "jopa_coin":
             await self._handle_jopa_coin(interaction)
         elif item == "mystery_gift":
@@ -409,6 +380,11 @@ class ShopCommands(commands.Cog):
                     return
             await interaction.response.send_message(
                 "Recalibration is on cooldown.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "That shop item is no longer available.",
+                ephemeral=True,
             )
 
     @shop_group.command(
@@ -856,197 +832,6 @@ class ShopCommands(commands.Cog):
             flex_lines.append(f"*At least you spent {SHOP_ANNOUNCE_TARGET_COST} to flex on them*")
 
         return flex_lines
-
-    async def _handle_protect_hero(
-        self,
-        interaction: discord.Interaction,
-        hero: str,
-    ):
-        """Handle the protect hero purchase."""
-        user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
-        cost = SHOP_PROTECT_HERO_COST
-
-        # Check if registered
-        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
-        if not player:
-            await interaction.response.send_message(
-                "You need to `/player register` before you can shop.",
-                ephemeral=True,
-            )
-            return
-
-        # Check if match_service is available
-        if not self.match_service:
-            await interaction.response.send_message(
-                "This feature is currently unavailable.",
-                ephemeral=True,
-            )
-            return
-
-        def _state_value(state, name, default=None):
-            if isinstance(state, dict):
-                return state.get(name, default)
-            return getattr(state, name, default)
-
-        def _state_team_ids(state, name):
-            value = _state_value(state, name, [])
-            return value if isinstance(value, list) else []
-
-        def _looks_like_pending_state(state) -> bool:
-            return isinstance(_state_value(state, "radiant_team_ids"), list) and isinstance(
-                _state_value(state, "dire_team_ids"), list
-            )
-
-        # Check if there's an active shuffle containing this purchaser. This
-        # matters when a guild has multiple concurrent pending games.
-        pending_state = None
-        get_for_player = getattr(self.match_service, "get_pending_match_for_player", None)
-        if callable(get_for_player):
-            candidate = await asyncio.to_thread(get_for_player, guild_id, user_id)
-            if candidate is not None and _looks_like_pending_state(candidate):
-                pending_state = candidate
-        if pending_state is None:
-            pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
-        if not pending_state:
-            await interaction.response.send_message(
-                "There's no active shuffle. You can only protect a hero during an active game.",
-                ephemeral=True,
-            )
-            return
-
-        # Check if player is in the shuffle
-        radiant_ids = _state_team_ids(pending_state, "radiant_team_ids")
-        dire_ids = _state_team_ids(pending_state, "dire_team_ids")
-        all_player_ids = radiant_ids + dire_ids
-
-        if user_id not in all_player_ids:
-            await interaction.response.send_message(
-                "You're not in the current shuffle. Only players in the game can protect heroes.",
-                ephemeral=True,
-            )
-            return
-
-        # Get hero info
-        hero_id = int(hero)
-        hero_name = get_hero_name(hero_id)
-        hero_image = get_hero_image_url(hero_id)
-        hero_color = get_hero_color(hero_id) or 0xFFD700  # Gold fallback
-
-        # Determine which team the player is on
-        team_side = "radiant" if user_id in radiant_ids else "dire"
-        team_name = team_side.capitalize()
-        pending_match_id = _state_value(pending_state, "pending_match_id")
-        if pending_match_id is None:
-            await interaction.response.send_message(
-                "This active game is missing its match tracking ID. Try again after reshuffling.",
-                ephemeral=True,
-            )
-            return
-
-        purchase_protected_hero = getattr(self.match_service, "purchase_protected_hero", None)
-        if not callable(purchase_protected_hero):
-            await interaction.response.send_message(
-                "This feature is currently unavailable.",
-                ephemeral=True,
-            )
-            return
-
-        # Defer before the atomic write in case SQLite is briefly waiting on a
-        # writer lock. Purchase failures are sent as followups below.
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
-        purchase = await asyncio.to_thread(
-            purchase_protected_hero,
-            guild_id=guild_id,
-            pending_match_id=pending_match_id,
-            discord_id=user_id,
-            hero_id=hero_id,
-            team_side=team_side,
-            cost=cost,
-        )
-        if not purchase.get("success"):
-            reason = purchase.get("reason")
-            if reason == "insufficient_balance":
-                balance = purchase.get("balance", 0)
-                await safe_followup(
-                    interaction,
-                    content=f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
-                    ephemeral=True,
-                )
-                return
-            if reason == "already_protected":
-                existing_hero_name = get_hero_name(purchase.get("hero_id") or hero_id)
-                await safe_followup(
-                    interaction,
-                    content=f"You already protected **{existing_hero_name}** for this game.",
-                    ephemeral=True,
-                )
-                return
-            if reason == "no_pending_match":
-                await safe_followup(
-                    interaction,
-                    content="This game is no longer active.",
-                    ephemeral=True,
-                )
-                return
-            await safe_followup(
-                interaction,
-                content="Could not protect that hero right now.",
-                ephemeral=True,
-            )
-            return
-
-        # Build mentions for all other players in the shuffle
-        other_player_ids = [pid for pid in all_player_ids if pid != user_id]
-        mentions = " ".join(f"<@{pid}>" for pid in other_player_ids)
-
-        # Build the embed
-        embed = discord.Embed(
-            title=f"First Pick Reserved: {hero_name}",
-            description=(
-                f"{interaction.user.mention} has protected **{hero_name}** for **{team_name}**!\n\n"
-                f"**{team_name}** should pick **{hero_name}** as their **first pick** of the "
-                f"draft. This reservation is now tracked for profile stats."
-            ),
-            color=hero_color,
-        )
-        if hero_image:
-            embed.set_thumbnail(url=hero_image)
-        embed.set_footer(text=f"Cost: {cost} jopacoin")
-
-        # Build the message content with mentions
-        content = f"{mentions}"
-
-        # Post to the shuffle thread if it exists
-        thread_id = _state_value(pending_state, "thread_shuffle_thread_id")
-        if thread_id:
-            try:
-                thread = self.bot.get_channel(thread_id)
-                if not thread:
-                    thread = await self.bot.fetch_channel(thread_id)
-                if thread:
-                    await thread.send(content=content, embed=embed)
-            except Exception as e:
-                logger.warning(f"Failed to post protect hero to thread {thread_id}: {e}")
-
-        # Post to the shuffle channel if it's different from both the thread
-        # and the channel where the command was invoked (to avoid double-posting)
-        channel_id = _state_value(pending_state, "shuffle_channel_id")
-        interaction_channel_id = interaction.channel.id if interaction.channel else None
-        if channel_id and channel_id != thread_id and channel_id != interaction_channel_id:
-            try:
-                channel = self.bot.get_channel(channel_id)
-                if not channel:
-                    channel = await self.bot.fetch_channel(channel_id)
-                if channel:
-                    await channel.send(content=content, embed=embed)
-            except Exception as e:
-                logger.warning(f"Failed to post protect hero to channel {channel_id}: {e}")
-
-        # Confirm to the user (this posts to where the command was invoked)
-        await safe_followup(interaction, content=content, embed=embed)
 
     async def _handle_jopa_coin(
         self,
