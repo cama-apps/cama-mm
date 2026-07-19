@@ -133,6 +133,11 @@ class DigInventoryService:
             and any(q.get("type") in BOSS_PREP_ITEM_IDS for q in queued)
         ):
             return _error("Only one boss preparation item can be queued at a time.")
+        # Duplicate-type guard (mirrors use_item): a second queued copy of the
+        # same type would be consumed with zero extra effect.
+        if any(q.get("type") == item_type for q in queued):
+            item_name = CONSUMABLE_ITEMS.get(item_type, {}).get("name", "That item")
+            return _error(f"{item_name} is already queued.")
         self.dig_repo.queue_item(item_id)
         return _ok(queued=True)
 

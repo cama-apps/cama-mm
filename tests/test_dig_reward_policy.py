@@ -530,7 +530,7 @@ def test_pinnacle_reward_scales_base_but_not_wager_profit(
     detail = json.loads(action["detail"])
     assert detail["gross_jc"] == 500
     assert detail["gross_payout"] == 500 + result["wager_payout"]
-    assert detail["gross_base_jc"] == 500
+    assert detail["scaled_base_jc"] == scale_positive_dig_jc(500)
     assert detail["wager_payout"] == result["wager_payout"]
     assert detail["reward_multiplier"] == 0.65
 

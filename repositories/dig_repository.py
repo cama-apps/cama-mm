@@ -9,6 +9,16 @@ from repositories.base_repository import BaseRepository
 from repositories.interfaces import IDigRepository
 
 
+class TunnelStateConflictError(Exception):
+    """Raised when a guarded tunnel write finds the row already changed.
+
+    Check-then-act service flows (e.g. prestige) validate tunnel state,
+    then pass ``require_tunnel_state`` so the final write only lands if
+    that state still holds. The loser of a race gets this exception (the
+    whole transaction rolls back) instead of double-applying.
+    """
+
+
 class DigRepository(BaseRepository, IDigRepository):
     """Data access for dig tunnels, actions, inventory, and artifacts."""
 
@@ -156,6 +166,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "void_bait_digs",
         # dig_thick_skin_date migration
         "thick_skin_date",
+        # add_lantern_stub_date_to_tunnels migration
+        "lantern_stub_date",
         # dig_miner_profile_columns migration
         "miner_origin", "miner_about", "stat_strength", "stat_smarts",
         "stat_stamina", "stat_points", "stat_boss_awards",
@@ -877,6 +889,7 @@ class DigRepository(BaseRepository, IDigRepository):
         add_artifact_is_relic: bool = False,
         add_gear: dict | None = None,
         consume_inventory_item_ids: list[int] | None = None,
+        require_tunnel_state: dict | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None:
@@ -904,6 +917,12 @@ class DigRepository(BaseRepository, IDigRepository):
             if unknown:
                 raise ValueError(
                     f"atomic_tunnel_balance_update got unknown tunnel columns: {sorted(unknown)}."
+                )
+        if require_tunnel_state:
+            unknown = set(require_tunnel_state) - self._TUNNEL_UPDATABLE_COLUMNS
+            if unknown:
+                raise ValueError(
+                    f"atomic_tunnel_balance_update got unknown guard columns: {sorted(unknown)}."
                 )
 
         gid = self.normalize_guild_id(guild_id)
@@ -934,10 +953,27 @@ class DigRepository(BaseRepository, IDigRepository):
 
             if tunnel_updates:
                 set_clauses = ", ".join(f"{col} = ?" for col in tunnel_updates)
+                where_sql = "discord_id = ? AND guild_id = ?"
+                params: list = [*tunnel_updates.values(), discord_id, gid]
+                if require_tunnel_state:
+                    # Conditional claim: the update only lands if the guarded
+                    # columns still hold the values the caller validated.
+                    for col, expected in require_tunnel_state.items():
+                        if expected is None:
+                            where_sql += f" AND {col} IS NULL"
+                        else:
+                            where_sql += f" AND {col} = ?"
+                            params.append(expected)
                 cursor.execute(
-                    f"UPDATE tunnels SET {set_clauses} WHERE discord_id = ? AND guild_id = ?",
-                    (*tunnel_updates.values(), discord_id, gid),
+                    f"UPDATE tunnels SET {set_clauses} WHERE {where_sql}",
+                    params,
                 )
+                if require_tunnel_state and cursor.rowcount == 0:
+                    # Rolls back the whole transaction (incl. any balance
+                    # credit above) via atomic_transaction's except path.
+                    raise TunnelStateConflictError(
+                        f"tunnel state changed for guard {sorted(require_tunnel_state)}"
+                    )
 
             inventory_id: int | None = None
             if add_inventory_item is not None:

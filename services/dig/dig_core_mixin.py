@@ -28,6 +28,7 @@ from services.dig_constants import (
     CAVE_IN_INJURY_DIGS_BY_BAND,
     CAVE_IN_MEDICAL_BILL_RANGES,
     CAVE_IN_STUN_DIGS_BY_BAND,
+    DIG_POSITIVE_JC_MULTIPLIER,
     DIG_STREAK_JC_PAYOUT_CAP,
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
@@ -214,7 +215,8 @@ class DigCoreMixin:
             jc_delta=jc_earned,
             details=json.dumps({
                 "advance": advance, "jc": jc_earned, "first_dig": True,
-                "gross_jc": gross_jc, "reward_multiplier": 0.65,
+                "gross_jc": gross_jc,
+                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "depth_before": depth_before, "depth_after": new_depth,
             }),
         )
@@ -713,7 +715,9 @@ class DigCoreMixin:
                     "detail": cave_in_detail,
                     "depth_before": depth_before, "depth_after": new_depth,
                     "gross_jc": cave_in_gross_jc,
-                    "reward_multiplier": 0.65 if cave_in_gross_jc > 0 else None,
+                    "reward_multiplier": (
+                        DIG_POSITIVE_JC_MULTIPLIER if cave_in_gross_jc > 0 else None
+                    ),
                 }),
             )
             if p.get("overgrowth_active") and self.buff_service is not None:
@@ -730,6 +734,7 @@ class DigCoreMixin:
                 has_lantern=p["has_lantern"],
                 event=None, artifact=None,
                 is_first_dig=False,
+                dig_consumed=True,
                 items_used=p["items_used"], items_used_ids=p["items_used_ids"],
                 auto_purchases=p.get("auto_purchases", []),
                 pickaxe_tier=p["pickaxe_tier"],
@@ -894,6 +899,7 @@ class DigCoreMixin:
         jc_earned = scale_positive_dig_jc(gross_jc)
 
         # Plains tithe / Blue tax apply to the scaled full payout.
+        # (_apply_mana_yield_taxes also applies the daily economy event.)
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
         # Helltide bell: flat per-dig tax while the guild modifier is active.
         helltide_tax = scale_deflationary_minigame_jc_delta(self._helltide_tax(guild_id))
@@ -999,7 +1005,8 @@ class DigCoreMixin:
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({
                 "advance": advance, "jc": jc_earned,
-                "gross_jc": gross_jc, "reward_multiplier": 0.65,
+                "gross_jc": gross_jc,
+                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter, "cave_in": False,
                 "corruption": p["corruption"]["id"] if p["corruption"] else None,
@@ -1024,6 +1031,7 @@ class DigCoreMixin:
             has_lantern=p["has_lantern"],
             event=event, artifact=artifact,
             is_first_dig=False,
+            dig_consumed=True,
             items_used=p["items_used"], items_used_ids=p["items_used_ids"],
             auto_purchases=p.get("auto_purchases", []),
             pickaxe_tier=p["pickaxe_tier"],
@@ -1186,7 +1194,9 @@ class DigCoreMixin:
                     "depth_before": depth_before, "depth_after": new_depth,
                     "dm_mode": True,
                     "gross_jc": cave_in_gross_jc,
-                    "reward_multiplier": 0.65 if cave_in_gross_jc > 0 else None,
+                    "reward_multiplier": (
+                        DIG_POSITIVE_JC_MULTIPLIER if cave_in_gross_jc > 0 else None
+                    ),
                 }),
             )
             if p.get("overgrowth_active") and self.buff_service is not None:
@@ -1203,6 +1213,7 @@ class DigCoreMixin:
                 has_lantern=p["has_lantern"],
                 event=None, artifact=None,
                 is_first_dig=False,
+                dig_consumed=True,
                 items_used=p["items_used"], items_used_ids=p["items_used_ids"],
                 auto_purchases=p.get("auto_purchases", []),
                 pickaxe_tier=p["pickaxe_tier"],
@@ -1398,7 +1409,8 @@ class DigCoreMixin:
                 jc_delta=jc_earned,
                 details=json.dumps({
                     "advance": advance, "jc": jc_earned,
-                    "gross_jc": gross_jc, "reward_multiplier": 0.65,
+                    "gross_jc": gross_jc,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "depth_before": depth_before, "depth_after": new_depth,
                     "boss_encounter": boss_encounter, "cave_in": False,
                     "corruption": p["corruption"]["id"] if p["corruption"] else None,
@@ -1425,6 +1437,7 @@ class DigCoreMixin:
                 has_lantern=p["has_lantern"],
                 event=event, artifact=artifact,
                 is_first_dig=False,
+                dig_consumed=True,
                 items_used=p["items_used"], items_used_ids=p["items_used_ids"],
                 auto_purchases=p.get("auto_purchases", []),
                 pickaxe_tier=p["pickaxe_tier"],

@@ -9,9 +9,11 @@ carries no state of its own and is composed into ``DigService``.
 import json
 import random
 
+from repositories.dig_repository import TunnelStateConflictError
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
     BOSS_BOUNDARIES,
+    DIG_POSITIVE_JC_MULTIPLIER,
     MAX_PRESTIGE,
     MUTATION_BY_ID,
     PINNACLE_DEPTH,
@@ -231,35 +233,43 @@ class PrestigeMixin:
         # a fresh pinnacle from the rotating pool on first encounter. The
         # tunnel reset and the flat JC grant commit together so a crash
         # can't reset the run without paying the grant (or vice versa).
+        # The reset is also guarded on the prestige level we validated:
+        # two rapid calls can both pass can_prestige before the first reset
+        # commits, so the write is conditional — the loser rolls back
+        # (no grant, no relic) and gets a clean error below.
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=prestige_jc_grant,
-            add_relic_artifact_id=granted_relic_id,
-            tunnel_updates={
-                "depth": 0,
-                "boss_progress": json.dumps(boss_progress),
-                "boss_attempts": 0,
-                "prestige_level": prestige_level,
-                "prestige_perks": json.dumps(current_perks),
-                "cheer_data": None,
-                "injury_state": None,
-                "best_run_score": best_score,
-                "current_run_jc": 0,
-                "current_run_artifacts": 0,
-                "current_run_events": 0,
-                "total_prestige_score": total_score,
-                "mutations": mutations_json,
-                "stat_boss_awards": json.dumps({
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_delta=prestige_jc_grant,
+                add_relic_artifact_id=granted_relic_id,
+                require_tunnel_state={"prestige_level": prestige_level - 1},
+                tunnel_updates={
+                    "depth": 0,
+                    "boss_progress": json.dumps(boss_progress),
+                    "boss_attempts": 0,
                     "prestige_level": prestige_level,
-                    "awards": [],
-                }),
-                "pinnacle_boss_id": None,
-                "pinnacle_phase": 0,
-                "pinnacle_hp_remaining": None,
-                "pinnacle_last_engaged_at": None,
-            },
-        )
+                    "prestige_perks": json.dumps(current_perks),
+                    "cheer_data": None,
+                    "injury_state": None,
+                    "best_run_score": best_score,
+                    "current_run_jc": 0,
+                    "current_run_artifacts": 0,
+                    "current_run_events": 0,
+                    "total_prestige_score": total_score,
+                    "mutations": mutations_json,
+                    "stat_boss_awards": json.dumps({
+                        "prestige_level": prestige_level,
+                        "awards": [],
+                    }),
+                    "pinnacle_boss_id": None,
+                    "pinnacle_phase": 0,
+                    "pinnacle_hp_remaining": None,
+                    "pinnacle_last_engaged_at": None,
+                },
+            )
+        except TunnelStateConflictError:
+            return self._error("Your prestige was already processed.")
 
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
@@ -269,7 +279,7 @@ class PrestigeMixin:
                 "level": prestige_level, "perk": perk_choice,
                 "run_score": run_score, "mutations": mutation_info,
                 "gross_jc": prestige_gross_jc,
-                "reward_multiplier": 0.65,
+                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
             }),
         )
 
@@ -334,12 +344,19 @@ class PrestigeMixin:
                 "injury_state": None,
                 "cheer_data": None,
                 "streak_days": 0,
+                # Abandon starts a fresh run — clear pinnacle state like
+                # prestige does, so the next cycle re-rolls from scratch
+                # instead of resuming a stored phase.
+                "pinnacle_boss_id": None,
+                "pinnacle_phase": 0,
+                "pinnacle_hp_remaining": None,
+                "pinnacle_last_engaged_at": None,
             },
             log_detail={
                 "depth": depth,
                 "refund": refund,
                 "gross_jc": gross_refund,
-                "reward_multiplier": 0.65,
+                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
             },
             log_action_type="abandon",
         )

@@ -36,6 +36,10 @@ class PrestigePerksView(discord.ui.View):
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
+        # Guards against a second resolution: two fast clicks would otherwise
+        # each reach the service call before stop() fires at the end of the
+        # first callback's awaits.
+        self._resolved = False
         # Sample 4 random perks from the eligible pool, seeded by (user, level)
         # so that closing and re-opening the picker shows the same options —
         # otherwise players could re-roll until they got the perks they want.
@@ -63,6 +67,14 @@ class PrestigePerksView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your prestige.", ephemeral=True)
                 return
+            # Check-and-set with no await in between, so a burst of rapid
+            # clicks can never each reach the service call — only the first.
+            if self._resolved:
+                await interaction.response.send_message(
+                    "You've already made your selection.", ephemeral=True
+                )
+                return
+            self._resolved = True
             await safe_defer(interaction)
             try:
                 mutation_choice = getattr(self, "_mutation_choice", None)
@@ -245,7 +257,10 @@ class MutationSelectionView(discord.ui.View):
             await safe_defer(interaction)
             # Store the mutation choice on the perk view so it can pass it to prestige()
             self.perks_view._mutation_choice = mut.get("id")
-            await interaction.followup.send(embed=self.perks_embed, view=self.perks_view)
+            msg = await interaction.followup.send(
+                embed=self.perks_embed, view=self.perks_view, wait=True
+            )
+            self.perks_view.message = msg
             self.stop()
         return callback
 

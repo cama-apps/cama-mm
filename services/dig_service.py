@@ -33,6 +33,7 @@ from services.dig_constants import (
     BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
     CAVE_IN_BLOCK_LOSS_RANGES,
+    DIG_POSITIVE_JC_MULTIPLIER,
     DIG_STREAK_JC_PAYOUT_CAP,
     EVENT_POOL,
     LAYERS,
@@ -856,7 +857,7 @@ class DigService(
                     "depth_before": depth_before, "depth_after": new_depth,
                     "gross_jc": cave_in_gross_jc,
                     "reward_multiplier": (
-                        0.65
+                        DIG_POSITIVE_JC_MULTIPLIER
                         if cave_in_gross_jc > 0
                         else None
                     ),
@@ -1068,6 +1069,7 @@ class DigService(
 
         # Plains tithe / Blue tax apply to the scaled full payout (base +
         # milestone + streak) so the transferred/burned amounts are scaled too.
+        # (_apply_mana_yield_taxes also applies the daily economy event.)
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
 
         # Helltide bell: a flat per-dig tax while the guild modifier is active.
@@ -1221,7 +1223,8 @@ class DigService(
             consume_inventory_item_ids=consumed_item_row_ids,
             log_detail={
                 "advance": advance, "jc": jc_earned,
-                "gross_jc": gross_jc, "reward_multiplier": 0.65,
+                "gross_jc": gross_jc,
+                "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter,
                 "cave_in": False,

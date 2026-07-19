@@ -34,6 +34,7 @@ from dataclasses import dataclass
 
 from config import HOSTILE_LOSS_MIN_BALANCE
 from services.dig_data.balance import (
+    DIG_POSITIVE_JC_MULTIPLIER,
     scale_positive_dig_jc,
     strengthen_dig_event_penalty,
 )
@@ -285,7 +286,9 @@ def resolve_splash(
         "penalty_requested": penalty_jc,
         "penalty_scaled": scaled_penalty_jc,
         "gross_jc": grant_gross_jc,
-        "reward_multiplier": 0.65 if grant_gross_jc is not None else None,
+        "reward_multiplier": (
+            DIG_POSITIVE_JC_MULTIPLIER if grant_gross_jc is not None else None
+        ),
         "mode": mode,
     })
 
@@ -310,7 +313,7 @@ def resolve_splash(
                     "mode": mode,
                     "digger_id": digger_id,
                     "gross_jc": grant_gross_jc,
-                    "reward_multiplier": 0.65,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 },
             )
             dig_repo.log_action(

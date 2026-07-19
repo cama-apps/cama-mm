@@ -30,6 +30,7 @@ from services.dig_constants import (
     BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
+    DIG_POSITIVE_JC_MULTIPLIER,
     LUMINOSITY_MAX,
     PHASE_TRANSITION_EVENTS,
     PINNACLE_BASE_JC_REWARD,
@@ -524,49 +525,22 @@ class PinnacleMixin:
                     luminosity_display=self._luminosity_combat_display(tunnel),
                 )
 
-            entry: dict = {"round": round_num}
-            crit_this_round = False
-            if random.random() < player_hit:
-                dmg_this_round = player_dmg
-                if relic_status.get("relic_bottled_quake"):
-                    dmg_this_round += 1
-                    relic_status["relic_bottled_quake"] = False
-                    entry["bottled_quake"] = True
-                if crit_chance > 0 and random.random() < crit_chance:
-                    dmg_this_round += crit_bonus
-                    crit_this_round = True
-                    if relic_status.get("gear_heal_first_crit"):
-                        player_hp = min(
-                            int(relic_status.get("trophy_start_hp", player_hp + 1)),
-                            player_hp + 1,
-                        )
-                        relic_status["gear_heal_first_crit"] = False
-                        entry["blood_locket_heal"] = True
-                boss_hp -= dmg_this_round
-            entry["crit"] = crit_this_round
-            entry["boss_hp"] = max(0, boss_hp)
-            if boss_hp <= 0:
-                won = True
-                round_log.append(entry)
-                break
-            boss_roll = random.random() < boss_hit_chance
-            if boss_roll:
-                player_hp -= boss_dmg
-                if relic_status.get("gear_reflect_first_hit"):
-                    boss_hp -= 1
-                    relic_status["gear_reflect_first_hit"] = False
-                    entry["briarplate_reflect"] = True
-            elif relic_status.get("gear_springheel_counter"):
-                boss_hp -= 1
-                relic_status["gear_springheel_counter"] = False
-                entry["springheel_counter"] = True
-            entry["boss_hp"] = max(0, boss_hp)
-            entry["player_hp"] = max(0, player_hp)
+            # Shared round engine — the same one the paused/resumed path
+            # uses, so relic and trophy effects behave identically whether
+            # or not a mechanic fired this fight.
+            entry, player_hp, boss_hp, terminal = self._run_one_round(
+                round_num=round_num,
+                player_hp=player_hp, boss_hp=boss_hp,
+                player_hit=player_hit, player_dmg=player_dmg,
+                boss_hit=boss_hit_chance, boss_dmg=boss_dmg,
+                status_effects=relic_status,
+                crit_chance=crit_chance, crit_bonus=crit_bonus,
+            )
             round_log.append(entry)
-            if boss_hp <= 0:
+            if terminal is True:
                 won = True
                 break
-            if player_hp <= 0:
+            if terminal is False:
                 won = False
                 break
         else:
@@ -958,8 +932,7 @@ class PinnacleMixin:
                     "jc_delta": total_reward,
                     "gross_jc": gross_base_reward,
                     "gross_payout": gross_payout,
-                    "reward_multiplier": 0.65,
-                    "gross_base_jc": gross_base_reward,
+                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "scaled_base_jc": scaled_base_reward,
                     "wager_payout": wager_payout,
                     "relic_id": relic_drop["artifact_id"],

@@ -594,3 +594,28 @@ class TestBuyInsurance:
         assert "4 JC" in result["error"]
         assert player_repository.get_balance(10001, guild_id) == 4
         assert dig_repo.get_tunnel(10001, guild_id)["insured_until"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# queue_item
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestQueueItemDuplicateGuard:
+    """queue_item must reject a second queued copy of the same type —
+    otherwise the extra copy is consumed on the next dig with zero effect."""
+
+    def test_queue_item_rejects_duplicate_type(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        _register_player(player_repository)
+        first_id = dig_repo.add_item(10001, guild_id, "torch")
+        second_id = dig_repo.add_item(10001, guild_id, "torch")
+
+        first = inv_service.queue_item(10001, guild_id, first_id)
+        assert first["success"] is True
+
+        second = inv_service.queue_item(10001, guild_id, second_id)
+        assert second["success"] is False
+        assert "already queued" in second["error"]
+        assert len(dig_repo.get_queued_items(10001, guild_id)) == 1

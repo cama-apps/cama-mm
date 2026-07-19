@@ -4,6 +4,7 @@ import json
 import random
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -365,6 +366,95 @@ class TestArtifacts:
         assert not dig_repo.has_artifact(10001, guild_id, relic_id)
         # Receiver has it
         assert dig_repo.has_artifact(10002, guild_id, relic_id)
+
+
+class TestGiftCommandPath:
+    """Drive /dig gift through the cog with the value autocomplete supplies.
+
+    Guards the id-vs-display-label contract between relic_autocomplete and
+    gift_relic, and that a failed gift is surfaced instead of reported as a
+    success.
+    """
+
+    @pytest.fixture
+    def gift_setup(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        import commands.dig as dig_commands
+
+        _register_player(player_repository, discord_id=10001)
+        _register_player(player_repository, discord_id=10002)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.add_artifact(10001, guild_id, "mole_claws", is_relic=True)
+
+        monkeypatch.setattr(
+            dig_commands, "require_dig_channel", AsyncMock(return_value=True)
+        )
+        monkeypatch.setattr(dig_commands, "safe_defer", AsyncMock(return_value=True))
+        safe_followup = AsyncMock()
+        monkeypatch.setattr(dig_commands, "safe_followup", safe_followup)
+
+        bot = SimpleNamespace(
+            player_service=SimpleNamespace(get_player=Mock(return_value=object()))
+        )
+        cog = dig_commands.DigCommands(bot, dig_service)
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=guild_id),
+            user=SimpleNamespace(id=10001),
+            channel=SimpleNamespace(id=999),
+        )
+        receiver = SimpleNamespace(id=10002, display_name="Receiver")
+        return cog, interaction, receiver, safe_followup
+
+    async def test_autocomplete_value_gifts_successfully(
+        self, gift_setup, dig_repo, guild_id
+    ):
+        cog, interaction, receiver, safe_followup = gift_setup
+
+        choices = await cog.relic_autocomplete(interaction, "")
+        assert choices, "autocomplete should list the owned relic"
+        value = choices[0].value
+        # The value must be the artifact id gift_relic matches on, not the
+        # display label — passing the label made the gift silently no-op.
+        assert value == "mole_claws"
+
+        await cog.dig_gift.callback(cog, interaction, receiver, value)
+
+        assert not dig_repo.has_artifact(10001, guild_id, "mole_claws")
+        assert dig_repo.has_artifact(10002, guild_id, "mole_claws")
+        content = safe_followup.await_args.kwargs["content"]
+        assert "You gifted" in content
+
+    async def test_failed_gift_reports_error_not_success(
+        self, gift_setup, dig_repo, guild_id
+    ):
+        cog, interaction, receiver, safe_followup = gift_setup
+
+        await cog.dig_gift.callback(cog, interaction, receiver, "Not An Owned Id")
+
+        # Nothing moved, and the user saw the error rather than a success line.
+        assert dig_repo.has_artifact(10001, guild_id, "mole_claws")
+        assert not dig_repo.has_artifact(10002, guild_id, "mole_claws")
+        call = safe_followup.await_args
+        assert call.kwargs.get("ephemeral") is True
+        assert "You gifted" not in (call.kwargs.get("content") or "")
+
+    async def test_failed_trap_reports_error(self, gift_setup, monkeypatch):
+        cog, interaction, _receiver, safe_followup = gift_setup
+        monkeypatch.setattr(
+            cog.dig_service,
+            "set_trap",
+            Mock(return_value={"success": False, "error": "No trap placed."}),
+        )
+
+        await cog.dig_trap.callback(cog, interaction)
+
+        call = safe_followup.await_args
+        assert call.kwargs.get("ephemeral") is True
+        content = call.kwargs.get("content") or ""
+        assert "Trap set" not in content
+        assert "No trap placed." in content
 
 
 class TestHasLanternInResult:
