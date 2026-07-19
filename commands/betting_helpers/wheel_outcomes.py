@@ -395,15 +395,25 @@ class WheelOutcomeProcessor:
                 or player.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE
             ):
                 continue
-            settled = await self._hostile_loss(
-                player,
-                1,
-                "COMMUNE",
-                destination="player",
-                recipient_id=self.context.user_id,
-                clamp_to_balance=True,
-                legacy_aggregate_transfer=True,
-            )
+            try:
+                settled = await self._hostile_loss(
+                    player,
+                    1,
+                    "COMMUNE",
+                    destination="player",
+                    recipient_id=self.context.user_id,
+                    clamp_to_balance=True,
+                    legacy_aggregate_transfer=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "COMMUNE: failed victim=%s (spinner=%s guild=%s): %s",
+                    player.discord_id,
+                    self.context.user_id,
+                    self.context.guild_id,
+                    exc,
+                )
+                continue
             centralized = centralized or settled.centralized
             self.state.commune_total += settled.applied
             self.state.commune_count += int(settled.applied > 0)
@@ -510,15 +520,25 @@ class WheelOutcomeProcessor:
             )
             if loss <= 0:
                 continue
-            settled = await self._hostile_loss(
-                player,
-                loss,
-                "DECAY",
-                destination="player",
-                recipient_id=self.context.user_id,
-                clamp_to_balance=True,
-                legacy_aggregate_transfer=True,
-            )
+            try:
+                settled = await self._hostile_loss(
+                    player,
+                    loss,
+                    "DECAY",
+                    destination="player",
+                    recipient_id=self.context.user_id,
+                    clamp_to_balance=True,
+                    legacy_aggregate_transfer=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "DECAY: failed victim=%s (spinner=%s guild=%s): %s",
+                    player.discord_id,
+                    self.context.user_id,
+                    self.context.guild_id,
+                    exc,
+                )
+                continue
             centralized = centralized or settled.centralized
             total += settled.applied
             self.state.record_shield(settled)
@@ -552,13 +572,24 @@ class WheelOutcomeProcessor:
         percentage = max(1, int(player_above.jopacoin_balance * random.uniform(0.02, 0.07)))
         flat = random.randint(2, 10)
         requested = scale_minigame_jc_delta(max(percentage, flat))
-        settled = await self._hostile_loss(
-            player_above,
-            requested,
-            "RED_SHELL",
-            destination="player",
-            recipient_id=self.context.user_id,
-        )
+        try:
+            settled = await self._hostile_loss(
+                player_above,
+                requested,
+                "RED_SHELL",
+                destination="player",
+                recipient_id=self.context.user_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "RED_SHELL: transfer failed (spinner=%s victim=%s guild=%s): %s",
+                self.context.user_id,
+                player_above.discord_id,
+                self.context.guild_id,
+                exc,
+            )
+            self.state.shell_missed = True
+            return
         self.state.shell_amount = settled.applied
         self.state.shell_victim_new_balance = settled.victim_balance_after
         if settled.destination_balance_after is not None:
@@ -576,16 +607,26 @@ class WheelOutcomeProcessor:
             percentage = max(1, int(self.state.new_balance * random.uniform(0.02, 0.07)))
             flat = random.randint(4, 20)
             requested = scale_minigame_jc_delta(max(percentage, flat))
-            settled = await self.command._apply_hostile_gamba_loss(
-                victim_id=self.context.user_id,
-                guild_id=self.context.guild_id,
-                amount=requested,
-                actor_id=self.context.user_id,
-                event_key=f"{self.context.hostile_event_prefix}:{self.context.user_id}",
-                outcome="BLUE_SHELL",
-                destination="reserve",
-                victim_balance=self.state.new_balance,
-            )
+            try:
+                settled = await self.command._apply_hostile_gamba_loss(
+                    victim_id=self.context.user_id,
+                    guild_id=self.context.guild_id,
+                    amount=requested,
+                    actor_id=self.context.user_id,
+                    event_key=f"{self.context.hostile_event_prefix}:{self.context.user_id}",
+                    outcome="BLUE_SHELL",
+                    destination="reserve",
+                    victim_balance=self.state.new_balance,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "BLUE_SHELL: self-hit failed (spinner=%s guild=%s): %s",
+                    self.context.user_id,
+                    self.context.guild_id,
+                    exc,
+                )
+                self.state.shell_missed = True
+                return
             self.state.shell_amount = settled.applied
             self.state.new_balance = settled.victim_balance_after
             return
@@ -598,13 +639,24 @@ class WheelOutcomeProcessor:
         percentage = max(1, int(richest.jopacoin_balance * random.uniform(0.02, 0.07)))
         flat = random.randint(4, 20)
         requested = scale_minigame_jc_delta(max(percentage, flat))
-        settled = await self._hostile_loss(
-            richest,
-            requested,
-            "BLUE_SHELL",
-            destination="player",
-            recipient_id=self.context.user_id,
-        )
+        try:
+            settled = await self._hostile_loss(
+                richest,
+                requested,
+                "BLUE_SHELL",
+                destination="player",
+                recipient_id=self.context.user_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "BLUE_SHELL: transfer failed (spinner=%s victim=%s guild=%s): %s",
+                self.context.user_id,
+                richest.discord_id,
+                self.context.guild_id,
+                exc,
+            )
+            self.state.shell_missed = True
+            return
         self.state.shell_amount = settled.applied
         self.state.shell_victim_new_balance = settled.victim_balance_after
         if settled.destination_balance_after is not None:
@@ -853,7 +905,7 @@ class WheelOutcomeProcessor:
                     recipient_id=self.context.user_id,
                 )
                 self.state.heist_total += settled.applied
-                self.state.heist_count += int(settled.attempted > 0)
+                self.state.heist_count += int(settled.applied > 0)
                 self.state.record_shield(settled)
             except Exception as exc:
                 logger.warning(
@@ -892,7 +944,7 @@ class WheelOutcomeProcessor:
                     recipient_id=self.context.user_id,
                 )
                 self.state.market_crash_total += settled.applied
-                self.state.market_crash_count += int(settled.attempted > 0)
+                self.state.market_crash_count += int(settled.applied > 0)
                 self.state.record_shield(settled)
             except Exception as exc:
                 logger.warning(

@@ -265,7 +265,7 @@ def format_health_snapshot(snapshot: HealthSnapshot) -> str:
         f"**Discord latency:** {discord_latency}\n"
         f"**Guilds:** {snapshot.guild_count}\n"
         f"**DB:** {'ok' if snapshot.db_ok else 'failed'} ({db_latency}), size {snapshot.db_size}\n"
-        f"**Memory RSS:** {snapshot.memory_rss}\n"
+        f"**Peak RSS:** {snapshot.memory_rss}\n"
         f"**Open FDs:** {fds}\n"
         f"**IO blocks:** in {snapshot.io_blocks_in}, out {snapshot.io_blocks_out}\n"
         f"**Commands:** {snapshot.usage.command_total} total, "

@@ -126,3 +126,60 @@ def test_compute_calibration_stats_openskill_prediction_quality_from_history():
     assert os_quality["ece"] is not None
     assert os_quality["accuracy"] == pytest.approx(0.5, rel=1e-6)
     assert calibrated_prob < raw_prob
+
+
+def _history_row(rating: float, rating_before: float | None = None) -> dict:
+    return {"rating": rating, "rating_before": rating_before}
+
+
+def _last_5_delta(history: list[dict]) -> float | None:
+    from rating_system import CamaRatingSystem
+    from utils.rating_insights import compute_player_calibration
+
+    calibration = compute_player_calibration(
+        Player(name="p"), history, [], CamaRatingSystem()
+    )
+    return calibration.last_5_delta
+
+
+class TestLast5Delta:
+    """last_5_delta must span five full games of change.
+
+    Each row's "rating" is the post-game value, so the baseline must be the
+    oldest counted game's pre-game rating ("rating_before"); using its
+    post-game rating undercounts by one game.
+    """
+
+    def test_spans_five_games_with_longer_history(self):
+        # Newest-first: each game gained exactly 10 rating.
+        history = [
+            _history_row(1550, 1540),
+            _history_row(1540, 1530),
+            _history_row(1530, 1520),
+            _history_row(1520, 1510),
+            _history_row(1510, 1500),
+            _history_row(1500, 1490),
+        ]
+        # Five games at +10 each: 1550 - 1500 (pre-game of the 5th-most-recent).
+        assert _last_5_delta(history) == 50
+
+    def test_short_history_spans_all_games(self):
+        history = [
+            _history_row(1530, 1520),
+            _history_row(1520, 1510),
+            _history_row(1510, 1500),
+        ]
+        # Three games at +10 each.
+        assert _last_5_delta(history) == 30
+
+    def test_legacy_rows_without_rating_before_fall_back(self):
+        history = [
+            _history_row(1550),
+            _history_row(1540),
+            _history_row(1530),
+            _history_row(1520),
+            _history_row(1510),
+            _history_row(1500),
+        ]
+        # Without rating_before the old post-game baseline is the best we have.
+        assert _last_5_delta(history) == 40

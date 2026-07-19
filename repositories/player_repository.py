@@ -3032,6 +3032,40 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
             return int(row["last_double_or_nothing"])
 
+    def try_claim_double_or_nothing(
+        self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int
+    ) -> bool:
+        """
+        Atomically check cooldown and claim a Double or Nothing spin.
+
+        This prevents race conditions where concurrent requests could both pass
+        the cooldown check before either sets the new timestamp.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+            now: Current Unix timestamp
+            cooldown_seconds: Required cooldown between spins
+
+        Returns:
+            True if the spin was claimed (cooldown passed), False if still on cooldown
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Atomic check-and-set: only update if cooldown has passed
+            cursor.execute(
+                """
+                UPDATE players
+                SET last_double_or_nothing = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (last_double_or_nothing IS NULL OR last_double_or_nothing < ?)
+                """,
+                (now, discord_id, guild_id, now - cooldown_seconds),
+            )
+            # If rowcount > 0, the update happened (cooldown passed)
+            return cursor.rowcount > 0
+
     def log_double_or_nothing(
         self,
         discord_id: int,

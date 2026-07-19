@@ -51,20 +51,30 @@ def format_player_list(
 
     rating_system = CamaRatingSystem()
 
-    seen_ids = set()
-    unique_players = []
-    unique_ids = []
+    # Pair each lobby id with its Player row by discord_id rather than by zip
+    # position: get_by_ids silently skips ids with no player row, so a
+    # positional zip would shift every pairing after a deleted/unregistered
+    # member and drop the last player.
+    players_by_id = {}
+    for player in players:
+        player_discord_id = getattr(player, "discord_id", None)
+        if player_discord_id is not None and player_discord_id not in players_by_id:
+            players_by_id[player_discord_id] = player
 
-    for player, pid in zip(players, player_ids):
+    seen_ids = set()
+    unique_ids = []
+    for pid in player_ids:
         if pid in seen_ids:
             continue
         seen_ids.add(pid)
-        unique_players.append(player)
         unique_ids.append(pid)
 
     players_with_ratings = []
-    for player, pid in zip(unique_players, unique_ids):
-        if player.glicko_rating is not None:
+    for pid in unique_ids:
+        player = players_by_id.get(pid)
+        if player is None:
+            rating = rating_system.mmr_to_rating(4000)
+        elif player.glicko_rating is not None:
             rating = player.glicko_rating
         elif player.mmr is not None:
             rating = rating_system.mmr_to_rating(player.mmr)
@@ -85,6 +95,13 @@ def format_player_list(
         if is_real_user and _get_penalty_games(bankruptcy_repo, pid, lookup_guild_id) > 0:
             tombstone = f"{TOMBSTONE_EMOJI} "
 
+        if player is None:
+            # Lobby member with no player row (deleted/unregistered): keep
+            # their slot with a placeholder instead of misaligning the list.
+            display = f"{tombstone}<@{pid}>" if is_real_user else "Unknown player"
+            items.append(f"{idx}. {display} *(unregistered)*")
+            continue
+
         display = f"{tombstone}<@{pid}>" if is_real_user else player.name
         name = f"{idx}. {display}"
         if player.glicko_rating is not None:
@@ -96,7 +113,7 @@ def format_player_list(
                 name += f" {role_display}"
         items.append(name)
 
-    return "\n".join(items), len(unique_players)
+    return "\n".join(items), len(unique_ids)
 
 
 def create_lobby_embed(
@@ -145,7 +162,7 @@ def create_lobby_embed(
 
     embed.add_field(
         name=f"**Players ({regular_count})** ⚔️",
-        value=player_list if players else "No players yet",
+        value=truncate_field(player_list) if players else "No players yet",
         inline=False,
     )
 
@@ -157,7 +174,7 @@ def create_lobby_embed(
         )
         embed.add_field(
             name=f"**Conditional ({conditional_count})** {FROGLING_EMOTE}",
-            value=conditional_list,
+            value=truncate_field(conditional_list),
             inline=False,
         )
 

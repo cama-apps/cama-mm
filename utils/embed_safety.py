@@ -119,8 +119,26 @@ def validate_embed(embed: discord.Embed) -> list[str]:
     if embed.footer and embed.footer.text and len(embed.footer.text) > EMBED_LIMITS["footer"]:
         errors.append(f"Footer exceeds {EMBED_LIMITS['footer']} chars ({len(embed.footer.text)})")
 
+    # Check author name
+    if embed.author and embed.author.name and len(embed.author.name) > EMBED_LIMITS["author_name"]:
+        errors.append(
+            f"Author name exceeds {EMBED_LIMITS['author_name']} chars ({len(embed.author.name)})"
+        )
+
     # Check field count
     if len(embed.fields) > EMBED_LIMITS["max_fields"]:
         errors.append(f"Too many fields: {len(embed.fields)} > {EMBED_LIMITS['max_fields']}")
+
+    # Check combined size (Discord counts title, description, footer text,
+    # author name, and all field names/values against a 6000-char total)
+    total = len(embed.title or "") + len(embed.description or "")
+    if embed.footer and embed.footer.text:
+        total += len(embed.footer.text)
+    if embed.author and embed.author.name:
+        total += len(embed.author.name)
+    for field in embed.fields:
+        total += len(field.name) + len(field.value)
+    if total > EMBED_LIMITS["total"]:
+        errors.append(f"Total embed size exceeds {EMBED_LIMITS['total']} chars ({total})")
 
     return errors

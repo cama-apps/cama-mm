@@ -67,6 +67,13 @@ class MockFooter:
         self.text = text
 
 
+class MockAuthor:
+    """Mock Discord embed author."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+
 class MockEmbed:
     """Mock Discord embed for testing."""
 
@@ -75,6 +82,7 @@ class MockEmbed:
         self.description = None
         self.fields = []
         self.footer = None
+        self.author = None
 
     def add_field(self, name: str, value: str):
         self.fields.append(MockField(name, value))
@@ -149,6 +157,24 @@ class TestValidateEmbed:
         embed.add_field("Test", "x" * (EMBED_LIMITS["field_value"] + 1))
         errors = validate_embed(embed)
         assert len(errors) == 2
+
+    def test_author_name_too_long(self):
+        """Over-long author name should return error."""
+        embed = MockEmbed()
+        embed.author = MockAuthor("x" * (EMBED_LIMITS["author_name"] + 1))
+        errors = validate_embed(embed)
+        assert len(errors) == 1
+        assert "Author" in errors[0]
+
+    def test_total_size_too_large(self):
+        """Parts individually within limits can still breach the 6000 total."""
+        embed = MockEmbed()
+        embed.description = "x" * 4000
+        embed.add_field("a", "y" * EMBED_LIMITS["field_value"])
+        embed.add_field("b", "z" * EMBED_LIMITS["field_value"])
+        errors = validate_embed(embed)
+        assert len(errors) == 1
+        assert "Total" in errors[0]
 
 
 class TestAddLinesField:

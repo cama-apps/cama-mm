@@ -1729,3 +1729,54 @@ async def test_dark_bargain_due_amount_matches_loan_principal():
         interaction.user.id, interaction.guild.id, amount_due=700, due_in_days=7,
     )
     assert "700 due in 7 days" in interaction.followup.send.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_double_or_nothing_atomic_claim_blocks_concurrent_second_spin():
+    """The cooldown must be claimed atomically before any money moves.
+
+    Two rapid presses both pass the stale read-based check; only the first may
+    flip. Pre-fix, both flips ran and each credited against the same stale
+    balance (or both zeroed), minting or over-debiting coins.
+    """
+    from unittest.mock import patch
+
+    from commands.shop import SHOP_DOUBLE_OR_NOTHING_COST as COST
+
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.return_value = object()
+    player_service.get_last_double_or_nothing.return_value = None  # stale read: no cooldown
+    player_service.get_balance.return_value = 200
+    # adjust_balance returns the post-adjust balance; the win credit lands at 300.
+    player_service.adjust_balance.return_value = 2 * (200 - COST)
+    player_service.player_repo.try_claim_double_or_nothing.side_effect = [True, False]
+
+    commands = ShopCommands(bot, player_service)
+
+    # First press: claim succeeds, WIN doubles the at-risk balance.
+    first = _make_interaction(guild_id=9001)
+    first.user.avatar = None
+    with patch("commands.shop.random.random", return_value=0.25):
+        await commands._handle_double_or_nothing(first)
+
+    adjust_calls = player_service.adjust_balance.call_args_list
+    assert [c.args for c in adjust_calls] == [
+        (1001, 9001, -COST),          # ante deducted
+        (1001, 9001, 200 - COST),     # win credits the exact at-risk amount
+    ]
+    log_kwargs = player_service.log_double_or_nothing.call_args.kwargs
+    assert log_kwargs["balance_before"] == 200 - COST
+    assert log_kwargs["balance_after"] == 2 * (200 - COST)
+    assert log_kwargs["won"] is True
+
+    # Second press: atomic claim rejects; no money may move again.
+    second = _make_interaction(guild_id=9001)
+    with patch("commands.shop.random.random", return_value=0.25):
+        await commands._handle_double_or_nothing(second)
+
+    second.response.send_message.assert_awaited_once()
+    assert second.response.send_message.call_args.kwargs.get("ephemeral") is True
+    assert len(player_service.adjust_balance.call_args_list) == 2  # unchanged
+    player_service.log_double_or_nothing.assert_called_once()  # unchanged
+    player_service.set_balance.assert_not_called()

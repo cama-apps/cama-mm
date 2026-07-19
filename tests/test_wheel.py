@@ -3018,3 +3018,165 @@ async def test_credit_gamba_outcome_direct_when_solvent():
     bot.garnishment_service.add_income.assert_not_called()
     _assert_gamba_adjust_call(player_service.adjust_balance, 1002, 123, 60)
     player_service.get_balance.assert_called_once_with(1002, 123)
+
+
+def _make_hostile_processor(wedge_key: str, *, user_id: int = 1001, new_balance: int = 50):
+    """Build a processor for direct hostile-outcome handler tests."""
+    command = MagicMock()
+    command.player_service = MagicMock()
+    interaction = MagicMock()
+    interaction.guild = None
+    context = WheelOutcomeContext(
+        command=command,
+        interaction=interaction,
+        user_id=user_id,
+        guild_id=123,
+        bankruptcy_service=None,
+        penalty_games_remaining=0,
+        effects=None,
+        mana_effects_service=None,
+        is_bad_gamba=False,
+        hostile_event_prefix="wheel_spin:test",
+    )
+    state = WheelOutcomeState((wedge_key, wedge_key, "#000"), new_balance)
+    return WheelOutcomeProcessor(context, state), state, command
+
+
+@pytest.mark.asyncio
+async def test_red_shell_settlement_failure_is_contained_as_miss():
+    """A steal failure after the spin was consumed must not escape process()."""
+    processor, state, command = _make_hostile_processor("RED_SHELL")
+    command.player_service.get_player_above = MagicMock(
+        return_value=SimpleNamespace(
+            name="Rich", discord_id=2002, jopacoin_balance=HOSTILE_LOSS_MIN_BALANCE
+        )
+    )
+    processor._hostile_loss = AsyncMock(side_effect=RuntimeError("settlement failed"))
+
+    await processor.process()
+
+    assert state.shell_missed is True
+    assert state.shell_amount == 0
+    assert state.log_result() == 0
+
+
+@pytest.mark.asyncio
+async def test_blue_shell_settlement_failure_is_contained_as_miss():
+    processor, state, command = _make_hostile_processor("BLUE_SHELL")
+    richest = SimpleNamespace(
+        name="Top", discord_id=2003, jopacoin_balance=HOSTILE_LOSS_MIN_BALANCE
+    )
+    processor._leaderboard = AsyncMock(return_value=[richest])
+    processor._hostile_loss = AsyncMock(side_effect=RuntimeError("settlement failed"))
+
+    await processor.process()
+
+    assert state.shell_missed is True
+    assert state.shell_amount == 0
+    assert state.log_result() == 0
+
+
+@pytest.mark.asyncio
+async def test_blue_shell_self_hit_failure_is_contained_as_miss():
+    processor, state, command = _make_hostile_processor("BLUE_SHELL", user_id=2004)
+    processor._leaderboard = AsyncMock(
+        return_value=[
+            SimpleNamespace(name="Me", discord_id=2004, jopacoin_balance=500)
+        ]
+    )
+    command._apply_hostile_gamba_loss = AsyncMock(side_effect=RuntimeError("settlement failed"))
+
+    await processor.process()
+
+    assert state.shell_missed is True
+    assert state.shell_amount == 0
+    assert state.log_result() == 0
+
+
+@pytest.mark.asyncio
+async def test_decay_per_victim_failure_keeps_other_victims_settled():
+    """One failed victim is skipped; the rest still settle and get credited."""
+    processor, state, command = _make_hostile_processor("DECAY")
+    victims = [
+        SimpleNamespace(name="V1", discord_id=2005, jopacoin_balance=500),
+        SimpleNamespace(name="V2", discord_id=2006, jopacoin_balance=500),
+    ]
+    processor._leaderboard = AsyncMock(return_value=victims)
+    processor._hostile_loss = AsyncMock(
+        side_effect=[
+            RuntimeError("settlement failed"),
+            SimpleNamespace(applied=60, absorbed=0, centralized=False),
+        ]
+    )
+    command._credit_gamba_outcome = AsyncMock(return_value=(110, 0))
+
+    await processor.process()
+
+    assert state.new_balance == 110
+    command._credit_gamba_outcome.assert_awaited_once()
+    assert command._credit_gamba_outcome.call_args.args[3] == 60
+
+
+@pytest.mark.asyncio
+async def test_commune_per_victim_failure_keeps_other_donations():
+    processor, state, command = _make_hostile_processor("COMMUNE")
+    victims = [
+        SimpleNamespace(name="V1", discord_id=2007, jopacoin_balance=500),
+        SimpleNamespace(name="V2", discord_id=2008, jopacoin_balance=500),
+    ]
+    processor._leaderboard = AsyncMock(return_value=victims)
+    processor._hostile_loss = AsyncMock(
+        side_effect=[
+            RuntimeError("settlement failed"),
+            SimpleNamespace(applied=1, absorbed=0, centralized=False),
+        ]
+    )
+    command._credit_gamba_outcome = AsyncMock(return_value=(51, 0))
+
+    await processor.process()
+
+    assert state.commune_total == 1
+    assert state.commune_count == 1
+    command._credit_gamba_outcome.assert_awaited_once()
+    assert command._credit_gamba_outcome.call_args.args[3] == 1
+
+
+@pytest.mark.asyncio
+async def test_heist_fully_shielded_victim_not_counted_as_robbed():
+    """A victim whose loss was fully absorbed by a shield is not 'robbed'."""
+    processor, state, command = _make_hostile_processor("HEIST")
+    command.player_service.get_leaderboard_bottom = MagicMock(
+        return_value=[
+            SimpleNamespace(name="Poor", discord_id=2009, jopacoin_balance=100)
+        ]
+    )
+    command.player_service.get_balance = MagicMock(return_value=50)
+    processor._hostile_loss = AsyncMock(
+        return_value=SimpleNamespace(applied=0, attempted=9, absorbed=9)
+    )
+
+    await processor.process()
+
+    assert state.heist_count == 0
+    assert state.heist_total == 0
+    assert state.shield_absorbed_total == 9
+
+
+@pytest.mark.asyncio
+async def test_market_crash_fully_shielded_victim_not_counted_as_taxed():
+    processor, state, command = _make_hostile_processor("MARKET_CRASH")
+    processor._leaderboard = AsyncMock(
+        return_value=[
+            SimpleNamespace(name="Rich", discord_id=2010, jopacoin_balance=500)
+        ]
+    )
+    command.player_service.get_balance = MagicMock(return_value=50)
+    processor._hostile_loss = AsyncMock(
+        return_value=SimpleNamespace(applied=0, attempted=12, absorbed=12)
+    )
+
+    await processor.process()
+
+    assert state.market_crash_count == 0
+    assert state.market_crash_total == 0
+    assert state.shield_absorbed_total == 12
