@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -11,6 +12,7 @@ from domain.models.duel import (
     DuelStatus,
     DuelTrial,
 )
+from infrastructure.schema_manager import SchemaManager
 from repositories.duel_challenge_repository import DuelChallengeRepository
 from repositories.player_repository import PlayerRepository
 
@@ -965,3 +967,90 @@ def test_only_one_concurrent_unresolved_claim_succeeds(duel_fixture):
         results = list(executor.map(lambda _: claim(), range(2)))
 
     assert sum(result is not None for result in results) == 1
+
+
+def test_voiding_stops_unresolved_reminders(duel_fixture):
+    repo, _, accepted = accept_fixture_challenge(duel_fixture)
+    voided = repo.resolve_atomic(
+        accepted.challenge_id, GUILD_ID, winner_id=None, now=NOW + 200, actor_id=99
+    )
+
+    assert voided.status is DuelStatus.VOIDED
+    assert repo.get_due_challenge_ids(NOW + 30 * DAY) == []
+    assert (
+        repo.claim_unresolved_reminder_atomic(
+            accepted.challenge_id, GUILD_ID, NOW + 30 * DAY
+        )
+        is None
+    )
+
+
+def test_due_scan_orders_pending_expiry_before_unresolved_reminder(repo_db_path):
+    other_guild = GUILD_ID + 1
+    for guild_id in (GUILD_ID, other_guild):
+        seed_player(repo_db_path, 1, 1400.0, 550, guild_id=guild_id)
+        seed_player(repo_db_path, 2, 1500.0, 500, guild_id=guild_id)
+    repo = DuelChallengeRepository(repo_db_path)
+    # Created (and accepted) first so its lower challenge_id would win any
+    # id tiebreak — the expiry-first bucket must be what orders it last.
+    unresolved_due = create_challenge(repo)
+    repo.bind_message(unresolved_due.challenge_id, GUILD_ID, 1001)
+    repo.accept_atomic(
+        unresolved_due.challenge_id, GUILD_ID, 2, DuelTrial.TRIAL_BY_COMBAT, NOW, 2
+    )
+    expiry_due = repo.create_challenge_atomic(
+        other_guild, 77, 1, 2, 500, NOW, 30 * DAY, 7 * DAY, DAY, 1
+    )
+    repo.bind_message(expiry_due.challenge_id, other_guild, 1002)
+
+    assert repo.get_due_challenge_ids(NOW + DAY) == [
+        (expiry_due.challenge_id, other_guild),
+        (unresolved_due.challenge_id, GUILD_ID),
+    ]
+
+
+def test_schedule_unresolved_duel_reminders_migration_backfills_only_accepted(
+    repo_db_path,
+):
+    def seed_row(challenger_id, status, next_reminder_at):
+        return conn.execute(
+            """
+            INSERT INTO duel_challenges (
+                guild_id, channel_id, challenger_id, recipient_id, wager,
+                issuance_fee, status, challenger_glicko, challenger_rd,
+                recipient_glicko, recipient_rd, created_at, expires_at,
+                next_reminder_at
+            ) VALUES (?, 77, ?, 999, 500, 50, ?, 1400.0, 80.0, 1500.0, 80.0,
+                      ?, ?, ?)
+            """,
+            (GUILD_ID, challenger_id, status, NOW, NOW + 7 * DAY, next_reminder_at),
+        ).lastrowid
+
+    with sqlite3.connect(repo_db_path) as conn:
+        legacy_accepted = seed_row(1, "accepted", None)
+        already_scheduled = seed_row(2, "accepted", 999)
+        pending = seed_row(3, "pending", None)
+        resolved = seed_row(4, "resolved", None)
+
+        before = int(time.time())
+        SchemaManager(repo_db_path)._migration_schedule_unresolved_duel_reminders(
+            conn.cursor()
+        )
+        after = int(time.time())
+
+        def reminder(row_id):
+            return conn.execute(
+                "SELECT next_reminder_at FROM duel_challenges WHERE challenge_id = ?",
+                (row_id,),
+            ).fetchone()[0]
+
+        backfilled = reminder(legacy_accepted)
+        assert before + DAY <= backfilled <= after + DAY
+        assert reminder(already_scheduled) == 999
+        assert reminder(pending) is None
+        assert reminder(resolved) is None
+
+        SchemaManager(repo_db_path)._migration_schedule_unresolved_duel_reminders(
+            conn.cursor()
+        )
+        assert reminder(legacy_accepted) == backfilled
