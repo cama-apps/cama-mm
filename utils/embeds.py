@@ -172,7 +172,7 @@ def create_lobby_embed(
     if total_count >= ready_threshold:
         embed.add_field(
             name="✅ Ready!",
-            value="Anyone can use `/shuffle` to create teams!",
+            value="Run `/readycheck` before `/shuffle` to confirm everyone is ready.",
             inline=False,
         )
     else:

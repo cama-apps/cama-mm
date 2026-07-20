@@ -352,6 +352,386 @@ async def test_retired_frogling_reaction_is_removed_from_active_lobby_message(
     lobby_service.join_lobby_conditional.assert_not_called()
 
 
+async def test_lobby_ready_notification_recommends_readycheck_before_shuffle(
+    bot_module,
+):
+    channel = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=42),
+        send=AsyncMock(),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = None
+    lobby_service.get_lobby_channel_id.return_value = None
+    lobby_service.get_origin_channel_id.return_value = None
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module, "_lobby_ready_cooldowns", {}),
+    ):
+        await bot_module.notify_lobby_ready(channel, guild_id=42)
+
+    embed = channel.send.await_args.kwargs["embed"]
+    next_step = next(field for field in embed.fields if field.name == "Next Step")
+    assert next_step.value == (
+        "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
+    )
+
+
+async def test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_channel(
+    bot_module,
+):
+    from commands.lobby import LobbyCommands
+
+    payload = SimpleNamespace(
+        user_id=9,
+        guild_id=42,
+        channel_id=200,
+        message_id=500,
+        emoji=SimpleNamespace(id=None, name="✅"),
+    )
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_readycheck_message_id.return_value = 500
+    lobby_service.add_readycheck_reaction.return_value = True
+    lobby_service.remove_readycheck_reaction.return_value = True
+    lobby_service.get_readycheck_reaction_count_for_message.side_effect = [9, 10, 10, 10]
+    lobby_service.get_origin_channel_id.return_value = 300
+
+    readycheck_message = SimpleNamespace(
+        edit=AsyncMock(
+            side_effect=[
+                None,
+                RuntimeError("readycheck embed edit failed"),
+                None,
+                None,
+            ]
+        )
+    )
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        fetch_message=AsyncMock(return_value=readycheck_message),
+    )
+    origin_channel = SimpleNamespace(id=300, send=AsyncMock())
+    cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
+    cog.rebuild_readycheck_embed = MagicMock(return_value=object())
+    bot_user = SimpleNamespace(id=999)
+
+    def get_channel(channel_id):
+        return {200: readycheck_channel, 300: origin_channel}.get(channel_id)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_channel", side_effect=get_channel),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+        origin_channel.send.assert_not_awaited()
+
+        payload.user_id = 10
+        await bot_module.on_raw_reaction_add(payload)
+        origin_channel.send.assert_awaited_once()
+
+        await bot_module.on_raw_reaction_remove(payload)
+        await bot_module.on_raw_reaction_add(payload)
+
+    origin_channel.send.assert_awaited_once_with(
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+    )
+
+
+async def test_readycheck_completion_falls_back_when_origin_channel_fetch_fails(
+    bot_module,
+):
+    from commands.lobby import LobbyCommands
+
+    readycheck_channel = SimpleNamespace(id=200, send=AsyncMock())
+    lobby_service = MagicMock()
+    lobby_service.get_origin_channel_id.return_value = 300
+    cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=None),
+        patch.object(
+            bot_module.bot,
+            "fetch_channel",
+            AsyncMock(side_effect=RuntimeError("origin channel unavailable")),
+        ),
+    ):
+        sent = await cog.notify_readycheck_complete(
+            42,
+            500,
+            fallback_channel=readycheck_channel,
+        )
+
+    assert sent is True
+    readycheck_channel.send.assert_awaited_once_with(
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+    )
+
+
+async def test_readycheck_completion_falls_back_when_origin_lookup_fails(
+    bot_module,
+):
+    from commands.lobby import LobbyCommands
+
+    readycheck_channel = SimpleNamespace(id=200, send=AsyncMock())
+    lobby_service = MagicMock()
+    lobby_service.get_origin_channel_id.side_effect = RuntimeError(
+        "origin lookup unavailable"
+    )
+    cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
+
+    with patch.object(bot_module.bot, "lobby_service", lobby_service, create=True):
+        sent = await cog.notify_readycheck_complete(
+            42,
+            500,
+            fallback_channel=readycheck_channel,
+        )
+
+    assert sent is True
+    readycheck_channel.send.assert_awaited_once_with(
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+    )
+
+
+async def test_readycheck_completion_uses_origin_when_source_channel_fetch_fails(
+    bot_module,
+):
+    from commands.lobby import LobbyCommands
+
+    payload = SimpleNamespace(
+        user_id=10,
+        guild_id=42,
+        channel_id=200,
+        message_id=500,
+        emoji=SimpleNamespace(id=None, name="✅"),
+    )
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_readycheck_message_id.return_value = 500
+    lobby_service.add_readycheck_reaction.return_value = True
+    lobby_service.get_readycheck_reaction_count_for_message.return_value = 10
+    lobby_service.get_origin_channel_id.return_value = 300
+    origin_channel = SimpleNamespace(id=300, send=AsyncMock())
+    cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
+    cog.rebuild_readycheck_embed = MagicMock(return_value=object())
+    bot_user = SimpleNamespace(id=999)
+
+    def get_channel(channel_id):
+        return origin_channel if channel_id == 300 else None
+
+    async def fetch_channel(channel_id):
+        if channel_id == 200:
+            raise RuntimeError("readycheck channel unavailable")
+        return origin_channel
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_channel", side_effect=get_channel),
+        patch.object(bot_module.bot, "fetch_channel", side_effect=fetch_channel),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    origin_channel.send.assert_awaited_once_with(
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+    )
+
+
+async def test_replaced_readycheck_is_revalidated_before_completion_send(bot_module):
+    from commands.lobby import LobbyCommands
+
+    origin_channel = SimpleNamespace(id=300, send=AsyncMock())
+    fallback_channel = SimpleNamespace(id=200, send=AsyncMock())
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_readycheck_reaction_count_for_message.side_effect = [10, None]
+    lobby_service.get_origin_channel_id.return_value = 300
+    cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
+
+    with (
+        patch.object(bot_module.bot, "get_channel", return_value=None),
+        patch.object(
+            bot_module.bot,
+            "fetch_channel",
+            AsyncMock(return_value=origin_channel),
+        ),
+    ):
+        sent = await cog.notify_readycheck_completion_if_ready(
+            42,
+            500,
+            fallback_channel=fallback_channel,
+        )
+
+    assert sent is False
+    origin_channel.send.assert_not_awaited()
+    fallback_channel.send.assert_not_awaited()
+
+
+async def test_reaction_from_replaced_readycheck_does_not_confirm_new_check(
+    bot_module,
+):
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    payload = SimpleNamespace(
+        user_id=9,
+        guild_id=42,
+        channel_id=200,
+        message_id=500,
+        emoji=SimpleNamespace(id=None, name="✅"),
+    )
+    manager = LobbyManagerService(FakeLobbyRepo())
+    manager.set_readycheck_state(500, 200, {9}, {}, guild_id=42)
+    lobby_service = LobbyService(manager, MagicMock(), ready_threshold=10)
+    original_add = lobby_service.add_readycheck_reaction
+
+    def replace_check_then_add(discord_id, tag, **kwargs):
+        manager.set_readycheck_state(600, 200, {9}, {}, guild_id=42)
+        return original_add(discord_id, tag, **kwargs)
+
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        fetch_message=AsyncMock(),
+    )
+    cog = SimpleNamespace(rebuild_readycheck_embed=MagicMock(return_value=None))
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(
+            lobby_service,
+            "add_readycheck_reaction",
+            side_effect=replace_check_then_add,
+        ),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_channel", return_value=readycheck_channel),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    assert lobby_service.get_readycheck_message_id(guild_id=42) == 600
+    assert lobby_service.get_readycheck_reacted(guild_id=42) == {}
+
+
+async def test_removal_from_replaced_readycheck_does_not_unconfirm_new_check(
+    bot_module,
+):
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    payload = SimpleNamespace(
+        user_id=9,
+        guild_id=42,
+        channel_id=200,
+        message_id=500,
+        emoji=SimpleNamespace(id=None, name="✅"),
+    )
+    manager = LobbyManagerService(FakeLobbyRepo())
+    manager.set_readycheck_state(500, 200, {9}, {}, guild_id=42)
+    manager.add_readycheck_reaction(9, "<@9>", guild_id=42)
+    lobby_service = LobbyService(manager, MagicMock(), ready_threshold=10)
+    original_remove = lobby_service.remove_readycheck_reaction
+
+    def replace_check_then_remove(discord_id, **kwargs):
+        manager.set_readycheck_state(600, 200, {9}, {}, guild_id=42)
+        manager.add_readycheck_reaction(9, "<@9>", guild_id=42)
+        return original_remove(discord_id, **kwargs)
+
+    cog = SimpleNamespace(rebuild_readycheck_embed=MagicMock(return_value=None))
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(
+            lobby_service,
+            "remove_readycheck_reaction",
+            side_effect=replace_check_then_remove,
+        ),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+    ):
+        await bot_module.on_raw_reaction_remove(payload)
+
+    assert lobby_service.get_readycheck_message_id(guild_id=42) == 600
+    assert lobby_service.get_readycheck_reacted(guild_id=42) == {9: "<@9>"}
+
+
+async def test_concurrent_readycheck_completion_retries_after_failed_delivery(
+    bot_module,
+):
+    from commands.lobby import LobbyCommands
+
+    first_send_started = asyncio.Event()
+    release_first_send = asyncio.Event()
+    send_attempts = 0
+
+    async def send(_content):
+        nonlocal send_attempts
+        send_attempts += 1
+        if send_attempts == 1:
+            first_send_started.set()
+            await release_first_send.wait()
+            raise RuntimeError("transient send failure")
+
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        send=AsyncMock(side_effect=send),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_origin_channel_id.return_value = None
+    cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
+
+    with patch.object(bot_module.bot, "lobby_service", lobby_service, create=True):
+        first = asyncio.create_task(
+            cog.notify_readycheck_complete(
+                42,
+                500,
+                fallback_channel=readycheck_channel,
+            )
+        )
+        await first_send_started.wait()
+        second = asyncio.create_task(
+            cog.notify_readycheck_complete(
+                42,
+                500,
+                fallback_channel=readycheck_channel,
+            )
+        )
+        await asyncio.sleep(0)
+        release_first_send.set()
+        results = await asyncio.gather(first, second)
+
+    assert results == [False, True]
+    assert send_attempts == 2
+
+
 async def test_economy_event_loop_enforces_moratorium_before_activation(bot_module):
     """Each wake unlocks recovery ballots before sizing the day's event."""
     guild = SimpleNamespace(id=42)

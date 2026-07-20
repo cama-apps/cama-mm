@@ -760,7 +760,7 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
         )
         embed.add_field(
             name="Next Step",
-            value="Anyone can use `/shuffle` to create balanced teams!",
+            value="Run `/readycheck` before `/shuffle` to confirm everyone is ready.",
             inline=False,
         )
 
@@ -1128,20 +1128,36 @@ async def on_raw_reaction_add(payload):
                     payload.user_id,
                     f"<@{payload.user_id}>",
                     guild_id=payload_guild_id,
+                    expected_message_id=rc_msg_id,
                 )
                 if added:
                     cog = bot.get_cog("LobbyCommands")
-                    embed = (
-                        await asyncio.to_thread(cog.rebuild_readycheck_embed, guild_id=payload_guild_id)
-                        if cog
-                        else None
-                    )
-                    if embed:
+                    if cog:
+                        await cog.notify_readycheck_completion_if_ready(
+                            payload_guild_id or 0,
+                            rc_msg_id,
+                            fallback_channel_id=payload.channel_id,
+                        )
+                    try:
                         channel = bot.get_channel(payload.channel_id)
                         if not channel:
                             channel = await bot.fetch_channel(payload.channel_id)
-                        message = await channel.fetch_message(payload.message_id)
-                        await message.edit(embed=embed)
+                        embed = (
+                            await asyncio.to_thread(
+                                cog.rebuild_readycheck_embed,
+                                guild_id=payload_guild_id,
+                            )
+                            if cog
+                            else None
+                        )
+                        if embed:
+                            message = await channel.fetch_message(payload.message_id)
+                            await message.edit(embed=embed)
+                    except Exception as exc:
+                        logger.error(
+                            f"Error refreshing readycheck embed: {exc}",
+                            exc_info=True,
+                        )
             except Exception as exc:
                 logger.error(f"Error handling readycheck reaction: {exc}", exc_info=True)
         return
@@ -1384,6 +1400,7 @@ async def on_raw_reaction_remove(payload):
                     bot.lobby_service.remove_readycheck_reaction,
                     payload.user_id,
                     guild_id=payload_guild_id,
+                    expected_message_id=rc_msg_id,
                 )
                 if removed:
                     cog = bot.get_cog("LobbyCommands")

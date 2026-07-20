@@ -307,11 +307,20 @@ class LobbyManagerService:
             }
 
     def add_readycheck_reaction(
-        self, discord_id: int, tag: str, guild_id: int | None = None
+        self,
+        discord_id: int,
+        tag: str,
+        guild_id: int | None = None,
+        expected_message_id: int | None = None,
     ) -> bool:
         """Record a reaction. Returns True if newly added."""
         normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
+            if (
+                expected_message_id is not None
+                and self.readycheck_message_ids.get(normalized) != expected_message_id
+            ):
+                return False
             reacted = self.readycheck_reacted.setdefault(normalized, {})
             lobby_ids = self.readycheck_lobby_ids.get(normalized, set())
             if discord_id in reacted:
@@ -321,12 +330,32 @@ class LobbyManagerService:
             reacted[discord_id] = tag
             return True
 
+    def get_readycheck_reaction_count_for_message(
+        self,
+        message_id: int,
+        guild_id: int | None = None,
+    ) -> int | None:
+        """Return the confirmation count only while ``message_id`` is current."""
+        normalized = self._normalize_guild_id(guild_id)
+        with self._state_lock:
+            if self.readycheck_message_ids.get(normalized) != message_id:
+                return None
+            return len(self.readycheck_reacted.get(normalized, {}))
+
     def remove_readycheck_reaction(
-        self, discord_id: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+        expected_message_id: int | None = None,
     ) -> bool:
         """Remove a reaction. Returns True if was present."""
         normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
+            if (
+                expected_message_id is not None
+                and self.readycheck_message_ids.get(normalized) != expected_message_id
+            ):
+                return False
             reacted = self.readycheck_reacted.get(normalized)
             if not reacted or discord_id not in reacted:
                 return False
@@ -413,5 +442,3 @@ class LobbyManagerService:
                 lobby.player_join_times
             ):
                 self._persist_lobby(guild_id)
-
-

@@ -196,19 +196,42 @@ class LobbyService:
         return self.lobby_manager.get_readycheck_player_data(guild_id=guild_id)
 
     def add_readycheck_reaction(
-        self, discord_id: int, tag: str, guild_id: int | None = None
+        self,
+        discord_id: int,
+        tag: str,
+        guild_id: int | None = None,
+        expected_message_id: int | None = None,
     ) -> bool:
         """Record a ✅ reaction. Returns True if newly added."""
         return self.lobby_manager.add_readycheck_reaction(
-            discord_id, tag, guild_id=guild_id
+            discord_id,
+            tag,
+            guild_id=guild_id,
+            expected_message_id=expected_message_id,
+        )
+
+    def get_readycheck_reaction_count_for_message(
+        self,
+        message_id: int,
+        guild_id: int | None = None,
+    ) -> int | None:
+        """Return confirmations only if ``message_id`` is still current."""
+        return self.lobby_manager.get_readycheck_reaction_count_for_message(
+            message_id,
+            guild_id=guild_id,
         )
 
     def remove_readycheck_reaction(
-        self, discord_id: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+        expected_message_id: int | None = None,
     ) -> bool:
         """Remove a ✅ reaction. Returns True if was present."""
         return self.lobby_manager.remove_readycheck_reaction(
-            discord_id, guild_id=guild_id
+            discord_id,
+            guild_id=guild_id,
+            expected_message_id=expected_message_id,
         )
 
     def get_lobby_players(self, lobby: Lobby, guild_id: int | None = None) -> tuple[list[int], list]:
