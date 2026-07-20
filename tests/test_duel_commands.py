@@ -31,6 +31,24 @@ CHALLENGER_ID = 1
 RECIPIENT_ID = 2
 
 
+def test_trial_by_combat_rules_match_agreed_format():
+    assert TRIAL_BY_COMBAT_RULES == (
+        "Mirror matchups: both duelists play the same hero each game.\n"
+        "• Game 1 hero: recipient's pick\n"
+        "• Game 2 hero: challenger's pick\n"
+        "• Tiebreaker: Shadow Fiend, mid\n"
+        "• Hero pool: all heroes, no bans\n"
+        "• Victory: tower destruction, two kills, or opponent surrender\n"
+        "• If neither player has won by 15:00, the higher score wins: creep "
+        "score + (kills × 35)\n"
+        "• Prohibited: farming in the jungle, destroying observer wards, visiting "
+        "other lanes, blocking the first wave of creeps, collecting and using "
+        "runes, Bottle, and Infused Raindrops\n"
+        "Players can agree to additional game rules that do not conflict with "
+        "existing regulations."
+    )
+
+
 def make_challenge(**overrides) -> DuelChallenge:
     values = {
         "challenge_id": 7,
