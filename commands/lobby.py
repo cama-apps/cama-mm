@@ -44,6 +44,8 @@ class LobbyCommands(commands.Cog):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_service = player_service
+        self._readycheck_shuffle_notified: dict[int, int] = {}
+        self._readycheck_shuffle_notification_locks: dict[int, asyncio.Lock] = {}
 
     def rebuild_readycheck_embed(self, guild_id: int | None = None) -> discord.Embed | None:
         """Rebuild the readycheck embed from stored data. Used by bot.py reaction handler."""
@@ -55,6 +57,125 @@ class LobbyCommands(commands.Cog):
             player_data, reacted, ready_threshold=self.lobby_service.ready_threshold
         )
         return embed
+
+    async def notify_readycheck_complete(
+        self,
+        guild_id: int,
+        readycheck_message_id: int,
+        *,
+        fallback_channel=None,
+        fallback_channel_id: int | None = None,
+        _require_current_readycheck: bool = False,
+    ) -> bool:
+        """Recommend shuffling once per ready check after ten confirmations."""
+        notification_lock = self._readycheck_shuffle_notification_locks.setdefault(
+            guild_id,
+            asyncio.Lock(),
+        )
+        async with notification_lock:
+            if (
+                self._readycheck_shuffle_notified.get(guild_id)
+                == readycheck_message_id
+            ):
+                return False
+
+            origin_channel_id = None
+            try:
+                origin_channel_id = await asyncio.to_thread(
+                    self.lobby_service.get_origin_channel_id,
+                    guild_id=guild_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not load readycheck origin channel for guild %s: %s",
+                    guild_id,
+                    exc,
+                )
+
+            target_channel = None
+            if origin_channel_id:
+                try:
+                    target_channel = self.bot.get_channel(origin_channel_id)
+                    if not target_channel:
+                        target_channel = await self.bot.fetch_channel(origin_channel_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not fetch readycheck origin channel %s: %s",
+                        origin_channel_id,
+                        exc,
+                    )
+
+            if target_channel is None:
+                target_channel = fallback_channel
+            if target_channel is None and fallback_channel_id:
+                try:
+                    target_channel = self.bot.get_channel(fallback_channel_id)
+                    if not target_channel:
+                        target_channel = await self.bot.fetch_channel(fallback_channel_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not fetch readycheck fallback channel %s: %s",
+                        fallback_channel_id,
+                        exc,
+                    )
+
+            if target_channel is None:
+                logger.error(
+                    "No channel available for readycheck completion in guild %s",
+                    guild_id,
+                )
+                return False
+
+            if _require_current_readycheck:
+                reacted_count = await asyncio.to_thread(
+                    self.lobby_service.get_readycheck_reaction_count_for_message,
+                    readycheck_message_id,
+                    guild_id=guild_id,
+                )
+                if (
+                    reacted_count is None
+                    or reacted_count < self.lobby_service.ready_threshold
+                ):
+                    return False
+
+            try:
+                await target_channel.send(
+                    "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+                )
+            except Exception as exc:
+                logger.error(
+                    "Error notifying readycheck completion: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return False
+
+            self._readycheck_shuffle_notified[guild_id] = readycheck_message_id
+            return True
+
+    async def notify_readycheck_completion_if_ready(
+        self,
+        guild_id: int,
+        readycheck_message_id: int,
+        *,
+        fallback_channel=None,
+        fallback_channel_id: int | None = None,
+    ) -> bool:
+        """Notify only while this ready-check generation is current and full."""
+        reacted_count = await asyncio.to_thread(
+            self.lobby_service.get_readycheck_reaction_count_for_message,
+            readycheck_message_id,
+            guild_id=guild_id,
+        )
+        if reacted_count is None or reacted_count < self.lobby_service.ready_threshold:
+            return False
+        return await self.notify_readycheck_complete(
+            guild_id,
+            readycheck_message_id,
+            fallback_channel=fallback_channel,
+            fallback_channel_id=fallback_channel_id,
+            _require_current_readycheck=True,
+        )
 
     async def _get_lobby_target_channel(
         self, interaction: discord.Interaction
@@ -1102,7 +1223,13 @@ class LobbyCommands(commands.Cog):
                     invoker_id,
                     f"<@{invoker_id}>",
                     guild_id=guild_id,
+                    expected_message_id=msg.id,
                 )
+            await self.notify_readycheck_completion_if_ready(
+                guild_id or 0,
+                msg.id,
+                fallback_channel=msg.channel,
+            )
             if ping_content:
                 await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
             return "ok", {
@@ -1134,7 +1261,13 @@ class LobbyCommands(commands.Cog):
                 invoker_id,
                 f"<@{invoker_id}>",
                 guild_id=guild_id,
+                expected_message_id=msg.id,
             )
+        await self.notify_readycheck_completion_if_ready(
+            guild_id or 0,
+            msg.id,
+            fallback_channel=msg.channel,
+        )
         if pruned_ids:
             note = (
                 "🧹 Removed (away during ready check): "

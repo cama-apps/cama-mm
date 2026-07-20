@@ -252,6 +252,22 @@ class TestReadycheckPreconditions:
         assert lobby.is_ready() is False
 
 
+def test_ready_lobby_embed_recommends_readycheck_before_shuffle():
+    from utils.embeds import create_lobby_embed
+
+    lobby = MagicMock()
+    lobby.created_at = None
+    lobby.guild_id = 42
+    lobby.get_player_count.return_value = 10
+
+    embed = create_lobby_embed(lobby, [], [], ready_threshold=10)
+
+    ready_field = next(field for field in embed.fields if field.name == "✅ Ready!")
+    assert ready_field.value == (
+        "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Readycheck message post-time (drives the 30-min staleness check)
 # ---------------------------------------------------------------------------

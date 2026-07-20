@@ -253,6 +253,36 @@ async def test_fresh_refresh_edits_in_place_and_preserves_reacted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refresh_invoker_reaching_ten_announces_shuffle(monkeypatch):
+    env = _setup(monkeypatch, regular=dict.fromkeys(range(1, 11), ONLINE))
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    for player_id in range(2, 10):
+        env.lobby_service.add_readycheck_reaction(
+            player_id,
+            f"<@{player_id}>",
+            guild_id=env.guild_id,
+        )
+    sent_before_refresh = len(env.thread.sent)
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=10,
+    )
+
+    assert status == "ok" and info["is_refresh"] is True
+    assert len(env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)) == 10
+    refresh_messages = [
+        sent.content for sent in env.thread.sent[sent_before_refresh:] if sent.content
+    ]
+    assert (
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+        in refresh_messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_stale_repost_deletes_old_and_resets_confirmations(monkeypatch):
     """30+ min old: delete the buried message, post a fresh one, reset ✅."""
     env = _setup(monkeypatch, regular=dict.fromkeys(range(1, 11), ONLINE))
