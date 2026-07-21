@@ -32,9 +32,8 @@ class TestE2EOpenDotaIntegration:
         """Create a test database using centralized fast fixture."""
         return Database(repo_db_path)
 
-    @patch("opendota_integration.OpenDotaAPI.get_player_mmr")
     @patch("opendota_integration.OpenDotaAPI.get_player_data")
-    def test_register_with_opendota_failure(self, mock_get_data, mock_get_mmr, test_db):
+    def test_register_with_opendota_failure(self, mock_get_data, test_db):
         """Registration aborts cleanly when OpenDota returns no player data.
 
         Drives the real PlayerService.register_player flow with the OpenDota
@@ -42,7 +41,6 @@ class TestE2EOpenDotaIntegration:
         ValueError and leave no player row or Steam-ID link behind.
         """
         mock_get_data.return_value = None
-        mock_get_mmr.return_value = None
 
         service = PlayerService(PlayerRepository(test_db.db_path))
         steam_id = 12345678
@@ -89,10 +87,10 @@ class TestE2EOpenDotaIntegration:
         assert player is None
 
     @patch("opendota_integration.OpenDotaAPI.get_player_counts")
-    @patch("opendota_integration.OpenDotaAPI.get_player_mmr")
+    @patch("opendota_integration.OpenDotaAPI.get_player_mmr_from_data")
     @patch("opendota_integration.OpenDotaAPI.get_player_data")
     def test_register_with_valid_opendota_response(
-        self, mock_get_data, mock_get_mmr, mock_get_counts, test_db
+        self, mock_get_data, mock_get_mmr_from_data, mock_get_counts, test_db
     ):
         """A successful OpenDota lookup registers the player with that MMR.
 
@@ -101,8 +99,9 @@ class TestE2EOpenDotaIntegration:
         row: MMR from OpenDota, Glicko seeded from that MMR, and the primary
         Steam ID recorded in the junction table.
         """
-        mock_get_data.return_value = {"rank_tier": 50, "leaderboard_rank": None}
-        mock_get_mmr.return_value = 2000
+        player_data = {"rank_tier": 50, "leaderboard_rank": None}
+        mock_get_data.return_value = player_data
+        mock_get_mmr_from_data.return_value = 2000
         mock_get_counts.return_value = None  # region inference: no API answer
 
         user_id = 100001
@@ -116,7 +115,8 @@ class TestE2EOpenDotaIntegration:
             steam_id=steam_id,
         )
 
-        mock_get_mmr.assert_called_once_with(steam_id)
+        mock_get_data.assert_called_once_with(steam_id)
+        mock_get_mmr_from_data.assert_called_once_with(player_data)
         assert result["mmr"] == 2000
 
         repo = PlayerRepository(test_db.db_path)

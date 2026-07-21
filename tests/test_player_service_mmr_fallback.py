@@ -1,7 +1,8 @@
-"""Tests for player registration MMR fallback chain (OpenDota -> current_mmr/4 -> error)."""
+"""Tests for player registration's OpenDota MMR fallback chain."""
 
 import pytest
 
+from opendota_integration import OpenDotaAPI
 from services.player_service import PlayerService
 from tests.conftest import TEST_GUILD_ID
 
@@ -55,12 +56,21 @@ class FakeRepo:
 def test_register_player_fallback_to_current_mmr(monkeypatch):
     repo = FakeRepo()
     service = PlayerService(repo)
+    api_calls = {"player_data": 0, "mmr_from_data": 0}
 
     class DummyAPI:
         def get_player_data(self, _steam_id):
+            api_calls["player_data"] += 1
             return {"mmr_estimate": {"estimate": 5200}}
 
+        def get_player_mmr_from_data(self, _player_data):
+            api_calls["mmr_from_data"] += 1
+            return None
+
         def get_player_mmr(self, _steam_id):
+            raise AssertionError("registration must not refetch the player payload")
+
+        def get_player_counts(self, _steam_id):
             return None
 
     monkeypatch.setattr("services.player_service.OpenDotaAPI", lambda: DummyAPI())
@@ -76,6 +86,7 @@ def test_register_player_fallback_to_current_mmr(monkeypatch):
     added = repo.add_calls[0]
     assert added["initial_mmr"] == 5200
     assert result["mmr"] == 5200
+    assert api_calls == {"player_data": 1, "mmr_from_data": 1}
 
 
 def test_register_player_raises_when_no_mmr_anywhere(monkeypatch):
@@ -86,7 +97,7 @@ def test_register_player_raises_when_no_mmr_anywhere(monkeypatch):
         def get_player_data(self, _steam_id):
             return {"mmr_estimate": {"estimate": None}}
 
-        def get_player_mmr(self, _steam_id):
+        def get_player_mmr_from_data(self, _player_data):
             return None
 
     monkeypatch.setattr("services.player_service.OpenDotaAPI", lambda: DummyAPI())
@@ -94,3 +105,27 @@ def test_register_player_raises_when_no_mmr_anywhere(monkeypatch):
     with pytest.raises(ValueError):
         service.register_player(discord_id=2, discord_username="user#2", guild_id=TEST_GUILD_ID, steam_id=456)
 
+
+@pytest.mark.parametrize(
+    ("player_data", "expected_mmr"),
+    [
+        (
+            {
+                "mmr_estimate": {"estimate": "5200"},
+                "computed_mmr": 4800,
+                "solo_competitive_rank": 4200,
+            },
+            5200,
+        ),
+        ({"computed_mmr": "4800"}, 4800),
+        ({"rank_tier": 80, "leaderboard_rank": 500, "computed_mmr": 4000}, 6500),
+        ({"solo_competitive_rank": "4200"}, 4200),
+        ({"rank_tier": 80, "leaderboard_rank": None}, 5500),
+        ({}, None),
+        (None, None),
+    ],
+)
+def test_get_player_mmr_from_data_preserves_fallback_chain(player_data, expected_mmr):
+    api = object.__new__(OpenDotaAPI)
+
+    assert api.get_player_mmr_from_data(player_data) == expected_mmr
