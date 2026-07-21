@@ -852,8 +852,6 @@ class DigCoreMixin:
 
         # Mana variance + steady bonus on base loot only.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
-        if p.get("overgrowth_active"):
-            jc_earned += 10
 
         # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
         # (capped). Folded into the non-streak total so it counts toward the base
@@ -897,8 +895,10 @@ class DigCoreMixin:
         jc_earned = scale_minigame_jc_delta(jc_earned)
         gross_jc = jc_earned
         jc_earned = scale_positive_dig_jc(gross_jc)
+        overgrowth_bonus = 10 if p.get("overgrowth_active") else 0
+        jc_earned += overgrowth_bonus
 
-        # Plains tithe / Blue tax apply to the scaled full payout.
+        # Plains tithe / Blue tax apply to the scaled payout plus Overgrowth.
         # (_apply_mana_yield_taxes also applies the daily economy event.)
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
         # Helltide bell: flat per-dig tax while the guild modifier is active.
@@ -1007,6 +1007,7 @@ class DigCoreMixin:
                 "advance": advance, "jc": jc_earned,
                 "gross_jc": gross_jc,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                "overgrowth_bonus": overgrowth_bonus,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter, "cave_in": False,
                 "corruption": p["corruption"]["id"] if p["corruption"] else None,
@@ -1024,6 +1025,7 @@ class DigCoreMixin:
             tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
             depth_before=depth_before, depth_after=new_depth,
             advance=advance, jc_earned=jc_earned, nonstreak_jc=nonstreak_jc,
+            overgrowth_bonus=overgrowth_bonus,
             bankruptcy_penalty=dig_bankruptcy_penalty,
             milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
             cave_in=False, cave_in_detail=None,
@@ -1367,8 +1369,10 @@ class DigCoreMixin:
             jc_earned = scale_minigame_jc_delta(jc_earned)
             gross_jc = jc_earned
             jc_earned = scale_positive_dig_jc(gross_jc)
+            overgrowth_bonus = 10 if p.get("overgrowth_active") else 0
+            jc_earned += overgrowth_bonus
 
-            # Plains tithe / Blue tax apply to the scaled full payout.
+            # Plains tithe / Blue tax apply to the scaled payout plus Overgrowth.
             jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
             # Helltide bell: flat per-dig tax while the guild modifier is active.
             helltide_tax = scale_deflationary_minigame_jc_delta(self._helltide_tax(guild_id))
@@ -1411,6 +1415,7 @@ class DigCoreMixin:
                     "advance": advance, "jc": jc_earned,
                     "gross_jc": gross_jc,
                     "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                    "overgrowth_bonus": overgrowth_bonus,
                     "depth_before": depth_before, "depth_after": new_depth,
                     "boss_encounter": boss_encounter, "cave_in": False,
                     "corruption": p["corruption"]["id"] if p["corruption"] else None,
@@ -1429,6 +1434,7 @@ class DigCoreMixin:
                 tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
                 depth_before=depth_before, depth_after=new_depth,
                 advance=advance, jc_earned=jc_earned, gross_jc=gross_jc,
+                overgrowth_bonus=overgrowth_bonus,
                 nonstreak_jc=nonstreak_jc,
                 bankruptcy_penalty=dig_bankruptcy_penalty,
                 milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,

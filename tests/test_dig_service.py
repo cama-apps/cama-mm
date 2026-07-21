@@ -334,29 +334,52 @@ class TestCoreDig:
         assert preconditions["jc_min"] <= BASE_DIG_JC_PAYOUT_CAP
         assert preconditions["jc_max"] <= BASE_DIG_JC_PAYOUT_CAP
 
-    def test_overgrowth_bonus_is_included_in_base_payout_cap(
+    def test_overgrowth_bonus_is_added_after_base_payout_scaling(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
     ):
-        """Overgrowth's flat bonus cannot push base dig payout above the cap."""
+        """Overgrowth contributes its advertised +10 after normal Dig scaling."""
+        from repositories.buff_repository import BuffRepository
+        from services.buff_service import BuffService
+
         _register_player(player_repository)
         dig_repo.create_tunnel(10001, guild_id, "T")
         dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
-        dig_service.buff_service = SimpleNamespace(
-            has_overgrowth=lambda did, gid: True,
-            consume_overgrowth_charge=lambda did, gid: True,
-        )
+        buff_repo = BuffRepository(dig_repo.db_path)
+        dig_service.buff_service = BuffService(buff_repo)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        dig_service.buff_service.grant_overgrowth(10001, guild_id)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25)
+        seen_tax_inputs = []
+
+        def capture_tax_input(did, gid, jc):
+            seen_tax_inputs.append(jc)
+            return jc
+
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", capture_tax_input)
 
         result = dig_service.dig(10001, guild_id)
 
         assert result["success"]
         assert result["milestone_bonus"] == 0
         assert result["streak_bonus"] == 0
-        assert result["jc_earned"] == scale_positive_dig_jc(
+        expected_base = scale_positive_dig_jc(
             scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
         )
+        assert seen_tax_inputs == [expected_base + 10]
+        assert result["jc_earned"] == expected_base + 10
+        action = dig_repo.get_recent_actions(
+            10001, guild_id, limit=1, action_type="dig"
+        )[0]
+        detail = json.loads(action["detail"])
+        assert detail["overgrowth_bonus"] == 10
+        assert result["overgrowth_bonus"] == 10
+        assert detail["jc"] == (
+            scale_positive_dig_jc(detail["gross_jc"])
+            + detail["overgrowth_bonus"]
+        )
+        active = buff_repo.active_for(10001, guild_id, "overgrowth")
+        assert active[0]["data"]["charges_remaining"] == 9
 
     def test_prospectors_streak_relic_is_included_in_base_payout_cap(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
@@ -3450,6 +3473,51 @@ class TestApplyDigOutcomeSecondaryPaths:
         assert result["jc_earned"] == expected
         assert balance_after == balance_before + expected
 
+    def test_dm_overgrowth_bonus_is_added_after_base_payout_scaling(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        from repositories.buff_repository import BuffRepository
+        from services.buff_service import BuffService
+
+        uid = 20109
+        seen_tax_inputs = []
+
+        def capture_tax_input(did, gid, jc):
+            seen_tax_inputs.append(jc)
+            return jc
+
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", capture_tax_input)
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
+        p = _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id
+        )
+        buff_repo = BuffRepository(dig_repo.db_path)
+        dig_service.buff_service = BuffService(buff_repo)
+        dig_service.buff_service.grant_overgrowth(uid, guild_id)
+        p["overgrowth_active"] = True
+        balance_before = player_repository.get_balance(uid, guild_id)
+
+        result = dig_service.apply_dig_outcome(
+            p, {"advance": 1, "jc_earned": 25, "cave_in": False, "event_id": ""}
+        )
+
+        expected_base = scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
+        assert seen_tax_inputs == [expected_base + 10]
+        assert result["jc_earned"] == expected_base + 10
+        assert player_repository.get_balance(uid, guild_id) == balance_before + expected_base + 10
+        action = dig_repo.get_recent_actions(uid, guild_id, limit=1, action_type="dig")[0]
+        detail = json.loads(action["detail"])
+        assert detail["overgrowth_bonus"] == 10
+        assert result["overgrowth_bonus"] == 10
+        assert detail["jc"] == (
+            scale_positive_dig_jc(detail["gross_jc"])
+            + detail["overgrowth_bonus"]
+        )
+        active = buff_repo.active_for(uid, guild_id, "overgrowth")
+        assert active[0]["data"]["charges_remaining"] == 9
+
     def test_base_dig_payout_cap_applies_after_dm_weather_combo(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
     ):
@@ -3550,3 +3618,50 @@ class TestExecuteDeterministicOutcomePaths:
         p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
         dig_service._execute_deterministic_outcome(p)
         assert tax[0] >= 1, "_helltide_tax never called on deterministic path"
+
+    def test_deterministic_overgrowth_bonus_is_added_after_base_payout_scaling(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        from repositories.buff_repository import BuffRepository
+        from services.buff_service import BuffService
+
+        uid = 20204
+        monkeypatch.setattr("random.random", lambda: 0.99)
+        seen_tax_inputs = []
+
+        def capture_tax_input(did, gid, jc):
+            seen_tax_inputs.append(jc)
+            return jc
+
+        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", capture_tax_input)
+        monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
+        p = _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id
+        )
+        buff_repo = BuffRepository(dig_repo.db_path)
+        dig_service.buff_service = BuffService(buff_repo)
+        dig_service.buff_service.grant_overgrowth(uid, guild_id)
+        p["overgrowth_active"] = True
+        monkeypatch.setattr(
+            dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25
+        )
+        balance_before = player_repository.get_balance(uid, guild_id)
+
+        result = dig_service._execute_deterministic_outcome(p)
+
+        expected_base = scale_positive_dig_jc(
+            scale_minigame_jc_delta(BASE_DIG_JC_PAYOUT_CAP)
+        )
+        assert seen_tax_inputs == [expected_base + 10]
+        assert result["jc_earned"] == expected_base + 10
+        assert player_repository.get_balance(uid, guild_id) == balance_before + expected_base + 10
+        action = dig_repo.get_recent_actions(uid, guild_id, limit=1, action_type="dig")[0]
+        detail = json.loads(action["detail"])
+        assert detail["overgrowth_bonus"] == 10
+        assert result["overgrowth_bonus"] == 10
+        assert detail["jc"] == (
+            scale_positive_dig_jc(detail["gross_jc"])
+            + detail["overgrowth_bonus"]
+        )
+        active = buff_repo.active_for(uid, guild_id, "overgrowth")
+        assert active[0]["data"]["charges_remaining"] == 9
