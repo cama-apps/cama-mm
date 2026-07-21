@@ -1012,8 +1012,6 @@ class DigService(
         # Mana variance + steady bonus on base loot only — protects deterministic
         # milestone/streak from a Mountain "zero" roll.
         jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
-        if overgrowth_active:
-            jc_earned += 10
 
         # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
         # (capped). Folded into the non-streak total so it counts toward the base
@@ -1066,9 +1064,11 @@ class DigService(
         jc_earned = scale_minigame_jc_delta(jc_earned)
         gross_jc = jc_earned
         jc_earned = scale_positive_dig_jc(gross_jc)
+        overgrowth_bonus = 10 if overgrowth_active else 0
+        jc_earned += overgrowth_bonus
 
-        # Plains tithe / Blue tax apply to the scaled full payout (base +
-        # milestone + streak) so the transferred/burned amounts are scaled too.
+        # Plains tithe / Blue tax apply to the scaled base, milestone, and
+        # streak payout plus the fixed Overgrowth bonus.
         # (_apply_mana_yield_taxes also applies the daily economy event.)
         jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
 
@@ -1225,6 +1225,7 @@ class DigService(
                 "advance": advance, "jc": jc_earned,
                 "gross_jc": gross_jc,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                "overgrowth_bonus": overgrowth_bonus,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter,
                 "cave_in": False,
@@ -1252,6 +1253,7 @@ class DigService(
             advance=advance,
             jc_earned=jc_earned,
             gross_jc=gross_jc,
+            overgrowth_bonus=overgrowth_bonus,
             nonstreak_jc=nonstreak_jc,
             nonstreak_cap=base_cap,
             bankruptcy_penalty=dig_bankruptcy_penalty,
