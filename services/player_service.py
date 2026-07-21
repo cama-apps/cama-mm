@@ -70,8 +70,9 @@ class PlayerService:
             if not player_data:
                 raise ValueError("Could not fetch player data from OpenDota.")
 
-            # Primary MMR
-            mmr = api.get_player_mmr(steam_id)
+            # Derive MMR from the payload already fetched above. Calling
+            # get_player_mmr() here would fetch /players/{id} a second time.
+            mmr = api.get_player_mmr_from_data(player_data)
 
             # Fallback: use current_mmr estimate if present and mmr was not returned.
             # NOTE: CamaRatingSystem.mmr_to_rating() already maps 0-12000 -> 0-3000 (effectively /4),

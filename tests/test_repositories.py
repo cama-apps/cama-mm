@@ -2,6 +2,8 @@
 Tests for the repository layer.
 """
 
+import sqlite3
+
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from tests.conftest import TEST_GUILD_ID
 
@@ -507,6 +509,104 @@ class TestMatchRepository:
 
         matches = match_repository.get_player_matches(1, TEST_GUILD_ID, limit=10)
         assert len(matches) == 2
+
+    def test_match_summary_reads_do_not_load_enrichment_data(
+        self, match_repository, monkeypatch
+    ):
+        """Ordinary match reads must not materialize the large enrichment JSON column."""
+        team1 = [1, 2, 3, 4, 5]
+        team2 = [6, 7, 8, 9, 10]
+        match_id = match_repository.record_match(
+            team1_ids=team1,
+            team2_ids=team2,
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+            dotabuff_match_id="dotabuff-123",
+            notes="summary contract",
+            lobby_type="draft",
+            balancing_rating_system="openskill",
+        )
+        enrichment_payload = "x" * 1_000_000
+        match_repository.update_match_enrichment(
+            match_id=match_id,
+            valve_match_id=8181518332,
+            duration_seconds=2400,
+            radiant_score=35,
+            dire_score=22,
+            game_mode=2,
+            enrichment_data=enrichment_payload,
+        )
+
+        with sqlite3.connect(match_repository.db_path) as conn:
+            stored_size = conn.execute(
+                "SELECT length(enrichment_data) FROM matches WHERE match_id = ?",
+                (match_id,),
+            ).fetchone()[0]
+        assert stored_size == len(enrichment_payload)
+
+        original_get_connection = match_repository.get_connection
+        columns_read: list[tuple[str | None, str | None]] = []
+
+        def get_guarded_connection():
+            conn = original_get_connection()
+
+            def deny_enrichment_reads(action, table, column, _database, _trigger):
+                if action == sqlite3.SQLITE_READ:
+                    columns_read.append((table, column))
+                    if table == "matches" and column == "enrichment_data":
+                        return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            conn.set_authorizer(deny_enrichment_reads)
+            return conn
+
+        monkeypatch.setattr(match_repository, "get_connection", get_guarded_connection)
+
+        match = match_repository.get_match(match_id, TEST_GUILD_ID)
+        player_matches = match_repository.get_player_matches(1, TEST_GUILD_ID, limit=10)
+        most_recent = match_repository.get_most_recent_match(TEST_GUILD_ID)
+
+        assert match == {
+            "match_id": match_id,
+            "team1_players": team1,
+            "team2_players": team2,
+            "winning_team": 1,
+            "match_date": match["match_date"],
+            "dotabuff_match_id": "dotabuff-123",
+            "notes": "summary contract",
+            "valve_match_id": 8181518332,
+            "duration_seconds": 2400,
+            "radiant_score": 35,
+            "dire_score": 22,
+            "game_mode": 2,
+            "lobby_type": "draft",
+            "balancing_rating_system": "openskill",
+        }
+        assert player_matches == [
+            {
+                "match_id": match_id,
+                "team1_players": team1,
+                "team2_players": team2,
+                "winning_team": 1,
+                "match_date": match["match_date"],
+                "player_team": 1,
+                "player_won": True,
+                "side": "radiant",
+                "valve_match_id": 8181518332,
+                "lobby_type": "draft",
+            }
+        ]
+        assert most_recent == {
+            "match_id": match_id,
+            "team1_players": team1,
+            "team2_players": team2,
+            "winning_team": 1,
+            "match_date": match["match_date"],
+            "dotabuff_match_id": "dotabuff-123",
+            "valve_match_id": 8181518332,
+            "notes": "summary contract",
+        }
+        assert ("matches", "enrichment_data") not in columns_read
 
     def test_get_lobby_type_stats_empty(self, match_repository):
         """Test lobby type stats with no data returns empty list."""

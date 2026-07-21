@@ -25,6 +25,13 @@ from utils.role_assignment_cache import get_cached_role_assignments
 
 logger = logging.getLogger("cama_bot.shuffler")
 
+# Fix player index 0 on team 1 so each unordered 5-vs-5 split is generated
+# exactly once: C(9, 4) = 126 rather than generating 252 and deduplicating.
+_UNIQUE_TEAM_SPLITS = tuple(
+    (0, *other_indices)
+    for other_indices in itertools.combinations(range(1, 10), 4)
+)
+
 
 @dataclass
 class DraftPoolResult:
@@ -45,6 +52,16 @@ class _PoolMatchup:
     value_diff: float
     total_off_roles: int
     log_entry: tuple  # 12-tuple consumed by BalancedShuffler._log_top_matchups
+
+
+@dataclass(frozen=True, slots=True)
+class _RoleAssignmentMetrics:
+    """Precomputed score inputs for one team's role assignment."""
+
+    role_assignments: tuple[str, ...]
+    team_value: float
+    off_role_count: int
+    role_values: tuple[float, ...]
 
 
 class BalancedShuffler:
@@ -491,6 +508,39 @@ class BalancedShuffler:
         cached_result = get_cached_role_assignments(player_roles_key)
         return [list(assignment) for assignment in cached_result]
 
+    def _role_assignment_metrics(
+        self,
+        players: list[Player],
+        role_assignments: list[str],
+        player_values: list[float],
+    ) -> _RoleAssignmentMetrics:
+        """Precompute the score inputs reused for every opposing assignment."""
+        team_value = 0.0
+        off_role_count = 0
+        role_values = [0.0] * Team.TEAM_SIZE
+
+        for player, assigned_role, base_value in zip(
+            players, role_assignments, player_values
+        ):
+            is_on_role = bool(
+                player.preferred_roles and assigned_role in player.preferred_roles
+            )
+            if is_on_role:
+                effective_value = base_value
+            else:
+                effective_value = base_value * self.off_role_multiplier
+                off_role_count += 1
+
+            team_value += effective_value
+            role_values[int(assigned_role) - 1] = effective_value
+
+        return _RoleAssignmentMetrics(
+            role_assignments=tuple(role_assignments),
+            team_value=team_value,
+            off_role_count=off_role_count,
+            role_values=tuple(role_values),
+        )
+
     def _optimize_role_assignments_for_matchup(
         self,
         team1_players: list[Player],
@@ -521,8 +571,8 @@ class BalancedShuffler:
         team1_assignments = self._get_cached_role_assignments(team1_players)[:max_assignments_per_team]
         team2_assignments = self._get_cached_role_assignments(team2_players)[:max_assignments_per_team]
 
-        best_team1 = None
-        best_team2 = None
+        best_team1_roles: tuple[str, ...] | None = None
+        best_team2_roles: tuple[str, ...] | None = None
         best_score = float("inf")
 
         # Pre-compute team IDs for penalty calculations (only once per call)
@@ -531,29 +581,58 @@ class BalancedShuffler:
         avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
+        rd_priority = self._calculate_rd_priority(team1_players + team2_players)
+
+        # Player values and per-assignment metrics do not depend on the opposing
+        # assignment. Compute them once instead of rebuilding two Team objects
+        # and rescanning all ten players for every item in the Cartesian product.
+        team1_player_values = [
+            player.get_value(
+                self.use_glicko,
+                use_openskill=self.use_openskill,
+                use_jopacoin=self.use_jopacoin,
+            )
+            for player in team1_players
+        ]
+        team2_player_values = [
+            player.get_value(
+                self.use_glicko,
+                use_openskill=self.use_openskill,
+                use_jopacoin=self.use_jopacoin,
+            )
+            for player in team2_players
+        ]
+        team1_metrics = [
+            self._role_assignment_metrics(team1_players, roles, team1_player_values)
+            for roles in team1_assignments
+        ]
+        team2_metrics = [
+            self._role_assignment_metrics(team2_players, roles, team2_player_values)
+            for roles in team2_assignments
+        ]
 
         # Try all combinations of valid role assignments
-        for t1_roles in team1_assignments:
-            for t2_roles in team2_assignments:
-                team1 = Team(team1_players, role_assignments=t1_roles)
-                team2 = Team(team2_players, role_assignments=t2_roles)
-
-                team1_value = team1.get_team_value(
-                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
+        for team1_assignment in team1_metrics:
+            for team2_assignment in team2_metrics:
+                value_diff = abs(
+                    team1_assignment.team_value - team2_assignment.team_value
                 )
-                team2_value = team2.get_team_value(
-                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
+
+                off_role_penalty = (
+                    team1_assignment.off_role_count + team2_assignment.off_role_count
+                ) * self.off_role_flat_penalty
+
+                t1_values = team1_assignment.role_values
+                t2_values = team2_assignment.role_values
+                role_matchup_delta = (
+                    abs(t1_values[0] - t2_values[2])
+                    + abs(t2_values[0] - t1_values[2])
+                    + abs(t1_values[1] - t2_values[1])
+                    + abs(t1_values[3] - t2_values[4])
+                    + abs(t2_values[3] - t1_values[4])
                 )
-                value_diff = abs(team1_value - team2_value)
-
-                team1_off_roles = team1.get_off_role_count()
-                team2_off_roles = team2.get_off_role_count()
-                off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
-
-                role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
 
                 weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
-                rd_priority = self._calculate_rd_priority(team1_players + team2_players)
                 total_score = (
                     value_diff + off_role_penalty + weighted_role_delta - rd_priority
                     + avoid_penalty + deal_penalty + region_penalty
@@ -561,16 +640,19 @@ class BalancedShuffler:
 
                 if total_score < best_score:
                     best_score = total_score
-                    best_team1 = team1
-                    best_team2 = team2
+                    best_team1_roles = team1_assignment.role_assignments
+                    best_team2_roles = team2_assignment.role_assignments
 
         # Fallback to default if no assignments found
-        if best_team1 is None:
+        if best_team1_roles is None:
             best_team1 = Team(team1_players)
             best_team2 = Team(team2_players)
             best_team1.ensure_role_assignments()
             best_team2.ensure_role_assignments()
             best_score = float("inf")
+        else:
+            best_team1 = Team(team1_players, role_assignments=best_team1_roles)
+            best_team2 = Team(team2_players, role_assignments=best_team2_roles)
 
         return best_team1, best_team2, best_score
 
@@ -660,23 +742,12 @@ class BalancedShuffler:
         # Track all matchups with the best score for random tie-breaking
         best_matchups = []  # List of (team1, team2, value_diff, off_roles)
 
-        # Track top matchups for logging (deduplicate by team composition, not order)
+        # Track top matchups for logging.
         top_matchups = []  # List of (score, value_diff, off_role_penalty, team1, team2)
-        seen_matchups = set()  # Track unique matchups (frozenset of player names)
 
-        for team1_indices in itertools.combinations(range(10), 5):
+        for team1_indices in _UNIQUE_TEAM_SPLITS:
             team1_players = [players[i] for i in team1_indices]
             team2_players = [players[i] for i in range(10) if i not in team1_indices]
-
-            # Create canonical matchup key (order doesn't matter)
-            team1_names = frozenset(p.name for p in team1_players)
-            team2_names = frozenset(p.name for p in team2_players)
-            matchup_key = frozenset([team1_names, team2_names])
-
-            # Skip if we've seen this matchup before (swapped teams)
-            if matchup_key in seen_matchups:
-                continue
-            seen_matchups.add(matchup_key)
 
             # Optimize role assignments for this matchup
             team1, team2, total_score = self._optimize_role_assignments_for_matchup(
@@ -774,7 +845,7 @@ class BalancedShuffler:
         combo_penalty: float,
         exclusion_penalty: float,
         excluded_names: list[str],
-        recent_match_names: set[str],
+        recent_penalty: float,
         max_assignments_per_team: int,
         avoids: list | None,
         deals: list | None,
@@ -783,8 +854,8 @@ class BalancedShuffler:
         Optimize role assignments for one team split and score it.
 
         ``combo_penalty`` is the combination-wide exclusions, deal split,
-        rating spread, and lobby rating adjustment. The recent-match penalty
-        depends on the split and is added here.
+        rating spread, and lobby rating adjustment. ``recent_penalty`` is also
+        combination-wide because every split contains the same ten players.
         """
         team1, team2, base_score = self._optimize_role_assignments_for_matchup(
             team1_players,
@@ -796,10 +867,6 @@ class BalancedShuffler:
 
         # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
         # We need to add exclusion_penalty, recent_match_penalty, deal_split_penalty, and rating_spread_penalty
-        selected_player_names = {p.name for p in team1_players + team2_players}
-        recent_in_match = len(selected_player_names & recent_match_names)
-        recent_penalty = recent_in_match * self.recent_match_penalty_weight
-
         total_score = base_score + combo_penalty + recent_penalty
 
         # Extract components for logging
@@ -959,7 +1026,6 @@ class BalancedShuffler:
         # Keep a numeric tiebreaker so heapq never tries to compare Team objects.
         top_matchups_heap: list[tuple[float, int, tuple]] = []
         heap_tiebreaker = 0
-        seen_matchups = set()  # Track unique matchups per player combination
 
         total_player_combinations = math.comb(len(players), 10)
         logger.info(
@@ -987,8 +1053,12 @@ class BalancedShuffler:
             ]
             excluded_names = [p.name for p in excluded_players]
 
-            # Create a key for this player combination to track seen matchups
+            # The recent-player penalty is fixed for all splits of these ten.
             selected_names = frozenset(p.name for p in selected_players)
+            recent_penalty = (
+                len(selected_names & recent_match_names)
+                * self.recent_match_penalty_weight
+            )
 
             exclusion_penalty = (
                 sum(exclusion_counts.get(name, 0) for name in excluded_names)
@@ -1017,19 +1087,9 @@ class BalancedShuffler:
             )
 
             # For this combination of 10, try all ways to split into teams
-            for team1_indices in itertools.combinations(range(10), 5):
+            for team1_indices in _UNIQUE_TEAM_SPLITS:
                 team1_players = [selected_players[i] for i in team1_indices]
                 team2_players = [selected_players[i] for i in range(10) if i not in team1_indices]
-
-                # Create canonical matchup key (order doesn't matter)
-                team1_names = frozenset(p.name for p in team1_players)
-                team2_names = frozenset(p.name for p in team2_players)
-                matchup_key = (selected_names, frozenset([team1_names, team2_names]))
-
-                # Skip if we've seen this matchup before (swapped teams)
-                if matchup_key in seen_matchups:
-                    continue
-                seen_matchups.add(matchup_key)
 
                 matchup = self._evaluate_pool_matchup(
                     team1_players,
@@ -1037,7 +1097,7 @@ class BalancedShuffler:
                     combo_penalty,
                     exclusion_penalty,
                     excluded_names,
-                    recent_match_names,
+                    recent_penalty,
                     pool_max_assignments_per_team,
                     avoids,
                     deals,
@@ -1178,28 +1238,17 @@ class BalancedShuffler:
                 pruned_player_selections += 1
                 continue
 
-            # Step 3: Iterate through team splits with pruning
-            # We use combinations to avoid duplicates (T1={A,B,C,D,E} vs T2={F,G,H,I,J}
-            # is same as T1={F,G,H,I,J} vs T2={A,B,C,D,E})
-            seen_splits = set()
+            selected_player_names = {p.name for p in selected_players}
+            recent_penalty = (
+                len(selected_player_names & recent_match_names)
+                * self.recent_match_penalty_weight
+            )
 
-            for team1_indices in itertools.combinations(range(10), 5):
+            # Step 3: Iterate once through each unordered team split with pruning.
+            for team1_indices in _UNIQUE_TEAM_SPLITS:
                 team1_players = [selected_players[i] for i in team1_indices]
                 team2_indices = [i for i in range(10) if i not in team1_indices]
                 team2_players = [selected_players[i] for i in team2_indices]
-
-                # Canonical key to avoid duplicate splits
-                t1_key = frozenset(p.name for p in team1_players)
-                t2_key = frozenset(p.name for p in team2_players)
-                split_key = frozenset([t1_key, t2_key])
-                if split_key in seen_splits:
-                    continue
-                seen_splits.add(split_key)
-
-                # Compute recent match penalty for selected players
-                selected_player_names = {p.name for p in team1_players + team2_players}
-                recent_in_match = len(selected_player_names & recent_match_names)
-                recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
                 lower_bound = recent_penalty + combo_lower_bound
 

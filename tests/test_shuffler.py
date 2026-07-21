@@ -237,6 +237,34 @@ class TestShuffler:
         player_names = {p.name for p in players}
         assert all_player_names == player_names
 
+    def test_shuffle_evaluates_duplicate_display_names_by_identity(self, monkeypatch):
+        """Duplicate Discord names must not collapse distinct team splits."""
+        players = [
+            Player(name="SameName", mmr=1500 + i, discord_id=i + 1)
+            for i in range(10)
+        ]
+        shuffler = BalancedShuffler(use_glicko=False)
+        evaluated_splits = []
+        roles = ["1", "2", "3", "4", "5"]
+
+        def optimize(team1_players, team2_players, **_kwargs):
+            evaluated_splits.append(
+                frozenset(player.discord_id for player in team1_players)
+            )
+            return (
+                Team(team1_players, role_assignments=roles),
+                Team(team2_players, role_assignments=roles),
+                1.0,
+            )
+
+        monkeypatch.setattr(shuffler, "_optimize_role_assignments_for_matchup", optimize)
+
+        shuffler.shuffle(players)
+
+        assert len(evaluated_splits) == 126
+        assert len(set(evaluated_splits)) == 126
+        assert all(1 in split for split in evaluated_splits)
+
     def test_rd_priority_bonus_scales_with_sum(self):
         """RD bonus should reflect the sum of player RD values times the weight."""
         players = [
@@ -874,6 +902,34 @@ class TestShuffler14Players:
         assert first_team1.role_assignments == second_team1.role_assignments
         assert first_team2.role_assignments == second_team2.role_assignments
         assert first_score == second_score
+
+    def test_role_optimizer_reads_each_player_value_once(self, monkeypatch):
+        """Role-pair exploration must reuse values instead of rescanning players."""
+        players = [
+            Player(
+                name=f"Player{i}",
+                glicko_rating=1200.0 + i * 75,
+                glicko_rd=50.0 + i,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(10)
+        ]
+        shuffler = BalancedShuffler()
+        original_get_value = Player.get_value
+        value_reads = 0
+
+        def counted_get_value(player, *args, **kwargs):
+            nonlocal value_reads
+            value_reads += 1
+            return original_get_value(player, *args, **kwargs)
+
+        monkeypatch.setattr(Player, "get_value", counted_get_value)
+
+        shuffler._optimize_role_assignments_for_matchup(
+            players[:5], players[5:], max_assignments_per_team=20
+        )
+
+        assert value_reads == len(players)
 
     def test_14_player_pool_exclusion_penalty(self):
         """

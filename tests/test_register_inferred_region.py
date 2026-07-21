@@ -46,7 +46,7 @@ class DummyAPI:
     def get_player_data(self, _steam_id):
         return {"profile": {}}
 
-    def get_player_mmr(self, _steam_id):
+    def get_player_mmr_from_data(self, _player_data):
         return 4000
 
     def get_player_counts(self, steam_id):

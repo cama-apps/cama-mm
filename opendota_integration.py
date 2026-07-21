@@ -271,6 +271,15 @@ class OpenDotaAPI:
             MMR value or None if not available
         """
         player_data = self.get_player_data(steam_id)
+        return self.get_player_mmr_from_data(player_data)
+
+    def get_player_mmr_from_data(self, player_data: dict | None) -> int | None:
+        """Derive a player's MMR from an existing OpenDota player payload.
+
+        This contains the same fallback chain as :meth:`get_player_mmr`, but
+        performs no HTTP request. Callers that already fetched ``/players/{id}``
+        can therefore reuse that payload instead of requesting it a second time.
+        """
         if not player_data:
             return None
 

@@ -785,7 +785,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM matches WHERE match_id = ? AND guild_id = ?",
+                """
+                SELECT match_id, team1_players, team2_players, winning_team,
+                       match_date, dotabuff_match_id, notes, valve_match_id,
+                       duration_seconds, radiant_score, dire_score, game_mode,
+                       lobby_type, balancing_rating_system
+                FROM matches
+                WHERE match_id = ? AND guild_id = ?
+                """,
                 (match_id, normalized_guild),
             )
             row = cursor.fetchone()
@@ -1013,7 +1020,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT m.*, mp.team_number, mp.won, mp.side
+                SELECT m.match_id, m.team1_players, m.team2_players,
+                       m.winning_team, m.match_date, m.valve_match_id,
+                       m.lobby_type, mp.team_number, mp.won, mp.side
                 FROM matches m
                 JOIN match_participants mp ON m.match_id = mp.match_id
                 WHERE mp.discord_id = ? AND mp.guild_id = ?
@@ -1328,7 +1337,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM matches WHERE guild_id = ? ORDER BY match_date DESC, match_id DESC LIMIT 1",
+                """
+                SELECT match_id, team1_players, team2_players, winning_team,
+                       match_date, dotabuff_match_id, valve_match_id, notes
+                FROM matches
+                WHERE guild_id = ?
+                ORDER BY match_date DESC, match_id DESC
+                LIMIT 1
+                """,
                 (guild_id,),
             )
             row = cursor.fetchone()
