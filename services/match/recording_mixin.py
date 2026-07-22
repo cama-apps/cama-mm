@@ -191,26 +191,75 @@ class RecordingMixin:
         )
 
         result: dict[int, dict[str, int]] = {}
+        awards: list[tuple[int, int, int]] = []
         for pid, new_streak in zip(actual_player_ids, new_streaks, strict=True):
             bonus = streak_bonus_for(new_streak, STREAKS)
             result[pid] = {"days": new_streak, "bonus": bonus}
             if bonus > 0:
-                self.player_repo.add_balance(
-                    pid,
-                    guild_id,
-                    bonus,
-                    source="match_streak",
-                    related_type="dota_streak",
-                    reason="Dota streak match bonus",
-                    metadata={"streak_days": new_streak, "bonus": bonus},
-                )
-                net_bonus = bonus
-                if self.betting_service:
-                    skimmed = self.betting_service._apply_blood_pact_skim(
-                        pid, guild_id, bonus
+                awards.append((pid, new_streak, bonus))
+
+        if not awards:
+            return result
+
+        pact_targets: set[int] | None = set()
+        if self.betting_service:
+            get_pact_targets = getattr(
+                self.betting_service, "_get_blood_pact_targets", None
+            )
+            if callable(get_pact_targets):
+                try:
+                    pact_targets = set(
+                        get_pact_targets(
+                            [pid for pid, _streak, _bonus in awards], guild_id
+                        )
                     )
-                    net_bonus = bonus - skimmed
-                accumulate({pid: {"net": net_bonus}})
+                except TypeError:
+                    # Compatibility with lightweight test doubles or older
+                    # betting-service implementations: retain the point path.
+                    pact_targets = None
+            else:
+                pact_targets = None
+
+        # Without a Blood Pact transfer to interleave, preserve one ledger row
+        # per award while sharing a single balance transaction.
+        if pact_targets is not None and not pact_targets:
+            self.player_repo.add_balance_batch(
+                [
+                    (
+                        pid,
+                        bonus,
+                        {"streak_days": new_streak, "bonus": bonus},
+                    )
+                    for pid, new_streak, bonus in awards
+                ],
+                guild_id,
+                source="match_streak",
+                related_type="dota_streak",
+                reason="Dota streak match bonus",
+            )
+            for pid, _new_streak, bonus in awards:
+                accumulate({pid: {"net": bonus}})
+            return result
+
+        for pid, new_streak, bonus in awards:
+            self.player_repo.add_balance(
+                pid,
+                guild_id,
+                bonus,
+                source="match_streak",
+                related_type="dota_streak",
+                reason="Dota streak match bonus",
+                metadata={"streak_days": new_streak, "bonus": bonus},
+            )
+            net_bonus = bonus
+            if self.betting_service and (
+                pact_targets is None or pid in pact_targets
+            ):
+                skimmed = self.betting_service._apply_blood_pact_skim(
+                    pid, guild_id, bonus
+                )
+                net_bonus = bonus - skimmed
+            accumulate({pid: {"net": net_bonus}})
         return result
 
     def _repay_outstanding_loans(

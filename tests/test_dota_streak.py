@@ -2,6 +2,8 @@
 and the per-(player, guild) repository state machine."""
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, call
@@ -194,6 +196,7 @@ class TestMatchStreakAwards:
         service.player_repo = Mock()
         service.player_repo.advance_dota_streaks_bulk.return_value = [3, 7, 3, 0]
         service.betting_service = Mock()
+        service.betting_service._get_blood_pact_targets.return_value = {10, 20}
         service.betting_service._apply_blood_pact_skim.side_effect = [1, 1, 0]
         accumulated = []
         monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-05-07")
@@ -242,6 +245,9 @@ class TestMatchStreakAwards:
             call(10, TEST_GUILD_ID, 3),
             call(20, TEST_GUILD_ID, 1),
         ]
+        service.betting_service._get_blood_pact_targets.assert_called_once_with(
+            [20, 10, 20], TEST_GUILD_ID
+        )
         assert accumulated == [
             {20: {"net": 0}},
             {10: {"net": 2}},
@@ -252,6 +258,107 @@ class TestMatchStreakAwards:
             10: {"days": 7, "bonus": 3},
             99999: {"days": 0, "bonus": 0},
         }
+
+    def test_no_blood_pact_batches_credits_with_per_award_metadata(
+        self, monkeypatch
+    ):
+        service = RecordingMixin()
+        service.player_repo = Mock()
+        service.player_repo.advance_dota_streaks_bulk.return_value = [3, 7, 3, 0]
+        service.betting_service = Mock()
+        service.betting_service._get_blood_pact_targets.return_value = set()
+        accumulated = []
+        monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-05-07")
+
+        result = service._award_dota_streak_bonuses(
+            [20, 10, 20, 99999], TEST_GUILD_ID, accumulated.append
+        )
+
+        service.player_repo.add_balance_batch.assert_called_once_with(
+            [
+                (20, 1, {"streak_days": 3, "bonus": 1}),
+                (10, 3, {"streak_days": 7, "bonus": 3}),
+                (20, 1, {"streak_days": 3, "bonus": 1}),
+            ],
+            TEST_GUILD_ID,
+            source="match_streak",
+            related_type="dota_streak",
+            reason="Dota streak match bonus",
+        )
+        service.player_repo.add_balance.assert_not_called()
+        service.betting_service._apply_blood_pact_skim.assert_not_called()
+        assert accumulated == [
+            {20: {"net": 1}},
+            {10: {"net": 3}},
+            {20: {"net": 1}},
+        ]
+        assert result == {
+            20: {"days": 3, "bonus": 1},
+            10: {"days": 7, "bonus": 3},
+            99999: {"days": 0, "bonus": 0},
+        }
+
+    def test_no_blood_pact_real_repository_uses_two_connections_and_exact_ledgers(
+        self, player_repository, monkeypatch
+    ):
+        for discord_id, streak in ((301, 2), (302, 6), (303, 2)):
+            _register(player_repository, discord_id)
+            with sqlite3.connect(player_repository.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE players
+                    SET dota_streak_days = ?, dota_last_played_date = '2026-05-06'
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (streak, discord_id, TEST_GUILD_ID),
+                )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository, "get_connection", counted_get_connection
+        )
+        monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-05-07")
+        service = RecordingMixin()
+        service.player_repo = player_repository
+        service.betting_service = Mock()
+        service.betting_service._get_blood_pact_targets.return_value = set()
+        accumulated = []
+
+        service._award_dota_streak_bonuses(
+            [301, 302, 303], TEST_GUILD_ID, accumulated.append
+        )
+
+        assert connection_count == 2
+        assert accumulated == [
+            {301: {"net": 1}},
+            {302: {"net": 3}},
+            {303: {"net": 1}},
+        ]
+        with sqlite3.connect(player_repository.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT account_id, delta, metadata
+                FROM economy_ledger_entries
+                WHERE guild_id = ? AND source = 'match_streak'
+                ORDER BY ledger_id
+                """,
+                (TEST_GUILD_ID,),
+            ).fetchall()
+        assert [
+            (account_id, delta, json.loads(metadata))
+            for account_id, delta, metadata in rows
+        ] == [
+            (301, 1, {"streak_days": 3, "bonus": 1}),
+            (302, 3, {"streak_days": 7, "bonus": 3}),
+            (303, 1, {"streak_days": 3, "bonus": 1}),
+        ]
 
 
 class TestGameDateHelpers:
