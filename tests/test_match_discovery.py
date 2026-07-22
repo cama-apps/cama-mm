@@ -80,6 +80,82 @@ class TestMatchDiscoveryService:
         assert result["confidence"] == 1.0  # All 10 players found
         assert result["player_count"] == 10
 
+    def test_discovery_stops_after_anchor_when_details_validate_roster(
+        self, mock_repos, mock_opendota_api
+    ):
+        """One history plus one detail payload can validate the whole lobby."""
+        match_repo, player_repo = mock_repos
+        match_repo.get_match.return_value = {
+            "match_id": 1,
+            "match_date": "2024-01-15 12:00:00",
+        }
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": discord_id} for discord_id in range(1, 11)
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {
+            discord_id: [discord_id + 1000] for discord_id in range(1, 11)
+        }
+        match_time = int(datetime(2024, 1, 15, 12, 0, tzinfo=UTC).timestamp())
+        mock_opendota_api.get_player_matches.return_value = [
+            {"match_id": 99999, "start_time": match_time}
+        ]
+        match_payload = {
+            "players": [
+                {"account_id": discord_id + 1000} for discord_id in range(1, 11)
+            ]
+        }
+        mock_opendota_api.get_match_details.return_value = match_payload
+
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
+
+        assert result["status"] == "discovered"
+        assert result["player_count"] == 10
+        assert mock_opendota_api.get_player_matches.call_count == 1
+        mock_opendota_api.get_match_details.assert_called_once_with(99999)
+
+    def test_discovery_reuses_validated_details_during_enrichment(
+        self, mock_repos, mock_opendota_api
+    ):
+        match_repo, player_repo = mock_repos
+        match_repo.get_match.return_value = {
+            "match_id": 1,
+            "match_date": "2024-01-15 12:00:00",
+        }
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": discord_id} for discord_id in range(1, 11)
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {
+            discord_id: [discord_id + 1000] for discord_id in range(1, 11)
+        }
+        match_time = int(datetime(2024, 1, 15, 12, 0, tzinfo=UTC).timestamp())
+        mock_opendota_api.get_player_matches.return_value = [
+            {"match_id": 99999, "start_time": match_time}
+        ]
+        match_payload = {
+            "players": [
+                {"account_id": discord_id + 1000} for discord_id in range(1, 11)
+            ]
+        }
+        mock_opendota_api.get_match_details.return_value = match_payload
+        enrichment = Mock()
+        enrichment.enrich_match.return_value = {"success": True}
+
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+        service._enrichment_service = enrichment
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=False)
+
+        assert result["status"] == "discovered"
+        enrichment.enrich_match.assert_called_once_with(
+            1,
+            99999,
+            source="auto",
+            confidence=1.0,
+            guild_id=TEST_GUILD_ID,
+            opendota_match_data=match_payload,
+        )
+        mock_opendota_api.get_match_details.assert_called_once_with(99999)
+
     def test_discover_match_low_confidence_skipped(self, mock_repos, mock_opendota_api):
         """Test discovery with low confidence (<80%) is skipped."""
         match_repo, player_repo = mock_repos

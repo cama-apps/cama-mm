@@ -129,6 +129,35 @@ class TestMatchEnrichmentService:
         assert result["success"] is False
         assert "Failed to fetch" in result["error"]
 
+    def test_enrich_match_reuses_preloaded_opendota_payload(
+        self, mock_repos, mock_opendota_api
+    ):
+        match_repo, player_repo = mock_repos
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": 100, "side": "radiant"}
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {100: [12345]}
+        payload = {
+            "match_id": 8181518332,
+            "duration": 2400,
+            "radiant_win": True,
+            "players": [
+                {"account_id": 12345, "player_slot": 0, "hero_id": 1}
+            ],
+        }
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+
+        result = service.enrich_match(
+            1,
+            8181518332,
+            skip_validation=True,
+            opendota_match_data=payload,
+        )
+
+        assert result["success"] is True
+        mock_opendota_api.get_match_details.assert_not_called()
+
     def test_enrich_match_player_not_found(self, mock_repos, mock_opendota_api):
         """Test enrichment when player steam_id not in API response."""
         match_repo, player_repo = mock_repos

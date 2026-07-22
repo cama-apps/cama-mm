@@ -19,6 +19,7 @@ logger = logging.getLogger("cama_bot.services.match_discovery")
 
 # Minimum players with steam_id to attempt discovery
 MIN_PLAYERS_FOR_DISCOVERY = 5
+MATCH_DETAILS_CACHE_SIZE = 32
 
 # For discovery phase, we require all 10 players by default (from config)
 # But we can still try discovery with fewer if we have at least MIN_PLAYERS_FOR_DISCOVERY
@@ -75,6 +76,7 @@ class MatchDiscoveryService:
             "details": [],
         }
         player_matches_cache: dict[int, list[dict]] = {}
+        match_details_cache: dict[int, dict] = {}
 
         match_ids = [match["match_id"] for match in unenriched]
         participants_by_match = self.match_repo.get_match_participants_bulk(
@@ -97,6 +99,7 @@ class MatchDiscoveryService:
                     normalized_guild,
                     dry_run,
                     player_matches_cache=player_matches_cache,
+                    match_details_cache=match_details_cache,
                     match=match,
                     participants=participants_by_match.get(match_id, []),
                     discord_to_steam_ids=discord_to_steam_ids,
@@ -140,6 +143,7 @@ class MatchDiscoveryService:
         dry_run: bool,
         *,
         player_matches_cache: dict[int, list[dict]] | None = None,
+        match_details_cache: dict[int, dict] | None = None,
         match: dict | None = None,
         participants: list[dict] | None = None,
         discord_to_steam_ids: dict[int, list[int]] | None = None,
@@ -191,8 +195,19 @@ class MatchDiscoveryService:
         if not match_time:
             return {"match_id": match_id, "status": "no_timestamp"}
 
-        # Query OpenDota for each player's recent matches
-        candidate_matches = {}
+        # Query one player history at a time and validate timestamp candidates
+        # against the complete match-details roster. A successful candidate can
+        # therefore stop after one history request instead of requiring the same
+        # match to appear independently in all ten players' histories.
+        candidate_matches: dict[int, set[int]] = {}
+        candidate_start_times: dict[int, int] = {}
+        rejected_detail_candidates: set[int] = set()
+        unavailable_detail_candidates: set[int] = set()
+        selected_match_id: int | None = None
+        selected_match_data: dict | None = None
+        selected_player_count = 0
+        best_detail_match_id: int | None = None
+        best_detail_player_count = 0
         time_window = ENRICHMENT_DISCOVERY_TIME_WINDOW
 
         for steam_id in steam_ids:
@@ -215,13 +230,69 @@ class MatchDiscoveryService:
                     start_time = m.get("start_time", 0)
                     if abs(start_time - match_time) <= time_window:
                         valve_match_id = m.get("match_id")
+                        if valve_match_id is None:
+                            continue
                         if valve_match_id not in candidate_matches:
                             candidate_matches[valve_match_id] = set()
+                            candidate_start_times[valve_match_id] = start_time
                         # Track the discord_id (player), not the steam_id
                         # This way, multiple steam_ids for same player count as one
                         discord_id = steam_to_discord.get(steam_id)
                         if discord_id:
                             candidate_matches[valve_match_id].add(discord_id)
+
+                # Prefer the closest timestamp first. Once OpenDota's full
+                # payload contains the configured number of distinct lobby
+                # players, no more per-player histories are needed.
+                unchecked_candidates = [
+                    candidate_id
+                    for candidate_id in candidate_matches
+                    if candidate_id not in rejected_detail_candidates
+                    and candidate_id not in unavailable_detail_candidates
+                ]
+                unchecked_candidates.sort(
+                    key=lambda candidate_id: (
+                        abs(candidate_start_times[candidate_id] - match_time),
+                        -len(candidate_matches[candidate_id]),
+                        candidate_id,
+                    )
+                )
+                for candidate_id in unchecked_candidates:
+                    candidate_data = None
+                    if match_details_cache is not None:
+                        candidate_data = match_details_cache.get(candidate_id)
+                    if candidate_data is None:
+                        candidate_data = self.opendota_api.get_match_details(candidate_id)
+                        if isinstance(candidate_data, dict) and match_details_cache is not None:
+                            if len(match_details_cache) >= MATCH_DETAILS_CACHE_SIZE:
+                                match_details_cache.pop(next(iter(match_details_cache)))
+                            match_details_cache[candidate_id] = candidate_data
+
+                    # Mocks and transient/unparsed OpenDota results may not be
+                    # dictionaries. Fall back to the historical correlation
+                    # algorithm in that case rather than turning a temporary
+                    # details failure into a false negative.
+                    if not isinstance(candidate_data, dict):
+                        unavailable_detail_candidates.add(candidate_id)
+                        continue
+
+                    matched_count = self._count_roster_matches(
+                        candidate_data,
+                        participants,
+                        discord_to_steam_ids,
+                    )
+                    if matched_count > best_detail_player_count:
+                        best_detail_match_id = candidate_id
+                        best_detail_player_count = matched_count
+                    if matched_count >= ENRICHMENT_MIN_PLAYER_MATCH:
+                        selected_match_id = candidate_id
+                        selected_match_data = candidate_data
+                        selected_player_count = matched_count
+                        break
+                    rejected_detail_candidates.add(candidate_id)
+
+                if selected_match_id is not None:
+                    break
 
             except Exception as e:
                 logger.warning(f"Error fetching matches for steam_id {steam_id}: {e}")
@@ -230,14 +301,22 @@ class MatchDiscoveryService:
             return {"match_id": match_id, "status": "no_candidates"}
 
         # Find best candidate based on unique player count
-        best_match_id = None
-        best_player_count = 0
+        best_match_id = selected_match_id
+        best_player_count = selected_player_count
 
         for valve_match_id, matched_discord_ids in candidate_matches.items():
+            if valve_match_id in rejected_detail_candidates:
+                continue
             player_count = len(matched_discord_ids)
             if player_count > best_player_count:
                 best_match_id = valve_match_id
                 best_player_count = player_count
+
+        # If every fetched details payload disproved the historical candidate,
+        # retain the strongest roster overlap for useful low-confidence output.
+        if best_match_id is None and best_detail_match_id is not None:
+            best_match_id = best_detail_match_id
+            best_player_count = best_detail_player_count
 
         # Use strict validation: require all players (configurable via ENRICHMENT_MIN_PLAYER_MATCH)
         min_required = ENRICHMENT_MIN_PLAYER_MATCH
@@ -268,6 +347,7 @@ class MatchDiscoveryService:
                     source="auto",
                     confidence=confidence,
                     guild_id=guild_id,
+                    opendota_match_data=selected_match_data,
                 )
 
                 # If validation failed in enrichment service, report as low_confidence
@@ -306,6 +386,27 @@ class MatchDiscoveryService:
                 "player_count": best_player_count,
                 "total_players": players_with_steam_id,
             }
+
+    @staticmethod
+    def _count_roster_matches(
+        opendota_match: dict,
+        participants: list[dict],
+        discord_to_steam_ids: dict[int, list[int]],
+    ) -> int:
+        """Count distinct internal players represented in a match payload."""
+        account_ids = {
+            player.get("account_id")
+            for player in opendota_match.get("players", [])
+            if player.get("account_id") is not None
+        }
+        return sum(
+            1
+            for participant in participants
+            if any(
+                steam_id in account_ids
+                for steam_id in discord_to_steam_ids.get(participant["discord_id"], [])
+            )
+        )
 
     def discover_match(self, match_id: int, guild_id: int | None = None) -> dict:
         """

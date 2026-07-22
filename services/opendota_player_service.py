@@ -3,6 +3,9 @@ Service for fetching player profile statistics from OpenDota API.
 """
 
 import logging
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from opendota_integration import OpenDotaAPI
@@ -23,9 +26,18 @@ LANE_ROLE_NAMES = {
     4: "Jungle",
 }
 
-# Hero primary attribute mapping (from OpenDota)
-# Will be fetched once and cached
+# Static hero metadata loaded from bundled Dotabase once and cached.
 _HERO_ATTRIBUTES_CACHE: dict[int, str] | None = None
+_HERO_ROLES_CACHE: dict[int, dict[str, float]] | None = None
+_HERO_CACHE_LOCK = threading.Lock()
+
+# Independent profile endpoints are fetched concurrently with per-worker API
+# clients. This cuts cold-profile wall time to the slowest endpoint rather than
+# the sum of player, W/L, totals, and hero-history latencies.
+_PROFILE_FETCH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="opendota-profile",
+)
 
 
 class OpenDotaPlayerService:
@@ -52,6 +64,10 @@ class OpenDotaPlayerService:
         self.api = OpenDotaAPI()
         # In-memory cache (fallback if no DB cache)
         self._memory_cache: dict[int, dict] = {}
+        self._dota_tab_cache: dict[tuple[int, int, int], tuple[float, dict]] = {}
+        self._cache_lock = threading.Lock()
+        self._profile_inflight: dict[tuple[int, int], Future[dict | None]] = {}
+        self._profile_api_local = threading.local()
 
     def get_player_profile(
         self,
@@ -59,6 +75,7 @@ class OpenDotaPlayerService:
         force_refresh: bool = False,
         *,
         steam_id: int | None = None,
+        recent_matches: list[dict] | None = None,
     ) -> dict | None:
         """
         Get comprehensive player profile from OpenDota.
@@ -77,45 +94,93 @@ class OpenDotaPlayerService:
             logger.warning(f"No steam_id for discord {discord_id}")
             return None
 
-        # Check memory cache
-        if not force_refresh and discord_id in self._memory_cache:
-            cached = self._memory_cache[discord_id]
-            if datetime.now() - cached["cached_at"] < timedelta(seconds=CACHE_TTL_SECONDS):
-                logger.debug(f"Returning cached profile for discord {discord_id}")
-                return cached["data"]
+        cache_key = (discord_id, steam_id)
+        with self._cache_lock:
+            if not force_refresh and discord_id in self._memory_cache:
+                cached = self._memory_cache[discord_id]
+                cache_is_fresh = datetime.now() - cached["cached_at"] < timedelta(
+                    seconds=CACHE_TTL_SECONDS
+                )
+                cache_matches_account = cached["data"].get("steam_id") == steam_id
+                if cache_is_fresh and cache_matches_account:
+                    logger.debug(f"Returning cached profile for discord {discord_id}")
+                    return cached["data"]
+
+            inflight = self._profile_inflight.get(cache_key)
+            is_leader = inflight is None
+            if is_leader:
+                inflight = Future()
+                self._profile_inflight[cache_key] = inflight
+
+        if not is_leader:
+            return inflight.result()
 
         # Fetch from API
         logger.info(f"Fetching OpenDota profile for steam_id {steam_id}")
-        profile = self._fetch_profile(steam_id)
-
-        if profile:
-            # Cache in memory
-            self._memory_cache[discord_id] = {
-                "data": profile,
-                "cached_at": datetime.now(),
-            }
-
-        return profile
-
-    def _fetch_profile(self, steam_id: int) -> dict | None:
-        """Fetch all profile data from OpenDota APIs."""
         try:
-            # Basic player info
-            player_data = self.api.get_player_data(steam_id)
+            profile = self._fetch_profile(steam_id, recent_matches=recent_matches)
+            if profile:
+                with self._cache_lock:
+                    self._memory_cache[discord_id] = {
+                        "data": profile,
+                        "cached_at": datetime.now(),
+                    }
+            inflight.set_result(profile)
+            return profile
+        except BaseException as exc:
+            inflight.set_exception(exc)
+            raise
+        finally:
+            with self._cache_lock:
+                self._profile_inflight.pop(cache_key, None)
+
+    def _get_profile_worker_api(self) -> OpenDotaAPI:
+        """Return a persistent per-worker client with its own HTTP session."""
+        client = getattr(self._profile_api_local, "client", None)
+        if client is None or client.api_key != self.api.api_key:
+            client = OpenDotaAPI(api_key=self.api.api_key)
+            self._profile_api_local.client = client
+        return client
+
+    def _fetch_profile_component(self, component: str, steam_id: int):
+        api = self._get_profile_worker_api()
+        if component == "player":
+            return api.get_player_data(steam_id)
+        if component == "wl":
+            return self._fetch_win_loss(steam_id, api=api)
+        if component == "totals":
+            return self._fetch_totals(steam_id, api=api)
+        if component == "heroes":
+            return self._fetch_top_heroes(steam_id, api=api)
+        raise ValueError(f"Unknown profile component: {component}")
+
+    def _fetch_profile(
+        self,
+        steam_id: int,
+        *,
+        recent_matches: list[dict] | None = None,
+    ) -> dict | None:
+        """Fetch independent profile endpoints concurrently."""
+        try:
+            futures = {
+                component: _PROFILE_FETCH_EXECUTOR.submit(
+                    self._fetch_profile_component, component, steam_id
+                )
+                for component in ("player", "wl", "totals", "heroes")
+            }
+            player_data = futures["player"].result()
             if not player_data:
+                for future in futures.values():
+                    future.cancel()
                 return None
-
-            # Win/Loss
-            wl = self._fetch_win_loss(steam_id)
-
-            # Totals for averages
-            totals = self._fetch_totals(steam_id)
-
-            # Top heroes
-            top_heroes = self._fetch_top_heroes(steam_id)
-
-            # Recent matches
-            recent_matches = self._fetch_recent_matches(steam_id)
+            wl = futures["wl"].result()
+            totals = futures["totals"].result()
+            top_heroes = futures["heroes"].result()
+            formatted_recent = (
+                self._format_recent_matches(recent_matches)
+                if recent_matches is not None
+                else self._fetch_recent_matches(steam_id)
+            )
 
             return {
                 "steam_id": steam_id,
@@ -133,32 +198,35 @@ class OpenDotaPlayerService:
                 "avg_xpm": totals.get("avg_xpm", 0),
                 "avg_last_hits": totals.get("avg_last_hits", 0),
                 "top_heroes": top_heroes,
-                "recent_matches": recent_matches,
-                "last_match_id": recent_matches[0]["match_id"] if recent_matches else None,
+                "recent_matches": formatted_recent,
+                "last_match_id": formatted_recent[0]["match_id"] if formatted_recent else None,
             }
         except Exception as e:
             logger.error(f"Error fetching profile for steam_id {steam_id}: {e}")
             return None
 
-    def _safe_get(self, path: str, *, context: str):
+    def _safe_get(self, path: str, *, context: str, api: OpenDotaAPI | None = None):
         """GET an OpenDota endpoint; return parsed JSON or None on any failure."""
         try:
-            response = self.api.make_request(f"{self.api.BASE_URL}{path}")
+            client = api or self.api
+            response = client.make_request(f"{client.BASE_URL}{path}")
             if response and response.status_code == 200:
                 return response.json()
         except Exception as e:
             logger.error(f"Error fetching {context}: {e}")
         return None
 
-    def _fetch_win_loss(self, steam_id: int) -> dict:
+    def _fetch_win_loss(self, steam_id: int, *, api: OpenDotaAPI | None = None) -> dict:
         """Fetch win/loss totals."""
-        data = self._safe_get(f"/players/{steam_id}/wl", context=f"W/L for {steam_id}")
+        data = self._safe_get(
+            f"/players/{steam_id}/wl", context=f"W/L for {steam_id}", api=api
+        )
         return data or {"win": 0, "lose": 0}
 
-    def _fetch_totals(self, steam_id: int) -> dict:
+    def _fetch_totals(self, steam_id: int, *, api: OpenDotaAPI | None = None) -> dict:
         """Fetch player totals for calculating averages."""
         totals_data = self._safe_get(
-            f"/players/{steam_id}/totals", context=f"totals for {steam_id}"
+            f"/players/{steam_id}/totals", context=f"totals for {steam_id}", api=api
         )
         if not totals_data:
             return {}
@@ -184,10 +252,16 @@ class OpenDotaPlayerService:
                 result["avg_last_hits"] = int(avg)
         return result
 
-    def _fetch_top_heroes(self, steam_id: int, limit: int = 5) -> list[dict]:
+    def _fetch_top_heroes(
+        self,
+        steam_id: int,
+        limit: int = 5,
+        *,
+        api: OpenDotaAPI | None = None,
+    ) -> list[dict]:
         """Fetch top heroes by games played."""
         heroes_data = self._safe_get(
-            f"/players/{steam_id}/heroes", context=f"heroes for {steam_id}"
+            f"/players/{steam_id}/heroes", context=f"heroes for {steam_id}", api=api
         )
         if not heroes_data:
             return []
@@ -214,6 +288,12 @@ class OpenDotaPlayerService:
         )
         if not matches_data:
             return []
+        return self._format_recent_matches(matches_data, limit=limit)
+
+    def _format_recent_matches(
+        self, matches_data: list[dict], limit: int = 5
+    ) -> list[dict]:
+        """Format a projected match sample for the profile display."""
         return [
             {
                 "match_id": m.get("match_id"),
@@ -353,6 +433,14 @@ class OpenDotaPlayerService:
             logger.warning(f"No steam_id for discord {discord_id}")
             return result
 
+        cache_key = (discord_id, steam_id, match_limit)
+        with self._cache_lock:
+            cached = self._dota_tab_cache.get(cache_key)
+            if cached and time.monotonic() - cached[0] < CACHE_TTL_SECONDS:
+                return cached[1]
+            if cached:
+                self._dota_tab_cache.pop(cache_key, None)
+
         matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
         try:
             result["role_distribution"] = self._calc_hero_role_distribution(matches)
@@ -360,12 +448,19 @@ class OpenDotaPlayerService:
             logger.error(f"Error calculating role distribution: {e}")
 
         try:
-            profile = self.get_player_profile(discord_id, steam_id=steam_id)
+            profile = self.get_player_profile(
+                discord_id,
+                steam_id=steam_id,
+                recent_matches=matches,
+            )
             if profile:
                 result["full_stats"] = self._build_full_stats(steam_id, profile, matches)
         except Exception as e:
             logger.error(f"Error getting full Dota-tab stats for discord {discord_id}: {e}")
 
+        if result["full_stats"] is not None:
+            with self._cache_lock:
+                self._dota_tab_cache[cache_key] = (time.monotonic(), result)
         return result
 
     def _build_full_stats(self, steam_id: int, profile: dict, matches: list[dict]) -> dict:
@@ -423,6 +518,9 @@ class OpenDotaPlayerService:
                         "kills",
                         "deaths",
                         "assists",
+                        "duration",
+                        "start_time",
+                        "match_id",
                     ],
                 },
             )
@@ -433,24 +531,32 @@ class OpenDotaPlayerService:
         return []
 
     def _get_hero_attributes(self) -> dict[int, str]:
-        """Get hero ID -> primary attribute mapping from OpenDota."""
+        """Get hero ID -> primary attribute mapping from bundled Dotabase."""
         global _HERO_ATTRIBUTES_CACHE
 
         if _HERO_ATTRIBUTES_CACHE is not None:
             return _HERO_ATTRIBUTES_CACHE
 
         try:
-            response = self.api.make_request(f"{self.api.BASE_URL}/heroes")
-            if response and response.status_code == 200:
-                heroes_data = response.json()
+            with _HERO_CACHE_LOCK:
+                if _HERO_ATTRIBUTES_CACHE is not None:
+                    return _HERO_ATTRIBUTES_CACHE
+                from services.trivia_data import load_heroes
+
+                attr_names = {
+                    "agility": "agi",
+                    "strength": "str",
+                    "intelligence": "int",
+                    "universal": "all",
+                }
                 _HERO_ATTRIBUTES_CACHE = {
-                    h["id"]: h.get("primary_attr", "all")  # "agi", "str", "int", "all" (universal)
-                    for h in heroes_data
+                    hero.id: attr_names.get(hero.attr_primary or "universal", "all")
+                    for hero in load_heroes()
                 }
                 logger.info(f"Cached hero attributes for {len(_HERO_ATTRIBUTES_CACHE)} heroes")
                 return _HERO_ATTRIBUTES_CACHE
         except Exception as e:
-            logger.error(f"Error fetching hero attributes: {e}")
+            logger.error(f"Error loading hero attributes: {e}")
 
         return {}
 
@@ -624,33 +730,41 @@ class OpenDotaPlayerService:
         Returns dict like {1: {"Carry": 3, "Escape": 3, "Nuker": 1}, ...}
         Weights come from dotabase role_levels (e.g., "3|3|1" -> weights)
         """
+        global _HERO_ROLES_CACHE
+        if _HERO_ROLES_CACHE is not None:
+            return _HERO_ROLES_CACHE
+
         try:
             from dotabase_integration import Hero, dotabase_session
 
-            session = dotabase_session()
-            try:
-                heroes = session.query(Hero).all()
+            with _HERO_CACHE_LOCK:
+                if _HERO_ROLES_CACHE is not None:
+                    return _HERO_ROLES_CACHE
+                session = dotabase_session()
+                try:
+                    heroes = session.query(Hero).all()
 
-                result = {}
-                for hero in heroes:
-                    if not hero.roles or not hero.role_levels:
-                        continue
+                    result = {}
+                    for hero in heroes:
+                        if not hero.roles or not hero.role_levels:
+                            continue
 
-                    roles = hero.roles.split("|")
-                    levels = hero.role_levels.split("|")
+                        roles = hero.roles.split("|")
+                        levels = hero.role_levels.split("|")
 
-                    role_weights = {}
-                    for role, level in zip(roles, levels):
-                        try:
-                            role_weights[role] = int(level)
-                        except ValueError:
-                            role_weights[role] = 1
+                        role_weights = {}
+                        for role, level in zip(roles, levels):
+                            try:
+                                role_weights[role] = int(level)
+                            except ValueError:
+                                role_weights[role] = 1
 
-                    result[hero.id] = role_weights
-            finally:
-                session.close()
+                        result[hero.id] = role_weights
+                finally:
+                    session.close()
 
-            return result
+                _HERO_ROLES_CACHE = result
+                return _HERO_ROLES_CACHE
         except ImportError:
             logger.warning("dotabase not available for role lookup")
             return {}

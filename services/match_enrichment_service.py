@@ -198,6 +198,8 @@ class MatchEnrichmentService:
         confidence: float | None = None,
         skip_validation: bool = False,
         guild_id: int | None = None,
+        *,
+        opendota_match_data: dict | None = None,
     ) -> dict:
         """
         Enrich an internal match with OpenDota API data including fantasy points.
@@ -209,6 +211,9 @@ class MatchEnrichmentService:
             confidence: Optional confidence score for auto-discovered matches
             skip_validation: If True, skip strict validation (for manual overrides)
             guild_id: Guild ID for multi-guild isolation
+            opendota_match_data: Already-fetched OpenDota match payload. Discovery
+                passes this through so a validated candidate is not downloaded a
+                second time during enrichment.
 
         Returns:
             Dict with enrichment results:
@@ -232,8 +237,11 @@ class MatchEnrichmentService:
                 "players_not_found": [],
             }
 
-        # Fetch match details from OpenDota API
-        match_data = self.opendota_api.get_match_details(dota_match_id)
+        # Fetch match details from OpenDota API unless discovery already loaded
+        # the candidate in order to validate its complete ten-player roster.
+        match_data = opendota_match_data
+        if match_data is None:
+            match_data = self.opendota_api.get_match_details(dota_match_id)
         if not match_data:
             return {
                 "success": False,

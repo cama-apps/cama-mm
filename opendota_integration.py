@@ -3,11 +3,16 @@ OpenDota API integration for fetching player data.
 OpenDota API: https://docs.opendota.com/
 """
 
+import asyncio
+import functools
 import logging
 import os
 import re
 import threading
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import requests
 
@@ -21,8 +26,28 @@ logger = logging.getLogger("cama_bot.opendota")
 # Default timeout for all HTTP calls (seconds).
 _REQUEST_TIMEOUT = 30
 
+# Bound the complete rate-limit + retry operation. The historical retry
+# schedule could otherwise occupy one of asyncio's shared default-executor
+# threads for nearly eight minutes, delaying unrelated SQLite offloads.
+_REQUEST_DEADLINE_SECONDS = 90
+
+# Network-heavy OpenDota commands use a small, dedicated pool so a slow or
+# rate-limited upstream cannot consume every worker used by asyncio.to_thread
+# for local repository operations.
+_OPENDOTA_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="opendota-io",
+)
+
 # Status codes that are worth retrying (429 rate-limit + transient 5xx).
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+async def run_opendota_io(func: Callable[..., Any], /, *args, **kwargs) -> Any:
+    """Run synchronous OpenDota work outside asyncio's shared worker pool."""
+    loop = asyncio.get_running_loop()
+    call = functools.partial(func, *args, **kwargs)
+    return await loop.run_in_executor(_OPENDOTA_EXECUTOR, call)
 
 
 class RateLimiter:
@@ -127,24 +152,38 @@ class OpenDotaAPI:
             Response object, or None if the rate limiter timed out, all retries
             were exhausted, or a connection error occurred after retries.
         """
-        # Wait for rate limiter
-        if not OpenDotaAPI._rate_limiter.acquire(timeout=30.0):
+        deadline_at = time.monotonic() + _REQUEST_DEADLINE_SECONDS
+
+        # Wait for rate limiter, but include that wait in the total operation
+        # deadline rather than starting an unbounded retry clock afterward.
+        rate_limit_timeout = min(30.0, max(0.0, deadline_at - time.monotonic()))
+        if rate_limit_timeout <= 0 or not OpenDotaAPI._rate_limiter.acquire(
+            timeout=rate_limit_timeout
+        ):
             logger.warning("OpenDota API rate limit exceeded, request timed out")
             return None
         # Add API key if available
         if self.api_key:
-            params = params or {}
+            params = dict(params or {})
             params["api_key"] = self.api_key
 
         # Retry loop: first attempt + len(delays) retries on transient failures.
         delays = list(ENRICHMENT_RETRY_DELAYS) or [0]
         last_response: requests.Response | None = None
         for attempt in range(len(delays) + 1):
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                logger.warning("OpenDota request to %s exceeded its total deadline", url)
+                return last_response
             try:
                 monitor = get_global_usage_monitor()
                 if monitor is not None:
                     monitor.record_api_request("opendota")
-                response = self.session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+                response = self.session.get(
+                    url,
+                    params=params,
+                    timeout=min(_REQUEST_TIMEOUT, remaining),
+                )
             except requests.exceptions.RequestException as e:
                 # Connection-level failure (timeout, DNS, etc.) — retry if we
                 # have budget, otherwise surface as None to match the existing
@@ -152,7 +191,7 @@ class OpenDotaAPI:
                 if attempt >= len(delays):
                     logger.warning(f"OpenDota request to {url} failed after retries: {e}")
                     return None
-                delay = delays[attempt]
+                delay = min(delays[attempt], max(0.0, deadline_at - time.monotonic()))
                 logger.info(
                     f"OpenDota request to {url} failed ({e}); "
                     f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
@@ -181,6 +220,7 @@ class OpenDotaAPI:
                 server_hint = retry_after_seconds(response)
                 if server_hint is not None:
                     delay = max(delay, server_hint)
+            delay = min(delay, max(0.0, deadline_at - time.monotonic()))
             logger.info(
                 f"OpenDota request to {url} returned {response.status_code}; "
                 f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
