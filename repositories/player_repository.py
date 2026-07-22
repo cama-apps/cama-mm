@@ -481,6 +481,38 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return (row[0], row[1], row[2])
             return None
 
+    def get_match_rating_inputs(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, dict]:
+        """Bulk-load every player field used during match rating calculation."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        guild_id = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(unique_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    discord_id,
+                    current_mmr,
+                    glicko_rating,
+                    glicko_rd,
+                    glicko_volatility,
+                    os_mu,
+                    os_sigma,
+                    last_match_date,
+                    created_at,
+                    first_calibrated_at
+                FROM players
+                WHERE discord_id IN ({placeholders}) AND guild_id = ?
+                """,
+                unique_ids + [guild_id],
+            )
+            return {row["discord_id"]: dict(row) for row in cursor.fetchall()}
+
     def get_last_match_date(self, discord_id: int, guild_id: int) -> tuple | None:
         """
         Get the last_match_date and created_at for a player.

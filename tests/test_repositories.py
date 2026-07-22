@@ -81,6 +81,52 @@ class TestPlayerRepository:
         assert rating[1] == 300
         assert rating[2] == 0.05
 
+    def test_get_match_rating_inputs_bulk(self, player_repository):
+        player_repository.add(
+            discord_id=12345,
+            discord_username="MatchPlayer",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=3200,
+            glicko_rating=1550,
+            glicko_rd=120,
+            glicko_volatility=0.05,
+            os_mu=27.5,
+            os_sigma=7.25,
+        )
+        player_repository.add(
+            discord_id=12345,
+            discord_username="OtherGuildPlayer",
+            guild_id=TEST_GUILD_ID + 1,
+            initial_mmr=9000,
+            glicko_rating=2500,
+            glicko_rd=50,
+            glicko_volatility=0.03,
+        )
+        with sqlite3.connect(player_repository.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE players
+                SET last_match_date = ?, first_calibrated_at = ?
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                ("2026-07-20T12:00:00+00:00", 1_750_000_000, 12345, TEST_GUILD_ID),
+            )
+
+        inputs = player_repository.get_match_rating_inputs(
+            [12345, 99999, 12345], TEST_GUILD_ID
+        )
+
+        assert list(inputs) == [12345]
+        assert inputs[12345]["current_mmr"] == 3200
+        assert inputs[12345]["glicko_rating"] == 1550
+        assert inputs[12345]["glicko_rd"] == 120
+        assert inputs[12345]["glicko_volatility"] == 0.05
+        assert inputs[12345]["os_mu"] == 27.5
+        assert inputs[12345]["os_sigma"] == 7.25
+        assert inputs[12345]["last_match_date"] == "2026-07-20T12:00:00+00:00"
+        assert inputs[12345]["first_calibrated_at"] == 1_750_000_000
+        assert player_repository.get_match_rating_inputs([], TEST_GUILD_ID) == {}
+
     def test_get_by_ids_preserves_order(self, player_repository):
         """Test that get_by_ids preserves input order."""
         for i in range(5):
@@ -509,6 +555,40 @@ class TestMatchRepository:
 
         matches = match_repository.get_player_matches(1, TEST_GUILD_ID, limit=10)
         assert len(matches) == 2
+
+    def test_get_player_recent_outcomes_bulk_matches_point_reads(self, match_repository):
+        histories = {
+            101: [True, False, True, True],
+            202: [False, False, True],
+        }
+        for discord_id, outcomes in histories.items():
+            for won in outcomes:
+                match_repository.add_rating_history(
+                    discord_id,
+                    TEST_GUILD_ID,
+                    rating=1500,
+                    won=won,
+                )
+        match_repository.add_rating_history(
+            101,
+            TEST_GUILD_ID + 1,
+            rating=1500,
+            won=False,
+        )
+
+        bulk = match_repository.get_player_recent_outcomes_bulk(
+            [202, 101, 303, 202], TEST_GUILD_ID, limit=3
+        )
+
+        assert list(bulk) == [202, 101, 303]
+        assert bulk[101] == match_repository.get_player_recent_outcomes(
+            101, TEST_GUILD_ID, limit=3
+        )
+        assert bulk[202] == match_repository.get_player_recent_outcomes(
+            202, TEST_GUILD_ID, limit=3
+        )
+        assert bulk[303] == []
+        assert match_repository.get_player_recent_outcomes_bulk([], TEST_GUILD_ID) == {}
 
     def test_match_summary_reads_do_not_load_enrichment_data(
         self, match_repository, monkeypatch

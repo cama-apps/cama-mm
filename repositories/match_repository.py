@@ -1104,6 +1104,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
             rows = cursor.fetchall()
             return [bool(row["won"]) for row in rows]
 
+    def get_player_recent_outcomes_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        limit: int = 20,
+    ) -> dict[int, list[bool]]:
+        """Get capped outcome histories for multiple players on one connection."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        guild_id = self.normalize_guild_id(guild_id)
+        outcomes = {discord_id: [] for discord_id in unique_ids}
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            for discord_id in unique_ids:
+                cursor.execute(
+                    """
+                    SELECT won FROM rating_history
+                    WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (discord_id, guild_id, limit),
+                )
+                outcomes[discord_id] = [
+                    bool(row["won"]) for row in cursor.fetchall()
+                ]
+        return outcomes
+
     def get_player_outcomes_before_match(
         self, discord_id: int, guild_id: int | None, match_id: int, limit: int = 20
     ) -> list[bool]:
