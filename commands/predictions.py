@@ -1602,9 +1602,6 @@ class PredictionCommands(commands.Cog):
         total_cost = 0
         total_mark = 0
         for p in positions:
-            book = await asyncio.to_thread(
-                self.prediction_service.prediction_repo.get_book, p["prediction_id"]
-            )
             question = (p["question"] or "")[:26]
             for side in ("yes", "no"):
                 qty = int(p[f"{side}_contracts"])
@@ -1612,7 +1609,7 @@ class PredictionCommands(commands.Cog):
                     continue
                 basis = int(p[f"{side}_cost_basis_total"])
                 avg = _avg_price_pct(basis, qty)
-                mark_p = PredictionService.position_mark(book, side)
+                mark_p = p[f"{side}_mark"]
                 mark_value = _mark_value_jopa(mark_p, qty)
                 upnl = mark_value - basis
                 total_cost += basis

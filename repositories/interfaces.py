@@ -850,7 +850,12 @@ class IPredictionRepository(ABC):
     def get_user_open_positions(
         self, discord_id: int, guild_id: int | None = None
     ) -> list[dict]:
-        """Return user's open positions across all open markets in a guild (for /predict mine)."""
+        """Return a user's open positions across open markets in a guild.
+
+        Each row includes nullable top-of-book exit prices: ``yes_mark`` is the
+        highest active YES bid, while ``no_mark`` is 100 minus the lowest active
+        YES ask. Missing depth on the relevant side yields ``None``.
+        """
         ...
 
     @abstractmethod
