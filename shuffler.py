@@ -8,7 +8,7 @@ import logging
 import math
 import random
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from config import (
     PACKAGE_DEAL_PENALTY,
@@ -62,6 +62,19 @@ class _RoleAssignmentMetrics:
     team_value: float
     off_role_count: int
     role_values: tuple[float, ...]
+
+
+@dataclass(slots=True)
+class _ShuffleScoringContext:
+    """Request-local values and role metrics reused across candidate splits."""
+
+    player_values: dict[int, float] = field(default_factory=dict)
+    team_metrics: dict[
+        tuple[tuple[int, ...], int], tuple[_RoleAssignmentMetrics, ...]
+    ] = field(default_factory=dict)
+    assigned_metrics: dict[
+        tuple[tuple[int, ...], tuple[str, ...]], _RoleAssignmentMetrics
+    ] = field(default_factory=dict)
 
 
 class BalancedShuffler:
@@ -369,6 +382,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
+        _scoring_context: _ShuffleScoringContext | None = None,
 
     ) -> tuple[Team, Team, list[Player], float]:
         """
@@ -393,7 +407,7 @@ class BalancedShuffler:
         # Sort by rating descending
         sorted_players = sorted(
             players,
-            key=lambda p: p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin),
+            key=lambda p: self._player_value(p, _scoring_context),
             reverse=True,
         )
 
@@ -418,7 +432,7 @@ class BalancedShuffler:
                 sorted_players,
                 key=lambda p: (
                     effective_exclusion_count(p),
-                    p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin),
+                    self._player_value(p, _scoring_context),
                 ),
             )
             excluded = exclusion_order[: len(players) - 10]
@@ -451,7 +465,13 @@ class BalancedShuffler:
 
         # Optimize role assignments for the greedy teams
         team1, team2, base_score = self._optimize_role_assignments_for_matchup(
-            team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals        )
+            team1_players,
+            team2_players,
+            max_assignments_per_team=3,
+            avoids=avoids,
+            deals=deals,
+            _scoring_context=_scoring_context,
+        )
 
         # Add exclusion penalty
         exclusion_penalty = (
@@ -475,7 +495,7 @@ class BalancedShuffler:
 
         # Rating spread penalty: incentivize selecting players of closer skill
         selected_values = [
-            p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin)
+            self._player_value(p, _scoring_context)
             for p in team1.players + team2.players
         ]
         rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
@@ -542,6 +562,106 @@ class BalancedShuffler:
             role_values=tuple(role_values),
         )
 
+    def _player_value(
+        self,
+        player: Player,
+        scoring_context: _ShuffleScoringContext | None = None,
+    ) -> float:
+        """Return a rating value, caching it for the current shuffle request."""
+        if scoring_context is None:
+            return player.get_value(
+                self.use_glicko,
+                use_openskill=self.use_openskill,
+                use_jopacoin=self.use_jopacoin,
+            )
+
+        player_key = id(player)
+        try:
+            return scoring_context.player_values[player_key]
+        except KeyError:
+            value = player.get_value(
+                self.use_glicko,
+                use_openskill=self.use_openskill,
+                use_jopacoin=self.use_jopacoin,
+            )
+            scoring_context.player_values[player_key] = value
+            return value
+
+    def _team_role_metrics(
+        self,
+        players: list[Player],
+        max_assignments: int,
+        scoring_context: _ShuffleScoringContext | None = None,
+    ) -> tuple[_RoleAssignmentMetrics, ...]:
+        """Return role metrics for a five-player team, reusing request-local work."""
+        player_key = tuple(id(player) for player in players)
+        cache_key = (player_key, max_assignments)
+        if scoring_context is not None:
+            cached = scoring_context.team_metrics.get(cache_key)
+            if cached is not None:
+                return cached
+
+        assignments = self._get_cached_role_assignments(players)[:max_assignments]
+        player_values = [
+            self._player_value(player, scoring_context) for player in players
+        ]
+        metrics = tuple(
+            self._role_assignment_metrics(players, roles, player_values)
+            for roles in assignments
+        )
+
+        if scoring_context is not None:
+            scoring_context.team_metrics[cache_key] = metrics
+            scoring_context.assigned_metrics.update(
+                {
+                    (player_key, metric.role_assignments): metric
+                    for metric in metrics
+                }
+            )
+        return metrics
+
+    def _assigned_role_metrics(
+        self,
+        team: Team,
+        scoring_context: _ShuffleScoringContext | None = None,
+    ) -> _RoleAssignmentMetrics:
+        """Return score components for a team's selected role assignment."""
+        roles = tuple(team.ensure_role_assignments())
+        player_key = tuple(id(player) for player in team.players)
+        cache_key = (player_key, roles)
+        if scoring_context is not None:
+            cached = scoring_context.assigned_metrics.get(cache_key)
+            if cached is not None:
+                return cached
+
+        metrics = self._role_assignment_metrics(
+            team.players,
+            roles,
+            [
+                self._player_value(player, scoring_context)
+                for player in team.players
+            ],
+        )
+        if scoring_context is not None:
+            scoring_context.assigned_metrics[cache_key] = metrics
+        return metrics
+
+    @staticmethod
+    def _role_matchup_delta_from_metrics(
+        team1: _RoleAssignmentMetrics,
+        team2: _RoleAssignmentMetrics,
+    ) -> float:
+        """Calculate lane matchup delta from precomputed effective role values."""
+        t1_values = team1.role_values
+        t2_values = team2.role_values
+        return (
+            abs(t1_values[0] - t2_values[2])
+            + abs(t2_values[0] - t1_values[2])
+            + abs(t1_values[1] - t2_values[1])
+            + abs(t1_values[3] - t2_values[4])
+            + abs(t2_values[3] - t1_values[4])
+        )
+
     def _optimize_role_assignments_for_matchup(
         self,
         team1_players: list[Player],
@@ -549,6 +669,7 @@ class BalancedShuffler:
         max_assignments_per_team: int = 20,
         avoids: list | None = None,
         deals: list | None = None,
+        _scoring_context: _ShuffleScoringContext | None = None,
 
     ) -> tuple[Team, Team, float]:
         """
@@ -568,10 +689,6 @@ class BalancedShuffler:
         Returns:
             Tuple of (best_team1, best_team2, best_score)
         """
-        # Get all optimal role assignments for each team (with caching, limited)
-        team1_assignments = self._get_cached_role_assignments(team1_players)[:max_assignments_per_team]
-        team2_assignments = self._get_cached_role_assignments(team2_players)[:max_assignments_per_team]
-
         best_team1_roles: tuple[str, ...] | None = None
         best_team2_roles: tuple[str, ...] | None = None
         best_score = float("inf")
@@ -584,33 +701,14 @@ class BalancedShuffler:
         region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
         rd_priority = self._calculate_rd_priority(team1_players + team2_players)
 
-        # Player values and per-assignment metrics do not depend on the opposing
-        # assignment. Compute them once instead of rebuilding two Team objects
-        # and rescanning all ten players for every item in the Cartesian product.
-        team1_player_values = [
-            player.get_value(
-                self.use_glicko,
-                use_openskill=self.use_openskill,
-                use_jopacoin=self.use_jopacoin,
-            )
-            for player in team1_players
-        ]
-        team2_player_values = [
-            player.get_value(
-                self.use_glicko,
-                use_openskill=self.use_openskill,
-                use_jopacoin=self.use_jopacoin,
-            )
-            for player in team2_players
-        ]
-        team1_metrics = [
-            self._role_assignment_metrics(team1_players, roles, team1_player_values)
-            for roles in team1_assignments
-        ]
-        team2_metrics = [
-            self._role_assignment_metrics(team2_players, roles, team2_player_values)
-            for roles in team2_assignments
-        ]
+        # These five-player teams recur across many pool selections. Keep their
+        # values and per-assignment metrics local to this shuffle request.
+        team1_metrics = self._team_role_metrics(
+            team1_players, max_assignments_per_team, _scoring_context
+        )
+        team2_metrics = self._team_role_metrics(
+            team2_players, max_assignments_per_team, _scoring_context
+        )
 
         # Try all combinations of valid role assignments
         for team1_assignment in team1_metrics:
@@ -623,14 +721,8 @@ class BalancedShuffler:
                     team1_assignment.off_role_count + team2_assignment.off_role_count
                 ) * self.off_role_flat_penalty
 
-                t1_values = team1_assignment.role_values
-                t2_values = team2_assignment.role_values
-                role_matchup_delta = (
-                    abs(t1_values[0] - t2_values[2])
-                    + abs(t2_values[0] - t1_values[2])
-                    + abs(t1_values[1] - t2_values[1])
-                    + abs(t1_values[3] - t2_values[4])
-                    + abs(t2_values[3] - t1_values[4])
+                role_matchup_delta = self._role_matchup_delta_from_metrics(
+                    team1_assignment, team2_assignment
                 )
 
                 weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
@@ -745,6 +837,7 @@ class BalancedShuffler:
 
         # Track top matchups for logging.
         top_matchups = []  # List of (score, value_diff, off_role_penalty, team1, team2)
+        scoring_context = _ShuffleScoringContext()
 
         for team1_indices in _UNIQUE_TEAM_SPLITS:
             team1_players = [players[i] for i in team1_indices]
@@ -752,19 +845,25 @@ class BalancedShuffler:
 
             # Optimize role assignments for this matchup
             team1, team2, total_score = self._optimize_role_assignments_for_matchup(
-                team1_players, team2_players, avoids=avoids, deals=deals            )
-
-            team1_value = team1.get_team_value(
-                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
+                team1_players,
+                team2_players,
+                avoids=avoids,
+                deals=deals,
+                _scoring_context=scoring_context,
             )
-            team2_value = team2.get_team_value(
-                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-            )
+            team1_metrics = self._assigned_role_metrics(team1, scoring_context)
+            team2_metrics = self._assigned_role_metrics(team2, scoring_context)
+            team1_value = team1_metrics.team_value
+            team2_value = team2_metrics.team_value
             value_diff = abs(team1_value - team2_value)
-            team1_off_roles = team1.get_off_role_count()
-            team2_off_roles = team2.get_off_role_count()
-            off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
-            role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
+            team1_off_roles = team1_metrics.off_role_count
+            team2_off_roles = team2_metrics.off_role_count
+            off_role_penalty = (
+                team1_off_roles + team2_off_roles
+            ) * self.off_role_flat_penalty
+            role_matchup_delta = self._role_matchup_delta_from_metrics(
+                team1_metrics, team2_metrics
+            )
             total_off_roles = team1_off_roles + team2_off_roles
 
             # Track this matchup (normalized 12-tuple shape shared with shuffle_from_pool;
@@ -850,6 +949,7 @@ class BalancedShuffler:
         max_assignments_per_team: int,
         avoids: list | None,
         deals: list | None,
+        scoring_context: _ShuffleScoringContext | None = None,
     ) -> _PoolMatchup:
         """
         Optimize role assignments for one team split and score it.
@@ -864,6 +964,7 @@ class BalancedShuffler:
             max_assignments_per_team=max_assignments_per_team,
             avoids=avoids,
             deals=deals,
+            _scoring_context=scoring_context,
         )
 
         # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
@@ -871,17 +972,19 @@ class BalancedShuffler:
         total_score = base_score + combo_penalty + recent_penalty
 
         # Extract components for logging
-        team1_value = team1.get_team_value(
-            self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
-        team2_value = team2.get_team_value(
-            self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-        )
+        team1_metrics = self._assigned_role_metrics(team1, scoring_context)
+        team2_metrics = self._assigned_role_metrics(team2, scoring_context)
+        team1_value = team1_metrics.team_value
+        team2_value = team2_metrics.team_value
         value_diff = abs(team1_value - team2_value)
-        team1_off_roles = team1.get_off_role_count()
-        team2_off_roles = team2.get_off_role_count()
-        off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
-        role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
+        team1_off_roles = team1_metrics.off_role_count
+        team2_off_roles = team2_metrics.off_role_count
+        off_role_penalty = (
+            team1_off_roles + team2_off_roles
+        ) * self.off_role_flat_penalty
+        role_matchup_delta = self._role_matchup_delta_from_metrics(
+            team1_metrics, team2_metrics
+        )
         total_off_roles = team1_off_roles + team2_off_roles
 
         log_entry = (
@@ -1027,6 +1130,7 @@ class BalancedShuffler:
         # Keep a numeric tiebreaker so heapq never tries to compare Team objects.
         top_matchups_heap: list[tuple[float, int, tuple]] = []
         heap_tiebreaker = 0
+        scoring_context = _ShuffleScoringContext()
 
         total_player_combinations = math.comb(len(players), 10)
         logger.info(
@@ -1075,7 +1179,7 @@ class BalancedShuffler:
 
             # Rating spread penalty: incentivize selecting players of closer skill
             selected_values = [
-                p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin)
+                self._player_value(p, scoring_context)
                 for p in selected_players
             ]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
@@ -1102,6 +1206,7 @@ class BalancedShuffler:
                     pool_max_assignments_per_team,
                     avoids,
                     deals,
+                    scoring_context,
                 )
 
                 # Track top-K only (avoid storing all matchups).
@@ -1183,17 +1288,24 @@ class BalancedShuffler:
 
         exclusion_counts = exclusion_counts or {}
         recent_match_names = recent_match_names or set()
+        scoring_context = _ShuffleScoringContext()
 
         # Step 1: Get greedy initial upper bound
         greedy_t1, greedy_t2, greedy_excluded, best_score = self._greedy_shuffle(
-            players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals        )
+            players,
+            exclusion_counts,
+            recent_match_names,
+            avoids=avoids,
+            deals=deals,
+            _scoring_context=scoring_context,
+        )
         best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
 
         logger.info(f"Branch & bound: greedy upper bound = {best_score:.1f}")
 
         # Precompute player values for fast lower bound calculations
         player_values = {
-            p.name: p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin)
+            p.name: self._player_value(p, scoring_context)
             for p in players
         }
 
@@ -1261,7 +1373,13 @@ class BalancedShuffler:
                 # Step 4: Full role optimization (only for promising splits)
                 evaluated_matchups += 1
                 team1, team2, base_score = self._optimize_role_assignments_for_matchup(
-                    team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals                )
+                    team1_players,
+                    team2_players,
+                    max_assignments_per_team=3,
+                    avoids=avoids,
+                    deals=deals,
+                    _scoring_context=scoring_context,
+                )
 
                 total_score = base_score + recent_penalty + combo_penalty
 
