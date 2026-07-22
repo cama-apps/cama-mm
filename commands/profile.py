@@ -19,6 +19,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import BANKRUPTCY_PENALTY_RATE, PREDICTION_CONTRACT_VALUE
+from opendota_integration import run_opendota_io
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from utils.drawing import (
@@ -1031,7 +1032,7 @@ class ProfileCommands(commands.Cog):
         # Fetch the shared match sample once for both role and full-stat views.
         dota_tab_stats = None
         try:
-            dota_tab_stats = await asyncio.to_thread(
+            dota_tab_stats = await run_opendota_io(
                 opendota_service.get_dota_tab_stats,
                 target_discord_id,
                 match_limit=50,

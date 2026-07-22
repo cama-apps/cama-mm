@@ -15,6 +15,7 @@ from config import (
     MMR_MODAL_RETRY_LIMIT,
     MMR_MODAL_TIMEOUT_MINUTES,
 )
+from opendota_integration import run_opendota_io
 from utils.formatting import format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.neon_helpers import get_neon_service
@@ -47,7 +48,7 @@ class RegistrationCommands(commands.Cog):
         guild_id = interaction.guild.id
 
         async def _finalize_register(mmr_override: int | None = None):
-            result = await asyncio.to_thread(
+            result = await run_opendota_io(
                 functools.partial(
                     self.player_service.register_player,
                     discord_id=interaction.user.id,

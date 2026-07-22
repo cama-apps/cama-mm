@@ -2,12 +2,15 @@
 Tests for OpenDotaPlayerService.
 """
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
 
 import opendota_integration
+import services.opendota_player_service as player_service_module
 from opendota_integration import OpenDotaAPI
 from services.opendota_player_service import CACHE_TTL_SECONDS, OpenDotaPlayerService
 from tests.conftest import TEST_GUILD_ID
@@ -122,6 +125,102 @@ class TestOpenDotaPlayerService:
             result = service.get_player_profile(discord_id=100, force_refresh=True)
 
         assert result["wins"] == 200  # Should have refreshed data
+
+    def test_profile_cache_is_not_reused_after_steam_account_changes(
+        self, mock_player_repo
+    ):
+        service = OpenDotaPlayerService(mock_player_repo)
+        service._memory_cache[100] = {
+            "data": {"steam_id": 111, "wins": 10},
+            "cached_at": datetime.now(),
+        }
+
+        with patch.object(
+            service,
+            "_fetch_profile",
+            return_value={"steam_id": 222, "wins": 20},
+        ) as fetch_profile:
+            result = service.get_player_profile(100, steam_id=222)
+
+        assert result["steam_id"] == 222
+        fetch_profile.assert_called_once_with(222, recent_matches=None)
+
+    def test_concurrent_profile_cache_misses_share_one_refresh(
+        self, mock_player_repo
+    ):
+        service = OpenDotaPlayerService(mock_player_repo)
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_fetch(steam_id, *, recent_matches=None):
+            started.set()
+            assert release.wait(timeout=2)
+            return {"steam_id": steam_id, "wins": 20}
+
+        with patch.object(service, "_fetch_profile", side_effect=slow_fetch) as fetch:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                leader = executor.submit(
+                    service.get_player_profile, 100, steam_id=12345
+                )
+                assert started.wait(timeout=2)
+                follower = executor.submit(
+                    service.get_player_profile, 100, steam_id=12345
+                )
+                release.set()
+                futures = [leader, follower]
+                results = [future.result() for future in futures]
+
+        assert results == [
+            {"steam_id": 12345, "wins": 20},
+            {"steam_id": 12345, "wins": 20},
+        ]
+        assert fetch.call_count == 1
+
+    def test_profile_components_are_fetched_in_parallel_and_reuse_match_sample(
+        self, mock_player_repo
+    ):
+        service = OpenDotaPlayerService(mock_player_repo)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+        all_started = threading.Barrier(4)
+
+        def component(component_name, _steam_id):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            all_started.wait(timeout=2)
+            with lock:
+                active -= 1
+            return {
+                "player": {"profile": {"personaname": "Parallel"}},
+                "wl": {"win": 2, "lose": 1},
+                "totals": {"avg_kills": 7.5},
+                "heroes": [{"hero_id": 1, "hero_name": "Anti-Mage"}],
+            }[component_name]
+
+        recent = [
+            {
+                "match_id": 77,
+                "hero_id": 1,
+                "kills": 8,
+                "deaths": 2,
+                "assists": 9,
+                "player_slot": 0,
+                "radiant_win": True,
+            }
+        ]
+        with (
+            patch.object(service, "_fetch_profile_component", side_effect=component),
+            patch.object(service, "_fetch_recent_matches") as fetch_recent,
+        ):
+            profile = service._fetch_profile(12345, recent_matches=recent)
+
+        assert max_active == 4
+        fetch_recent.assert_not_called()
+        assert profile["recent_matches"][0]["match_id"] == 77
+        assert profile["last_match_id"] == 77
 
     def test_calc_win_rate(self, mock_player_repo):
         """Test win rate calculation."""
@@ -473,7 +572,7 @@ class TestDistributionCalculations:
                 service,
                 "_fetch_profile",
                 return_value={"wins": 20, "losses": 10, "win_rate": 66.7},
-            ),
+            ) as fetch_profile,
             patch.object(
                 service,
                 "_get_hero_roles",
@@ -496,6 +595,7 @@ class TestDistributionCalculations:
 
         mock_player_repo.get_steam_id.assert_not_called()
         fetch_matches.assert_called_once_with(steam_id, limit=50)
+        fetch_profile.assert_called_once_with(steam_id, recent_matches=matches)
         assert result["role_distribution"] == {
             "Carry": 60.0,
             "Escape": 20.0,
@@ -504,6 +604,55 @@ class TestDistributionCalculations:
         assert result["full_stats"]["lane_distribution"]["Safe Lane"] == 66.7
         assert result["full_stats"]["lane_distribution"]["Mid"] == 33.3
         assert result["full_stats"]["lane_parsed_count"] == 3
+
+    def test_get_dota_tab_stats_caches_complete_result(self, mock_player_repo):
+        service = OpenDotaPlayerService(mock_player_repo)
+        matches = [{"hero_id": 1, "lane_role": 1}]
+        full_stats = {"matches_analyzed": 1}
+
+        with (
+            patch.object(
+                service, "_fetch_matches_for_stats", return_value=matches
+            ) as fetch_matches,
+            patch.object(
+                service,
+                "_calc_hero_role_distribution",
+                return_value={"Carry": 100.0},
+            ),
+            patch.object(
+                service,
+                "get_player_profile",
+                return_value={"steam_id": 12345},
+            ) as get_profile,
+            patch.object(service, "_build_full_stats", return_value=full_stats),
+        ):
+            first = service.get_dota_tab_stats(100, steam_id=12345)
+            second = service.get_dota_tab_stats(100, steam_id=12345)
+
+        assert first is second
+        assert first["full_stats"] == full_stats
+        fetch_matches.assert_called_once_with(12345, limit=50)
+        get_profile.assert_called_once()
+
+    def test_hero_attributes_use_bundled_data_without_http(self, mock_player_repo):
+        service = OpenDotaPlayerService(mock_player_repo)
+        heroes = [
+            type("Hero", (), {"id": 1, "attr_primary": "agility"})(),
+            type("Hero", (), {"id": 2, "attr_primary": "universal"})(),
+        ]
+        original = player_service_module._HERO_ATTRIBUTES_CACHE
+        player_service_module._HERO_ATTRIBUTES_CACHE = None
+        try:
+            with (
+                patch("services.trivia_data.load_heroes", return_value=heroes),
+                patch.object(service.api, "make_request") as make_request,
+            ):
+                attributes = service._get_hero_attributes()
+                make_request.assert_not_called()
+        finally:
+            player_service_module._HERO_ATTRIBUTES_CACHE = original
+
+        assert attributes == {1: "agi", 2: "all"}
 
     def test_get_dota_tab_stats_preserves_roles_when_profile_is_unavailable(
         self, mock_player_repo

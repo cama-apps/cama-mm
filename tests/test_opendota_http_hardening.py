@@ -11,13 +11,14 @@ Covers:
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
 import opendota_integration
-from opendota_integration import OpenDotaAPI
+from opendota_integration import OpenDotaAPI, run_opendota_io
 
 # =============================================================================
 # Helpers
@@ -101,6 +102,12 @@ class TestOpenDotaTimeout:
 
         assert captured["timeout"] is not None
         assert captured["timeout"] >= 5
+
+    @pytest.mark.asyncio
+    async def test_slow_work_uses_dedicated_executor(self):
+        thread_name = await run_opendota_io(lambda: threading.current_thread().name)
+
+        assert thread_name.startswith("opendota-io")
 
     def test_get_match_details_passes_timeout(self):
         api = OpenDotaAPI(api_key="test")
@@ -340,6 +347,22 @@ class TestRetryAfterHonoring:
         # Falls back to configured backoff (0 from the fixture) and still
         # succeeds on the retry.
         assert result == {"profile": {}}
+
+    def test_retry_after_is_capped_by_total_request_deadline(self, monkeypatch):
+        api = OpenDotaAPI(api_key="test")
+        sleeps: list[float] = []
+        monkeypatch.setattr(opendota_integration.time, "sleep", sleeps.append)
+        responses = [
+            _make_response(429, retry_after="600"),
+            _make_response(200, json_body={"profile": {}}),
+        ]
+
+        with patch.object(api.session, "get", side_effect=responses):
+            result = api.get_player_data(12345)
+
+        assert result == {"profile": {}}
+        assert len(sleeps) == 1
+        assert 0 < sleeps[0] <= opendota_integration._REQUEST_DEADLINE_SECONDS
 
 
 class TestOpenDotaGetPlayerRolesNoneCheck:

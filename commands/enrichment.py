@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
+from opendota_integration import run_opendota_io
 from services.match_enrichment_service import MatchEnrichmentService
 from services.opendota_player_service import OpenDotaPlayerService
 from services.permissions import has_admin_permission
@@ -158,7 +159,7 @@ class EnrichmentCommands(commands.Cog):
                 return
 
         # Perform enrichment (skip_validation=True for manual admin enrichment)
-        result = await asyncio.to_thread(
+        result = await run_opendota_io(
             functools.partial(self.enrichment_service.enrich_match,
                 internal_match_id, valve_match_id, skip_validation=True, guild_id=guild_id)
         )
@@ -669,7 +670,7 @@ class EnrichmentCommands(commands.Cog):
             content=f"Starting match discovery (dry_run={dry_run})... This may take a while.",
             ephemeral=True,
         )
-        results = await asyncio.to_thread(
+        results = await run_opendota_io(
             functools.partial(
                 discovery_service.discover_all_matches,
                 guild_id=guild_id,
@@ -772,7 +773,7 @@ class EnrichmentCommands(commands.Cog):
             else:
                 try:
                     # Re-enrich with skip_validation since we already have the correct valve_match_id
-                    result = await asyncio.to_thread(
+                    result = await run_opendota_io(
                         functools.partial(self.enrichment_service.enrich_match,
                             match_id, valve_match_id, source="manual", skip_validation=True,
                             guild_id=guild_id)
@@ -923,7 +924,11 @@ class EnrichmentCommands(commands.Cog):
             f"Recent command: User {interaction.user.id} viewing {target_id}, limit={limit}"
         )
 
-        matches = await asyncio.to_thread(self.opendota_player_service.get_recent_matches_detailed, target_id, limit=limit)
+        matches = await run_opendota_io(
+            self.opendota_player_service.get_recent_matches_detailed,
+            target_id,
+            limit=limit,
+        )
 
         if not matches:
             await safe_followup(

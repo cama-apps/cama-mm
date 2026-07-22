@@ -62,6 +62,7 @@ from config import (
     USE_GLICKO,
 )
 from infrastructure.service_container import ServiceContainer
+from opendota_integration import run_opendota_io
 from services import trivia_data
 from services.monitoring_service import MonitoringService, UsageMonitor, set_global_usage_monitor
 from utils.command_registry import (
@@ -1008,7 +1009,7 @@ async def on_ready():
 
         region_task = _retain_background_task(
             bot.loop.create_task(
-                asyncio.to_thread(region_service.backfill_inferred_regions)
+                run_opendota_io(region_service.backfill_inferred_regions)
             )
         )
         region_task.add_done_callback(_log_region_backfill)
