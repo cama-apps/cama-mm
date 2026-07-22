@@ -10,10 +10,6 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 
-from sqlalchemy.orm import joinedload
-
-from dotabase_integration import Ability, Hero, Item, Response, dotabase_session
-
 _STEAM_CDN = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react"
 
 
@@ -137,6 +133,8 @@ def item_icon_url(icon_path: str | None) -> str | None:
 
 @lru_cache(maxsize=1)
 def load_heroes() -> list[HeroData]:
+    from dotabase_integration import Hero, dotabase_session
+
     session = dotabase_session()
     heroes = session.query(Hero).all()
     result = []
@@ -170,6 +168,10 @@ def load_heroes() -> list[HeroData]:
 
 @lru_cache(maxsize=1)
 def load_abilities() -> list[AbilityData]:
+    from sqlalchemy.orm import joinedload
+
+    from dotabase_integration import Ability, dotabase_session
+
     session = dotabase_session()
     abilities = session.query(Ability).options(joinedload(Ability.hero)).all()
     result = []
@@ -217,6 +219,8 @@ def get_ability_icon_url_by_name(localized_name: str) -> str | None:
 
 @lru_cache(maxsize=1)
 def load_items() -> list[ItemData]:
+    from dotabase_integration import Item, dotabase_session
+
     session = dotabase_session()
     items = session.query(Item).all()
 
@@ -262,6 +266,8 @@ def load_items() -> list[ItemData]:
 @lru_cache(maxsize=1)
 def load_voicelines() -> list[VoicelineData]:
     """Load voicelines suitable for trivia (clean, reasonable length)."""
+    from dotabase_integration import Response, dotabase_session
+
     session = dotabase_session()
     responses = (
         session.query(Response)
@@ -283,6 +289,10 @@ def load_voicelines() -> list[VoicelineData]:
 
 @lru_cache(maxsize=1)
 def load_facets() -> list[FacetData]:
+    from sqlalchemy.orm import joinedload
+
+    from dotabase_integration import Hero, dotabase_session
+
     session = dotabase_session()
     heroes = session.query(Hero).options(joinedload(Hero.facets)).all()
     result = []
