@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from io import BytesIO
 
-import matplotlib.pyplot as plt
-import numpy as np
 from PIL import Image, ImageDraw
-from scipy import stats
 
 from utils.drawing._common import (
     DISCORD_ACCENT,
@@ -252,6 +249,10 @@ def draw_rating_distribution(
     Returns:
         BytesIO containing the PNG image
     """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from scipy import stats
+
     if not ratings:
         # Return empty image if no data
         fig, ax = plt.subplots(figsize=(6.5, 4), facecolor="#36393F")
@@ -383,6 +384,8 @@ def draw_calibration_curve(
     Returns:
         BytesIO containing the PNG image
     """
+    import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(6.5, 5), facecolor=DISCORD_BG)
     ax.set_facecolor(DISCORD_DARKER)
 
@@ -449,6 +452,8 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
     Returns:
         BytesIO containing the PNG image
     """
+    import matplotlib.pyplot as plt
+
     if "error" in comparison_data:
         # Return error image
         fig, ax = plt.subplots(figsize=(6.5, 4), facecolor=DISCORD_BG)
@@ -525,4 +530,3 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
     plt.close(fig)
     fp.seek(0)
     return fp
-
