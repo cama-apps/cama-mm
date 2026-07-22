@@ -89,6 +89,20 @@ class BettingService:
             earner_id, guild_id, earning, self.player_repo
         )
 
+    def _get_blood_pact_targets(
+        self, player_ids: list[int], guild_id: int | None
+    ) -> set[int]:
+        """Snapshot active pact targets before processing an award batch."""
+        if self.buff_service is None or not player_ids:
+            return set()
+        try:
+            return set(
+                self.buff_service.get_blood_pact_targets(player_ids, guild_id)
+            )
+        except Exception:
+            logger.exception("Failed to bulk-load Blood Pact targets")
+            return set()
+
     def _skim_blood_pact_from_awards(
         self,
         results: dict[int, dict[str, int]],
@@ -97,7 +111,10 @@ class BettingService:
         earning_key: str = "gross",
     ) -> None:
         """Apply Blood Pact skims to a batch of award results."""
+        pact_targets = self._get_blood_pact_targets(list(results), guild_id)
         for pid, result in results.items():
+            if pid not in pact_targets:
+                continue
             earning = int(result.get(earning_key, 0))
             skimmed = self._apply_blood_pact_skim(pid, guild_id, earning)
             if skimmed:
@@ -216,6 +233,8 @@ class BettingService:
                 results[pid] = {"gross": 0, "garnished": 0, "net": 0, "bomb_pot_bonus": 0}
             return results
 
+        pact_targets = self._get_blood_pact_targets(player_ids, guild_id)
+
         # Always credit each player atomically. When a garnishment service is
         # injected we delegate to it (which uses the atomic add_balance_with_garnishment
         # path under the hood). When no service is injected we still use the
@@ -230,7 +249,11 @@ class BettingService:
                     pid, guild_id, total_reward, 0.0
                 )
             result["bomb_pot_bonus"] = bomb_pot_bonus
-            skimmed = self._apply_blood_pact_skim(pid, guild_id, total_reward)
+            skimmed = 0
+            if pid in pact_targets:
+                skimmed = self._apply_blood_pact_skim(
+                    pid, guild_id, total_reward
+                )
             if skimmed:
                 result["blood_pact_skimmed"] = skimmed
                 result["net"] = int(result.get("net", 0)) - skimmed
@@ -300,9 +323,14 @@ class BettingService:
                     + int(w.get("payout", 0))
                     - int(w.get("effective_bet", w.get("amount", 0)))
                 )
+            pact_targets = self._get_blood_pact_targets(list(profits), guild_id)
             for pid, profit in profits.items():
                 net_profit = profit - int(penalties.get(pid, 0))
-                skimmed = self._apply_blood_pact_skim(pid, guild_id, net_profit)
+                skimmed = 0
+                if pid in pact_targets:
+                    skimmed = self._apply_blood_pact_skim(
+                        pid, guild_id, net_profit
+                    )
                 if skimmed:
                     pact_skims[pid] = skimmed
             if pact_skims:
@@ -400,16 +428,11 @@ class BettingService:
                     results[pid]["manashop_bonus"] = credited
 
         if self.buff_service:
-            for pid, result in results.items():
-                # Skim what the player was actually credited: net already
-                # reflects garnishment, the bankruptcy penalty, and any
-                # manashop bonuses credited above (mirrors how prediction
-                # settlement nets the penalty into profit before skims).
-                net = int(result.get("net", 0))
-                skimmed = self._apply_blood_pact_skim(pid, guild_id, net)
-                if skimmed:
-                    result["net"] = net - skimmed
-                    result["blood_pact_skimmed"] = skimmed
+            # Net already reflects garnishment, bankruptcy, and any manashop
+            # bonuses, mirroring prediction settlement's skim base.
+            self._skim_blood_pact_from_awards(
+                results, guild_id, earning_key="net"
+            )
 
         return results
 

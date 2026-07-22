@@ -238,6 +238,14 @@ class BuffService:
         active = self.buff_repo.active_targeted_at(target_id, guild_id, BUFF_BLOOD_PACT)
         return active[0] if active else None
 
+    def get_blood_pact_targets(
+        self, target_ids: list[int], guild_id: int | None
+    ) -> set[int]:
+        """Snapshot which earners have an active Blood Pact."""
+        return self.buff_repo.active_target_ids(
+            target_ids, guild_id, BUFF_BLOOD_PACT
+        )
+
     def record_blood_pact_skim(
         self, buff_id: int, current_data: dict, new_total: int
     ) -> None:

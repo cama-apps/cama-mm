@@ -265,6 +265,34 @@ def test_blood_pact_skim_state_persists(buff_service):
     assert refreshed["data"]["skimmed_total"] == 25
 
 
+def test_blood_pact_target_snapshot_is_batched_and_guild_scoped(
+    buff_service, buff_repo, monkeypatch
+):
+    buff_service.grant_blood_pact(USER, TEST_GUILD_ID, TARGET)
+    buff_service.grant_blood_pact(
+        USER, TEST_GUILD_ID_SECONDARY, ALLY
+    )
+    triggered_id = buff_service.grant_blood_pact(USER, TEST_GUILD_ID, ALLY)
+    assert buff_repo.consume_atomic(triggered_id) is True
+
+    connection_count = 0
+    original_get_connection = buff_repo.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
+    monkeypatch.setattr(buff_repo, "get_connection", counted_get_connection)
+
+    targets = buff_service.get_blood_pact_targets(
+        [ALLY, TARGET, 999999, TARGET], TEST_GUILD_ID
+    )
+
+    assert targets == {TARGET}
+    assert connection_count == 1
+
+
 def test_blood_pact_skim_calculation_respects_rate_and_cap(buff_service):
     buff_service.grant_blood_pact(USER, TEST_GUILD_ID, TARGET)
 

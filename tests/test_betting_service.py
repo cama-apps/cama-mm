@@ -876,6 +876,7 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
     buff_service.has_sanctuary_match_bonus.side_effect = RuntimeError("boom")
     buff_service.buff_repo.active_for_many.return_value = {pid: [{"id": 1}]}
     buff_service.buff_repo.consume_and_credit_atomic.side_effect = fake_consume_and_credit
+    buff_service.get_blood_pact_targets.return_value = set()
     buff_service.apply_blood_pact_skim.return_value = 0
     betting_service.buff_service = buff_service
     event_service = MagicMock()
@@ -928,6 +929,7 @@ def test_win_bonus_bulk_loads_communion_blessings(services):
     buff_service.buff_repo.active_for_many.return_value = {
         pid: [] for pid in winning_ids
     }
+    buff_service.get_blood_pact_targets.return_value = set()
     buff_service.apply_blood_pact_skim.return_value = 0
     betting_service.buff_service = buff_service
 
@@ -937,6 +939,37 @@ def test_win_bonus_bulk_loads_communion_blessings(services):
         winning_ids, TEST_GUILD_ID, BUFF_COMMUNION_BLESSING
     )
     buff_service.buff_repo.active_for.assert_not_called()
+    buff_service.get_blood_pact_targets.assert_called_once_with(
+        winning_ids, TEST_GUILD_ID
+    )
+    buff_service.apply_blood_pact_skim.assert_not_called()
+
+
+def test_participation_snapshots_blood_pact_targets_once(services):
+    """Five participation awards skip point claims when no pact is active."""
+    from unittest.mock import MagicMock
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+    player_ids = list(range(7190, 7195))
+    for pid in player_ids:
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"Participant{pid}",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=1500,
+        )
+
+    buff_service = MagicMock()
+    buff_service.get_blood_pact_targets.return_value = set()
+    betting_service.buff_service = buff_service
+
+    betting_service.award_participation(player_ids, TEST_GUILD_ID)
+
+    buff_service.get_blood_pact_targets.assert_called_once_with(
+        player_ids, TEST_GUILD_ID
+    )
+    buff_service.apply_blood_pact_skim.assert_not_called()
 
 
 def test_consume_and_credit_atomic_pays_once(repo_db_path):
@@ -1069,6 +1102,7 @@ def test_settle_skims_blood_pact_on_net_profit_for_penalized_winner(services):
         )
     betting_service.bankruptcy_service = SimpleNamespace(penalty_rate=0.5)
     buff_service = MagicMock()
+    buff_service.get_blood_pact_targets.return_value = {winner}
     buff_service.apply_blood_pact_skim.return_value = 5
     betting_service.buff_service = buff_service
 
@@ -1121,6 +1155,7 @@ def test_award_win_bonus_skims_blood_pact_on_net(services):
     buff_service = MagicMock()
     buff_service.has_sanctuary_match_bonus.return_value = False
     buff_service.buff_repo.active_for_many.return_value = {pid: []}
+    buff_service.get_blood_pact_targets.return_value = {pid}
     buff_service.apply_blood_pact_skim.return_value = 1
     betting_service.buff_service = buff_service
 
