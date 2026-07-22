@@ -876,6 +876,74 @@ class DigRepository(BaseRepository, IDigRepository):
 
     # ── Atomic Operations ────────────────────────────────────────────────
 
+    def atomic_auto_buy_items(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        queue_item_ids: list[int],
+        purchases: list[tuple[str, int]],
+    ) -> list[int]:
+        """Queue reserves and buy auto-use items in one transaction.
+
+        Each purchase retains its own balance update and therefore its own
+        economy-ledger row, while all mutations share one connection/commit.
+        Returned inventory IDs align with ``purchases``.
+        """
+        if not queue_item_ids and not purchases:
+            return []
+
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            if queue_item_ids:
+                unique_ids = list(
+                    dict.fromkeys(int(item_id) for item_id in queue_item_ids)
+                )
+                placeholders = ",".join("?" for _ in unique_ids)
+                cursor.execute(
+                    f"""
+                    UPDATE dig_inventory
+                    SET queued = 1
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND id IN ({placeholders})
+                    """,
+                    (discord_id, gid, *unique_ids),
+                )
+
+            purchased_ids: list[int] = []
+            for item_type, price in purchases:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=discord_id,
+                    related_type="dig_action",
+                    reason=self._ledger_balance_reason("dig_action", -price),
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (price, discord_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+                cursor.execute(
+                    """
+                    INSERT INTO dig_inventory
+                        (discord_id, guild_id, item_type, queued, created_at)
+                    VALUES (?, ?, ?, 1, ?)
+                    """,
+                    (discord_id, gid, item_type, int(time.time())),
+                )
+                purchased_ids.append(int(cursor.lastrowid))
+
+        return purchased_ids
+
     def atomic_tunnel_balance_update(
         self,
         discord_id: int,

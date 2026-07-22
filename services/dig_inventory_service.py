@@ -194,14 +194,29 @@ class DigInventoryService:
         Existing reserve inventory is queued first. Only if no reserve exists do
         we buy a new copy. Failures are reported but do not block the dig.
         """
-        results: list[dict] = []
-        for item_type in item_types:
-            if item_type not in AUTO_QUEUE_ON_BUY:
-                continue
+        selected_types = [
+            item_type for item_type in item_types if item_type in AUTO_QUEUE_ON_BUY
+        ]
+        if not selected_types:
+            return []
 
+        queued = _get_queued_items_for_tunnel(
+            self.dig_repo, discord_id, guild_id
+        )
+        queued_types = {item.get("type") for item in queued}
+        inventory = self.dig_repo.get_inventory(discord_id, guild_id)
+        inventory_size = len(inventory)
+        balance: int | None = None
+        tunnel_checked = False
+        tunnel_exists = False
+
+        results: list[dict] = []
+        queue_item_ids: list[int] = []
+        purchases: list[tuple[str, int]] = []
+        purchase_result_indexes: list[int] = []
+        for item_type in selected_types:
             item_name = CONSUMABLE_ITEMS[item_type]["name"]
-            queued = _get_queued_items_for_tunnel(self.dig_repo, discord_id, guild_id)
-            if any(q.get("type") == item_type for q in queued):
+            if item_type in queued_types:
                 results.append({
                     "type": item_type,
                     "item": item_name,
@@ -210,7 +225,6 @@ class DigInventoryService:
                 })
                 continue
 
-            inventory = self.dig_repo.get_inventory(discord_id, guild_id)
             reserve = next(
                 (
                     item for item in inventory
@@ -219,7 +233,9 @@ class DigInventoryService:
                 None,
             )
             if reserve is not None:
-                self.dig_repo.queue_item(reserve["id"])
+                queue_item_ids.append(reserve["id"])
+                reserve["queued"] = 1
+                queued_types.add(item_type)
                 results.append({
                     "type": item_type,
                     "item": item_name,
@@ -228,7 +244,7 @@ class DigInventoryService:
                 })
                 continue
 
-            if len(inventory) >= MAX_INVENTORY_SIZE:
+            if inventory_size >= MAX_INVENTORY_SIZE:
                 results.append({
                     "type": item_type,
                     "item": item_name,
@@ -238,7 +254,8 @@ class DigInventoryService:
                 continue
 
             price = ITEM_PRICES[item_type]
-            balance = self.player_repo.get_balance(discord_id, guild_id)
+            if balance is None:
+                balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < price:
                 results.append({
                     "type": item_type,
@@ -248,23 +265,43 @@ class DigInventoryService:
                 })
                 continue
 
-            purchased = self.buy_item(discord_id, guild_id, item_type)
-            if purchased.get("success"):
-                results.append({
-                    "type": item_type,
-                    "item": item_name,
-                    "status": "purchased",
-                    "cost": price,
-                    "item_id": purchased.get("item_id"),
-                })
-            else:
+            if not tunnel_checked:
+                tunnel_exists = (
+                    self.dig_repo.get_tunnel(discord_id, guild_id) is not None
+                )
+                tunnel_checked = True
+            if not tunnel_exists:
                 results.append({
                     "type": item_type,
                     "item": item_name,
                     "status": "skipped_error",
                     "cost": price,
-                    "error": purchased.get("error"),
+                    "error": "You don't have a tunnel. Dig first!",
                 })
+                continue
+
+            purchase_result_indexes.append(len(results))
+            purchases.append((item_type, price))
+            results.append({
+                "type": item_type,
+                "item": item_name,
+                "status": "purchased",
+                "cost": price,
+            })
+            balance -= price
+            inventory_size += 1
+            queued_types.add(item_type)
+
+        purchased_ids = self.dig_repo.atomic_auto_buy_items(
+            discord_id,
+            guild_id,
+            queue_item_ids=queue_item_ids,
+            purchases=purchases,
+        )
+        for result_index, item_id in zip(
+            purchase_result_indexes, purchased_ids, strict=True
+        ):
+            results[result_index]["item_id"] = item_id
 
         return results
 
