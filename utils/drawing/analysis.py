@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from io import BytesIO
 
-import matplotlib.pyplot as plt
-import numpy as np
 from PIL import Image, ImageDraw
 
 from utils.drawing._common import (
@@ -36,6 +34,8 @@ def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> Bytes
     Returns:
         BytesIO containing the PNG image
     """
+    import matplotlib.pyplot as plt
+
     if len(match_data) < window:
         # Return error image
         fig, ax = plt.subplots(figsize=(8, 4), facecolor=DISCORD_BG)
@@ -116,6 +116,9 @@ def draw_advantage_graph(
 
     if not gold_adv and not xp_adv:
         return None
+
+    import matplotlib.pyplot as plt
+    import numpy as np
 
     fig, ax = plt.subplots(figsize=(8, 3.5), facecolor=DISCORD_BG)
     ax.set_facecolor(DISCORD_DARKER)
