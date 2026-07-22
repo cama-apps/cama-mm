@@ -258,6 +258,23 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def add_balances_with_garnishment(
+        self,
+        awards: list[tuple[int, int, float]],
+        guild_id: int | None,
+        garnishment_rate: float,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> list[dict[str, int]]:
+        """Atomically credit multiple incomes with live garnishment checks."""
+        ...
+
+    @abstractmethod
     def get_leaderboard(self, guild_id: int, limit: int = 20, offset: int = 0) -> list:
         """Get players for leaderboard, sorted by jopacoin balance descending."""
         ...

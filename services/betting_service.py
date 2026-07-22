@@ -500,43 +500,39 @@ class BettingService:
                 if state.penalty_games_remaining > 0
             }
 
-        for pid in player_ids:
-            # Decide (in service layer, where bankruptcy policy lives) whether
-            # this player is currently under bankruptcy penalty. We only pass a
-            # nonzero rate down to the repo when they are — keeping the repo
-            # layer agnostic to bankruptcy state-tracking. The rate is the
-            # single policy coefficient; the repo applies it to the live
-            # post-garnishment net inside the atomic txn.
-            bankruptcy_penalty_rate = 0.0
-            if self.bankruptcy_service and pid in penalized_ids:
-                # Clamp defensively: a misconfigured rate must never debit
-                # more than the post-garnishment net.
-                bankruptcy_penalty_rate = max(
-                    0.0, min(1.0, self.bankruptcy_service.penalty_rate)
-                )
+        # Decide (in the service layer, where bankruptcy policy lives) which
+        # players receive a nonzero penalty coefficient. The repository still
+        # computes garnishment and the penalty from each player's live balance,
+        # but all awards now share one BEGIN IMMEDIATE transaction.
+        bankruptcy_penalty_rates: dict[int, float] = {}
+        if self.bankruptcy_service and penalized_ids:
+            penalty_rate = max(
+                0.0, min(1.0, self.bankruptcy_service.penalty_rate)
+            )
+            bankruptcy_penalty_rates = dict.fromkeys(penalized_ids, penalty_rate)
 
-            # Apply garnishment + bankruptcy penalty in one atomic balance
-            # mutation. The repo credits gross, reads balance to decide
-            # garnishment, then (if bankruptcy_penalty_rate > 0) computes and
-            # debits the penalty against the live post-garnishment net — all
-            # inside one BEGIN IMMEDIATE, so no intermediate state is visible
-            # and the penalty base cannot drift from a concurrent balance flip.
-            if self.garnishment_service:
-                garn = self.garnishment_service.add_income(
-                    pid,
-                    reward_amount,
-                    guild_id=guild_id,
-                    bankruptcy_penalty_rate=bankruptcy_penalty_rate,
-                )
-            else:
-                garn = self.player_repo.add_balance_with_garnishment(
-                    pid,
-                    guild_id,
-                    reward_amount,
-                    garnishment_rate=0.0,
-                    bankruptcy_penalty_rate=bankruptcy_penalty_rate,
-                )
+        if self.garnishment_service:
+            award_results = self.garnishment_service.add_income_many(
+                player_ids,
+                reward_amount,
+                guild_id=guild_id,
+                bankruptcy_penalty_rates=bankruptcy_penalty_rates,
+            )
+        else:
+            award_results = self.player_repo.add_balances_with_garnishment(
+                [
+                    (
+                        pid,
+                        reward_amount,
+                        bankruptcy_penalty_rates.get(pid, 0.0),
+                    )
+                    for pid in player_ids
+                ],
+                guild_id,
+                garnishment_rate=0.0,
+            )
 
+        for pid, garn in zip(player_ids, award_results, strict=True):
             results[pid] = {
                 "gross": garn["gross"],
                 "garnished": garn["garnished"],

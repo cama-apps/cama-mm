@@ -149,6 +149,50 @@ class TestGarnishmentTransitions:
         assert result["garnished"] == 0
         assert result["net"] == 100
 
+    def test_bulk_income_uses_one_transaction_and_live_duplicate_balance(
+        self,
+        garnishment_service_50_percent,
+        player_repository,
+        test_player,
+        monkeypatch,
+    ):
+        """Bulk awards stay ordered and reuse a single database connection."""
+        player_repository.update_balance(test_player, TEST_GUILD_ID, -3)
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(player_repository, "get_connection", counted_get_connection)
+
+        results = garnishment_service_50_percent.add_income_many(
+            [test_player, test_player], 4, TEST_GUILD_ID
+        )
+
+        assert [result["garnished"] for result in results] == [2, 0]
+        assert [result["net"] for result in results] == [2, 4]
+        assert connection_count == 1
+        assert player_repository.get_balance(test_player, TEST_GUILD_ID) == 5
+
+    def test_bulk_income_rolls_back_all_players_on_error(
+        self, garnishment_service_full_rate, player_repository, test_player
+    ):
+        """A missing player cannot leave earlier recipients partially credited."""
+        starting_balance = player_repository.get_balance(test_player, TEST_GUILD_ID)
+
+        with pytest.raises(ValueError, match="Player not found"):
+            garnishment_service_full_rate.add_income_many(
+                [test_player, 999999], 10, TEST_GUILD_ID
+            )
+
+        assert (
+            player_repository.get_balance(test_player, TEST_GUILD_ID)
+            == starting_balance
+        )
+
 
 class TestGarnishmentRates:
     """Test different garnishment rate configurations."""

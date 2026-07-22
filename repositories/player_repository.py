@@ -1052,41 +1052,66 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
 
         with self.atomic_transaction() as conn:
+            return self._add_balance_with_garnishment_cursor(
+                conn.cursor(),
+                discord_id,
+                guild_id,
+                amount,
+                garnishment_rate,
+                bankruptcy_penalty_rate,
+                source=source,
+                actor_id=actor_id,
+                related_type=related_type,
+                related_id=related_id,
+                reason=reason,
+                metadata=metadata,
+            )
+
+    def add_balances_with_garnishment(
+        self,
+        awards: list[tuple[int, int, float]],
+        guild_id: int | None,
+        garnishment_rate: float,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> list[dict[str, int]]:
+        """Credit multiple incomes in one atomic transaction.
+
+        Results align with ``awards``. Each tuple contains
+        ``(discord_id, amount, bankruptcy_penalty_rate)``; duplicate players
+        are evaluated sequentially against their live balance, matching
+        repeated point calls.
+        """
+        if not awards:
+            return []
+
+        guild_id = self.normalize_guild_id(guild_id)
+        if all(amount <= 0 for _discord_id, amount, _penalty_rate in awards):
+            return [
+                {
+                    "gross": amount,
+                    "garnished": 0,
+                    "net": amount,
+                    "bankruptcy_penalty": 0,
+                }
+                for _discord_id, amount, _penalty_rate in awards
+            ]
+
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, guild_id),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError("Player not found.")
-
-            current_balance = int(row["balance"])
-
-            if current_balance >= 0:
-                # No debt, full amount credited without garnishment
-                garnished = 0
-                net_before_penalty = amount
-            else:
-                # Player has debt - apply garnishment
-                garnished = int(amount * garnishment_rate)
-                net_before_penalty = amount - garnished
-
-            has_context = any(
-                value is not None
-                for value in (
-                    source,
-                    actor_id,
-                    related_type,
-                    related_id,
-                    reason,
-                    metadata,
-                )
-            )
-            if has_context:
-                self._set_economy_ledger_context(
+            return [
+                self._add_balance_with_garnishment_cursor(
                     cursor,
+                    discord_id,
+                    guild_id,
+                    amount,
+                    garnishment_rate,
+                    bankruptcy_penalty_rate,
                     source=source,
                     actor_id=actor_id,
                     related_type=related_type,
@@ -1094,65 +1119,123 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     reason=reason,
                     metadata=metadata,
                 )
+                for discord_id, amount, bankruptcy_penalty_rate in awards
+            ]
+
+    def _add_balance_with_garnishment_cursor(
+        self,
+        cursor,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        garnishment_rate: float,
+        bankruptcy_penalty_rate: float,
+        *,
+        source: str | None,
+        actor_id: int | None,
+        related_type: str | None,
+        related_id: str | int | None,
+        reason: str | None,
+        metadata: dict | str | None,
+    ) -> dict[str, int]:
+        """Apply one award using a caller-owned transaction cursor."""
+        if amount <= 0:
+            return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
+
+        cursor.execute(
+            "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+            (discord_id, guild_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("Player not found.")
+
+        current_balance = int(row["balance"])
+        if current_balance >= 0:
+            garnished = 0
+            net_before_penalty = amount
+        else:
+            garnished = int(amount * garnishment_rate)
+            net_before_penalty = amount - garnished
+
+        has_context = any(
+            value is not None
+            for value in (
+                source,
+                actor_id,
+                related_type,
+                related_id,
+                reason,
+                metadata,
+            )
+        )
+        if has_context:
+            self._set_economy_ledger_context(
+                cursor,
+                source=source,
+                actor_id=actor_id,
+                related_type=related_type,
+                related_id=related_id,
+                reason=reason,
+                metadata=metadata,
+            )
+        try:
+            # Full gross is credited to the balance (garnishment is a
+            # bookkeeping split, not a separate debit).
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (amount, discord_id, guild_id),
+            )
+        finally:
+            if has_context:
+                self._clear_economy_ledger_context(cursor)
+
+        if bankruptcy_penalty_rate > 0 and net_before_penalty > 0:
+            # Floor the penalty (amount withheld), not the kept net, so a
+            # fractional rate never rounds a small net down to zero.
+            penalty = int(net_before_penalty * (1 - bankruptcy_penalty_rate))
+        else:
+            penalty = 0
+
+        if penalty > 0:
+            if has_context:
+                penalty_reason = (
+                    f"{reason} bankruptcy penalty"
+                    if reason
+                    else "bankruptcy penalty on income"
+                )
+                self._set_economy_ledger_context(
+                    cursor,
+                    source=source,
+                    actor_id=actor_id,
+                    related_type=related_type,
+                    related_id=related_id,
+                    reason=penalty_reason,
+                    metadata=metadata,
+                )
             try:
-                # Full gross is credited to the balance (garnishment is a
-                # bookkeeping split, not a separate debit).
                 cursor.execute(
                     """
                     UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                     """,
-                    (amount, discord_id, guild_id),
+                    (penalty, discord_id, guild_id),
                 )
             finally:
                 if has_context:
                     self._clear_economy_ledger_context(cursor)
 
-            # Bankruptcy penalty (if requested) is computed against the live
-            # post-garnishment net and debited in the same txn.
-            if bankruptcy_penalty_rate > 0 and net_before_penalty > 0:
-                # Floor the penalty (amount withheld), not the kept net, so a
-                # fractional rate never rounds a small net down to zero.
-                penalty = int(net_before_penalty * (1 - bankruptcy_penalty_rate))
-            else:
-                penalty = 0
-
-            if penalty > 0:
-                if has_context:
-                    penalty_reason = (
-                        f"{reason} bankruptcy penalty"
-                        if reason
-                        else "bankruptcy penalty on income"
-                    )
-                    self._set_economy_ledger_context(
-                        cursor,
-                        source=source,
-                        actor_id=actor_id,
-                        related_type=related_type,
-                        related_id=related_id,
-                        reason=penalty_reason,
-                        metadata=metadata,
-                    )
-                try:
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (penalty, discord_id, guild_id),
-                    )
-                finally:
-                    if has_context:
-                        self._clear_economy_ledger_context(cursor)
-
-            return {
-                "gross": amount,
-                "garnished": garnished,
-                "net": net_before_penalty - penalty,
-                "bankruptcy_penalty": penalty,
-            }
+        return {
+            "gross": amount,
+            "garnished": garnished,
+            "net": net_before_penalty - penalty,
+            "bankruptcy_penalty": penalty,
+        }
 
     def pay_debt_atomic(
         self, from_discord_id: int, to_discord_id: int, guild_id: int, amount: int

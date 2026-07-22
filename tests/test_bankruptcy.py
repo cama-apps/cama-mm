@@ -365,7 +365,7 @@ class TestBettingServiceIntegration:
         assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 4
 
     def test_win_bonus_batches_bankruptcy_io(self, db_and_repos, monkeypatch):
-        """Five winners use one state read and one atomic counter decrement."""
+        """Five winners batch penalty reads, balance credits, and counter writes."""
         player_repo = db_and_repos["player_repo"]
         bankruptcy_repo = db_and_repos["bankruptcy_repo"]
         bankruptcy_service = BankruptcyService(
@@ -390,19 +390,30 @@ class TestBettingServiceIntegration:
                 penalty_games_remaining=3,
             )
 
-        connection_count = 0
-        original_get_connection = bankruptcy_repo.get_connection
+        bankruptcy_connection_count = 0
+        player_connection_count = 0
+        original_bankruptcy_connection = bankruptcy_repo.get_connection
+        original_player_connection = player_repo.get_connection
 
-        def counted_get_connection():
-            nonlocal connection_count
-            connection_count += 1
-            return original_get_connection()
+        def counted_bankruptcy_connection():
+            nonlocal bankruptcy_connection_count
+            bankruptcy_connection_count += 1
+            return original_bankruptcy_connection()
 
-        monkeypatch.setattr(bankruptcy_repo, "get_connection", counted_get_connection)
+        def counted_player_connection():
+            nonlocal player_connection_count
+            player_connection_count += 1
+            return original_player_connection()
+
+        monkeypatch.setattr(
+            bankruptcy_repo, "get_connection", counted_bankruptcy_connection
+        )
+        monkeypatch.setattr(player_repo, "get_connection", counted_player_connection)
 
         results = betting_service.award_win_bonus(winning_ids, TEST_GUILD_ID)
 
-        assert connection_count == 2
+        assert bankruptcy_connection_count == 2
+        assert player_connection_count == 1
         assert all(results[pid]["bankruptcy_penalty"] > 0 for pid in winning_ids)
         assert all(
             bankruptcy_repo.get_penalty_games(pid, TEST_GUILD_ID) == 2
