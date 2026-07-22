@@ -220,6 +220,29 @@ class TestSelectDraftPoolRouting:
         assert len(result.selected_players) == 8
         assert len(result.excluded_players) == 4
 
+    def test_exhaustive_search_reuses_team_role_metrics(self):
+        """Each recurring captain-plus-four team is scored only once."""
+        shuffler = BalancedShuffler()
+        captain_a = _make_player("CaptA", 1600)
+        captain_b = _make_player("CaptB", 1550)
+        candidates = [_make_player(f"P{i}", 1400 + i * 30) for i in range(12)]
+        metric_calls = 0
+        original = shuffler._role_assignment_metrics
+
+        def counted(*args, **kwargs):
+            nonlocal metric_calls
+            metric_calls += 1
+            return original(*args, **kwargs)
+
+        shuffler._role_assignment_metrics = counted
+
+        result = shuffler.select_draft_pool(captain_a, captain_b, candidates)
+
+        assert len(result.selected_players) == 8
+        # There are C(12, 4)=495 unique candidate fours per captain and the
+        # scorer explores three tied role assignments for each team.
+        assert metric_calls == 2 * 495 * 3
+
     def test_13_candidates_uses_beam_search(self):
         """13 candidates should use beam search (above threshold)."""
         shuffler = BalancedShuffler()
