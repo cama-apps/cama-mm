@@ -3,6 +3,8 @@ Unit tests for the shuffler algorithm and team balancing logic.
 """
 
 import math
+import random
+from types import SimpleNamespace
 
 import pytest
 
@@ -996,6 +998,119 @@ def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 5
         )
         for i in range(count)
     ]
+
+
+class TestRoleAssignmentCommonPath:
+    def test_common_path_skips_constraint_penalty_work(self, monkeypatch):
+        players = _create_players_with_roles(10)
+        shuffler = BalancedShuffler(use_glicko=True)
+
+        def unexpected(*_args, **_kwargs):
+            raise AssertionError("constraint penalty ran on the common path")
+
+        monkeypatch.setattr(shuffler, "_calculate_soft_avoid_penalty", unexpected)
+        monkeypatch.setattr(shuffler, "_calculate_package_deal_penalty", unexpected)
+        monkeypatch.setattr(shuffler, "_calculate_region_split_penalty", unexpected)
+
+        team1_roles, team2_roles, score = shuffler._score_role_assignments_for_matchup(
+            players[:5], players[5:], max_assignments_per_team=5
+        )
+
+        assert team1_roles is not None
+        assert team2_roles is not None
+        assert math.isfinite(score)
+
+    @pytest.mark.parametrize("constraint", ["avoid", "deal", "region"])
+    def test_configured_constraints_retain_general_fallback(self, constraint, monkeypatch):
+        players = _create_players_with_roles(10)
+        for discord_id, player in enumerate(players, start=1):
+            player.discord_id = discord_id
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            region_split=constraint == "region",
+        )
+        avoids = None
+        deals = None
+        if constraint == "avoid":
+            avoids = [
+                SimpleNamespace(
+                    avoider_discord_id=players[0].discord_id,
+                    avoided_discord_id=players[5].discord_id,
+                )
+            ]
+        elif constraint == "deal":
+            deals = [
+                SimpleNamespace(
+                    buyer_discord_id=players[0].discord_id,
+                    partner_discord_id=players[1].discord_id,
+                )
+            ]
+
+        def unexpected(*_args, **_kwargs):
+            raise AssertionError("constrained scoring used the common path")
+
+        monkeypatch.setattr(shuffler, "_score_unconstrained_role_assignments", unexpected)
+
+        roles1, roles2, score = shuffler._score_role_assignments_for_matchup(
+            players[:5],
+            players[5:],
+            max_assignments_per_team=3,
+            avoids=avoids,
+            deals=deals,
+        )
+
+        assert roles1 is not None
+        assert roles2 is not None
+        assert math.isfinite(score)
+
+    def test_seeded_randomized_common_path_exactly_matches_zero_penalty_fallback(
+        self,
+    ):
+        rng = random.Random(0xCADA)
+        role_pool = ["1", "2", "3", "4", "5"]
+
+        for case in range(60):
+            players = []
+            for index in range(10):
+                role_count = rng.randint(1, len(role_pool))
+                players.append(
+                    Player(
+                        name=f"Case{case}Player{index}",
+                        discord_id=case * 100 + index + 1,
+                        glicko_rating=rng.uniform(900.0, 2600.0),
+                        glicko_rd=rng.uniform(30.0, 350.0),
+                        preferred_roles=rng.sample(role_pool, role_count),
+                    )
+                )
+
+            shuffler = BalancedShuffler(
+                off_role_multiplier=rng.uniform(0.75, 1.0),
+                off_role_flat_penalty=rng.uniform(0.0, 250.0),
+                role_matchup_delta_weight=rng.uniform(0.0, 1.5),
+                rd_priority_weight=rng.uniform(0.0, 0.25),
+            )
+            assignment_limit = rng.randint(1, 20)
+
+            common = shuffler._score_role_assignments_for_matchup(
+                players[:5],
+                players[5:],
+                max_assignments_per_team=assignment_limit,
+            )
+            # This cross-team avoid forces the general path but contributes
+            # exactly zero, making it an output-equivalent oracle.
+            fallback = shuffler._score_role_assignments_for_matchup(
+                players[:5],
+                players[5:],
+                max_assignments_per_team=assignment_limit,
+                avoids=[
+                    SimpleNamespace(
+                        avoider_discord_id=players[0].discord_id,
+                        avoided_discord_id=players[5].discord_id,
+                    )
+                ],
+            )
+
+            assert common == fallback
 
 
 class TestShuffler14Players:

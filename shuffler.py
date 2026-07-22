@@ -726,6 +726,62 @@ class BalancedShuffler:
 
         return best_team1, best_team2, best_score
 
+    def _score_unconstrained_role_assignments(
+        self,
+        team1_metrics: tuple[_RoleAssignmentMetrics, ...],
+        team2_metrics: tuple[_RoleAssignmentMetrics, ...],
+        rd_priority: float,
+    ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, float]:
+        """Score the common path without avoid/deal/region bookkeeping."""
+        best_team1_roles: tuple[str, ...] | None = None
+        best_team2_roles: tuple[str, ...] | None = None
+        best_score = float("inf")
+        off_role_flat_penalty = self.off_role_flat_penalty
+        role_matchup_delta_weight = self.role_matchup_delta_weight
+        abs_value = abs
+
+        for team1_assignment in team1_metrics:
+            team1_value = team1_assignment.team_value
+            team1_off_role_penalty = team1_assignment.off_role_count * off_role_flat_penalty
+            (
+                t1_carry,
+                t1_mid,
+                t1_offlane,
+                t1_soft_support,
+                t1_hard_support,
+            ) = team1_assignment.role_values
+            for team2_assignment in team2_metrics:
+                value_diff = abs_value(team1_value - team2_assignment.team_value)
+                off_role_penalty = (
+                    team1_off_role_penalty + team2_assignment.off_role_count * off_role_flat_penalty
+                )
+                (
+                    t2_carry,
+                    t2_mid,
+                    t2_offlane,
+                    t2_soft_support,
+                    t2_hard_support,
+                ) = team2_assignment.role_values
+                role_matchup_delta = (
+                    abs_value(t1_carry - t2_offlane)
+                    + abs_value(t2_carry - t1_offlane)
+                    + abs_value(t1_mid - t2_mid)
+                    + abs_value(t1_soft_support - t2_hard_support)
+                    + abs_value(t2_soft_support - t1_hard_support)
+                )
+                total_score = (
+                    value_diff
+                    + off_role_penalty
+                    + role_matchup_delta * role_matchup_delta_weight
+                    - rd_priority
+                )
+                if total_score < best_score:
+                    best_score = total_score
+                    best_team1_roles = team1_assignment.role_assignments
+                    best_team2_roles = team2_assignment.role_assignments
+
+        return best_team1_roles, best_team2_roles, best_score
+
     def _score_role_assignments_for_matchup(
         self,
         team1_players: list[Player],
@@ -737,16 +793,6 @@ class BalancedShuffler:
         _rd_priority: float | None = None,
     ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, float]:
         """Return the best role tuples and score without constructing teams."""
-        best_team1_roles: tuple[str, ...] | None = None
-        best_team2_roles: tuple[str, ...] | None = None
-        best_score = float("inf")
-
-        # Pre-compute team IDs for penalty calculations (only once per call)
-        team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
-        team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
-        avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
-        deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
-        region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
         rd_priority = (
             self._calculate_rd_priority(team1_players + team2_players)
             if _rd_priority is None
@@ -761,6 +807,23 @@ class BalancedShuffler:
         team2_metrics = self._team_role_metrics(
             team2_players, max_assignments_per_team, _scoring_context
         )
+
+        if not avoids and not deals and (not self.region_split or self.region_split_penalty <= 0):
+            return self._score_unconstrained_role_assignments(
+                team1_metrics, team2_metrics, rd_priority
+            )
+
+        best_team1_roles: tuple[str, ...] | None = None
+        best_team2_roles: tuple[str, ...] | None = None
+        best_score = float("inf")
+
+        # Constraints are uncommon, so pay their set/scan cost only on the
+        # fallback path that can produce a non-zero penalty.
+        team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
+        team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
+        avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
 
         # Try all combinations of valid role assignments. Keep the hot
         # assignment-pair arithmetic local: this loop runs hundreds of
