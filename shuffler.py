@@ -1226,21 +1226,39 @@ class BalancedShuffler:
                                 (-matchup.total_score, heap_tiebreaker, matchup.log_entry),
                             )
 
-                # Deterministic best selection to avoid flaky tests.
+                # Deterministic best selection to avoid flaky tests. Building the
+                # canonical name signature requires sorting three name lists, so
+                # defer it until the numeric score can actually improve or tie
+                # the incumbent. The signature is still stored on every numeric
+                # improvement because a later exact tie needs it for comparison.
+                candidate_prefix = (
+                    matchup.total_score,
+                    matchup.value_diff,
+                    matchup.total_off_roles,
+                )
+                best_prefix = (
+                    best_score,
+                    best_value_diff,
+                    best_total_off_roles,
+                )
+                if candidate_prefix > best_prefix:
+                    continue
+
                 signature = self._pool_matchup_signature(
                     matchup.team1, matchup.team2, excluded_names
                 )
-                is_better = self._pool_matchup_is_better(
-                    (matchup.total_score, matchup.value_diff, matchup.total_off_roles, signature),
-                    (best_score, best_value_diff, best_total_off_roles, best_signature),
-                )
-                if is_better:
-                    best_score = matchup.total_score
-                    best_value_diff = matchup.value_diff
-                    best_total_off_roles = matchup.total_off_roles
-                    best_signature = signature
-                    best_teams = (matchup.team1, matchup.team2)
-                    best_excluded = excluded_players
+                if not self._pool_matchup_is_better(
+                    (*candidate_prefix, signature),
+                    (*best_prefix, best_signature),
+                ):
+                    continue
+
+                best_score = matchup.total_score
+                best_value_diff = matchup.value_diff
+                best_total_off_roles = matchup.total_off_roles
+                best_signature = signature
+                best_teams = (matchup.team1, matchup.team2)
+                best_excluded = excluded_players
 
         # Log top 5 matchups
         if logger.isEnabledFor(logging.INFO) and top_matchups_heap:
