@@ -235,6 +235,26 @@ class BettingService:
 
         pact_targets = self._get_blood_pact_targets(player_ids, guild_id)
 
+        # With no pact transfers to interleave, all balance mutations can share
+        # one transaction. Active-pact batches retain the point path below so a
+        # skim that credits another participant can still affect that player's
+        # subsequent live debt/garnishment check exactly as before.
+        if not pact_targets:
+            if self.garnishment_service:
+                award_results = self.garnishment_service.add_income_many(
+                    player_ids, total_reward, guild_id=guild_id
+                )
+            else:
+                award_results = self.player_repo.add_balances_with_garnishment(
+                    [(pid, total_reward, 0.0) for pid in player_ids],
+                    guild_id,
+                    garnishment_rate=0.0,
+                )
+            for pid, result in zip(player_ids, award_results, strict=True):
+                result["bomb_pot_bonus"] = bomb_pot_bonus
+                results[pid] = result
+            return results
+
         # Always credit each player atomically. When a garnishment service is
         # injected we delegate to it (which uses the atomic add_balance_with_garnishment
         # path under the hood). When no service is injected we still use the
