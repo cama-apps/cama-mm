@@ -75,3 +75,21 @@ class GarnishmentService:
             reason=reason,
             metadata=metadata,
         )
+
+    def add_income_many(
+        self,
+        discord_ids: list[int],
+        amount: int,
+        guild_id: int | None = None,
+        bankruptcy_penalty_rates: dict[int, float] | None = None,
+    ) -> list[dict[str, int]]:
+        """Add the same income to multiple players in one transaction."""
+        penalty_rates = bankruptcy_penalty_rates or {}
+        return self.player_repo.add_balances_with_garnishment(
+            [
+                (discord_id, amount, penalty_rates.get(discord_id, 0.0))
+                for discord_id in discord_ids
+            ],
+            guild_id,
+            self.garnishment_rate,
+        )
