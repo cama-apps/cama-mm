@@ -235,24 +235,31 @@ class RatingUpdateMixin:
             [match["match_id"] for match in all_matches], normalized_guild
         )
 
-        # Reset all players' OpenSkill ratings if requested
-        # Seed from initial_mmr (what they started with), falling back to DEFAULT_MU
-        if reset_first:
-            all_players = self.player_repo.get_all(normalized_guild)
-            reset_updates = []
-            for p in all_players:
-                if p.discord_id is None:
-                    continue
-                # Seed mu from initial_mmr (OpenDota MMR at registration)
-                if p.initial_mmr is not None:
-                    # Convert MMR to mu: mu = 25 + (mmr / 200)
-                    seed_mu = self.openskill_system.mmr_to_os_mu(p.initial_mmr)
-                else:
-                    seed_mu = self.openskill_system.DEFAULT_MU
-                reset_updates.append((p.discord_id, seed_mu, self.openskill_system.DEFAULT_SIGMA))
-            if reset_updates:
-                self.player_repo.update_openskill_ratings_bulk(reset_updates, normalized_guild)
-                logger.info(f"Reset {len(reset_updates)} players to seeded OpenSkill ratings")
+        # Replay against one in-memory rating snapshot. Match order still
+        # determines every update, but no per-match database reads or writes
+        # are needed. Persist the completed snapshot once at the end.
+        all_players = self.player_repo.get_all(normalized_guild)
+        current_os_ratings: dict[
+            int, tuple[float | None, float | None]
+        ] = {}
+        for player in all_players:
+            if player.discord_id is None:
+                continue
+            if reset_first:
+                seed_mu = (
+                    self.openskill_system.mmr_to_os_mu(player.initial_mmr)
+                    if player.initial_mmr is not None
+                    else self.openskill_system.DEFAULT_MU
+                )
+                current_os_ratings[player.discord_id] = (
+                    seed_mu,
+                    self.openskill_system.DEFAULT_SIGMA,
+                )
+            else:
+                current_os_ratings[player.discord_id] = (
+                    player.os_mu,
+                    player.os_sigma,
+                )
 
         # Process each match in chronological order
         for i, match in enumerate(all_matches):
@@ -283,20 +290,22 @@ class RatingUpdateMixin:
                         dire_ids = match.get("team2_players", [])
                         has_fantasy = False
 
-                # Get guild_id from match for per-guild updates
-                match_guild_id = match.get("guild_id")
-
                 if has_fantasy:
                     # Use FP-weighted update (with blending)
                     result = self._backfill_match_with_fantasy(
-                        match_guild_id, participants, winning_team
+                        participants,
+                        winning_team,
+                        current_os_ratings,
                     )
                     if result.get("success"):
                         matches_with_fantasy += 1
                 else:
                     # Use equal-weight update
                     result = self._backfill_match_equal_weight(
-                        match_guild_id, radiant_ids, dire_ids, winning_team
+                        radiant_ids,
+                        dire_ids,
+                        winning_team,
+                        current_os_ratings,
                     )
                     if result.get("success"):
                         matches_equal_weight += 1
@@ -317,6 +326,24 @@ class RatingUpdateMixin:
             if (i + 1) % 50 == 0 or (i + 1) == total_matches:
                 logger.info(f"Backfill progress: {i + 1}/{total_matches} matches processed")
 
+        persist_ids = set(current_os_ratings) if reset_first else players_touched
+        final_updates = []
+        for player_id in sorted(persist_ids):
+            rating = current_os_ratings.get(player_id)
+            if rating is None:
+                continue
+            mu, sigma = rating
+            if mu is not None and sigma is not None:
+                final_updates.append((player_id, mu, sigma))
+        if final_updates:
+            try:
+                self.player_repo.update_openskill_ratings_bulk(
+                    final_updates, normalized_guild
+                )
+            except Exception as exc:
+                errors.append(f"Failed to persist backfill ratings: {exc}")
+                logger.error(f"Failed to persist OpenSkill backfill ratings: {exc}")
+
         logger.info(
             f"OpenSkill backfill complete: {matches_processed} matches "
             f"({matches_with_fantasy} FP-weighted, {matches_equal_weight} equal-weight), "
@@ -334,24 +361,20 @@ class RatingUpdateMixin:
 
     def _backfill_match_with_fantasy(
         self,
-        guild_id: int | None,
         participants: list[dict],
         winning_team: int,
+        os_ratings: dict[int, tuple[float | None, float | None]],
     ) -> dict:
         """
         Backfill a single match using FP-weighted OpenSkill update.
 
-        Uses current player ratings (after reset) and fantasy points from participants.
+        Uses the in-memory replay ratings and fantasy points from participants.
         """
         radiant = [p for p in participants if p.get("side") == "radiant"]
         dire = [p for p in participants if p.get("side") == "dire"]
 
         if len(radiant) != 5 or len(dire) != 5:
             return {"success": False, "error": f"Invalid team sizes: {len(radiant)}/{len(dire)}"}
-
-        # Get current ratings (from DB, after potential reset)
-        all_ids = [p["discord_id"] for p in participants]
-        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids, guild_id)
 
         # Build team data: (discord_id, mu, sigma, fantasy_points)
         team1_data = []
@@ -372,19 +395,22 @@ class RatingUpdateMixin:
             results = self.openskill_system.update_ratings_after_match(
                 team1_data, team2_data, winning_team
             )
-            # Persist updated ratings
-            updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
-            self.player_repo.update_openskill_ratings_bulk(updates, guild_id)
-            return {"success": True, "players_updated": len(updates)}
+            os_ratings.update(
+                {
+                    player_id: (mu, sigma)
+                    for player_id, (mu, sigma, _) in results.items()
+                }
+            )
+            return {"success": True, "players_updated": len(results)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def _backfill_match_equal_weight(
         self,
-        guild_id: int | None,
         radiant_ids: list[int],
         dire_ids: list[int],
         winning_team: int,
+        os_ratings: dict[int, tuple[float | None, float | None]],
     ) -> dict:
         """
         Backfill a single match using equal-weight OpenSkill update.
@@ -393,10 +419,6 @@ class RatingUpdateMixin:
         """
         if len(radiant_ids) != 5 or len(dire_ids) != 5:
             return {"success": False, "error": f"Invalid team sizes: {len(radiant_ids)}/{len(dire_ids)}"}
-
-        # Get current ratings (from DB, after potential reset)
-        all_ids = radiant_ids + dire_ids
-        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids, guild_id)
 
         # Build team data: (discord_id, mu, sigma)
         radiant_data = [
@@ -412,10 +434,8 @@ class RatingUpdateMixin:
             results = self.openskill_system.update_ratings_equal_weight(
                 radiant_data, dire_data, winning_team
             )
-            # Persist updated ratings
-            updates = [(pid, mu, sigma) for pid, (mu, sigma) in results.items()]
-            self.player_repo.update_openskill_ratings_bulk(updates, guild_id)
-            return {"success": True, "players_updated": len(updates)}
+            os_ratings.update(results)
+            return {"success": True, "players_updated": len(results)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

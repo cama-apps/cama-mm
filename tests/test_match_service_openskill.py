@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import pytest
+
 from openskill_rating_system import CamaOpenSkillSystem
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -297,6 +299,160 @@ def test_backfill_loads_all_match_participants_once_without_point_reads(
     assert set(loaded_match_ids) == set(match_ids)
     assert loaded_guild_id == TEST_GUILD_ID
     point_loader.assert_not_called()
+
+
+def test_backfill_replays_in_memory_and_flushes_once_with_reset(
+    repo_db_path, monkeypatch
+):
+    service, player_repo, match_repo = _build_service(repo_db_path)
+    player_ids = _seed_players(player_repo, count=11)
+    active_ids = player_ids[:10]
+    match_ids = [
+        _record_a_match(service, active_ids),
+        _record_a_match(service, active_ids),
+    ]
+    with match_repo.connection() as conn:
+        conn.execute(
+            "UPDATE match_participants SET fantasy_points = 15.0 "
+            "WHERE match_id = ? AND guild_id = ?",
+            (match_ids[1], TEST_GUILD_ID),
+        )
+
+    expected_ratings = {
+        player_id: (
+            service.openskill_system.mmr_to_os_mu(SEED_MMR),
+            service.openskill_system.DEFAULT_SIGMA,
+        )
+        for player_id in player_ids
+    }
+    chronological_matches = match_repo.get_all_matches_chronological(TEST_GUILD_ID)
+    for match in chronological_matches:
+        participants = match_repo.get_match_participants(
+            match["match_id"], TEST_GUILD_ID
+        )
+        radiant = [p for p in participants if p["side"] == "radiant"]
+        dire = [p for p in participants if p["side"] == "dire"]
+        if any(p["fantasy_points"] is not None for p in participants):
+            results = service.openskill_system.update_ratings_after_match(
+                [
+                    (
+                        p["discord_id"],
+                        *expected_ratings[p["discord_id"]],
+                        p["fantasy_points"],
+                    )
+                    for p in radiant
+                ],
+                [
+                    (
+                        p["discord_id"],
+                        *expected_ratings[p["discord_id"]],
+                        p["fantasy_points"],
+                    )
+                    for p in dire
+                ],
+                match["winning_team"],
+            )
+            expected_ratings.update({
+                player_id: (mu, sigma)
+                for player_id, (mu, sigma, _weight) in results.items()
+            })
+        else:
+            results = service.openskill_system.update_ratings_equal_weight(
+                [
+                    (p["discord_id"], *expected_ratings[p["discord_id"]])
+                    for p in radiant
+                ],
+                [
+                    (p["discord_id"], *expected_ratings[p["discord_id"]])
+                    for p in dire
+                ],
+                match["winning_team"],
+            )
+            expected_ratings.update(results)
+
+    get_all = Mock(wraps=player_repo.get_all)
+    bulk_reader = Mock(
+        side_effect=AssertionError("backfill replay must not bulk-read ratings")
+    )
+    point_reader = Mock(
+        side_effect=AssertionError("backfill replay must not point-read ratings")
+    )
+    bulk_writer = Mock(wraps=player_repo.update_openskill_ratings_bulk)
+    monkeypatch.setattr(player_repo, "get_all", get_all)
+    monkeypatch.setattr(player_repo, "get_openskill_ratings_bulk", bulk_reader)
+    monkeypatch.setattr(player_repo, "get_openskill_rating", point_reader)
+    monkeypatch.setattr(player_repo, "update_openskill_ratings_bulk", bulk_writer)
+
+    summary = service.backfill_openskill_ratings(
+        guild_id=TEST_GUILD_ID, reset_first=True
+    )
+
+    assert summary == {
+        "matches_processed": 2,
+        "matches_with_fantasy": 1,
+        "matches_equal_weight": 1,
+        "players_updated": 10,
+        "total_matches": 2,
+        "errors": [],
+    }
+    get_all.assert_called_once_with(TEST_GUILD_ID)
+    bulk_reader.assert_not_called()
+    point_reader.assert_not_called()
+    bulk_writer.assert_called_once()
+    final_updates, final_guild_id = bulk_writer.call_args.args
+    assert final_guild_id == TEST_GUILD_ID
+    assert {player_id for player_id, _mu, _sigma in final_updates} == set(
+        player_ids
+    )
+    actual_ratings = {
+        player_id: (mu, sigma) for player_id, mu, sigma in final_updates
+    }
+    for player_id, expected in expected_ratings.items():
+        assert actual_ratings[player_id] == pytest.approx(expected)
+
+
+def test_backfill_without_reset_loads_players_and_flushes_once(
+    repo_db_path, monkeypatch
+):
+    service, player_repo, _match_repo = _build_service(repo_db_path)
+    player_ids = _seed_players(player_repo)
+    _record_a_match(service, player_ids)
+    _record_a_match(service, player_ids)
+
+    get_all = Mock(wraps=player_repo.get_all)
+    bulk_reader = Mock(
+        side_effect=AssertionError("backfill replay must not bulk-read ratings")
+    )
+    point_reader = Mock(
+        side_effect=AssertionError("backfill replay must not point-read ratings")
+    )
+    bulk_writer = Mock(wraps=player_repo.update_openskill_ratings_bulk)
+    monkeypatch.setattr(player_repo, "get_all", get_all)
+    monkeypatch.setattr(player_repo, "get_openskill_ratings_bulk", bulk_reader)
+    monkeypatch.setattr(player_repo, "get_openskill_rating", point_reader)
+    monkeypatch.setattr(player_repo, "update_openskill_ratings_bulk", bulk_writer)
+
+    summary = service.backfill_openskill_ratings(
+        guild_id=TEST_GUILD_ID, reset_first=False
+    )
+
+    assert summary == {
+        "matches_processed": 2,
+        "matches_with_fantasy": 0,
+        "matches_equal_weight": 2,
+        "players_updated": 10,
+        "total_matches": 2,
+        "errors": [],
+    }
+    get_all.assert_called_once_with(TEST_GUILD_ID)
+    bulk_reader.assert_not_called()
+    point_reader.assert_not_called()
+    bulk_writer.assert_called_once()
+    final_updates, final_guild_id = bulk_writer.call_args.args
+    assert final_guild_id == TEST_GUILD_ID
+    assert {player_id for player_id, _mu, _sigma in final_updates} == set(
+        player_ids
+    )
 
 
 def test_openskill_prediction_uses_requested_guild_and_shared_probability_model(repo_db_path):
