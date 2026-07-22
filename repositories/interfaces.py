@@ -93,6 +93,13 @@ class IPlayerRepository(ABC):
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
 
     @abstractmethod
+    def get_balances_bulk(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, int]:
+        """Get player balances in one query, defaulting missing players to zero."""
+        ...
+
+    @abstractmethod
     def update_balance(
         self,
         discord_id: int,

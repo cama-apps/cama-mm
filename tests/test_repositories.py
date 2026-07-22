@@ -127,6 +127,52 @@ class TestPlayerRepository:
         assert inputs[12345]["first_calibrated_at"] == 1_750_000_000
         assert player_repository.get_match_rating_inputs([], TEST_GUILD_ID) == {}
 
+    def test_get_balances_bulk_is_single_query_and_guild_scoped(
+        self, player_repository, monkeypatch
+    ):
+        player_ids = [12346, 12347]
+        for pid, balance in zip(player_ids, [75, -25], strict=True):
+            player_repository.add(
+                discord_id=pid,
+                discord_username=f"BalancePlayer{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repository.update_balance(pid, TEST_GUILD_ID, balance)
+        player_repository.add(
+            discord_id=player_ids[0],
+            discord_username="OtherGuildBalancePlayer",
+            guild_id=TEST_GUILD_ID_SECONDARY,
+        )
+        player_repository.update_balance(
+            player_ids[0], TEST_GUILD_ID_SECONDARY, 999
+        )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository, "get_connection", counted_get_connection
+        )
+
+        balances = player_repository.get_balances_bulk(
+            [player_ids[1], player_ids[0], 99999, player_ids[1]],
+            TEST_GUILD_ID,
+        )
+
+        assert balances == {
+            player_ids[1]: -25,
+            player_ids[0]: 75,
+            99999: 0,
+        }
+        assert connection_count == 1
+        assert player_repository.get_balances_bulk([], TEST_GUILD_ID) == {}
+        assert connection_count == 1
+
     def test_update_personal_best_win_streaks_is_atomic_and_guild_scoped(
         self, player_repository, monkeypatch
     ):

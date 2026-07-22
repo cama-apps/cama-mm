@@ -630,6 +630,31 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return int(row["balance"]) if row else 0
 
+    def get_balances_bulk(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, int]:
+        """Get balances for multiple players on one connection."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        guild_id = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(unique_ids))
+        balances = dict.fromkeys(unique_ids, 0)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id, COALESCE(jopacoin_balance, 0) AS balance
+                FROM players
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
+                """,
+                (guild_id, *unique_ids),
+            )
+            for row in cursor.fetchall():
+                balances[row["discord_id"]] = int(row["balance"])
+        return balances
+
     def advance_dota_streak(
         self, discord_id: int, guild_id: int, today: str, yesterday: str
     ) -> int:

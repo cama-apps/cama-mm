@@ -431,6 +431,40 @@ class TestBlindBetsCore:
         assert result["total_radiant"] == 50
         assert result["total_dire"] == 50
 
+    def test_create_auto_blind_bets_batches_balance_snapshot(
+        self, services, monkeypatch
+    ):
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+        player_ids = list(range(12320, 12330))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repo.update_balance(pid, TEST_GUILD_ID, 100)
+
+        connection_count = 0
+        original_get_connection = player_repo.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(player_repo, "get_connection", counted_get_connection)
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=player_ids[:5],
+            dire_ids=player_ids[5:],
+            shuffle_timestamp=int(time.time()),
+        )
+
+        assert result["created"] == 10
+        assert connection_count == 1
+
     def test_blind_bet_is_blind_flag(self, services):
         """Blind bets have is_blind flag set."""
         match_service = services["match_service"]

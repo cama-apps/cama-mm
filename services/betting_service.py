@@ -745,18 +745,19 @@ class BettingService:
         cached_totals = self.bet_repo.get_total_bets_by_guild(
             guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
         )
+        balances = self.player_repo.get_balances_bulk(
+            radiant_ids + dire_ids, guild_id
+        )
 
         # Process each team
         for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
             for discord_id in player_ids:
                 try:
-                    # Read balance immediately before computing amount + placing
-                    # the bet. ``place_bet_atomic`` re-reads the balance under
-                    # BEGIN IMMEDIATE and will reject if the player has flipped
-                    # negative past ``max_debt`` between the read here and the
-                    # atomic placement — so the atomic op is the source of truth
-                    # and this read is only used to size the bet.
-                    balance = self.player_repo.get_balance(discord_id, guild_id)
+                    # Use the one-query balance snapshot only to size the bet.
+                    # ``place_bet_atomic`` re-reads the live balance under
+                    # BEGIN IMMEDIATE and remains the source of truth for
+                    # sufficient-funds and max-debt validation.
+                    balance = balances.get(discord_id, 0)
 
                     if is_bomb_pot:
                         # Bomb pot: mandatory ante for everyone, no threshold check
