@@ -1062,6 +1062,7 @@ def test_settle_skims_blood_pact_on_net_profit_for_penalized_winner(services):
 def test_award_win_bonus_skims_blood_pact_on_net(services):
     """Win-bonus Blood Pact skim must use the credited net (post garnish and
     bankruptcy penalty), not the gross reward."""
+    from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from config import JOPACOIN_WIN_REWARD
@@ -1079,7 +1080,9 @@ def test_award_win_bonus_skims_blood_pact_on_net(services):
     player_repo.update_balance(pid, TEST_GUILD_ID, 0)
 
     bankruptcy_service = MagicMock()
-    bankruptcy_service.apply_penalty_to_winnings.return_value = {"penalty_applied": 1}
+    bankruptcy_service.get_bulk_states.return_value = {
+        pid: SimpleNamespace(penalty_games_remaining=1)
+    }
     bankruptcy_service.penalty_rate = 0.5
     betting_service.bankruptcy_service = bankruptcy_service
     buff_service = MagicMock()

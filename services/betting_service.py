@@ -326,8 +326,7 @@ class BettingService:
 
         # Decrement after awarding so the final required win is still reduced.
         if self.bankruptcy_service and winning_ids:
-            for pid in winning_ids:
-                self.bankruptcy_service.on_game_won(pid, guild_id)
+            self.bankruptcy_service.on_games_won(winning_ids, guild_id)
 
         # Manashop buffs that boost win bonus: Sanctuary (+15% for 24h) and
         # Communion blessing (+10% on the next match-win, single-charge).
@@ -490,6 +489,17 @@ class BettingService:
         if not player_ids:
             return results
 
+        penalized_ids: set[int] = set()
+        if self.bankruptcy_service and reward_amount > 0:
+            bankruptcy_states = self.bankruptcy_service.get_bulk_states(
+                player_ids, guild_id
+            )
+            penalized_ids = {
+                pid
+                for pid, state in bankruptcy_states.items()
+                if state.penalty_games_remaining > 0
+            }
+
         for pid in player_ids:
             # Decide (in service layer, where bankruptcy policy lives) whether
             # this player is currently under bankruptcy penalty. We only pass a
@@ -498,16 +508,12 @@ class BettingService:
             # single policy coefficient; the repo applies it to the live
             # post-garnishment net inside the atomic txn.
             bankruptcy_penalty_rate = 0.0
-            if self.bankruptcy_service and reward_amount > 0:
-                penalty_info = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, reward_amount, guild_id
+            if self.bankruptcy_service and pid in penalized_ids:
+                # Clamp defensively: a misconfigured rate must never debit
+                # more than the post-garnishment net.
+                bankruptcy_penalty_rate = max(
+                    0.0, min(1.0, self.bankruptcy_service.penalty_rate)
                 )
-                if penalty_info["penalty_applied"] > 0:
-                    # Clamp defensively: a misconfigured rate must never debit
-                    # more than the post-garnishment net.
-                    bankruptcy_penalty_rate = max(
-                        0.0, min(1.0, self.bankruptcy_service.penalty_rate)
-                    )
 
             # Apply garnishment + bankruptcy penalty in one atomic balance
             # mutation. The repo credits gross, reads balance to decide
