@@ -169,8 +169,22 @@ class VotingCorrectionMixin:
         # this match), so the multiplier is recomputed, not restored.
         streak_multipliers: dict[int, float] = {}
         new_streaks: dict[int, tuple[int, float]] = {}
-        if hasattr(self.match_repo, "get_player_outcomes_before_match"):
-            for pid in radiant_ids + dire_ids:
+        participant_ids = radiant_ids + dire_ids
+        get_outcomes_bulk = getattr(
+            self.match_repo, "get_player_outcomes_before_match_bulk", None
+        )
+        if callable(get_outcomes_bulk):
+            outcomes_by_id = get_outcomes_bulk(
+                participant_ids, guild_id, match_id, limit=20
+            )
+            for pid in participant_ids:
+                slen, mult = self.rating_system.calculate_streak_multiplier(
+                    outcomes_by_id.get(pid, []), won=pid in new_winner_ids
+                )
+                streak_multipliers[pid] = mult
+                new_streaks[pid] = (slen, mult)
+        elif hasattr(self.match_repo, "get_player_outcomes_before_match"):
+            for pid in participant_ids:
                 outcomes = self.match_repo.get_player_outcomes_before_match(
                     pid, guild_id, match_id, limit=20
                 )

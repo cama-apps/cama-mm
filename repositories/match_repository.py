@@ -1164,6 +1164,62 @@ class MatchRepository(BaseRepository, IMatchRepository):
             rows = cursor.fetchall()
             return [bool(row["won"]) for row in rows]
 
+    def get_player_outcomes_before_match_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        match_id: int,
+        limit: int = 20,
+    ) -> dict[int, list[bool]]:
+        """Get per-player outcome windows before one match in one query."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        outcomes = {discord_id: [] for discord_id in unique_ids}
+        placeholders = ",".join("?" * len(unique_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                WITH target_rows AS (
+                    SELECT discord_id, MIN(id) AS cutoff_id
+                    FROM rating_history
+                    WHERE match_id = ? AND guild_id = ?
+                      AND discord_id IN ({placeholders})
+                    GROUP BY discord_id
+                ), ranked_outcomes AS (
+                    SELECT
+                        history.discord_id,
+                        history.won,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY history.discord_id
+                            ORDER BY history.id DESC
+                        ) AS outcome_rank
+                    FROM rating_history AS history
+                    JOIN target_rows AS target
+                      ON target.discord_id = history.discord_id
+                     AND history.id < target.cutoff_id
+                    WHERE history.guild_id = ? AND history.won IS NOT NULL
+                )
+                SELECT discord_id, won
+                FROM ranked_outcomes
+                WHERE outcome_rank <= ?
+                ORDER BY discord_id, outcome_rank
+                """,
+                (
+                    match_id,
+                    normalized_guild,
+                    *unique_ids,
+                    normalized_guild,
+                    limit,
+                ),
+            )
+            for row in cursor.fetchall():
+                outcomes[row["discord_id"]].append(bool(row["won"]))
+        return outcomes
+
     def get_player_rating_history_detailed(self, discord_id: int, guild_id: int, limit: int = 50) -> list[dict]:
         """Get detailed rating history for a player in a guild including prediction and OpenSkill data."""
         with self.connection() as conn:
