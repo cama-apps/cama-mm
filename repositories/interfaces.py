@@ -575,6 +575,17 @@ class IMatchRepository(ABC):
         ...
 
     @abstractmethod
+    def get_player_outcomes_before_match_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        match_id: int,
+        limit: int = 20,
+    ) -> dict[int, list[bool]]:
+        """Get capped pre-match outcome windows for multiple players."""
+        ...
+
+    @abstractmethod
     def get_os_ratings_for_matches(
         self, match_ids: list[int], guild_id: int | None = None
     ) -> dict[int, dict[str, list[tuple[float, float]]]]:

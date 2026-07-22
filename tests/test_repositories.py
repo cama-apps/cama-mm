@@ -710,6 +710,82 @@ class TestMatchRepository:
         assert bulk[303] == []
         assert match_repository.get_player_recent_outcomes_bulk([], TEST_GUILD_ID) == {}
 
+    def test_get_player_outcomes_before_match_bulk_is_capped_and_single_query(
+        self, match_repository, monkeypatch
+    ):
+        for won in [True, False, True, True]:
+            match_repository.add_rating_history(
+                101, TEST_GUILD_ID, rating=1500, won=won
+            )
+        for won in [False, True]:
+            match_repository.add_rating_history(
+                202, TEST_GUILD_ID, rating=1500, won=won
+            )
+        match_repository.add_rating_history(
+            101, TEST_GUILD_ID_SECONDARY, rating=1500, won=False
+        )
+        target_match_id = match_repository.record_match(
+            team1_ids=[101],
+            team2_ids=[202],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+        )
+        match_repository.add_rating_history(
+            101,
+            TEST_GUILD_ID,
+            rating=1510,
+            won=True,
+            match_id=target_match_id,
+        )
+        match_repository.add_rating_history(
+            202,
+            TEST_GUILD_ID,
+            rating=1490,
+            won=False,
+            match_id=target_match_id,
+        )
+        # Rows written after the target match must not leak into its window.
+        match_repository.add_rating_history(
+            101, TEST_GUILD_ID, rating=1520, won=False
+        )
+        match_repository.add_rating_history(
+            202, TEST_GUILD_ID, rating=1480, won=True
+        )
+
+        connection_count = 0
+        original_get_connection = match_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            match_repository, "get_connection", counted_get_connection
+        )
+
+        outcomes = match_repository.get_player_outcomes_before_match_bulk(
+            [202, 101, 303, 202],
+            TEST_GUILD_ID,
+            target_match_id,
+            limit=3,
+        )
+
+        assert list(outcomes) == [202, 101, 303]
+        assert outcomes == {
+            202: [True, False],
+            101: [True, True, False],
+            303: [],
+        }
+        assert connection_count == 1
+        assert (
+            match_repository.get_player_outcomes_before_match_bulk(
+                [], TEST_GUILD_ID, target_match_id
+            )
+            == {}
+        )
+        assert connection_count == 1
+
     def test_get_os_ratings_for_matches_bulk_and_guild_scoped(self, match_repository):
         match_ids = [
             match_repository.record_match(

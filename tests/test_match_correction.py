@@ -648,7 +648,9 @@ class TestMatchCorrection:
                 start[pid] + JOPACOIN_PER_GAME
             )
 
-    def test_correction_applies_streak_multipliers(self, correction_services):
+    def test_correction_applies_streak_multipliers(
+        self, correction_services, monkeypatch
+    ):
         """Corrected ratings must include the streak amplification recording
         the true result would have applied. Seeds a 3-win streak for the true
         winners, corrects, and checks stored ratings against an independent
@@ -675,7 +677,27 @@ class TestMatchCorrection:
         result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
+        bulk_calls = 0
+        original_bulk = match_repo.get_player_outcomes_before_match_bulk
+
+        def counted_bulk(*args, **kwargs):
+            nonlocal bulk_calls
+            bulk_calls += 1
+            return original_bulk(*args, **kwargs)
+
+        def fail_point_read(*_args, **_kwargs):
+            pytest.fail("correction should use one bulk outcome query")
+
+        monkeypatch.setattr(
+            match_repo, "get_player_outcomes_before_match_bulk", counted_bulk
+        )
+        monkeypatch.setattr(
+            match_repo, "get_player_outcomes_before_match", fail_point_read
+        )
+
         match_service.correct_match_result(match_id, "dire", TEST_GUILD_ID, corrected_by=1)
+
+        assert bulk_calls == 1
 
         # Independent recomputation from the pre-match snapshots.
         history = match_repo.get_full_rating_history_for_match(match_id)
