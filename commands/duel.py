@@ -139,7 +139,8 @@ class DuelCommands(commands.Cog):
         guild_id = interaction.guild.id
         actor_id = interaction.user.id
         try:
-            challenge = self.duel_service.issue(
+            challenge = await asyncio.to_thread(
+                self.duel_service.issue,
                 guild_id,
                 interaction.channel_id,
                 actor_id,
@@ -192,7 +193,8 @@ class DuelCommands(commands.Cog):
             return
 
         try:
-            self.duel_service.bind_message(
+            await asyncio.to_thread(
+                self.duel_service.bind_message,
                 challenge.challenge_id,
                 guild_id,
                 message.id,
@@ -244,7 +246,9 @@ class DuelCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        challenges = self.duel_service.list_outstanding(interaction.guild.id)
+        challenges = await asyncio.to_thread(
+            self.duel_service.list_outstanding, interaction.guild.id
+        )
         if not challenges:
             await safe_followup(
                 interaction,
@@ -315,7 +319,8 @@ class DuelCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         try:
-            challenge = self.duel_service.resolve(
+            challenge = await asyncio.to_thread(
+                self.duel_service.resolve,
                 guild_id,
                 interaction.user.id,
                 challenge_id,
@@ -368,7 +373,9 @@ class DuelCommands(commands.Cog):
 
         guild_id = interaction.guild.id
         if challenge_id is not None:
-            pending = self.duel_service.get_challenge(challenge_id, guild_id)
+            pending = await asyncio.to_thread(
+                self.duel_service.get_challenge, challenge_id, guild_id
+            )
             if (
                 pending is None
                 or pending.challenge_id != challenge_id
@@ -386,7 +393,8 @@ class DuelCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
         try:
-            challenge = self.duel_service.respond(
+            challenge = await asyncio.to_thread(
+                self.duel_service.respond,
                 guild_id,
                 interaction.user.id,
                 choice,
@@ -681,7 +689,7 @@ class DuelCommands(commands.Cog):
         )
         channel = await self._get_channel(challenge.channel_id)
         if channel is None:
-            self._mark_recovery_delivery_failed(challenge)
+            await self._mark_recovery_delivery_failed(challenge)
             return
 
         allowed_mentions = discord.AllowedMentions(
@@ -708,11 +716,12 @@ class DuelCommands(commands.Cog):
                 challenge.guild_id,
                 challenge.channel_id,
             )
-            self._mark_recovery_delivery_failed(challenge)
+            await self._mark_recovery_delivery_failed(challenge)
             return
 
         try:
-            self.duel_service.bind_message(
+            await asyncio.to_thread(
+                self.duel_service.bind_message,
                 challenge.challenge_id,
                 challenge.guild_id,
                 message.id,
@@ -731,7 +740,7 @@ class DuelCommands(commands.Cog):
                 challenge.guild_id,
             )
             await self._delete_unbound_replacement(message, challenge)
-            self._mark_recovery_delivery_failed(challenge)
+            await self._mark_recovery_delivery_failed(challenge)
             return
 
         view = DuelChallengeView(self, challenge.challenge_id)
@@ -744,9 +753,12 @@ class DuelCommands(commands.Cog):
                 challenge.challenge_id,
             )
 
-    def _mark_recovery_delivery_failed(self, challenge: DuelChallenge) -> None:
+    async def _mark_recovery_delivery_failed(
+        self, challenge: DuelChallenge
+    ) -> None:
         try:
-            self.duel_service.mark_delivery_failed(
+            await asyncio.to_thread(
+                self.duel_service.mark_delivery_failed,
                 challenge.challenge_id,
                 challenge.guild_id,
                 challenge.challenger_id,
@@ -824,7 +836,8 @@ class DuelCommands(commands.Cog):
         actor_id: int,
     ) -> None:
         try:
-            self.duel_service.mark_delivery_failed(
+            await asyncio.to_thread(
+                self.duel_service.mark_delivery_failed,
                 challenge.challenge_id,
                 guild_id,
                 actor_id,
@@ -900,7 +913,8 @@ async def setup(bot: commands.Bot) -> None:
 
     cog = DuelCommands(bot, duel_service, flavor_service)
     await bot.add_cog(cog)
-    for challenge in duel_service.list_pending_all():
+    pending_challenges = await asyncio.to_thread(duel_service.list_pending_all)
+    for challenge in pending_challenges:
         if challenge.message_id is None:
             await cog.restore_unbound_challenge(challenge)
             continue

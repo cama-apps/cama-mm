@@ -2,6 +2,7 @@
 Dota 2 information commands using dotabase: /hero, /ability
 """
 
+import asyncio
 import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -144,7 +145,7 @@ class DotaInfoCommands(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         """Autocomplete for hero names."""
-        heroes = _get_all_heroes()
+        heroes = await asyncio.to_thread(_get_all_heroes)
         matches = [
             app_commands.Choice(name=name, value=name)
             for name, _ in heroes
@@ -156,7 +157,7 @@ class DotaInfoCommands(commands.Cog):
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         """Autocomplete for ability names."""
-        abilities = _get_all_abilities()
+        abilities = await asyncio.to_thread(_get_all_abilities)
         matches = [
             app_commands.Choice(name=name, value=name)
             for name, _ in abilities
@@ -172,7 +173,7 @@ class DotaInfoCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        hero = _get_hero_by_name(hero_name)
+        hero = await asyncio.to_thread(_get_hero_by_name, hero_name)
         if not hero:
             await safe_followup(
                 interaction,
@@ -291,7 +292,7 @@ class DotaInfoCommands(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        ability = _get_ability_by_name(ability_name)
+        ability = await asyncio.to_thread(_get_ability_by_name, ability_name)
         if not ability:
             await safe_followup(
                 interaction,

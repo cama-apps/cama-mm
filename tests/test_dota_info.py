@@ -1,14 +1,91 @@
 """Tests for DotaInfoCommands cog — hero/ability lookup and formatting helpers."""
 
+from unittest.mock import AsyncMock, MagicMock, call, patch
+
 import pytest
 
 from commands.dota_info import (
+    DotaInfoCommands,
     _format_ability_values,
     _get_ability_by_name,
     _get_all_abilities,
     _get_all_heroes,
     _get_hero_by_name,
 )
+
+
+async def _run_sync(func, *args, **kwargs):
+    return func(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_autocomplete_loaders_are_offloaded_from_the_event_loop():
+    cog = DotaInfoCommands(MagicMock())
+    with (
+        patch(
+            "commands.dota_info._get_all_heroes",
+            return_value=[("Pudge", 14)],
+        ) as get_heroes,
+        patch(
+            "commands.dota_info._get_all_abilities",
+            return_value=[("Meat Hook", 14)],
+        ) as get_abilities,
+        patch(
+            "commands.dota_info.asyncio.to_thread",
+            new_callable=AsyncMock,
+            side_effect=_run_sync,
+        ) as to_thread,
+    ):
+        hero_choices = await cog.hero_autocomplete(MagicMock(), "pud")
+        ability_choices = await cog.ability_autocomplete(MagicMock(), "hook")
+
+    assert [choice.name for choice in hero_choices] == ["Pudge"]
+    assert [choice.name for choice in ability_choices] == ["Meat Hook"]
+    assert to_thread.await_args_list == [call(get_heroes), call(get_abilities)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_name", "helper_name", "query", "not_found"),
+    [
+        ("hero", "_get_hero_by_name", "Pudge", "Hero 'Pudge' not found"),
+        (
+            "ability",
+            "_get_ability_by_name",
+            "Meat Hook",
+            "Ability 'Meat Hook' not found",
+        ),
+    ],
+)
+async def test_detail_lookups_are_offloaded_from_the_event_loop(
+    command_name,
+    helper_name,
+    query,
+    not_found,
+):
+    cog = DotaInfoCommands(MagicMock())
+    interaction = MagicMock()
+    command = getattr(DotaInfoCommands, command_name)
+    with (
+        patch(f"commands.dota_info.{helper_name}", return_value=None) as lookup,
+        patch(
+            "commands.dota_info.asyncio.to_thread",
+            new_callable=AsyncMock,
+            side_effect=_run_sync,
+        ) as to_thread,
+        patch(
+            "commands.dota_info.safe_defer",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "commands.dota_info.safe_followup", new_callable=AsyncMock
+        ) as followup,
+    ):
+        await command.callback(cog, interaction, query)
+
+    to_thread.assert_awaited_once_with(lookup, query)
+    assert not_found in followup.await_args.kwargs["content"]
 
 
 class TestDotaInfoHeroLookup:
