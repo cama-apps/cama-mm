@@ -214,6 +214,35 @@ class TestTeam:
 class TestShuffler:
     """Test BalancedShuffler algorithm."""
 
+    def test_get_cached_role_assignments_reuses_immutable_cache_value(
+        self, monkeypatch
+    ):
+        players = [
+            Player(name=f"Player{i}", preferred_roles=[str(i + 1)])
+            for i in range(5)
+        ]
+        cached_assignments = (("1", "2", "3", "4", "5"),)
+        received_keys = []
+
+        def get_cached_assignments(player_roles_key):
+            received_keys.append(player_roles_key)
+            return cached_assignments
+
+        monkeypatch.setattr(
+            "shuffler.get_cached_role_assignments", get_cached_assignments
+        )
+        shuffler = BalancedShuffler()
+
+        first_result = shuffler._get_cached_role_assignments(players)
+        second_result = shuffler._get_cached_role_assignments(players)
+
+        expected_key = (("1",), ("2",), ("3",), ("4",), ("5",))
+        assert received_keys == [expected_key, expected_key]
+        assert first_result is cached_assignments
+        assert second_result is cached_assignments
+        assert isinstance(first_result, tuple)
+        assert all(isinstance(assignment, tuple) for assignment in first_result)
+
     def test_lobby_rating_bonus_uses_average_team_total(self):
         shuffler = BalancedShuffler(use_glicko=False)
 
