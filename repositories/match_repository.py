@@ -1944,6 +1944,38 @@ class MatchRepository(BaseRepository, IMatchRepository):
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
+    def get_match_participants_bulk(
+        self, match_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, list[dict]]:
+        """Get participants for many matches using one connection."""
+        unique_ids = list(dict.fromkeys(match_ids))
+        if not unique_ids:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        participants_by_match: dict[int, list[dict]] = {
+            match_id: [] for match_id in unique_ids
+        }
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Stay below conservative SQLite bind limits while retaining one
+            # connection for arbitrarily long match histories.
+            for offset in range(0, len(unique_ids), 900):
+                match_id_chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in match_id_chunk)
+                cursor.execute(
+                    f"""
+                    SELECT *
+                    FROM match_participants
+                    WHERE guild_id = ? AND match_id IN ({placeholders})
+                    """,
+                    (normalized_guild, *match_id_chunk),
+                )
+                for row in cursor.fetchall():
+                    participants_by_match[row["match_id"]].append(dict(row))
+
+        return participants_by_match
+
     def get_player_hero_stats(self, discord_id: int, guild_id: int) -> dict:
         """
         Get hero statistics for a player from enriched matches in a guild.
