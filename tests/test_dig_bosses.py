@@ -26,6 +26,7 @@ from services.dig_constants import (
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
     BOSSES_BY_ID,
+    BOSSES_BY_TIER,
     LUMINOSITY_BRIGHT,
     LUMINOSITY_DARK,
     PHASE_TRANSITION_EVENTS,
@@ -430,24 +431,22 @@ class TestPersistedBossHP:
 
 
 class TestDialogueV2:
-    def test_all_bosses_have_first_meet(self):
-        expected_bosses = [
-            "grothak", "pudge", "ogre_magi",
-            "crystalia", "crystal_maiden", "tusk",
-            "magmus_rex", "lina", "doom",
-            "void_warden", "spectre", "void_spirit",
-            "sporeling_sovereign", "treant_protector", "broodmother",
-            "chronofrost", "faceless_void", "weaver",
-            "nameless_depth", "oracle", "terrorblade",
-            # Prestige-2 additions
-            "aegis_warden", "heartspire", "emberwright",
-            # Late-prestige additions (prestige>=3)
-            "xalatath", "lilith", "underlord",
-        ]
+    def test_all_standard_roster_bosses_have_first_meet(self):
+        # Prestige-4 bosses currently use their phase dialogue instead of the
+        # standard BOSS_DIALOGUE_V2 slots.
+        expected_bosses = set(BOSSES_BY_ID) - {
+            "blightcoil", "rimebound_king", "spineback",
+        }
         for boss_id in expected_bosses:
             assert boss_id in BOSS_DIALOGUE_V2, f"missing {boss_id}"
             slots = BOSS_DIALOGUE_V2[boss_id]
-            assert "first_meet" in slots
+            assert slots.keys() >= {
+                "first_meet",
+                "after_defeat",
+                "after_retreat",
+                "after_close_win",
+                "after_scout",
+            }
             assert len(slots["first_meet"]) >= 2
 
     def test_pinnacle_pool_has_all_three(self):
@@ -1263,21 +1262,29 @@ class TestPinnacleBuildInfo:
 class TestLatePrestigeBossPool:
     """Prestige-gated bosses should enter pools only at their unlock level."""
 
-    PRESTIGE2_IDS = {"aegis_warden", "heartspire", "emberwright"}
+    PRESTIGE2_BY_TIER = {
+        150: {"aegis_warden", "cairn_general"},
+        200: {"heartspire", "brass_croupier"},
+        275: {"emberwright", "saltveil_commodore"},
+    }
+    PRESTIGE2_IDS = set().union(*PRESTIGE2_BY_TIER.values())
     LATE_PRESTIGE_IDS = {"xalatath", "lilith", "underlord"}
     AFFECTED_TIERS = (150, 200, 275)
 
     def test_pool_unlocks_prestige2_bosses_at_p2(self):
         for tier in self.AFFECTED_TIERS:
             pool = get_boss_pool_for_tier(tier, prestige_level=2)
-            assert len(pool) == 4, f"tier {tier} should have 4 bosses at P2, got {len(pool)}"
+            assert len(pool) == 5, f"tier {tier} should have 5 bosses at P2, got {len(pool)}"
             ids = {b.boss_id for b in pool}
-            assert ids & self.PRESTIGE2_IDS, f"tier {tier} P2 pool missing P2 boss"
+            assert self.PRESTIGE2_BY_TIER[tier] <= ids, (
+                f"tier {tier} P2 pool missing bosses: "
+                f"{self.PRESTIGE2_BY_TIER[tier] - ids}"
+            )
 
     def test_pool_full_at_p3(self):
         for tier in self.AFFECTED_TIERS:
             pool = get_boss_pool_for_tier(tier, prestige_level=3)
-            assert len(pool) == 5, f"tier {tier} should have 5 bosses at P3, got {len(pool)}"
+            assert len(pool) == 6, f"tier {tier} should have 6 bosses at P3, got {len(pool)}"
             ids = {b.boss_id for b in pool}
             assert ids & self.LATE_PRESTIGE_IDS, f"tier {tier} P3 pool missing late-prestige boss"
 
@@ -1293,14 +1300,60 @@ class TestLatePrestigeBossPool:
                 f"tier {tier} P1 pool leaked late-prestige boss: {ids & self.LATE_PRESTIGE_IDS}"
             )
 
+    def test_deep_tier_prestige_composition(self):
+        for tier in self.AFFECTED_TIERS:
+            bosses = BOSSES_BY_TIER[tier]
+            assert sum(boss.prestige_required == 0 for boss in bosses) == 3
+            assert {
+                boss.boss_id for boss in bosses if boss.prestige_required == 2
+            } == self.PRESTIGE2_BY_TIER[tier]
+            assert sum(boss.prestige_required == 3 for boss in bosses) == 1
+            assert sum(boss.prestige_required == 4 for boss in bosses) == 1
+
+    def test_prestige_pool_sizes_at_each_unlock_level(self):
+        expected_sizes = {0: 3, 1: 3, 2: 5, 3: 6, 4: 7, 8: 7}
+        for tier in self.AFFECTED_TIERS:
+            for prestige, expected_size in expected_sizes.items():
+                pool = get_boss_pool_for_tier(tier, prestige_level=prestige)
+                assert len(pool) == expected_size, (
+                    f"tier {tier} should have {expected_size} bosses at P{prestige}, "
+                    f"got {len(pool)}"
+                )
+
+    def test_prestige2_bosses_remain_available_after_unlock(self):
+        assert BOSSES_BY_ID.keys() >= self.PRESTIGE2_IDS, (
+            f"missing P2 bosses: {self.PRESTIGE2_IDS - BOSSES_BY_ID.keys()}"
+        )
+        for tier, p2_ids in self.PRESTIGE2_BY_TIER.items():
+            for prestige in (2, 3, 4, 8):
+                ids = {
+                    boss.boss_id
+                    for boss in get_boss_pool_for_tier(tier, prestige_level=prestige)
+                }
+                assert p2_ids <= ids, f"tier {tier} P{prestige} lost P2 bosses: {p2_ids - ids}"
+
+    def test_every_gated_boss_remains_available_after_unlock(self):
+        for tier, bosses in BOSSES_BY_TIER.items():
+            gated_bosses = [boss for boss in bosses if boss.prestige_required > 0]
+            for boss in gated_bosses:
+                for prestige in range(boss.prestige_required, 9):
+                    ids = {
+                        candidate.boss_id
+                        for candidate in get_boss_pool_for_tier(tier, prestige)
+                    }
+                    assert boss.boss_id in ids, (
+                        f"tier {tier} P{prestige} lost {boss.boss_id}, "
+                        f"unlocked at P{boss.prestige_required}"
+                    )
+
     def test_pool_default_returns_full_pool(self):
         # Default prestige_level=99 is fail-open: callers that omit the
         # argument see the full pool (gated bosses included). All callers
         # that surface boss names to a player must pass the player's real
         # prestige explicitly to avoid leaking gated names.
         for tier in self.AFFECTED_TIERS:
-            # 3 grandfathered/Dota + 1 P2 + 1 P3 + 1 P4 twisted-homage = 6
-            assert len(get_boss_pool_for_tier(tier)) == 6
+            # 3 ungated + 2 P2 + 1 P3 + 1 P4 = 7.
+            assert len(get_boss_pool_for_tier(tier)) == 7
 
     def test_unaffected_tiers_unchanged(self):
         # Tiers without late-prestige additions should return 3 entries at any prestige.
@@ -1309,6 +1362,9 @@ class TestLatePrestigeBossPool:
             assert len(get_boss_pool_for_tier(tier, prestige_level=10)) == 3
 
     def test_prestige2_field_correct(self):
+        assert BOSSES_BY_ID.keys() >= self.PRESTIGE2_IDS, (
+            f"missing P2 bosses: {self.PRESTIGE2_IDS - BOSSES_BY_ID.keys()}"
+        )
         for boss_id in self.PRESTIGE2_IDS:
             boss = BOSSES_BY_ID[boss_id]
             assert boss.prestige_required == 2, f"{boss_id} prestige_required should be 2"
@@ -1324,15 +1380,109 @@ class TestLatePrestigeBossPool:
             assert BOSSES_BY_ID[boss_id].prestige_required == 0
 
     def test_prestige2_boss_combat_content_registered(self):
+        assert BOSSES_BY_ID.keys() >= self.PRESTIGE2_IDS, (
+            f"missing P2 bosses: {self.PRESTIGE2_IDS - BOSSES_BY_ID.keys()}"
+        )
         for boss_id in self.PRESTIGE2_IDS:
             boss = BOSSES_BY_ID[boss_id]
             assert boss.mechanic_pool, f"{boss_id} should have a mechanic"
             assert all(mechanic_id in MECHANIC_REGISTRY for mechanic_id in boss.mechanic_pool)
             assert boss.stinger_id in STINGER_REGISTRY
 
+        expected_new_content = {
+            "cairn_general": (
+                ("cairn_remnant", "cairn_rolling_fault", "cairn_magnetic_recall"),
+                "cairn_aftershock",
+            ),
+            "brass_croupier": (
+                ("croupier_malice_cube", "croupier_clockwork_ballet", "croupier_overdraw"),
+                "croupier_collection",
+            ),
+            "saltveil_commodore": (
+                ("saltveil_spyglass", "saltveil_chainshot", "saltveil_boarding"),
+                "saltveil_pressgang",
+            ),
+        }
+        for boss_id, (mechanic_pool, stinger_id) in expected_new_content.items():
+            boss = BOSSES_BY_ID[boss_id]
+            assert boss.mechanic_pool == mechanic_pool
+            assert boss.stinger_id == stinger_id
+
+    @pytest.mark.parametrize(
+        ("boss_id", "depth", "phase2_identity", "phase3_identity"),
+        (
+            (
+                "cairn_general",
+                150,
+                ("The Cairn General, Reformed", "The Fallen Close Ranks"),
+                ("The Buried Host", "Every Stone Takes the Order"),
+            ),
+            (
+                "brass_croupier",
+                200,
+                ("The Brass Croupier, Re-Dealt", "The House Opens Another Table"),
+                ("The Hungry Engine", "The House Was Inside the Machine"),
+            ),
+            (
+                "saltveil_commodore",
+                275,
+                ("The Saltveil Commodore, Broadside", "All Guns Below"),
+                ("The Drowned Fleet", "Every Bell Answers"),
+            ),
+        ),
+    )
+    def test_new_prestige2_bosses_keep_their_identity_across_phases(
+        self, boss_id, depth, phase2_identity, phase3_identity,
+    ):
+        from services.dig_data.bosses import (
+            BOSS_PHASE2,
+            BOSS_PHASE2_BY_ID,
+            BOSS_PHASE3,
+            BOSS_PHASE3_BY_ID,
+            get_phase2_for,
+            get_phase3_for,
+        )
+
+        assert boss_id in BOSS_PHASE2_BY_ID
+        assert boss_id in BOSS_PHASE3_BY_ID
+        phase2 = get_phase2_for(boss_id, depth)
+        phase3 = get_phase3_for(boss_id, depth)
+        assert phase2 is BOSS_PHASE2_BY_ID[boss_id]
+        assert phase3 is BOSS_PHASE3_BY_ID[boss_id]
+        assert (phase2.name, phase2.title) == phase2_identity
+        assert (phase3.name, phase3.title) == phase3_identity
+        assert phase2.depth == depth
+        assert phase3.depth == depth
+        assert phase2 != BOSS_PHASE2[depth]
+        assert phase3 != BOSS_PHASE3[depth]
+
 
 class TestLatePrestigeBossLocking:
     """_ensure_boss_locked must respect prestige_required when rolling a boss."""
+
+    @staticmethod
+    def _prefer_boss(monkeypatch, boss_id):
+        class PreferredBossRandom:
+            def choice(self, pool):
+                for boss in pool:
+                    if boss.boss_id == boss_id:
+                        return boss
+                available = [boss.boss_id for boss in pool]
+                raise AssertionError(f"{boss_id} unavailable in pool: {available}")
+
+        monkeypatch.setattr(random, "Random", PreferredBossRandom)
+
+    @staticmethod
+    def _reject_boss(monkeypatch, boss_id):
+        class RejectBossRandom:
+            def choice(self, pool):
+                available = [boss.boss_id for boss in pool]
+                assert boss_id not in available, (
+                    f"{boss_id} should still be locked: {available}"
+                )
+                return pool[0]
+
+        monkeypatch.setattr(random, "Random", RejectBossRandom)
 
     def test_p0_player_never_locks_late_prestige_boss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -1361,6 +1511,7 @@ class TestLatePrestigeBossLocking:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
+        self._prefer_boss(monkeypatch, "lilith")
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
             depth=200, prestige_level=3, boss_progress="{}",
@@ -1371,8 +1522,7 @@ class TestLatePrestigeBossLocking:
             tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
             boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 200)
             seen.add(boss.boss_id)
-        # Over 50 rolls of a 4-boss pool, the late-prestige boss should appear at least once
-        # with overwhelming probability (P(missing) = 0.75^50 ≈ 5.7e-7).
+        # The chooser is pinned so this proves runtime selection, not probability.
         assert "lilith" in seen, "P3 player should be able to lock the P3 boss"
 
     def test_p1_player_never_locks_prestige2_boss(
@@ -1402,6 +1552,7 @@ class TestLatePrestigeBossLocking:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
+        self._prefer_boss(monkeypatch, "aegis_warden")
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
             depth=150, prestige_level=2, boss_progress="{}",
@@ -1413,6 +1564,64 @@ class TestLatePrestigeBossLocking:
             boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 150)
             seen.add(boss.boss_id)
         assert "aegis_warden" in seen, "P2 player should be able to lock the P2 boss"
+
+    @pytest.mark.parametrize(
+        ("tier", "boss_id"),
+        (
+            (150, "cairn_general"),
+            (200, "brass_croupier"),
+            (275, "saltveil_commodore"),
+        ),
+    )
+    def test_p1_player_cannot_lock_new_prestige2_boss(
+        self, dig_service, dig_repo, player_repository, monkeypatch, tier, boss_id,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        self._reject_boss(monkeypatch, boss_id)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=tier, prestige_level=1, boss_progress="{}",
+        )
+
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, tier)
+
+        assert boss.boss_id != boss_id
+        persisted = json.loads(dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"])
+        assert persisted[str(tier)]["boss_id"] != boss_id
+
+    @pytest.mark.parametrize("prestige_level", (2, 3, 4, 8))
+    @pytest.mark.parametrize(
+        ("tier", "boss_id"),
+        (
+            (150, "cairn_general"),
+            (200, "brass_croupier"),
+            (275, "saltveil_commodore"),
+        ),
+    )
+    def test_new_prestige2_boss_locks_at_and_after_unlock(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+        prestige_level, tier, boss_id,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        self._prefer_boss(monkeypatch, boss_id)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=tier, prestige_level=prestige_level, boss_progress="{}",
+        )
+
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, tier)
+
+        assert boss.boss_id == boss_id
+        persisted = json.loads(dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"])
+        assert persisted[str(tier)]["boss_id"] == boss_id
 
 
 # --- _DictObj nested-dict access (Bug: render crash on pinnacle relic) ----

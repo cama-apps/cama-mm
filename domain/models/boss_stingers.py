@@ -159,6 +159,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_NO_SCOUT_NEXT_DIG,
         flavor_on_loss="Something was said. You can't unhear it. The path won't show itself.",
     ),
+    "cairn_aftershock": StingerEffect(
+        id="cairn_aftershock",
+        extra_knockback=6,
+        extended_cooldown_s=0,
+        cursed_status=None,
+        flavor_on_loss="The General's stomp sends falling stone after you, carrying you farther up the shaft.",
+    ),
     # -------------------------- Tier 200 --------------------------
     "chronofrost_stillness": StingerEffect(
         id="chronofrost_stillness",
@@ -195,6 +202,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The bleeding doesn't stop on the way back. The next descent is slower for it.",
     ),
+    "croupier_collection": StingerEffect(
+        id="croupier_collection",
+        extra_knockback=0,
+        extended_cooldown_s=1200,
+        cursed_status=None,
+        flavor_on_loss="Brass collectors lock your gear in a cage until the hourglass empties.",
+    ),
     # -------------------------- Tier 275 --------------------------
     "nameless_erase": StingerEffect(
         id="nameless_erase",
@@ -230,6 +244,13 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extended_cooldown_s=900,
         cursed_status=None,
         flavor_on_loss="The pit pulled. You came out a long way back, with less to show for it.",
+    ),
+    "saltveil_pressgang": StingerEffect(
+        id="saltveil_pressgang",
+        extra_knockback=10,
+        extended_cooldown_s=900,
+        cursed_status=None,
+        flavor_on_loss="The Commodore's drowned crew hauls you even farther back to bail the buried ship.",
     ),
     # ------------------- Prestige-4 additions -------------------
     "blightcoil_venom": StingerEffect(

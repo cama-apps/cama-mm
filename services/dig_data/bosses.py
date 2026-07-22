@@ -732,10 +732,46 @@ _DOTA_BOSSES: dict[str, BossDef] = {
 
 
 # ---------------------------------------------------------------------------
-# Prestige-2 crossover-inspired bosses. These unlock earlier than the current
-# late-prestige additions and seed one new candidate into each deep-tier pool.
+# Prestige-2 bosses. These unlock earlier than the late-prestige additions and
+# provide two prestige-2 candidates in each deep-tier pool.
 # ---------------------------------------------------------------------------
 _PRESTIGE2_BOSSES: dict[str, BossDef] = {
+    "cairn_general": BossDef(
+        depth=150,
+        boss_id="cairn_general",
+        name="The Cairn General",
+        title="Commander of the Buried Host",
+        ascii_art=(
+            "     .-^-._\n"
+            "    / o o \\\n"
+            "   | [===] |\n"
+            "   | /|||\\ |\n"
+            "  _|_|||||_|_\n"
+            "    /_/_\\_\\\n"
+        ),
+        dialogue=[
+            "The host has held this line since the mountain learned silence.",
+            "You return. Good. My formations needed a moving target.",
+            "Stone remembers the weight of every command I give.",
+            "YOU AGAIN. The fallen have already found their places.",
+            "Pass, then. A commander knows when the field belongs to another.",
+        ],
+        mechanic_pool=("cairn_remnant", "cairn_rolling_fault", "cairn_magnetic_recall"),
+        stinger_id="cairn_aftershock",
+        prestige_required=2,
+        victory_lines=(
+            "{boss}'s formation loosens, one silent stone at a time.",
+            "The jade helm tips. The buried host finally stands down.",
+            "A last command fades beneath the rubble. The path opens.",
+            "{boss} salutes with a cracked gauntlet, then becomes part of the wall.",
+        ),
+        defeat_lines=(
+            "The ground rolls beneath you. {boss} never has to raise his voice.",
+            "Loose stones gather around your boots and decide where you are going.",
+            "{boss} recalls the fallen. They return before you do.",
+            "An aftershock writes the end of the battle in dust.",
+        ),
+    ),
     "aegis_warden": BossDef(
         depth=150,
         boss_id="aegis_warden",
@@ -808,6 +844,42 @@ _PRESTIGE2_BOSSES: dict[str, BossDef] = {
             "You retreat carrying a hand of bad options. {boss} drew better.",
         ),
     ),
+    "brass_croupier": BossDef(
+        depth=200,
+        boss_id="brass_croupier",
+        name="The Brass Croupier",
+        title="Dealer of the Hungry Engine",
+        ascii_art=(
+            "    .-===-.\n"
+            "   / o   o \\\n"
+            "  |  [#]  |\n"
+            "  | /|=|\\ |\n"
+            "   \\_|||_/\n"
+            "    /_|_|_\\\n"
+        ),
+        dialogue=[
+            "Place your courage on the table. The engine accepts all denominations.",
+            "Back for another hand? The gears adore a repeat wager.",
+            "Every shape has a price. Yours is becoming interesting.",
+            "YOU AGAIN. The wheel has learned the rhythm of your fear.",
+            "Take your winnings. The house will be hungry when you return.",
+        ],
+        mechanic_pool=("croupier_malice_cube", "croupier_clockwork_ballet", "croupier_overdraw"),
+        stinger_id="croupier_collection",
+        prestige_required=2,
+        victory_lines=(
+            "{boss}'s brass fingers stop counting. The engine misses a turn.",
+            "The final wager lands face down. You leave before it can be read.",
+            "{boss} bows as the gears unwind into harmless silence.",
+            "The table folds itself away. For once, the house has lost track.",
+        ),
+        defeat_lines=(
+            "{boss} collects without touching you. The ledger closes anyway.",
+            "The engine takes one last turn, and your luck goes with it.",
+            "A brass hand deals you the only card you did not want.",
+            "{boss} calls the wager settled. The tunnel agrees.",
+        ),
+    ),
     "emberwright": BossDef(
         depth=275,
         boss_id="emberwright",
@@ -842,6 +914,42 @@ _PRESTIGE2_BOSSES: dict[str, BossDef] = {
             "The forge accepts your panic as fuel. {boss} approves the burn.",
             "{boss} overclocks the room. You leave before your bones glow.",
             "You wake up tasting iron and lantern smoke. {boss} is still working.",
+        ),
+    ),
+    "saltveil_commodore": BossDef(
+        depth=275,
+        boss_id="saltveil_commodore",
+        name="The Saltveil Commodore",
+        title="Captain of the Buried Broadside",
+        ascii_art=(
+            "      .-.-.\n"
+            "   __/ o o \\__\n"
+            "  /==\\_>_/==\\\n"
+            "  |  /|||\\  |\n"
+            "  |_/_____|_|\n"
+            "    ~|_|_|~\n"
+        ),
+        dialogue=[
+            "Spyglass up. One digger in range, and nowhere dry to run.",
+            "Back aboard? The deep has kept your berth warm.",
+            "My broadside is loaded with stones that still remember the sea.",
+            "YOU AGAIN. Cast the chains. This one knows the way down.",
+            "Sail on, then. The bell will call you below again.",
+        ],
+        mechanic_pool=("saltveil_spyglass", "saltveil_chainshot", "saltveil_boarding"),
+        stinger_id="saltveil_pressgang",
+        prestige_required=2,
+        victory_lines=(
+            "{boss}'s bell gives one low note and the buried deck goes still.",
+            "The commodore lowers the spyglass. The broadside will not follow.",
+            "Chains slacken across the stone. You step over the silent gangway.",
+            "{boss} salutes from beneath the salt-dark, then sinks from sight.",
+        ),
+        defeat_lines=(
+            "Chainshot catches the tunnel wall and brings it down around you.",
+            "{boss} reads your retreat through the spyglass before you choose it.",
+            "The boarding bell rings. Too many wet boots answer.",
+            "A diving bell closes over the light. You wake much higher up.",
         ),
     ),
 }
@@ -967,19 +1075,19 @@ _PRESTIGE4_BOSSES: dict[str, BossDef] = {
 }
 
 
-# BOSSES_BY_TIER: new canonical per-tier grouping. The first entry per tier
-# is the grandfathered fantasy boss (preserved from ``BOSSES``); the remaining
-# entries are the Dota-themed additions. All gameplay code that selects
-# which boss a tunnel faces should go through this table via
+# BOSSES_BY_TIER: canonical per-tier grouping. The first entry per tier is the
+# grandfathered fantasy boss (preserved from ``BOSSES``); the remaining entries
+# cover the themed and prestige-gated roster additions. All gameplay code that
+# selects which boss a tunnel faces should go through this table via
 # ``get_boss_pool_for_tier`` or ``get_boss_by_id``.
 BOSSES_BY_TIER: dict[int, list[BossDef]] = {
     25:  [BOSSES[25],  _DOTA_BOSSES["pudge"],            _DOTA_BOSSES["ogre_magi"]],
     50:  [BOSSES[50],  _DOTA_BOSSES["crystal_maiden"],   _DOTA_BOSSES["tusk"]],
     75:  [BOSSES[75],  _DOTA_BOSSES["lina"],             _DOTA_BOSSES["doom"]],
     100: [BOSSES[100], _DOTA_BOSSES["spectre"],          _DOTA_BOSSES["void_spirit"]],
-    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _PRESTIGE2_BOSSES["aegis_warden"], _DOTA_BOSSES["xalatath"],  _PRESTIGE4_BOSSES["blightcoil"]],
-    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _PRESTIGE2_BOSSES["heartspire"],   _DOTA_BOSSES["lilith"],    _PRESTIGE4_BOSSES["rimebound_king"]],
-    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _PRESTIGE2_BOSSES["emberwright"],  _DOTA_BOSSES["underlord"], _PRESTIGE4_BOSSES["spineback"]],
+    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"],  _PRESTIGE2_BOSSES["aegis_warden"], _PRESTIGE2_BOSSES["cairn_general"],      _DOTA_BOSSES["xalatath"],  _PRESTIGE4_BOSSES["blightcoil"]],
+    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"],       _PRESTIGE2_BOSSES["heartspire"],   _PRESTIGE2_BOSSES["brass_croupier"],    _DOTA_BOSSES["lilith"],    _PRESTIGE4_BOSSES["rimebound_king"]],
+    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"],  _PRESTIGE2_BOSSES["emberwright"],  _PRESTIGE2_BOSSES["saltveil_commodore"], _DOTA_BOSSES["underlord"], _PRESTIGE4_BOSSES["spineback"]],
 }
 
 
@@ -1095,18 +1203,21 @@ BOSS_ARCHETYPE_BY_ID: dict[str, str] = {
     "treant_protector":    "tank",
     "broodmother":         "glass_cannon",
     "aegis_warden":        "tank",
+    "cairn_general":       "bruiser",
     "xalatath":            "slippery",
     # Tier 200
     "chronofrost":         "slippery",
     "faceless_void":       "slippery",
     "weaver":              "slippery",
     "heartspire":          "bruiser",
+    "brass_croupier":      "glass_cannon",
     "lilith":              "glass_cannon",
     # Tier 275
     "nameless_depth":      "tank",
     "oracle":              "glass_cannon",
     "terrorblade":         "glass_cannon",
     "emberwright":         "bruiser",
+    "saltveil_commodore":  "tank",
     "underlord":           "tank",
     # Prestige-4 additions
     "blightcoil":          "bruiser",
@@ -1310,10 +1421,43 @@ BOSS_PHASE3: dict[int, BossPhase3Def] = {
 }
 
 
-# Per-boss phase overrides — bespoke escalation for the prestige-4 bosses and the
-# two reskins so they don't borrow another boss's phase dialogue. Any boss without
-# an entry here falls back to the depth-keyed dicts above, via the resolvers.
+# Per-boss phase overrides — bespoke escalation for bosses that should not borrow
+# another boss's phase identity. Any boss without an entry here falls back to the
+# depth-keyed dictionaries above via the resolvers.
 BOSS_PHASE2_BY_ID: dict[str, BossPhase2Def] = {
+    "cairn_general": BossPhase2Def(
+        depth=150,
+        name="The Cairn General, Reformed",
+        title="The Fallen Close Ranks",
+        dialogue=[
+            "You scattered soldiers, not the command. Form again.",
+            "Every broken shield returns as a heavier one.",
+            "The line bends. The line does not open.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    "brass_croupier": BossPhase2Def(
+        depth=200,
+        name="The Brass Croupier, Re-Dealt",
+        title="The House Opens Another Table",
+        dialogue=[
+            "One hand settled. The engine deals from beneath the table.",
+            "The cube has more faces than you counted. Choose again.",
+            "Your winnings were only the ante.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    "saltveil_commodore": BossPhase2Def(
+        depth=275,
+        name="The Saltveil Commodore, Broadside",
+        title="All Guns Below",
+        dialogue=[
+            "That was the warning shot. Run out the lower guns.",
+            "The buried deck rolls beneath you. The crew does not stagger.",
+            "Spyglass down. At this range, I need no lens.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
     "blightcoil": BossPhase2Def(
         depth=150,
         name="The Blightcoil, Unbudding",
@@ -1372,6 +1516,39 @@ BOSS_PHASE2_BY_ID: dict[str, BossPhase2Def] = {
 }
 
 BOSS_PHASE3_BY_ID: dict[str, BossPhase3Def] = {
+    "cairn_general": BossPhase3Def(
+        depth=150,
+        name="The Buried Host",
+        title="Every Stone Takes the Order",
+        dialogue=[
+            "One helm was enough for a general. An army needs the whole mountain.",
+            "Every cairn is a soldier. Every soldier has heard the command.",
+            "There is no gap in the line now. There is only the line.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    "brass_croupier": BossPhase3Def(
+        depth=200,
+        name="The Hungry Engine",
+        title="The House Was Inside the Machine",
+        dialogue=[
+            "No dealer. No table. Only the wager turning itself.",
+            "Every gear is a hand, and every hand is against you.",
+            "The engine has counted everything except its own loss.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    "saltveil_commodore": BossPhase3Def(
+        depth=275,
+        name="The Drowned Fleet",
+        title="Every Bell Answers",
+        dialogue=[
+            "One hull was a courtesy. The deep kept the rest in reserve.",
+            "Every chain draws tight. Every buried gun finds the range.",
+            "The fleet has no horizon here, so it sails toward you.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
     "blightcoil": BossPhase3Def(
         depth=150,
         name="The Whole Garden",
@@ -2452,6 +2629,32 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         ],
     },
     # ---- Prestige-2 additions ------------------------------------------
+    "cairn_general": {
+        "first_meet": [
+            "The buried host holds. You are the only thing still moving.",
+            "A jade hand rises from the cairn. The general is already watching.",
+            "Form ranks, he says softly. The stones obey.",
+        ],
+        "after_defeat": [
+            "You broke the line. The remnant host is rebuilding it.",
+            "Streak {streak}. The general marks every advance.",
+            "Round two. The formation has learned your weight.",
+        ],
+        "after_retreat": [
+            "Withdraw. The field remains where it was.",
+            "Go. The fallen are already rolling back into place.",
+            "Retreat is a command. He permits it this once.",
+        ],
+        "after_close_win": [
+            "Close. One more stone and the line would have held.",
+            "You found the fault in the formation. It will be sealed.",
+            "Almost. The general calls that a useful lesson.",
+        ],
+        "after_scout": [
+            "Study the ranks. They do not blink.",
+            "The spy stones study you back from the rubble.",
+        ],
+    },
     "aegis_warden": {
         "first_meet": [
             "You brought one life. I brought the one after it.",
@@ -2504,6 +2707,32 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
             "The spire shows you a plan. It does not show the cost.",
         ],
     },
+    "brass_croupier": {
+        "first_meet": [
+            "The table is set. The engine has saved you a seat.",
+            "Place a wager. The croupier smiles with too many gears.",
+            "Every hand ends eventually. This one begins now.",
+        ],
+        "after_defeat": [
+            "You took the pot. The engine is calculating interest.",
+            "Streak {streak}. The house notices patterns like that.",
+            "Round two. The deck has been sharpened.",
+        ],
+        "after_retreat": [
+            "Fold, then. The table remembers your chips.",
+            "Go. The wheel will keep turning without you.",
+            "A sensible wager is still a wager. The house thanks you.",
+        ],
+        "after_close_win": [
+            "Close. The house nearly balanced the ledger.",
+            "A narrow payout. The gears sound disappointed.",
+            "Almost. The croupier loves a hand with teeth.",
+        ],
+        "after_scout": [
+            "Inspect the table. It has more sides than it should.",
+            "The croupier lets you count the gears. Do not lose track.",
+        ],
+    },
     "emberwright": {
         "first_meet": [
             "The forge is awake. Try to be useful fuel.",
@@ -2528,6 +2757,32 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         "after_scout": [
             "Inspect the engine. Mind the pieces that inspect back.",
             "Look into the forge. It has opinions about your lantern.",
+        ],
+    },
+    "saltveil_commodore": {
+        "first_meet": [
+            "A bell sounds below the stone. The commodore has sighted you.",
+            "The spyglass turns. Somewhere, chains begin to drag.",
+            "Welcome aboard. The deck is buried, but the rules remain.",
+        ],
+        "after_defeat": [
+            "You silenced the bell. The crew is taking soundings.",
+            "Streak {streak}. The commodore marks it in a salt-stiff log.",
+            "Round two. The broadside has been reloaded.",
+        ],
+        "after_retreat": [
+            "Climb away. The spyglass follows until the dark takes you.",
+            "Go. The bell will ring for another crew.",
+            "Retreat accepted. The commodore calls it a change of tide.",
+        ],
+        "after_close_win": [
+            "Close. A chain-link more and you would have joined the crew.",
+            "You slipped the broadside by a breath. The sea keeps count.",
+            "Almost. The commodore adjusts the spyglass.",
+        ],
+        "after_scout": [
+            "Look through the glass. It shows only depths you have not reached.",
+            "The buried deck creaks under inspection. No water moves.",
         ],
     },
     # ---- Late-prestige additions (only appear at prestige>=3) ----------

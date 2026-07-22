@@ -147,9 +147,9 @@ class TestRosterShape:
     """Cross-referential invariants between BossDef, mechanics, and stingers."""
 
     def test_pool_size_per_tier(self):
-        # Tiers 25/50/75/100 have 3 bosses each. Tiers 150/200/275 have 6
-        # (a P2 crossover boss + a P3 late-prestige addition + a P4 twisted-homage addition).
-        expected = {25: 3, 50: 3, 75: 3, 100: 3, 150: 6, 200: 6, 275: 6}
+        # Tiers 25/50/75/100 have 3 bosses each. Tiers 150/200/275 have 7
+        # (two P2 bosses, plus P3 and P4 additions).
+        expected = {25: 3, 50: 3, 75: 3, 100: 3, 150: 7, 200: 7, 275: 7}
         for tier, pool in BOSSES_BY_TIER.items():
             assert len(pool) == expected[tier], f"tier {tier} has {len(pool)} bosses"
 
@@ -178,8 +178,8 @@ class TestRosterShape:
     def test_boss_ids_unique(self):
         all_ids = [b.boss_id for pool in BOSSES_BY_TIER.values() for b in pool]
         assert len(all_ids) == len(set(all_ids))
-        # 21 base + 3 P2 crossover + 3 late-prestige (P3) + 3 twisted-homage (P4) additions.
-        assert len(all_ids) == 30
+        # 21 base + 6 P2 + 3 P3 + 3 P4 additions.
+        assert len(all_ids) == 33
 
 
 class TestMechanicInvariants:
@@ -698,6 +698,13 @@ class TestApplyOptionOutcome:
 
 class TestStingers:
     """Stinger application on loss (extra_knockback / extended_cooldown_s / curse)."""
+
+    def test_new_additive_knockback_flavor_describes_extra_distance(self):
+        for stinger_id in ("cairn_aftershock", "saltveil_pressgang"):
+            flavor = STINGER_REGISTRY[stinger_id].flavor_on_loss.casefold()
+            assert "farther" in flavor, (
+                f"{stinger_id} flavor should describe its knockback as additive"
+            )
 
     def test_extra_knockback_widens_loss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
