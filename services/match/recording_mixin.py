@@ -220,11 +220,15 @@ class RecordingMixin:
         Returns one dict per successful repayment (order follows input)."""
         if not self.loan_service:
             return []
+        borrower_ids = self.loan_service.get_outstanding_borrower_ids(
+            participant_ids, guild_id
+        )
         repayments: list[dict] = []
+        attempted_ids: set[int] = set()
         for player_id in participant_ids:
-            state = self.loan_service.get_state(player_id, guild_id)
-            if not state.has_outstanding_loan:
+            if player_id not in borrower_ids or player_id in attempted_ids:
                 continue
+            attempted_ids.add(player_id)
             result = self.loan_service.execute_repayment(player_id, guild_id)
             if not result.success:
                 continue

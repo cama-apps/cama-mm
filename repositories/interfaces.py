@@ -1321,6 +1321,11 @@ class ILoanRepository(ABC):
     def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None: ...
 
     @abstractmethod
+    def get_outstanding_borrower_ids(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> set[int]: ...
+
+    @abstractmethod
     def upsert_state(
         self,
         discord_id: int,
