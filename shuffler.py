@@ -595,7 +595,7 @@ class BalancedShuffler:
         scoring_context: _ShuffleScoringContext | None = None,
     ) -> tuple[_RoleAssignmentMetrics, ...]:
         """Return role metrics for a five-player team, reusing request-local work."""
-        player_key = tuple(id(player) for player in players)
+        player_key = tuple(map(id, players))
         cache_key = (player_key, max_assignments)
         if scoring_context is not None:
             cached = scoring_context.team_metrics.get(cache_key)
@@ -628,7 +628,7 @@ class BalancedShuffler:
     ) -> _RoleAssignmentMetrics:
         """Return score components for a team's selected role assignment."""
         roles = tuple(team.ensure_role_assignments())
-        player_key = tuple(id(player) for player in team.players)
+        player_key = tuple(map(id, team.players))
         cache_key = (player_key, roles)
         if scoring_context is not None:
             cached = scoring_context.assigned_metrics.get(cache_key)
@@ -717,22 +717,36 @@ class BalancedShuffler:
             team2_players, max_assignments_per_team, _scoring_context
         )
 
-        # Try all combinations of valid role assignments
+        # Try all combinations of valid role assignments. Keep the hot
+        # assignment-pair arithmetic local: this loop runs hundreds of
+        # thousands of times for a 14-player pool.
+        off_role_flat_penalty = self.off_role_flat_penalty
+        role_matchup_delta_weight = self.role_matchup_delta_weight
         for team1_assignment in team1_metrics:
+            team1_value = team1_assignment.team_value
+            team1_off_role_penalty = (
+                team1_assignment.off_role_count * off_role_flat_penalty
+            )
+            t1_values = team1_assignment.role_values
             for team2_assignment in team2_metrics:
-                value_diff = abs(
-                    team1_assignment.team_value - team2_assignment.team_value
-                )
+                value_diff = abs(team1_value - team2_assignment.team_value)
 
                 off_role_penalty = (
-                    team1_assignment.off_role_count + team2_assignment.off_role_count
-                ) * self.off_role_flat_penalty
-
-                role_matchup_delta = self._role_matchup_delta_from_metrics(
-                    team1_assignment, team2_assignment
+                    team1_off_role_penalty
+                    + team2_assignment.off_role_count * off_role_flat_penalty
                 )
 
-                weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
+                t2_values = team2_assignment.role_values
+                role_matchup_delta = (
+                    abs(t1_values[0] - t2_values[2])
+                    + abs(t2_values[0] - t1_values[2])
+                    + abs(t1_values[1] - t2_values[1])
+                    + abs(t1_values[3] - t2_values[4])
+                    + abs(t2_values[3] - t1_values[4])
+                )
+                weighted_role_delta = (
+                    role_matchup_delta * role_matchup_delta_weight
+                )
                 total_score = (
                     value_diff + off_role_penalty + weighted_role_delta - rd_priority
                     + avoid_penalty + deal_penalty + region_penalty
