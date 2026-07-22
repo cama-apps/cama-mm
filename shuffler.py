@@ -7,7 +7,7 @@ import itertools
 import logging
 import math
 import random
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from config import (
@@ -489,7 +489,9 @@ class BalancedShuffler:
         return team1, team2, excluded, total_score
 
 
-    def _get_cached_role_assignments(self, players: list[Player]) -> list[list[str]]:
+    def _get_cached_role_assignments(
+        self, players: list[Player]
+    ) -> tuple[tuple[str, ...], ...]:
         """
         Get optimal role assignments using service-layer caching.
 
@@ -500,18 +502,17 @@ class BalancedShuffler:
             players: List of 5 players
 
         Returns:
-            List of optimal role assignment permutations
+            Immutable tuple of optimal role assignment permutations
         """
         player_roles_key = tuple(
             tuple(p.preferred_roles) if p.preferred_roles else () for p in players
         )
-        cached_result = get_cached_role_assignments(player_roles_key)
-        return [list(assignment) for assignment in cached_result]
+        return get_cached_role_assignments(player_roles_key)
 
     def _role_assignment_metrics(
         self,
         players: list[Player],
-        role_assignments: list[str],
+        role_assignments: Sequence[str],
         player_values: list[float],
     ) -> _RoleAssignmentMetrics:
         """Precompute the score inputs reused for every opposing assignment."""
