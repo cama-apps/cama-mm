@@ -415,7 +415,7 @@ class WrappedCog(commands.Cog):
             if pnl_series:
                 player_stats = gambling_stats.get_player_stats(target_user_id, guild_id)
                 if player_stats:
-                    degen = gambling_stats.calculate_degen_score(target_user_id, guild_id)
+                    degen = player_stats.degen_score
                     gamba_stats = {
                         "total_bets": player_stats.total_bets,
                         "win_rate": player_stats.win_rate,

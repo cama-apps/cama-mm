@@ -3,6 +3,7 @@ Tests for gambling statistics and degen score functionality.
 """
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -243,6 +244,40 @@ class TestGambaStats:
         assert stats.win_rate == pytest.approx(2/3)
         assert stats.net_pnl == 10  # +10 +10 -10
         assert stats.total_wagered == 30
+
+    def test_get_player_stats_reuses_history_and_leverage_data(
+        self, gambling_stats_service, repositories, monkeypatch
+    ):
+        """Degen scoring must not repeat the two primary bet-data reads."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+        discord_id = _setup_player(player_repo, balance=200)
+        _place_and_settle_bet(
+            bet_repo,
+            match_repo,
+            player_repo,
+            discord_id,
+            10,
+            "radiant",
+            "radiant",
+            leverage=2,
+        )
+
+        history_spy = MagicMock(wraps=bet_repo.get_player_bet_history)
+        leverage_spy = MagicMock(wraps=bet_repo.get_player_leverage_distribution)
+        monkeypatch.setattr(bet_repo, "get_player_bet_history", history_spy)
+        monkeypatch.setattr(
+            bet_repo,
+            "get_player_leverage_distribution",
+            leverage_spy,
+        )
+
+        stats = gambling_stats_service.get_player_stats(discord_id, guild_id=0)
+
+        assert stats is not None
+        history_spy.assert_called_once_with(discord_id, 0)
+        leverage_spy.assert_called_once_with(discord_id, 0)
 
     def test_streak_calculation(self, gambling_stats_service, repositories):
         """Test that streaks are calculated correctly."""

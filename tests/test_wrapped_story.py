@@ -16,6 +16,7 @@ Covers:
 
 import io
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -971,6 +972,55 @@ class TestSelectAwardsForViewer:
         result = select_awards_for_viewer(awards, viewer_id=1)
         assert len(result) == 6
         assert all(a.discord_id != 1 for a in result)
+
+
+class TestWrappedGamblingData:
+    def test_reuses_degen_score_from_player_stats(self):
+        from commands.wrapped import WrappedCog
+
+        embedded_degen = SimpleNamespace(
+            total=73,
+            title="Degenerate",
+            emoji="🎰",
+        )
+        player_stats = SimpleNamespace(
+            total_bets=12,
+            win_rate=0.5,
+            net_pnl=-40,
+            roi=-0.25,
+            degen_score=embedded_degen,
+        )
+        pnl_series = [(1, -10), (2, -40)]
+        gambling_stats = MagicMock()
+        gambling_stats.get_cumulative_pnl_series.return_value = pnl_series
+        gambling_stats.get_player_stats.return_value = player_stats
+        gambling_stats.calculate_degen_score.return_value = SimpleNamespace(
+            total=99,
+            title="Wrong duplicate result",
+            emoji="❌",
+        )
+        bot = SimpleNamespace(
+            wrapped_service=MagicMock(),
+            gambling_stats_service=gambling_stats,
+            match_repo=None,
+        )
+
+        result = WrappedCog(bot)._fetch_all_wrapped_data(42, 2026, 111)
+
+        assert result[7] == (
+            pnl_series,
+            {
+                "total_bets": 12,
+                "win_rate": 0.5,
+                "net_pnl": -40,
+                "roi": -0.25,
+                "degen_score": 73,
+                "degen_title": "Degenerate",
+                "degen_emoji": "🎰",
+            },
+        )
+        gambling_stats.get_player_stats.assert_called_once_with(111, 42)
+        gambling_stats.calculate_degen_score.assert_not_called()
 
 
 class TestDrawAwardsGrid:
