@@ -105,11 +105,11 @@ class ManaService:
         return row["assigned_date"] == get_today_pst()
 
     def get_current_mana(self, discord_id: int, guild_id: int | None) -> dict | None:
-        """Return {land, color, assigned_date} or None if never assigned.
+        """Return current mana details or ``None`` if never assigned.
 
-        Always returns the assigned land regardless of tap (consumed) state —
-        callers who need to suppress effects should also check
-        :meth:`is_mana_consumed`.
+        The result includes land, color, emoji, assigned date, Guardian capacity,
+        and whether today's mana was consumed. A stale assignment always reports
+        ``consumed=False`` and zero Guardian capacity.
         """
         row = self.mana_repo.get_mana(discord_id, guild_id)
         if row is None:

@@ -100,6 +100,7 @@ class _StubManaService:
             "color": self._color,
             "emoji": "?",
             "assigned_date": get_today_pst(),
+            "consumed": self._consumed,
         }
 
     def is_mana_consumed(self, discord_id, guild_id):
