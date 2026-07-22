@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from commands.betting_helpers.wheel_outcomes import (
+    WheelOutcomeContext,
+    WheelOutcomeProcessor,
+    WheelOutcomeState,
+)
 from infrastructure.schema_manager import SchemaManager
 from repositories.buff_repository import BuffRepository
 from repositories.loan_repository import LoanRepository
@@ -193,6 +200,209 @@ def test_shared_sanctuary_pool_is_consumed_by_caster_and_ally(protection_stack):
             (sanctuary_id,),
         ).fetchone()
     assert data is not None and data[0] == 1
+
+
+def test_hostile_loss_batch_preserves_order_pools_destinations_and_failures(
+    protection_stack, monkeypatch
+):
+    service = protection_stack["service"]
+    repo = protection_stack["repo"]
+    players = protection_stack["players"]
+    buffs = protection_stack["buffs"]
+    buff_repo = protection_stack["buff_repo"]
+    loans = protection_stack["loans"]
+    for discord_id, balance in (
+        (10, 200),
+        (11, 200),
+        (12, 100),
+        (13, 100),
+        (99, 0),
+    ):
+        _player(players, discord_id, balance)
+    sanctuary_id = buffs.grant_sanctuary(10, TEST_GUILD_ID, 11)
+
+    connection_count = 0
+    original_get_connection = repo.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
+    monkeypatch.setattr(repo, "get_connection", counted_get_connection)
+    losses = [
+        {
+            "victim_id": 10,
+            "guild_id": TEST_GUILD_ID,
+            "amount": 100,
+            "kind": "lightning_bolt",
+            "actor_id": 99,
+            "event_key": "batch:10",
+            "destination": "reserve",
+            "metadata": {"order": 0},
+        },
+        {
+            "victim_id": 404,
+            "guild_id": TEST_GUILD_ID,
+            "amount": 20,
+            "kind": "wildfire",
+            "actor_id": 99,
+            "event_key": "batch:missing",
+            "destination": "burn",
+            "metadata": {"order": 1},
+        },
+        {
+            "victim_id": 11,
+            "guild_id": TEST_GUILD_ID,
+            "amount": 80,
+            "kind": "soul_harvest",
+            "actor_id": 99,
+            "event_key": "batch:11",
+            "destination": "player",
+            "recipient_id": 99,
+            "metadata": {"order": 2},
+        },
+        {
+            "victim_id": 12,
+            "guild_id": TEST_GUILD_ID,
+            "amount": 10,
+            "kind": "pyroclasm",
+            "actor_id": 99,
+            "event_key": "batch:12",
+            "destination": "burn",
+            "metadata": {"order": 3},
+        },
+        {
+            "victim_id": 13,
+            "guild_id": TEST_GUILD_ID,
+            "amount": 10,
+            "kind": "recession",
+            "actor_id": 99,
+            "event_key": "batch:13",
+            "destination": "reserve",
+            "metadata": {"order": 4},
+        },
+    ]
+
+    outcomes = service.apply_hostile_losses(losses)
+
+    assert connection_count == 1
+    assert [(outcomes[index].absorbed, outcomes[index].applied) for index in (0, 2, 3, 4)] == [
+        (100, 0),
+        (50, 30),
+        (0, 10),
+        (0, 10),
+    ]
+    assert isinstance(outcomes[1], ValueError)
+    assert str(outcomes[1]) == "victim is not registered in this guild"
+    assert outcomes[2].destination_balance_before == 0
+    assert outcomes[2].destination_balance_after == 30
+    assert players.get_balance(10, TEST_GUILD_ID) == 200
+    assert players.get_balance(11, TEST_GUILD_ID) == 170
+    assert players.get_balance(12, TEST_GUILD_ID) == 90
+    assert players.get_balance(13, TEST_GUILD_ID) == 90
+    assert players.get_balance(99, TEST_GUILD_ID) == 30
+    assert loans.get_nonprofit_fund(TEST_GUILD_ID) == 10
+    assert buff_repo.active_for(10, TEST_GUILD_ID, "sanctuary") == []
+
+    with sqlite3.connect(protection_stack["db_path"]) as conn:
+        event_rows = conn.execute(
+            """
+            SELECT event_key, destination, metadata
+            FROM hostile_loss_events
+            WHERE event_key LIKE 'batch:%'
+            ORDER BY event_id
+            """
+        ).fetchall()
+        pool_row = conn.execute(
+            "SELECT triggered, data FROM manashop_buffs WHERE id = ?",
+            (sanctuary_id,),
+        ).fetchone()
+    assert [(row[0], row[1]) for row in event_rows] == [
+        ("batch:10", "reserve"),
+        ("batch:11", "player"),
+        ("batch:12", "burn"),
+        ("batch:13", "reserve"),
+    ]
+    assert [json.loads(row[2])["order"] for row in event_rows] == [0, 2, 3, 4]
+    assert pool_row is not None
+    assert pool_row[0] == 1
+    assert json.loads(pool_row[1])["capacity_remaining"] == 0
+
+    duplicates = service.apply_hostile_losses(losses)
+    assert connection_count == 2
+    assert [duplicates[index].duplicate for index in (0, 2, 3, 4)] == [
+        True,
+        True,
+        True,
+        True,
+    ]
+    assert isinstance(duplicates[1], ValueError)
+    assert players.get_balance(99, TEST_GUILD_ID) == 30
+    assert loans.get_nonprofit_fund(TEST_GUILD_ID) == 10
+
+
+@pytest.mark.asyncio
+async def test_wheel_multi_victim_helper_uses_real_protection_batch(protection_stack, monkeypatch):
+    service = protection_stack["service"]
+    repo = protection_stack["repo"]
+    players = protection_stack["players"]
+    _player(players, 20, 100)
+    _player(players, 21, 100)
+    _player(players, 99, 0)
+    command = SimpleNamespace(
+        bot=SimpleNamespace(protection_service=service),
+        player_service=players,
+    )
+    context = WheelOutcomeContext(
+        command=command,
+        interaction=SimpleNamespace(guild=None),
+        user_id=99,
+        guild_id=TEST_GUILD_ID,
+        bankruptcy_service=None,
+        penalty_games_remaining=0,
+        effects=None,
+        mana_effects_service=None,
+        is_bad_gamba=False,
+        hostile_event_prefix="wheel:batch",
+    )
+    processor = WheelOutcomeProcessor(
+        context,
+        WheelOutcomeState(("HEIST", "HEIST", "#000000"), 0),
+    )
+    attempts = [
+        (
+            SimpleNamespace(discord_id=20, jopacoin_balance=100),
+            10,
+            "HEIST",
+            {"destination": "player", "recipient_id": 99},
+        ),
+        (
+            SimpleNamespace(discord_id=21, jopacoin_balance=100),
+            15,
+            "HEIST",
+            {"destination": "player", "recipient_id": 99},
+        ),
+    ]
+    connection_count = 0
+    original_get_connection = repo.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
+    monkeypatch.setattr(repo, "get_connection", counted_get_connection)
+
+    outcomes = await processor._hostile_loss_batch(attempts)
+
+    assert connection_count == 1
+    assert [outcome.applied for outcome in outcomes] == [10, 15]
+    assert [outcome.destination_balance_after for outcome in outcomes] == [10, 25]
+    assert all(outcome.centralized for outcome in outcomes)
+    assert players.get_balance(20, TEST_GUILD_ID) == 90
+    assert players.get_balance(21, TEST_GUILD_ID) == 85
+    assert players.get_balance(99, TEST_GUILD_ID) == 25
 
 
 def test_reprieve_then_guardian_compound_in_documented_order(protection_stack):

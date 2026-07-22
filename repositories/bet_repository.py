@@ -952,6 +952,23 @@ class BetRepository(BaseRepository, IBetRepository):
                 finally:
                     self._clear_economy_ledger_context(cursor)
 
+            loser_ids = list(
+                dict.fromkeys(entry["discord_id"] for entry in distributions.get("losers", []))
+            )
+            if loser_ids:
+                placeholders = ",".join("?" for _ in loser_ids)
+                cursor.execute(
+                    f"""
+                    SELECT discord_id, COALESCE(jopacoin_balance, 0) AS balance
+                    FROM players
+                    WHERE guild_id = ? AND discord_id IN ({placeholders})
+                    """,
+                    (normalized_guild, *loser_ids),
+                )
+                balances = {row["discord_id"]: int(row["balance"]) for row in cursor.fetchall()}
+                for entry in distributions.get("losers", []):
+                    entry["balance_after"] = balances.get(entry["discord_id"], 0)
+
             # Store payout for winning bets
             if payout_updates:
                 cursor.executemany(
@@ -1487,9 +1504,120 @@ class BetRepository(BaseRepository, IBetRepository):
                 results.append(bet)
             return results
 
-    def get_guild_gambling_summary(
-        self, guild_id: int | None, min_bets: int = 3
-    ) -> list[dict]:
+    def get_recent_loss_aggregates(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        cutoff_ts: int,
+    ) -> dict[str, int]:
+        """Return largest and cumulative bet/wheel losses since a timestamp."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                WITH losses(loss) AS (
+                    SELECT b.amount * COALESCE(b.leverage, 1)
+                    FROM bets b
+                    JOIN matches m ON m.match_id = b.match_id
+                    WHERE b.guild_id = ?
+                      AND b.discord_id = ?
+                      AND b.match_id IS NOT NULL
+                      AND b.bet_time >= ?
+                      AND CASE
+                          WHEN m.winning_team = 1 AND b.team_bet_on = 'radiant'
+                              THEN 0
+                          WHEN m.winning_team = 2 AND b.team_bet_on = 'dire'
+                              THEN 0
+                          ELSE 1
+                      END = 1
+                    UNION ALL
+                    SELECT -result
+                    FROM wheel_spins
+                    WHERE guild_id = ?
+                      AND discord_id = ?
+                      AND spin_time >= ?
+                      AND result < 0
+                )
+                SELECT
+                    COALESCE(MAX(loss), 0) AS largest,
+                    COALESCE(SUM(loss), 0) AS total
+                FROM losses
+                """,
+                (
+                    normalized_guild,
+                    discord_id,
+                    cutoff_ts,
+                    normalized_guild,
+                    discord_id,
+                    cutoff_ts,
+                ),
+            ).fetchone()
+        return {
+            "largest": int(row["largest"]),
+            "total": int(row["total"]),
+        }
+
+    def get_current_bet_streaks_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None = None,
+    ) -> dict[int, int]:
+        """Return signed current settled-bet streaks in batched SQL reads."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        streaks: dict[int, int] = {}
+        with self.connection() as conn:
+            for offset in range(0, len(unique_ids), 900):
+                chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    WITH ordered AS (
+                        SELECT
+                            b.discord_id,
+                            CASE
+                                WHEN m.winning_team = 1
+                                 AND b.team_bet_on = 'radiant' THEN 1
+                                WHEN m.winning_team = 2
+                                 AND b.team_bet_on = 'dire' THEN 1
+                                ELSE -1
+                            END AS outcome,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY b.discord_id
+                                ORDER BY b.bet_time DESC, b.bet_id DESC
+                            ) AS recent_rank
+                        FROM bets b
+                        JOIN matches m ON m.match_id = b.match_id
+                        WHERE b.guild_id = ?
+                          AND b.match_id IS NOT NULL
+                          AND b.discord_id IN ({placeholders})
+                    ), grouped AS (
+                        SELECT
+                            discord_id,
+                            outcome,
+                            recent_rank,
+                            recent_rank - ROW_NUMBER() OVER (
+                                PARTITION BY discord_id, outcome
+                                ORDER BY recent_rank
+                            ) AS run_group
+                        FROM ordered
+                    )
+                    SELECT
+                        discord_id,
+                        outcome * COUNT(*) AS streak
+                    FROM grouped
+                    WHERE run_group = 0
+                    GROUP BY discord_id, outcome
+                    """,
+                    (normalized_guild, *chunk),
+                ).fetchall()
+                streaks.update({int(row["discord_id"]): int(row["streak"]) for row in rows})
+        return streaks
+
+    def get_guild_gambling_summary(self, guild_id: int | None, min_bets: int = 3) -> list[dict]:
         """
         Get aggregated gambling stats for all players in a guild.
 

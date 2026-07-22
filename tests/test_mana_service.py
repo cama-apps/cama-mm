@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -248,6 +250,75 @@ class TestManaRepository:
         rows = mana_repo.get_all_mana(TEST_GUILD_ID)
         assert rows == []
 
+    def test_claim_mana_batch_is_one_connection_and_returns_only_new_claims(self, mana_repo):
+        today = "2025-06-15"
+        assert mana_repo.claim_mana_atomic(1, TEST_GUILD_ID, "Forest", today)
+        assert mana_repo.claim_mana_atomic(2, TEST_GUILD_ID, "Mountain", "2025-06-14")
+        assert mana_repo.mark_mana_consumed_atomic(2, TEST_GUILD_ID)
+        assert mana_repo.claim_bankrupt_buff_atomic(2, TEST_GUILD_ID, "reroll")
+
+        with patch.object(
+            mana_repo, "get_connection", wraps=mana_repo.get_connection
+        ) as connection:
+            claimed = mana_repo.claim_mana_batch_atomic(
+                [
+                    (1, "Swamp"),
+                    (2, "Plains"),
+                    (3, "Island"),
+                    (2, "Forest"),
+                ],
+                TEST_GUILD_ID,
+                today,
+            )
+
+        assert connection.call_count == 1
+        assert [row["discord_id"] for row in claimed] == [2, 3]
+        assert [row["current_land"] for row in claimed] == ["Plains", "Island"]
+        assert mana_repo.get_mana(1, TEST_GUILD_ID)["current_land"] == "Forest"
+        player_two = mana_repo.get_mana(2, TEST_GUILD_ID)
+        assert player_two == {
+            "current_land": "Plains",
+            "assigned_date": today,
+            "consumed_today": 0,
+            "white_shield_remaining": 25,
+        }
+        assert not mana_repo.is_bankrupt_buff_used(2, TEST_GUILD_ID, "reroll")
+
+    def test_claim_mana_batch_is_guild_scoped(self, mana_repo):
+        today = "2025-06-15"
+        other_guild = TEST_GUILD_ID + 1
+        assert mana_repo.claim_mana_atomic(10, other_guild, "Swamp", today)
+
+        claimed = mana_repo.claim_mana_batch_atomic([(10, "Island")], TEST_GUILD_ID, today)
+
+        assert [row["discord_id"] for row in claimed] == [10]
+        assert mana_repo.get_mana(10, TEST_GUILD_ID)["current_land"] == "Island"
+        assert mana_repo.get_mana(10, other_guild)["current_land"] == "Swamp"
+
+    def test_concurrent_mana_batches_return_each_claim_once(self, mana_repo, repo_db_path):
+        barrier = threading.Barrier(2)
+
+        def claim(land: str):
+            repo = ManaRepository(repo_db_path)
+            barrier.wait()
+            return repo.claim_mana_batch_atomic(
+                [(20, land), (21, land)], TEST_GUILD_ID, "2025-06-15"
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(claim, ["Plains", "Forest"]))
+
+        assert sorted(len(result) for result in results) == [0, 2]
+        assert sum(len(result) for result in results) == 2
+        assert mana_repo.get_mana(20, TEST_GUILD_ID)["current_land"] in {
+            "Plains",
+            "Forest",
+        }
+        assert (
+            mana_repo.get_mana(20, TEST_GUILD_ID)["current_land"]
+            == mana_repo.get_mana(21, TEST_GUILD_ID)["current_land"]
+        )
+
 
 # =============================================================================
 # ManaService — has_assigned_today / get_current_mana
@@ -351,6 +422,145 @@ class TestAssignDailyMana:
             42, TEST_GUILD_ID, 1_750_000_000
         )
         assert result["retro_refund"] == 9
+
+    def test_single_assignment_reuses_one_bet_history(self, mana_repo):
+        svc = _make_service(mana_repo)
+        history = [{"outcome": "lost"}, {"outcome": "won"}]
+        svc.gambling_stats_service.bet_repo.get_player_bet_history.return_value = history
+
+        with patch("services.mana_service.get_today_pst", return_value="2025-06-15"):
+            svc.assign_daily_mana(43, TEST_GUILD_ID)
+
+        svc.gambling_stats_service.bet_repo.get_player_bet_history.assert_called_once_with(
+            43, TEST_GUILD_ID
+        )
+        svc.gambling_stats_service.calculate_degen_score.assert_called_once_with(
+            43, TEST_GUILD_ID, history=history
+        )
+        svc._get_current_win_streak.assert_called_once_with(43, TEST_GUILD_ID, bet_history=history)
+
+
+class TestAssignAllDailyMana:
+    def test_batches_claims_and_reuses_loaded_players_and_bulk_stats(self):
+        today = "2025-06-15"
+        players = [
+            SimpleNamespace(
+                discord_id=1,
+                jopacoin_balance=10,
+                wins=5,
+                losses=5,
+                glicko_rating=2000.0,
+            ),
+            SimpleNamespace(
+                discord_id=2,
+                jopacoin_balance=-10,
+                wins=5,
+                losses=5,
+                glicko_rating=2000.0,
+            ),
+            SimpleNamespace(
+                discord_id=3,
+                jopacoin_balance=20,
+                wins=5,
+                losses=5,
+                glicko_rating=2000.0,
+            ),
+        ]
+        mana_repo = MagicMock()
+        mana_repo.get_all_mana.return_value = [
+            {"discord_id": 1, "current_land": "Swamp", "assigned_date": today}
+        ]
+        mana_repo.claim_mana_batch_atomic.return_value = [
+            {
+                "discord_id": 2,
+                "current_land": "Plains",
+                "assigned_date": today,
+                "white_shield_remaining": 25,
+            }
+        ]
+        player_repo = MagicMock()
+        player_repo.normalize_guild_id.return_value = TEST_GUILD_ID
+        player_repo.get_all.return_value = players
+        player_repo.get_lowest_balances_bulk.return_value = {2: -10, 3: 0}
+
+        gambling_stats = MagicMock()
+        gambling_stats.bet_repo.get_current_bet_streaks_bulk.return_value = {
+            2: -1,
+            3: 1,
+        }
+        degen_scores = {2: _make_degen(), 3: _make_degen()}
+        gambling_stats.calculate_degen_scores_bulk.return_value = degen_scores
+        bankruptcy = MagicMock()
+        bankruptcy.get_bulk_states.return_value = {
+            2: _make_bk_state(),
+            3: _make_bk_state(),
+        }
+        tips = MagicMock()
+        tips.get_user_tip_stats.return_value = _make_tip_stats()
+        tips.get_user_tip_stats_bulk.return_value = {
+            2: _make_tip_stats(),
+            3: _make_tip_stats(),
+        }
+        protection = MagicMock()
+        protection.reconcile_guardian.return_value = 5
+        service = ManaService(
+            mana_repo,
+            player_repo,
+            gambling_stats,
+            bankruptcy,
+            tips,
+            protection_service=protection,
+        )
+
+        with (
+            patch("services.mana_service.get_today_pst", return_value=today),
+            patch(
+                "services.mana_service.get_mana_day_start_timestamp",
+                return_value=1_750_000_000,
+            ),
+            patch(
+                "services.mana_service.random.choices",
+                side_effect=[["Plains"], ["Forest"]],
+            ),
+        ):
+            assignments, board = service.assign_all_daily_mana_with_board(
+                TEST_GUILD_ID, ash_fan_ids={3}
+            )
+
+        mana_repo.get_all_mana.assert_called_once_with(TEST_GUILD_ID)
+        mana_repo.get_mana.assert_not_called()
+        player_repo.get_all.assert_called_once_with(TEST_GUILD_ID)
+        player_repo.get_by_id.assert_not_called()
+        player_repo.get_lowest_balances_bulk.assert_called_once_with([2, 3], TEST_GUILD_ID)
+        player_repo.get_lowest_balance.assert_not_called()
+        gambling_stats.bet_repo.get_player_bet_history.assert_not_called()
+        gambling_stats.bet_repo.get_current_bet_streaks_bulk.assert_called_once_with(
+            [2, 3], TEST_GUILD_ID
+        )
+        gambling_stats.calculate_degen_scores_bulk.assert_called_once_with([2, 3], TEST_GUILD_ID)
+        gambling_stats.calculate_degen_score.assert_not_called()
+        gambling_stats.get_player_bet_outcomes.assert_not_called()
+        bankruptcy.get_bulk_states.assert_called_once_with([2, 3], TEST_GUILD_ID)
+        bankruptcy.get_state.assert_not_called()
+        tips.get_user_tip_stats_bulk.assert_called_once_with([2, 3], TEST_GUILD_ID)
+        tips.get_user_tip_stats.assert_not_called()
+        mana_repo.claim_mana_batch_atomic.assert_called_once_with(
+            [(2, "Plains"), (3, "Forest")], TEST_GUILD_ID, today
+        )
+        protection.reconcile_guardian.assert_called_once_with(2, TEST_GUILD_ID, 1_750_000_000)
+        assert assignments == [
+            {
+                "discord_id": 2,
+                "land": "Plains",
+                "color": "White",
+                "emoji": "🌾",
+                "assigned_date": today,
+                "retro_refund": 5,
+                "guardian_remaining": 20,
+                "consumed": False,
+            }
+        ]
+        assert {row["discord_id"] for row in board} == {1, 2}
 
 
 # =============================================================================

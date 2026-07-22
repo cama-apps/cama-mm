@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from repositories.dig_repository import DigRepository
+from repositories.protection_repository import ProtectionRepository
 from services.dig_data.balance import (
     scale_positive_dig_jc,
     strengthen_dig_event_penalty,
@@ -20,6 +21,7 @@ from services.dig_splash import (
     SplashResult,
     resolve_splash,
 )
+from services.protection_service import ProtectionService
 from tests.conftest import TEST_GUILD_ID
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
@@ -278,6 +280,49 @@ class TestResolveSplashBurns:
         assert call.kwargs["event_key"] == "dig:test:10002"
         # The fake gateway owns settlement, so the legacy debit is not repeated.
         assert player_repository.get_balance(10002, TEST_GUILD_ID) == 500
+
+    def test_real_protection_batches_multi_victim_burns_on_one_connection(
+        self, repo_db_path, dig_repo, player_repository, monkeypatch
+    ):
+        _register(player_repository, 10101, balance=500)
+        _register(player_repository, 10102, balance=500)
+        _register(player_repository, 10103, balance=500)
+        _register(player_repository, 10104, balance=500)
+        monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+        protection_repo = ProtectionRepository(repo_db_path)
+        protection = ProtectionService(protection_repo)
+        connection_count = 0
+        original_get_connection = protection_repo.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(protection_repo, "get_connection", counted_get_connection)
+
+        result = resolve_splash(
+            player_repo=player_repository,
+            dig_repo=dig_repo,
+            guild_id=TEST_GUILD_ID,
+            digger_id=10101,
+            event_name="Batched Burn",
+            strategy="random_active",
+            victim_count=3,
+            penalty_jc=10,
+            protection_service=protection,
+            event_key_prefix="dig:batch",
+        )
+
+        expected = scale_deflationary_minigame_jc_delta(strengthen_dig_event_penalty(10))
+        assert connection_count == 1
+        assert [victim_id for victim_id, _ in result.victims] == [
+            10102,
+            10103,
+            10104,
+        ]
+        assert [amount for _, amount in result.victims] == [expected] * 3
+        assert result.total_burned == expected * 3
 
 
 class TestActiveDiggersLookback:

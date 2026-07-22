@@ -118,7 +118,11 @@ def test_betting_totals_only_include_pending_bets(services):
     assert totals["dire"] == 2, "Should show 2 jopacoin on Dire"
 
     # Settle the first match (assigns match_id to bets)
-    betting_service.settle_bets(100, TEST_GUILD_ID, "radiant", pending_state=pending1)
+    loser_balance_before = player_repo.get_balance(spectator2, TEST_GUILD_ID)
+    settlement = betting_service.settle_bets(100, TEST_GUILD_ID, "radiant", pending_state=pending1)
+    loser = next(entry for entry in settlement["losers"] if entry["discord_id"] == spectator2)
+    assert loser["balance_after"] == loser_balance_before
+    assert loser["balance_after"] == player_repo.get_balance(spectator2, TEST_GUILD_ID)
 
     # Clear the pending match (simulates what record_match does)
     match_service.clear_last_shuffle(TEST_GUILD_ID, pending1.pending_match_id)

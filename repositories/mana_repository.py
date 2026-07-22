@@ -103,9 +103,98 @@ class ManaRepository(BaseRepository, IManaRepository):
             )
             return True
 
-    def get_white_shield_remaining(
-        self, discord_id: int, guild_id: int | None
-    ) -> int:
+    def claim_mana_batch_atomic(
+        self,
+        assignments: list[tuple[int, str]],
+        guild_id: int | None,
+        assigned_date: str,
+    ) -> list[dict]:
+        """Claim one day's mana for a player batch in a single transaction.
+
+        The first assignment for each player wins if ``assignments`` contains
+        duplicates. Results preserve that input order and contain only players
+        whose row was inserted or advanced to ``assigned_date`` by this call.
+        A concurrent single or batch claim is serialized by ``BEGIN IMMEDIATE``
+        and therefore cannot be returned as newly claimed twice.
+        """
+        if not assignments:
+            return []
+
+        unique_assignments: list[tuple[int, str]] = []
+        seen_ids: set[int] = set()
+        for discord_id, land in assignments:
+            if discord_id in seen_ids:
+                continue
+            seen_ids.add(discord_id)
+            unique_assignments.append((discord_id, land))
+
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            already_claimed: set[int] = set()
+            # Stay below SQLite's host-parameter limit for unusually large
+            # guilds while retaining one connection and one write transaction.
+            for offset in range(0, len(unique_assignments), 900):
+                player_ids = [
+                    discord_id for discord_id, _ in unique_assignments[offset : offset + 900]
+                ]
+                placeholders = ",".join("?" for _ in player_ids)
+                rows = cursor.execute(
+                    f"""
+                    SELECT discord_id
+                    FROM player_mana
+                    WHERE guild_id = ? AND assigned_date = ?
+                      AND discord_id IN ({placeholders})
+                    """,
+                    (gid, assigned_date, *player_ids),
+                ).fetchall()
+                already_claimed.update(int(row["discord_id"]) for row in rows)
+
+            newly_claimed = [
+                (discord_id, land)
+                for discord_id, land in unique_assignments
+                if discord_id not in already_claimed
+            ]
+            cursor.executemany(
+                """
+                INSERT INTO player_mana (
+                    discord_id, guild_id, current_land, assigned_date,
+                    bankrupt_insurance_used, bankrupt_reroll_used, consumed_today,
+                    white_shield_remaining, updated_at
+                )
+                VALUES (?, ?, ?, ?, 0, 0, 0, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    current_land            = excluded.current_land,
+                    assigned_date           = excluded.assigned_date,
+                    bankrupt_insurance_used = 0,
+                    bankrupt_reroll_used    = 0,
+                    consumed_today          = 0,
+                    white_shield_remaining  = excluded.white_shield_remaining,
+                    updated_at              = CURRENT_TIMESTAMP
+                """,
+                [
+                    (
+                        discord_id,
+                        gid,
+                        land,
+                        assigned_date,
+                        25 if land == "Plains" else 0,
+                    )
+                    for discord_id, land in newly_claimed
+                ],
+            )
+
+            return [
+                {
+                    "discord_id": discord_id,
+                    "current_land": land,
+                    "assigned_date": assigned_date,
+                    "white_shield_remaining": 25 if land == "Plains" else 0,
+                }
+                for discord_id, land in newly_claimed
+            ]
+
+    def get_white_shield_remaining(self, discord_id: int, guild_id: int | None) -> int:
         """Return the player's current Guardian capacity, or zero."""
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -243,7 +332,7 @@ class ManaRepository(BaseRepository, IManaRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, current_land, assigned_date
+                SELECT discord_id, current_land, assigned_date, consumed_today
                 FROM player_mana
                 WHERE guild_id = ?
                 ORDER BY current_land, discord_id

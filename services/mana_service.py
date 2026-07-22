@@ -7,12 +7,14 @@ The land is randomly selected from five options weighted by player attributes.
 
 import logging
 import random
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger("cama_bot.services.mana")
 
 if TYPE_CHECKING:
+    from domain.models.player import Player
     from repositories.mana_repository import ManaRepository
     from repositories.player_repository import PlayerRepository
     from repositories.tip_repository import TipRepository
@@ -40,6 +42,8 @@ LAND_EMOJIS: dict[str, str] = {
     "Plains": "🌾",
     "Swamp": "🌿",
 }
+
+_UNSET = object()
 
 
 def get_today_pst() -> str:
@@ -153,27 +157,132 @@ class ManaService:
             can run once-per-claim side effects (e.g. the White stipend)
             exactly as the self-claim path does.
         """
+        new_assignments, _ = self.assign_all_daily_mana_with_board(
+            guild_id, ash_fan_ids=ash_fan_ids
+        )
+        return new_assignments
+
+    def assign_all_daily_mana_with_board(
+        self, guild_id: int | None, *, ash_fan_ids: set[int] | None = None
+    ) -> tuple[list[dict], list[dict]]:
+        """Batch-assign the guild and return fresh claims plus board rows.
+
+        Existing mana is loaded once. Candidate lands are calculated without
+        reopening player rows or bet histories, then claimed together under a
+        single repository transaction. Only transaction winners receive
+        once-per-claim Plains reconciliation and are returned to callers.
+        """
         gid = self.player_repo.normalize_guild_id(guild_id)
         players = self.player_repo.get_all(gid)
+        current_rows = self.mana_repo.get_all_mana(guild_id)
+        current_by_id = {int(row["discord_id"]): dict(row) for row in current_rows}
+        today = get_today_pst()
         ash_fan_ids = ash_fan_ids or set()
 
-        new_assignments: list[dict] = []
-        for player in players:
-            if player.discord_id is None:
-                continue
-            if self.has_assigned_today(player.discord_id, guild_id):
-                continue
+        candidate_players = [
+            player
+            for player in players
+            if player.discord_id is not None
+            and current_by_id.get(player.discord_id, {}).get("assigned_date") != today
+        ]
+        candidate_ids = [int(player.discord_id) for player in candidate_players]
+
+        bankruptcy_states: Mapping[int, object] = {}
+        if candidate_ids:
             try:
-                result = self.assign_daily_mana(
-                    player.discord_id, guild_id,
-                    is_ash_fan=player.discord_id in ash_fan_ids,
+                loaded_states = self.bankruptcy_service.get_bulk_states(candidate_ids, guild_id)
+                if isinstance(loaded_states, Mapping):
+                    bankruptcy_states = loaded_states
+            except Exception:
+                logger.debug(
+                    "Failed to bulk-load bankruptcy states for guild %s",
+                    guild_id,
+                    exc_info=True,
                 )
-            except ValueError:
-                logger.debug("Race condition: mana already assigned for player %s in guild %s", player.discord_id, guild_id)
-                continue
-            result["discord_id"] = player.discord_id
-            new_assignments.append(result)
-        return new_assignments
+
+        lowest_balances: Mapping[int, int | None] = {}
+        if candidate_ids:
+            try:
+                loaded_balances = self.player_repo.get_lowest_balances_bulk(candidate_ids, gid)
+                if isinstance(loaded_balances, Mapping):
+                    lowest_balances = loaded_balances
+            except Exception:
+                logger.debug(
+                    "Failed to bulk-load lowest balances for guild %s",
+                    guild_id,
+                    exc_info=True,
+                )
+
+        degen_scores: Mapping[int, object] = {}
+        if candidate_ids:
+            try:
+                loaded_scores = self.gambling_stats_service.calculate_degen_scores_bulk(
+                    candidate_ids, guild_id
+                )
+                if isinstance(loaded_scores, Mapping):
+                    degen_scores = loaded_scores
+            except Exception:
+                logger.debug(
+                    "Failed to bulk-calculate degen scores for guild %s",
+                    guild_id,
+                    exc_info=True,
+                )
+
+        current_streaks: Mapping[int, int] = {}
+        if candidate_ids:
+            try:
+                loaded_streaks = self.gambling_stats_service.bet_repo.get_current_bet_streaks_bulk(
+                    candidate_ids, guild_id
+                )
+                if isinstance(loaded_streaks, Mapping):
+                    current_streaks = loaded_streaks
+            except Exception:
+                logger.debug(
+                    "Failed to bulk-load bet streaks for guild %s",
+                    guild_id,
+                    exc_info=True,
+                )
+
+        tip_stats_by_id: Mapping[int, dict] = {}
+        if candidate_ids:
+            try:
+                loaded_tip_stats = self.tip_repo.get_user_tip_stats_bulk(candidate_ids, guild_id)
+                if isinstance(loaded_tip_stats, Mapping):
+                    tip_stats_by_id = loaded_tip_stats
+            except Exception:
+                logger.debug(
+                    "Failed to bulk-load tip stats for guild %s",
+                    guild_id,
+                    exc_info=True,
+                )
+
+        candidates: list[tuple[int, str]] = []
+        for player in candidate_players:
+            discord_id = int(player.discord_id)
+            weights = self.calculate_land_weights(
+                discord_id,
+                guild_id,
+                is_ash_fan=discord_id in ash_fan_ids,
+                player=player,
+                bankruptcy_state=bankruptcy_states.get(discord_id, _UNSET),
+                lowest_balance=lowest_balances.get(discord_id, _UNSET),
+                degen_score=degen_scores.get(discord_id, _UNSET),
+                current_streak=current_streaks.get(discord_id, 0),
+                tip_stats=tip_stats_by_id.get(discord_id, _UNSET),
+            )
+            land = random.choices(list(weights), weights=list(weights.values()), k=1)[0]
+            candidates.append((discord_id, land))
+
+        claimed_rows = self.mana_repo.claim_mana_batch_atomic(candidates, guild_id, today)
+        new_assignments = self._finalize_batch_assignments(claimed_rows, guild_id)
+
+        for row in claimed_rows:
+            current_by_id[int(row["discord_id"])] = {
+                "discord_id": int(row["discord_id"]),
+                "current_land": row["current_land"],
+                "assigned_date": row["assigned_date"],
+            }
+        return new_assignments, list(current_by_id.values())
 
     def assign_daily_mana(
         self, discord_id: int, guild_id: int | None, *, is_ash_fan: bool = False
@@ -187,7 +296,15 @@ class ManaService:
         Returns:
             {"land": str, "color": str, "emoji": str}
         """
-        weights = self.calculate_land_weights(discord_id, guild_id, is_ash_fan=is_ash_fan)
+        bet_history = self.gambling_stats_service.bet_repo.get_player_bet_history(
+            discord_id, guild_id
+        )
+        weights = self.calculate_land_weights(
+            discord_id,
+            guild_id,
+            is_ash_fan=is_ash_fan,
+            bet_history=bet_history,
+        )
         lands = list(weights.keys())
         w = list(weights.values())
         land = random.choices(lands, weights=w, k=1)[0]
@@ -233,7 +350,18 @@ class ManaService:
     # ------------------------------------------------------------------
 
     def calculate_land_weights(
-        self, discord_id: int, guild_id: int | None, *, is_ash_fan: bool = False
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        is_ash_fan: bool = False,
+        player: "Player | None" = None,
+        bet_history: list[dict] | None = None,
+        bankruptcy_state=_UNSET,
+        lowest_balance: int | None | object = _UNSET,
+        degen_score=_UNSET,
+        current_streak: int | object = _UNSET,
+        tip_stats: dict | object = _UNSET,
     ) -> dict[str, float]:
         """Return unnormalized weight dict for all five lands.
 
@@ -248,22 +376,40 @@ class ManaService:
         }
 
         # Gather data once, share across land calculations
-        player = self.player_repo.get_by_id(discord_id, self.player_repo.normalize_guild_id(guild_id))
+        if player is None:
+            player = self.player_repo.get_by_id(
+                discord_id, self.player_repo.normalize_guild_id(guild_id)
+            )
         balance: int = player.jopacoin_balance if player else 0
         wins: int = player.wins if player else 0
         losses: int = player.losses if player else 0
         glicko: float | None = player.glicko_rating if player else None
-        lowest_balance: int | None = self.player_repo.get_lowest_balance(discord_id, guild_id)
+        if lowest_balance is _UNSET:
+            lowest_balance = self.player_repo.get_lowest_balance(discord_id, guild_id)
 
         total_games = wins + losses
         win_rate = wins / total_games if total_games > 0 else 0.0
 
-        degen = self.gambling_stats_service.calculate_degen_score(discord_id, guild_id)
-        bk_state = self.bankruptcy_service.get_state(discord_id, guild_id)
-        tip_stats = self.tip_repo.get_user_tip_stats(discord_id, guild_id)
+        if degen_score is not _UNSET:
+            degen = degen_score
+        elif bet_history is not None:
+            degen = self.gambling_stats_service.calculate_degen_score(
+                discord_id, guild_id, history=bet_history
+            )
+        else:
+            degen = self.gambling_stats_service.calculate_degen_score(discord_id, guild_id)
+        bk_state = (
+            self.bankruptcy_service.get_state(discord_id, guild_id)
+            if bankruptcy_state is _UNSET
+            else bankruptcy_state
+        )
+        if tip_stats is _UNSET:
+            tip_stats = self.tip_repo.get_user_tip_stats(discord_id, guild_id)
 
-        # Fetch current win streak from match repo (optional helper)
-        current_streak = self._get_current_win_streak(discord_id, guild_id)
+        if current_streak is _UNSET:
+            current_streak = self._get_current_win_streak(
+                discord_id, guild_id, bet_history=bet_history
+            )
 
         # --- Island (Blue — wealth, intellect, upper class) ---
         if balance >= 500:
@@ -385,11 +531,59 @@ class ManaService:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _get_current_win_streak(self, discord_id: int, guild_id: int | None) -> int:
+    def _finalize_batch_assignments(
+        self, claimed_rows: list[dict], guild_id: int | None
+    ) -> list[dict]:
+        """Run post-claim Plains reconciliation for batch transaction winners."""
+        results: list[dict] = []
+        day_start: int | None = None
+        for row in claimed_rows:
+            discord_id = int(row["discord_id"])
+            land = row["current_land"]
+            retro_refund = 0
+            guardian_remaining = int(row.get("white_shield_remaining", 0) or 0)
+            if land == "Plains" and self.protection_service is not None:
+                try:
+                    if day_start is None:
+                        day_start = get_mana_day_start_timestamp()
+                    retro_refund = self.protection_service.reconcile_guardian(
+                        discord_id, guild_id, day_start
+                    )
+                    guardian_remaining = max(0, guardian_remaining - retro_refund)
+                except Exception:
+                    logger.exception(
+                        "Failed to reconcile White Guardian losses for player %s in guild %s",
+                        discord_id,
+                        guild_id,
+                    )
+
+            results.append(
+                {
+                    "discord_id": discord_id,
+                    "land": land,
+                    "color": LAND_COLORS[land],
+                    "emoji": LAND_EMOJIS[land],
+                    "assigned_date": row["assigned_date"],
+                    "retro_refund": retro_refund,
+                    "guardian_remaining": guardian_remaining,
+                    "consumed": False,
+                }
+            )
+        return results
+
+    def _get_current_win_streak(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        bet_history: list[dict] | None = None,
+    ) -> int:
         """Return current win/loss streak as a signed integer (positive=win, negative=loss)."""
         try:
-            outcomes = self.gambling_stats_service.get_player_bet_outcomes(
-                discord_id, guild_id
+            outcomes = (
+                [bet["outcome"] for bet in bet_history]
+                if bet_history is not None
+                else self.gambling_stats_service.get_player_bet_outcomes(discord_id, guild_id)
             )
             if not outcomes:
                 return 0

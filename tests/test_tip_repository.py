@@ -343,6 +343,55 @@ class TestTipRepository:
         assert stats_guild2["total_sent"] == 50
         assert stats_guild2["tips_sent_count"] == 1
 
+    def test_get_user_tip_stats_bulk_is_single_connection_and_guild_scoped(
+        self, tip_repo, player_repo, monkeypatch
+    ):
+        for discord_id in (1, 2, 3):
+            register_player(player_repo, discord_id)
+        tip_repo.log_tip(1, 2, 50, 5, 111)
+        tip_repo.log_tip(1, 3, 30, 3, 111)
+        tip_repo.log_tip(2, 1, 20, 2, 111)
+        tip_repo.log_tip(1, 2, 999, 99, 222)
+
+        connection_count = 0
+        original_get_connection = tip_repo.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(tip_repo, "get_connection", counted_get_connection)
+
+        stats = tip_repo.get_user_tip_stats_bulk([2, 1, 4, 2], 111)
+
+        assert stats == {
+            2: {
+                "total_sent": 20,
+                "tips_sent_count": 1,
+                "fees_paid": 2,
+                "total_received": 50,
+                "tips_received_count": 1,
+            },
+            1: {
+                "total_sent": 80,
+                "tips_sent_count": 2,
+                "fees_paid": 8,
+                "total_received": 20,
+                "tips_received_count": 1,
+            },
+            4: {
+                "total_sent": 0,
+                "tips_sent_count": 0,
+                "fees_paid": 0,
+                "total_received": 0,
+                "tips_received_count": 0,
+            },
+        }
+        assert connection_count == 1
+        assert tip_repo.get_user_tip_stats_bulk([], 111) == {}
+        assert connection_count == 1
+
     def test_get_total_tip_volume(self, tip_repo, player_repo):
         """Test getting server-wide tip statistics."""
         register_player(player_repo, 1)

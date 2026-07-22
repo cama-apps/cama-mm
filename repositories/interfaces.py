@@ -35,6 +35,13 @@ class IPlayerRepository(ABC):
     def get_by_ids(self, discord_ids: list[int], guild_id: int): ...
 
     @abstractmethod
+    def get_reminder_timestamps_bulk(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, dict[str, int | None]]:
+        """Load wheel and trivia timestamps for reminder recovery in one read."""
+        ...
+
+    @abstractmethod
     def get_shuffle_inputs(
         self, discord_ids: list[int], guild_id: int | None
     ) -> tuple[list, dict[int, str | None], dict[int, int]]:
@@ -479,6 +486,25 @@ class IBetRepository(ABC):
         discord_id: int,
     ) -> list[dict]:
         """Return all pending bets for a player across ALL pending matches."""
+        ...
+
+    @abstractmethod
+    def get_recent_loss_aggregates(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        cutoff_ts: int,
+    ) -> dict[str, int]:
+        """Return largest and cumulative recent bet/wheel losses."""
+        ...
+
+    @abstractmethod
+    def get_current_bet_streaks_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None = None,
+    ) -> dict[int, int]:
+        """Return signed current settled-bet streaks for requested players."""
         ...
 
 
@@ -1277,6 +1303,13 @@ class ITipRepository(ABC):
         ...
 
     @abstractmethod
+    def get_user_tip_stats_bulk(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, dict]:
+        """Get individual tip statistics for many users in one connection."""
+        ...
+
+    @abstractmethod
     def get_total_tip_volume(self, guild_id: int | None) -> dict:
         """Get server-wide tip statistics."""
         ...
@@ -1703,6 +1736,16 @@ class IManaRepository(ABC):
         ...
 
     @abstractmethod
+    def claim_mana_batch_atomic(
+        self,
+        assignments: list[tuple[int, str]],
+        guild_id: int | None,
+        assigned_date: str,
+    ) -> list[dict]:
+        """Claim one day's assignments in one transaction, returning winners."""
+        ...
+
+    @abstractmethod
     def get_all_mana(self, guild_id: int | None) -> list[dict]:
         """Return all mana rows for the guild."""
         ...
@@ -2087,6 +2130,13 @@ class IReminderRepository(ABC):
 
     @abstractmethod
     def get_enabled_users_for_type(self, guild_id: int, reminder_type: str) -> list[int]: ...
+
+    @abstractmethod
+    def get_enabled_users_by_type_bulk(
+        self, guild_id: int, reminder_types: tuple[str, ...]
+    ) -> dict[str, list[int]]:
+        """Load enabled subscribers for several reminder types in one read."""
+        ...
 
 
 class ICurseRepository(ABC):

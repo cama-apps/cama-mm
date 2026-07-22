@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 from domain.models.hostile_loss import (
     HostileLossDestination,
@@ -43,6 +44,70 @@ class ProtectionService:
         this service does not apply the global minigame multiplier a second time.
         Reusing ``event_key`` for the same victim returns the stored outcome.
         """
+        normalized = self._normalize_hostile_loss(
+            victim_id=victim_id,
+            guild_id=guild_id,
+            amount=amount,
+            kind=kind,
+            actor_id=actor_id,
+            event_key=event_key,
+            destination=destination,
+            recipient_id=recipient_id,
+            clamp_to_balance=clamp_to_balance,
+            min_balance=min_balance,
+            metadata=metadata,
+            occurred_at=occurred_at,
+        )
+        return self.protection_repo.apply_hostile_loss(**normalized)
+
+    def apply_hostile_losses(
+        self, losses: Iterable[Mapping[str, Any]]
+    ) -> list[HostileLossResult | Exception]:
+        """Settle an ordered victim batch under one operation transaction.
+
+        Results align with the input. Invalid or rejected victims occupy their
+        position as an exception while all other victims still settle.
+        """
+        raw_losses = list(losses)
+        if not raw_losses:
+            return []
+
+        prepared: list[dict[str, Any]] = []
+        prepared_positions: list[int] = []
+        errors: dict[int, Exception] = {}
+        for index, loss in enumerate(raw_losses):
+            try:
+                normalized = self._normalize_hostile_loss(**dict(loss))
+            except Exception as exc:
+                errors[index] = exc
+                continue
+            prepared.append(normalized)
+            prepared_positions.append(index)
+
+        settled = self.protection_repo.apply_hostile_losses(prepared)
+        settled_by_position = dict(zip(prepared_positions, settled, strict=True))
+        return [
+            errors[index] if index in errors else settled_by_position[index]
+            for index in range(len(raw_losses))
+        ]
+
+    @staticmethod
+    def _normalize_hostile_loss(
+        victim_id: int,
+        guild_id: int | None,
+        amount: int,
+        kind: HostileLossKind | str,
+        *,
+        actor_id: int | None,
+        event_key: str,
+        destination: HostileLossDestination | str = HostileLossDestination.BURN,
+        recipient_id: int | None = None,
+        clamp_to_balance: bool = False,
+        min_balance: int | None = None,
+        metadata: Mapping[str, object] | None = None,
+        occurred_at: int | None = None,
+    ) -> dict[str, Any]:
+        """Validate public inputs and build repository settlement arguments."""
         requested = int(amount)
         if requested <= 0:
             raise ValueError("amount must be a positive, already-scaled integer")
@@ -64,21 +129,21 @@ class ProtectionService:
         ):
             raise ValueError("recipient_id is required for player destination")
 
-        return self.protection_repo.apply_hostile_loss(
-            victim_id=int(victim_id),
-            guild_id=guild_id,
-            requested=requested,
-            kind=normalized_kind,
-            actor_id=int(actor_id) if actor_id is not None else None,
-            event_key=event_key,
-            destination=normalized_destination,
-            recipient_id=int(recipient_id) if recipient_id is not None else None,
-            clamp_to_balance=bool(clamp_to_balance),
-            min_balance=min_balance,
-            metadata=dict(metadata or {}),
-            occurred_at=int(occurred_at if occurred_at is not None else time.time()),
-            mana_date=get_today_pst(),
-        )
+        return {
+            "victim_id": int(victim_id),
+            "guild_id": guild_id,
+            "requested": requested,
+            "kind": normalized_kind,
+            "actor_id": int(actor_id) if actor_id is not None else None,
+            "event_key": event_key,
+            "destination": normalized_destination,
+            "recipient_id": (int(recipient_id) if recipient_id is not None else None),
+            "clamp_to_balance": bool(clamp_to_balance),
+            "min_balance": min_balance,
+            "metadata": dict(metadata or {}),
+            "occurred_at": int(occurred_at if occurred_at is not None else time.time()),
+            "mana_date": get_today_pst(),
+        }
 
     def reconcile_guardian(
         self, discord_id: int, guild_id: int | None, since_ts: int

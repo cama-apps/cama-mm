@@ -8,6 +8,7 @@ import logging
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import discord
@@ -34,6 +35,7 @@ from config import (
     WHEEL_GREEN_SHELL_STEAL_MIN,
 )
 from services.dig_data.balance import scale_positive_dig_jc
+from services.protection_service import ProtectionService
 from utils.economy_scaling import scale_minigame_jc_delta
 
 logger = logging.getLogger("cama_bot.commands.betting.wheel_outcomes")
@@ -41,6 +43,7 @@ logger = logging.getLogger("cama_bot.commands.betting.wheel_outcomes")
 # SQLite accepts a signed 32-bit LIMIT; this mirrors the unified leaderboard's
 # full candidate fetch before Discord membership filtering.
 ALL_GUILD_LEADERBOARD_ENTRIES_LIMIT = 2**31 - 1
+HostileLossAttempt = tuple[Any, int, str, dict[str, Any]]
 
 
 def has_guild_member_snapshot(guild: discord.Guild | None) -> bool:
@@ -372,16 +375,25 @@ class WheelOutcomeProcessor:
 
     async def _emergency(self) -> None:
         players = await self._leaderboard(limit=9999)
+        attempts: list[HostileLossAttempt] = []
         for player in players:
             if player.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                 continue
             loss = min(player.jopacoin_balance, scale_minigame_jc_delta(20))
-            settled = await self._hostile_loss(
-                player,
-                loss,
-                "EMERGENCY",
-                clamp_to_balance=True,
-            )
+            attempts.append((player, loss, "EMERGENCY", {"clamp_to_balance": True}))
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            player = attempt[0]
+            if isinstance(settled, Exception):
+                logger.warning(
+                    "EMERGENCY: failed victim=%s (spinner=%s guild=%s): %s",
+                    player.discord_id,
+                    self.context.user_id,
+                    self.context.guild_id,
+                    settled,
+                )
+                continue
             self.state.emergency_total += settled.applied
             self.state.emergency_count += int(settled.applied > 0)
             self.state.record_shield(settled)
@@ -389,29 +401,37 @@ class WheelOutcomeProcessor:
 
     async def _commune(self) -> None:
         centralized = False
+        attempts: list[HostileLossAttempt] = []
         for player in await self._leaderboard(limit=9999):
             if (
                 player.discord_id == self.context.user_id
                 or player.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE
             ):
                 continue
-            try:
-                settled = await self._hostile_loss(
+            attempts.append(
+                (
                     player,
                     1,
                     "COMMUNE",
-                    destination="player",
-                    recipient_id=self.context.user_id,
-                    clamp_to_balance=True,
-                    legacy_aggregate_transfer=True,
+                    {
+                        "destination": "player",
+                        "recipient_id": self.context.user_id,
+                        "clamp_to_balance": True,
+                        "legacy_aggregate_transfer": True,
+                    },
                 )
-            except Exception as exc:
+            )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            player = attempt[0]
+            if isinstance(settled, Exception):
                 logger.warning(
                     "COMMUNE: failed victim=%s (spinner=%s guild=%s): %s",
                     player.discord_id,
                     self.context.user_id,
                     self.context.guild_id,
-                    exc,
+                    settled,
                 )
                 continue
             centralized = centralized or settled.centralized
@@ -508,6 +528,7 @@ class WheelOutcomeProcessor:
     async def _decay(self) -> None:
         total = 0
         centralized = False
+        attempts: list[HostileLossAttempt] = []
         for index, player in enumerate(await self._leaderboard(limit=4)):
             if (
                 player.discord_id == self.context.user_id
@@ -520,23 +541,30 @@ class WheelOutcomeProcessor:
             )
             if loss <= 0:
                 continue
-            try:
-                settled = await self._hostile_loss(
+            attempts.append(
+                (
                     player,
                     loss,
                     "DECAY",
-                    destination="player",
-                    recipient_id=self.context.user_id,
-                    clamp_to_balance=True,
-                    legacy_aggregate_transfer=True,
+                    {
+                        "destination": "player",
+                        "recipient_id": self.context.user_id,
+                        "clamp_to_balance": True,
+                        "legacy_aggregate_transfer": True,
+                    },
                 )
-            except Exception as exc:
+            )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            player = attempt[0]
+            if isinstance(settled, Exception):
                 logger.warning(
                     "DECAY: failed victim=%s (spinner=%s guild=%s): %s",
                     player.discord_id,
                     self.context.user_id,
                     self.context.guild_id,
-                    exc,
+                    settled,
                 )
                 continue
             centralized = centralized or settled.centralized
@@ -670,21 +698,39 @@ class WheelOutcomeProcessor:
     async def _lightning_bolt(self) -> None:
         tax_rate = random.uniform(LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
         centralized = False
+        attempts: list[HostileLossAttempt] = []
         for player in await self._leaderboard(limit=9999):
             if player.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                 continue
             tax = scale_minigame_jc_delta(
                 max(LIGHTNING_BOLT_MIN_TAX, int(player.jopacoin_balance * tax_rate))
             )
-            settled = await self._hostile_loss(
-                player,
-                tax,
-                "LIGHTNING_BOLT",
-                destination="reserve",
-                clamp_to_balance=True,
-                legacy_aggregate_transfer=True,
-                metadata={"tax_pct": tax_rate},
+            attempts.append(
+                (
+                    player,
+                    tax,
+                    "LIGHTNING_BOLT",
+                    {
+                        "destination": "reserve",
+                        "clamp_to_balance": True,
+                        "legacy_aggregate_transfer": True,
+                        "metadata": {"tax_pct": tax_rate},
+                    },
+                )
             )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            player = attempt[0]
+            if isinstance(settled, Exception):
+                logger.warning(
+                    "LIGHTNING_BOLT: failed victim=%s (spinner=%s guild=%s): %s",
+                    player.discord_id,
+                    self.context.user_id,
+                    self.context.guild_id,
+                    settled,
+                )
+                continue
             centralized = centralized or settled.centralized
             self.state.lightning_total += settled.applied
             self.state.lightning_count += int(settled.applied > 0)
@@ -831,6 +877,7 @@ class WheelOutcomeProcessor:
         if sample_size <= 0:
             self.state.bomb_omb_missed = True
             return
+        attempts: list[HostileLossAttempt] = []
         for victim in random.sample(eligible, sample_size):
             requested = min(
                 scale_minigame_jc_delta(
@@ -843,20 +890,18 @@ class WheelOutcomeProcessor:
             )
             if requested <= 0:
                 continue
-            try:
-                settled = await self._hostile_loss(
-                    victim,
-                    requested,
-                    "BOMB_OMB",
-                    clamp_to_balance=True,
-                )
-            except Exception as exc:
+            attempts.append((victim, requested, "BOMB_OMB", {"clamp_to_balance": True}))
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            victim = attempt[0]
+            if isinstance(settled, Exception):
                 logger.warning(
                     "BOMB_OMB: failed victim=%s (spinner=%s guild=%s): %s",
                     victim.discord_id,
                     self.context.user_id,
                     self.context.guild_id,
-                    exc,
+                    settled,
                 )
                 continue
             if settled.applied > 0:
@@ -892,26 +937,35 @@ class WheelOutcomeProcessor:
             if player.discord_id != self.context.user_id
             and player.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
         ][:30]
+        attempts: list[HostileLossAttempt] = []
         for victim in victims:
             requested = scale_minigame_jc_delta(
                 max(1, int(victim.jopacoin_balance * random.uniform(0.05, 0.12)))
             )
-            try:
-                settled = await self._hostile_loss(
+            attempts.append(
+                (
                     victim,
                     requested,
                     "HEIST",
-                    destination="player",
-                    recipient_id=self.context.user_id,
+                    {
+                        "destination": "player",
+                        "recipient_id": self.context.user_id,
+                    },
                 )
+            )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            victim = attempt[0]
+            if not isinstance(settled, Exception):
                 self.state.heist_total += settled.applied
                 self.state.heist_count += int(settled.applied > 0)
                 self.state.record_shield(settled)
-            except Exception as exc:
+            else:
                 logger.warning(
                     "Failed to execute heist steal from victim %s: %s",
                     victim.discord_id,
-                    exc,
+                    settled,
                 )
         if not victims:
             self.state.heist_total = self._minted_reward(
@@ -931,26 +985,35 @@ class WheelOutcomeProcessor:
             if player.discord_id != self.context.user_id
             and player.jopacoin_balance >= HOSTILE_LOSS_MIN_BALANCE
         ]
+        attempts: list[HostileLossAttempt] = []
         for victim in victims:
             requested = scale_minigame_jc_delta(
                 max(1, int(victim.jopacoin_balance * random.uniform(0.08, 0.15)))
             )
-            try:
-                settled = await self._hostile_loss(
+            attempts.append(
+                (
                     victim,
                     requested,
                     "MARKET_CRASH",
-                    destination="player",
-                    recipient_id=self.context.user_id,
+                    {
+                        "destination": "player",
+                        "recipient_id": self.context.user_id,
+                    },
                 )
+            )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            victim = attempt[0]
+            if not isinstance(settled, Exception):
                 self.state.market_crash_total += settled.applied
                 self.state.market_crash_count += int(settled.applied > 0)
                 self.state.record_shield(settled)
-            except Exception as exc:
+            else:
                 logger.warning(
                     "Failed to execute market crash tax on victim %s: %s",
                     victim.discord_id,
-                    exc,
+                    settled,
                 )
         if not victims:
             self.state.market_crash_total = self._minted_reward(
@@ -984,25 +1047,41 @@ class WheelOutcomeProcessor:
             WHEEL_GOLDEN_TRICKLE_DOWN_PCT_MAX,
         )
         centralized = False
+        attempts: list[HostileLossAttempt] = []
         for player in await self._leaderboard(limit=9999):
             if (
                 player.discord_id == self.context.user_id
                 or player.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE
             ):
                 continue
-            tax = scale_minigame_jc_delta(
-                max(1, int(player.jopacoin_balance * tax_rate))
+            tax = scale_minigame_jc_delta(max(1, int(player.jopacoin_balance * tax_rate)))
+            attempts.append(
+                (
+                    player,
+                    tax,
+                    "TRICKLE_DOWN",
+                    {
+                        "destination": "player",
+                        "recipient_id": self.context.user_id,
+                        "clamp_to_balance": True,
+                        "legacy_aggregate_transfer": True,
+                        "metadata": {"tax_pct": tax_rate},
+                    },
+                )
             )
-            settled = await self._hostile_loss(
-                player,
-                tax,
-                "TRICKLE_DOWN",
-                destination="player",
-                recipient_id=self.context.user_id,
-                clamp_to_balance=True,
-                legacy_aggregate_transfer=True,
-                metadata={"tax_pct": tax_rate},
-            )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            player = attempt[0]
+            if isinstance(settled, Exception):
+                logger.warning(
+                    "TRICKLE_DOWN: failed victim=%s (spinner=%s guild=%s): %s",
+                    player.discord_id,
+                    self.context.user_id,
+                    self.context.guild_id,
+                    settled,
+                )
+                continue
             centralized = centralized or settled.centralized
             self.state.trickle_total += settled.applied
             self.state.trickle_count += int(settled.applied > 0)
@@ -1100,6 +1179,7 @@ class WheelOutcomeProcessor:
     async def _recession(self) -> None:
         spinner_balance_before = self.state.new_balance
         centralized = False
+        attempts: list[HostileLossAttempt] = []
         for rank, player in enumerate(await self._leaderboard(limit=9999)):
             if player.jopacoin_balance < HOSTILE_LOSS_MIN_BALANCE:
                 continue
@@ -1117,15 +1197,32 @@ class WheelOutcomeProcessor:
             )
             if loss <= 0:
                 continue
-            settled = await self._hostile_loss(
-                player,
-                loss,
-                "RECESSION",
-                destination="reserve",
-                clamp_to_balance=True,
-                legacy_aggregate_transfer=True,
-                metadata={"rank_index": rank},
+            attempts.append(
+                (
+                    player,
+                    loss,
+                    "RECESSION",
+                    {
+                        "destination": "reserve",
+                        "clamp_to_balance": True,
+                        "legacy_aggregate_transfer": True,
+                        "metadata": {"rank_index": rank},
+                    },
+                )
             )
+        for attempt, settled in zip(
+            attempts, await self._hostile_loss_batch(attempts), strict=True
+        ):
+            player = attempt[0]
+            if isinstance(settled, Exception):
+                logger.warning(
+                    "RECESSION: failed victim=%s (spinner=%s guild=%s): %s",
+                    player.discord_id,
+                    self.context.user_id,
+                    self.context.guild_id,
+                    settled,
+                )
+                continue
             centralized = centralized or settled.centralized
             self.state.recession_total += settled.applied
             self.state.recession_count += int(settled.applied > 0)
@@ -1282,6 +1379,66 @@ class WheelOutcomeProcessor:
             reason,
             outcome,
         )
+
+    async def _hostile_loss_batch(
+        self, attempts: list[HostileLossAttempt]
+    ) -> list[Any | Exception]:
+        """Settle a wheel victim list in one transaction when available."""
+        if not attempts:
+            return []
+
+        protection_service = getattr(getattr(self.command, "bot", None), "protection_service", None)
+        if type(protection_service) is ProtectionService:
+            losses = []
+            for victim, amount, outcome, options in attempts:
+                metadata = {
+                    "outcome": outcome,
+                    **dict(options.get("metadata") or {}),
+                }
+                losses.append(
+                    {
+                        "victim_id": victim.discord_id,
+                        "guild_id": self.context.guild_id,
+                        "amount": amount,
+                        "kind": outcome.lower(),
+                        "actor_id": self.context.user_id,
+                        "event_key": (f"{self.context.hostile_event_prefix}:{victim.discord_id}"),
+                        "destination": options.get("destination", "burn"),
+                        "recipient_id": options.get("recipient_id"),
+                        "clamp_to_balance": options.get("clamp_to_balance", False),
+                        "min_balance": options.get("min_balance", HOSTILE_LOSS_MIN_BALANCE),
+                        "metadata": metadata,
+                    }
+                )
+            outcomes = await asyncio.to_thread(protection_service.apply_hostile_losses, losses)
+            return [
+                outcome
+                if isinstance(outcome, Exception)
+                else SimpleNamespace(
+                    event_key=outcome.event_key,
+                    requested=outcome.requested,
+                    attempted=outcome.attempted,
+                    absorbed=outcome.absorbed,
+                    applied=outcome.applied,
+                    victim_balance_before=outcome.victim_balance_before,
+                    victim_balance_after=outcome.victim_balance_after,
+                    destination_balance_after=(outcome.destination_balance_after),
+                    duplicate=outcome.duplicate,
+                    details=outcome.details,
+                    centralized=True,
+                )
+                for outcome in outcomes
+            ]
+
+        outcomes: list[Any | Exception] = []
+        for victim, amount, outcome, options in attempts:
+            try:
+                settled = await self._hostile_loss(victim, amount, outcome, **options)
+            except Exception as exc:
+                outcomes.append(exc)
+            else:
+                outcomes.append(settled)
+        return outcomes
 
     async def _hostile_loss(
         self,

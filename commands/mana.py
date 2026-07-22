@@ -106,8 +106,8 @@ class ManaCommands(commands.Cog):
                     if any("ash" in role.name.lower() for role in member.roles):
                         ash_fan_ids.add(member.id)
 
-            new_assignments = await asyncio.to_thread(
-                mana_service.assign_all_daily_mana,
+            new_assignments, rows = await asyncio.to_thread(
+                mana_service.assign_all_daily_mana_with_board,
                 guild_id,
                 ash_fan_ids=ash_fan_ids,
             )
@@ -116,19 +116,12 @@ class ManaCommands(commands.Cog):
             # claims only, so a later /mana all can't re-pay anyone.
             mana_fx = getattr(interaction.client, "mana_effects_service", None)
             if mana_fx is not None:
-                for assignment in new_assignments:
-                    if assignment.get("land") != "Plains":
-                        continue
-                    try:
-                        await asyncio.to_thread(
-                            mana_fx.apply_bankrupt_stipend,
-                            assignment["discord_id"],
-                            guild_id,
-                            "Plains",
-                        )
-                    except Exception:
-                        logger.exception("Failed to apply White stipend")
-            rows = await asyncio.to_thread(mana_service.mana_repo.get_all_mana, guild_id)
+                await asyncio.to_thread(
+                    _apply_fresh_plains_stipends,
+                    mana_fx,
+                    new_assignments,
+                    guild_id,
+                )
 
             # Build display-name lookup from guild cache
             member_lookup: dict[int, str] = {}
@@ -201,6 +194,26 @@ class ManaCommands(commands.Cog):
 # ---------------------------------------------------------------------------
 # Embed / page builders
 # ---------------------------------------------------------------------------
+
+
+def _apply_fresh_plains_stipends(
+    mana_effects_service,
+    new_assignments: list[dict],
+    guild_id: int,
+) -> dict[int, int]:
+    """Apply stipends for fresh Plains claims in one background-thread batch."""
+    paid_by_player: dict[int, int] = {}
+    for assignment in new_assignments:
+        if assignment.get("land") != "Plains":
+            continue
+        discord_id = int(assignment["discord_id"])
+        try:
+            paid_by_player[discord_id] = mana_effects_service.apply_bankrupt_stipend(
+                discord_id, guild_id, "Plains"
+            )
+        except Exception:
+            logger.exception("Failed to apply White stipend for player %s", discord_id)
+    return paid_by_player
 
 
 def _build_all_pages(
