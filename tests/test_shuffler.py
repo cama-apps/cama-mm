@@ -2,6 +2,8 @@
 Unit tests for the shuffler algorithm and team balancing logic.
 """
 
+import math
+
 import pytest
 
 from domain.models.player import Player
@@ -959,6 +961,53 @@ class TestShuffler14Players:
         )
 
         assert value_reads == len(players)
+
+    def test_pool_shuffle_reuses_five_player_role_metrics(self, monkeypatch):
+        players = [
+            Player(
+                name=f"Player{i}",
+                glicko_rating=1200.0 + i * 50,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(11)
+        ]
+        shuffler = BalancedShuffler()
+        original_role_metrics = shuffler._role_assignment_metrics
+        metric_builds = 0
+
+        def counted_role_metrics(*args, **kwargs):
+            nonlocal metric_builds
+            metric_builds += 1
+            return original_role_metrics(*args, **kwargs)
+
+        monkeypatch.setattr(
+            shuffler, "_role_assignment_metrics", counted_role_metrics
+        )
+
+        shuffler.shuffle_from_pool(players)
+
+        # Every unique five-player team is built once, with three assignment
+        # candidates, instead of once for every ten-player selection it occurs in.
+        assert metric_builds == math.comb(11, 5) * 3
+
+    def test_pool_player_value_cache_is_request_scoped(self, monkeypatch):
+        players = _create_players_with_roles(11)
+        shuffler = BalancedShuffler()
+        original_get_value = Player.get_value
+        value_reads = dict.fromkeys((id(player) for player in players), 0)
+
+        def counted_get_value(player, *args, **kwargs):
+            value_reads[id(player)] += 1
+            return original_get_value(player, *args, **kwargs)
+
+        monkeypatch.setattr(Player, "get_value", counted_get_value)
+
+        shuffler.shuffle_from_pool(players)
+        assert set(value_reads.values()) == {1}
+
+        players[0].glicko_rating += 100
+        shuffler.shuffle_from_pool(players)
+        assert set(value_reads.values()) == {2}
 
     def test_14_player_pool_exclusion_penalty(self):
         """
