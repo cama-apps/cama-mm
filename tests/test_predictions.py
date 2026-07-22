@@ -8,6 +8,7 @@ admin gating, and position math.
 from __future__ import annotations
 
 import random
+import time
 
 import pytest
 
@@ -19,6 +20,7 @@ from config import (
     PREDICTION_LEVELS_PER_SIDE,
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
+    PREDICTION_REFRESH_SECONDS,
     PREDICTION_REFRESH_SIZE_PER_LEVEL,
     PREDICTION_REFRESH_SPREAD_TICKS,
     PREDICTION_SIZE_PER_LEVEL,
@@ -194,6 +196,107 @@ def test_create_orderbook_prediction_populates_ladder(prediction_service, predic
 
     for _, size in asks + bids:
         assert size == PREDICTION_SIZE_PER_LEVEL
+
+
+def test_open_orderbook_listing_includes_book_and_recent_volume(
+    prediction_repo, player_repository
+):
+    _add_player(player_repository, 1)
+    market_with_activity = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="Active listed market?",
+        initial_fair=50,
+    )
+    prediction_repo.replace_levels(
+        market_with_activity,
+        [
+            ("yes_ask", 55, 7),
+            ("yes_ask", 60, 8),
+            ("yes_ask", 1, 0),
+            ("yes_bid", 43, 9),
+            ("yes_bid", 47, 4),
+            ("yes_bid", 99, 0),
+        ],
+    )
+    empty_market = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="Empty listed market?",
+        initial_fair=50,
+    )
+    prediction_repo.replace_levels(empty_market, [])
+
+    now = int(time.time())
+    with prediction_repo.connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO prediction_trades
+                (prediction_id, discord_id, action, contracts, jopacoins,
+                 vwap_x100, last_fill_price, trade_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (market_with_activity, 1, "buy_yes", 3, 150, 5000, 50, now),
+                (market_with_activity, 1, "sell_yes", 7, -350, 5000, 50, now),
+                (
+                    market_with_activity,
+                    1,
+                    "buy_no",
+                    100,
+                    5000,
+                    5000,
+                    50,
+                    now - PREDICTION_REFRESH_SECONDS - 60,
+                ),
+            ],
+        )
+
+    markets = {
+        row["prediction_id"]: row
+        for row in prediction_repo.get_open_orderbook_predictions(TEST_GUILD_ID)
+    }
+
+    assert set(markets) == {market_with_activity, empty_market}
+    assert markets[market_with_activity]["top_ask"] == 55
+    assert markets[market_with_activity]["top_bid"] == 47
+    assert markets[market_with_activity]["volume_recent"] == 10
+    assert markets[empty_market]["top_ask"] is None
+    assert markets[empty_market]["top_bid"] is None
+    assert markets[empty_market]["volume_recent"] == 0
+
+
+@pytest.mark.parametrize("market_count", [1, 5])
+def test_open_orderbook_listing_uses_one_select(
+    prediction_repo, monkeypatch, market_count
+):
+    for index in range(market_count):
+        prediction_repo.create_orderbook_prediction(
+            guild_id=TEST_GUILD_ID,
+            creator_id=1,
+            question=f"Listed market {index}?",
+            initial_fair=50,
+        )
+
+    traced_statements: list[str] = []
+    original_get_connection = prediction_repo.get_connection
+
+    def get_traced_connection():
+        conn = original_get_connection()
+        conn.set_trace_callback(traced_statements.append)
+        return conn
+
+    monkeypatch.setattr(prediction_repo, "get_connection", get_traced_connection)
+
+    markets = prediction_repo.get_open_orderbook_predictions(TEST_GUILD_ID)
+
+    read_statements = [
+        statement
+        for statement in traced_statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    assert len(markets) == market_count
+    assert len(read_statements) == 1
 
 
 @pytest.mark.parametrize("initial_fair", [PREDICTION_PRICE_LOW, PREDICTION_PRICE_HIGH])

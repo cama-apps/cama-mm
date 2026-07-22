@@ -1915,40 +1915,33 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT prediction_id, question, creator_id, current_price,
-                       prev_price, last_refresh_at, created_at, thread_id,
-                       channel_id, embed_message_id, guild_id
-                FROM predictions
-                WHERE guild_id = ? AND status = 'open'
-                ORDER BY created_at DESC
+                SELECT p.prediction_id, p.question, p.creator_id, p.current_price,
+                       p.prev_price, p.last_refresh_at, p.created_at, p.thread_id,
+                       p.channel_id, p.embed_message_id, p.guild_id,
+                       (
+                           SELECT MIN(pl.price)
+                           FROM prediction_levels pl
+                           WHERE pl.prediction_id = p.prediction_id
+                             AND pl.side = 'yes_ask'
+                             AND pl.remaining_size > 0
+                       ) AS top_ask,
+                       (
+                           SELECT MAX(pl.price)
+                           FROM prediction_levels pl
+                           WHERE pl.prediction_id = p.prediction_id
+                             AND pl.side = 'yes_bid'
+                             AND pl.remaining_size > 0
+                       ) AS top_bid,
+                       CAST(COALESCE((
+                           SELECT SUM(pt.contracts)
+                           FROM prediction_trades pt
+                           WHERE pt.prediction_id = p.prediction_id
+                             AND pt.trade_time >= ?
+                       ), 0) AS INTEGER) AS volume_recent
+                FROM predictions p
+                WHERE p.guild_id = ? AND p.status = 'open'
+                ORDER BY p.created_at DESC
                 """,
-                (normalized_guild,),
+                (since, normalized_guild),
             )
-            preds = [dict(r) for r in cursor.fetchall()]
-
-            for pred in preds:
-                pid = pred["prediction_id"]
-                book = self._book_summary(cursor, pid)
-                pred["top_ask"] = book["top_ask"]
-                pred["top_bid"] = book["top_bid"]
-                cursor.execute(
-                    "SELECT COALESCE(SUM(contracts), 0) AS vol FROM prediction_trades WHERE prediction_id = ? AND trade_time >= ?",
-                    (pid, since),
-                )
-                pred["volume_recent"] = int(cursor.fetchone()["vol"])
-            return preds
-
-    def _book_summary(self, cursor, prediction_id: int) -> dict:
-        cursor.execute(
-            """
-            SELECT side, MIN(CASE WHEN side='yes_ask' THEN price END) AS top_ask,
-                         MAX(CASE WHEN side='yes_bid' THEN price END) AS top_bid
-            FROM prediction_levels
-            WHERE prediction_id = ? AND remaining_size > 0
-            """,
-            (prediction_id,),
-        )
-        row = cursor.fetchone()
-        if not row:
-            return {"top_ask": None, "top_bid": None}
-        return {"top_ask": row["top_ask"], "top_bid": row["top_bid"]}
+            return [dict(r) for r in cursor.fetchall()]
