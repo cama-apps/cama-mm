@@ -945,7 +945,7 @@ def test_win_bonus_bulk_loads_communion_blessings(services):
     buff_service.apply_blood_pact_skim.assert_not_called()
 
 
-def test_participation_snapshots_blood_pact_targets_once(services):
+def test_participation_snapshots_blood_pact_targets_once(services, monkeypatch):
     """Five participation awards skip point claims when no pact is active."""
     from unittest.mock import MagicMock
 
@@ -960,16 +960,58 @@ def test_participation_snapshots_blood_pact_targets_once(services):
             initial_mmr=1500,
         )
 
+    connection_count = 0
+    original_get_connection = player_repo.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
     buff_service = MagicMock()
     buff_service.get_blood_pact_targets.return_value = set()
     betting_service.buff_service = buff_service
+    monkeypatch.setattr(player_repo, "get_connection", counted_get_connection)
 
     betting_service.award_participation(player_ids, TEST_GUILD_ID)
 
+    assert connection_count == 1
     buff_service.get_blood_pact_targets.assert_called_once_with(
         player_ids, TEST_GUILD_ID
     )
     buff_service.apply_blood_pact_skim.assert_not_called()
+
+
+def test_participation_with_active_pact_keeps_point_skim_order(services):
+    """Active pacts retain credit-then-skim processing per participant."""
+    from unittest.mock import MagicMock
+
+    from config import JOPACOIN_PER_GAME
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+    player_ids = [7196, 7197]
+    for pid in player_ids:
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"PactedParticipant{pid}",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=1500,
+        )
+
+    buff_service = MagicMock()
+    buff_service.get_blood_pact_targets.return_value = {player_ids[0]}
+    buff_service.apply_blood_pact_skim.return_value = 1
+    betting_service.buff_service = buff_service
+
+    results = betting_service.award_participation(player_ids, TEST_GUILD_ID)
+
+    buff_service.apply_blood_pact_skim.assert_called_once_with(
+        player_ids[0], TEST_GUILD_ID, JOPACOIN_PER_GAME, player_repo
+    )
+    assert results[player_ids[0]]["blood_pact_skimmed"] == 1
+    assert results[player_ids[0]]["net"] == JOPACOIN_PER_GAME - 1
+    assert "blood_pact_skimmed" not in results[player_ids[1]]
 
 
 def test_consume_and_credit_atomic_pays_once(repo_db_path):
