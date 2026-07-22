@@ -282,6 +282,36 @@ class TestManaEffectsService:
         assert effects.red_roll_jackpot == 40
         assert effects.red_bomb_pot_ante == 30
 
+    def test_get_effects_reuses_consumed_state_from_mana_read(
+        self, service, monkeypatch
+    ):
+        """Tapped mana is suppressed without a second repository read."""
+        discord_id = 10007
+        _register_player(service["player_repo"], discord_id)
+        service["mana_repo"].set_mana(
+            discord_id,
+            GID,
+            "Mountain",
+            get_today_pst(),
+        )
+        assert service["mana_repo"].mark_mana_consumed_atomic(discord_id, GID)
+
+        get_mana_spy = MagicMock(wraps=service["mana_repo"].get_mana)
+        consumed_spy = MagicMock(wraps=service["mana_repo"].is_mana_consumed)
+        monkeypatch.setattr(service["mana_repo"], "get_mana", get_mana_spy)
+        monkeypatch.setattr(
+            service["mana_repo"],
+            "is_mana_consumed",
+            consumed_spy,
+        )
+
+        effects = service["effects_service"].get_effects(discord_id, GID)
+
+        assert effects.color is None
+        assert effects.red_10x_leverage is False
+        get_mana_spy.assert_called_once_with(discord_id, GID)
+        consumed_spy.assert_not_called()
+
     def test_get_effects_stale_mana(self, service):
         """Player with yesterday's mana gets default (no) effects."""
         _register_player(service["player_repo"], 10002)

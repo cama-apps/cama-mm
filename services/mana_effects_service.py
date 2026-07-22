@@ -63,7 +63,7 @@ class ManaEffectsService:
             return ManaEffects()
 
         # Tap suppression: ultimates consume the day's color
-        if self.mana_service.is_mana_consumed(discord_id, guild_id):
+        if mana.get("consumed", False):
             return ManaEffects()
 
         color = mana.get("color")
