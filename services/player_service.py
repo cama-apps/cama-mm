@@ -197,7 +197,7 @@ class PlayerService:
         """
         api = api or OpenDotaAPI()
         region_by_steam: dict[int, str | None] = {}
-        updated = 0
+        updates: list[tuple[int, int, str]] = []
         for row in self.player_repo.get_players_needing_region_backfill():
             steam_id = row["steam_id"]
             if steam_id in region_by_steam:
@@ -208,9 +208,10 @@ class PlayerService:
             # None = no answer from OpenDota; leave the row NULL to retry next run.
             if region is None:
                 continue
-            self.player_repo.update_inferred_region(row["discord_id"], row["guild_id"], region)
-            updated += 1
-        return updated
+            updates.append((row["discord_id"], row["guild_id"], region))
+        if updates:
+            self.player_repo.update_inferred_regions_bulk(updates)
+        return len(updates)
 
     def get_player(self, discord_id: int, guild_id: int) -> Player | None:
         """Fetch a Player model by Discord ID and Guild ID."""

@@ -213,8 +213,10 @@ class TestMatchEnrichmentService:
             },
         ]
 
-        # Mock get_steam_ids to return empty lists (no existing steam_ids)
-        player_repo.get_steam_ids.return_value = []
+        player_repo.add_steam_ids_bulk.return_value = [
+            {"success": True, "is_primary": True},
+            {"success": True, "is_primary": True},
+        ]
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
 
@@ -224,7 +226,12 @@ class TestMatchEnrichmentService:
 
         assert result["players_updated"] == 2
         assert len(result["players_failed"]) == 0
-        assert player_repo.add_steam_id.call_count == 2
+        player_repo.add_steam_ids_bulk.assert_called_once_with([
+            (100, 52079950),
+            (101, 127388593),
+        ])
+        player_repo.get_steam_ids.assert_not_called()
+        player_repo.add_steam_id.assert_not_called()
 
     def test_backfill_steam_ids_with_failures(self, mock_repos, mock_opendota_api):
         """Test steam_id backfill with some failures."""
@@ -238,8 +245,9 @@ class TestMatchEnrichmentService:
             {"discord_id": 101, "dotabuff_url": "invalid_url"},
         ]
 
-        # Mock get_steam_ids to return empty lists (no existing steam_ids)
-        player_repo.get_steam_ids.return_value = []
+        player_repo.add_steam_ids_bulk.return_value = [
+            {"success": True, "is_primary": True},
+        ]
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         mock_opendota_api.extract_player_id_from_dotabuff.side_effect = [52079950, None]
@@ -247,6 +255,38 @@ class TestMatchEnrichmentService:
 
         assert result["players_updated"] == 1
         assert 101 in result["players_failed"]
+
+    def test_backfill_steam_ids_preserves_failure_order_and_batch_conflicts(
+        self, mock_repos, mock_opendota_api
+    ):
+        """Extraction and ownership failures retain original player order."""
+        match_repo, player_repo = mock_repos
+        player_repo.get_all_with_dotabuff_no_steam_id.return_value = [
+            {"discord_id": 10, "dotabuff_url": "bad"},
+            {"discord_id": 11, "dotabuff_url": "conflict"},
+            {"discord_id": 12, "dotabuff_url": "ok"},
+        ]
+        mock_opendota_api.extract_player_id_from_dotabuff.side_effect = [
+            None,
+            500,
+            600,
+        ]
+        player_repo.add_steam_ids_bulk.return_value = [
+            {
+                "success": False,
+                "is_primary": False,
+                "error": "Steam ID 500 is already linked to another player",
+            },
+            {"success": True, "is_primary": True},
+        ]
+
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+
+        assert service.backfill_steam_ids() == {
+            "players_updated": 1,
+            "players_failed": [10, 11],
+        }
+        player_repo.add_steam_ids_bulk.assert_called_once_with([(11, 500), (12, 600)])
 
     def test_enrich_match_forwards_guild_id_to_openskill_update(self, mock_repos, mock_opendota_api):
         """enrich_match must pass guild_id to update_openskill_ratings_for_match.

@@ -349,3 +349,48 @@ class TestPlayerSteamIds:
         p2 = player_repository.get_by_steam_id(100002, guild_id=TEST_GUILD_ID)
         assert p1.discord_id == 12345
         assert p2.discord_id == 12345
+
+    def test_add_steam_ids_bulk_preserves_primary_and_conflict_semantics(
+        self, player_repository, monkeypatch
+    ):
+        """A failed candidate does not prevent a later ID becoming primary."""
+        for discord_id in (111, 222, 333):
+            player_repository.add(
+                discord_id=discord_id,
+                discord_username=f"P{discord_id}",
+                guild_id=TEST_GUILD_ID,
+            )
+        player_repository.add_steam_id(222, 900001, is_primary=True)
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository, "get_connection", counted_get_connection
+        )
+        results = player_repository.add_steam_ids_bulk([
+            (111, 800001),
+            (111, 800002),
+            (333, 900001),
+            (333, 800003),
+        ])
+
+        assert results == [
+            {"success": True, "is_primary": True},
+            {"success": True, "is_primary": False},
+            {
+                "success": False,
+                "is_primary": False,
+                "error": "Steam ID 900001 is already linked to another player",
+            },
+            {"success": True, "is_primary": True},
+        ]
+        assert connection_count == 1
+        assert player_repository.get_primary_steam_id(111) == 800001
+        assert player_repository.get_steam_ids(111) == [800001, 800002]
+        assert player_repository.get_primary_steam_id(333) == 800003
