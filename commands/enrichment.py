@@ -370,18 +370,10 @@ class EnrichmentCommands(commands.Cog):
             match_id = match["match_id"]
             won = match["player_won"]
             side = match.get("side", "?").capitalize()
-
-            # Get participants for this match
-            participants = await asyncio.to_thread(
-                self.match_service.get_match_participants, match_id, guild_id
-            )
-
-            # Find this player's stats
-            player_stats = None
-            for p in participants:
-                if p["discord_id"] == target_id:
-                    player_stats = p
-                    break
+            # The history repository hydrates the target row and the compact
+            # lane-comparison roster in the same query as the match list.
+            player_stats = match
+            participants = match.get("participants", [])
 
             result_emoji = "✅" if won else "❌"
             lobby_type = match.get("lobby_type", "shuffle")

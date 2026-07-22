@@ -164,6 +164,43 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return players
 
+    def get_reminder_timestamps_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+    ) -> dict[int, dict[str, int | None]]:
+        """Load cooldown timestamps for many reminder subscribers."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        timestamps = {
+            discord_id: {
+                "last_wheel_spin": None,
+                "last_trivia_session": None,
+            }
+            for discord_id in unique_ids
+        }
+        if not unique_ids:
+            return timestamps
+
+        normalized = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            for offset in range(0, len(unique_ids), 900):
+                chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = conn.execute(
+                    f"""
+                    SELECT discord_id, last_wheel_spin, last_trivia_session
+                    FROM players
+                    WHERE guild_id = ? AND discord_id IN ({placeholders})
+                    """,
+                    [normalized, *chunk],
+                ).fetchall()
+                for row in rows:
+                    timestamps[row["discord_id"]] = {
+                        "last_wheel_spin": row["last_wheel_spin"],
+                        "last_trivia_session": row["last_trivia_session"],
+                    }
+        return timestamps
+
     def get_shuffle_inputs(
         self, discord_ids: list[int], guild_id: int | None
     ) -> tuple[list[Player], dict[int, str | None], dict[int, int]]:
@@ -2212,37 +2249,41 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         if not discord_ids:
             return {}
 
-        result: dict[int, list[int]] = {did: [] for did in discord_ids}
+        unique_ids = list(dict.fromkeys(discord_ids))
+        result: dict[int, list[int]] = {did: [] for did in unique_ids}
 
         with self.connection() as conn:
             cursor = conn.cursor()
-            placeholders = ",".join("?" * len(discord_ids))
-
-            # First, check the junction table (primary first via ORDER BY)
-            cursor.execute(
-                f"""
-                SELECT discord_id, steam_id
-                FROM player_steam_ids
-                WHERE discord_id IN ({placeholders})
-                ORDER BY discord_id, is_primary DESC, added_at ASC
-                """,
-                discord_ids,
-            )
-
             junction_found = set()
-            for row in cursor.fetchall():
-                did = row["discord_id"]
-                sid = row["steam_id"]
-                result[did].append(sid)
-                junction_found.add(did)
+            # Stay below conservative SQLite bind limits for discovery runs
+            # that hydrate hundreds of matches at once.
+            for offset in range(0, len(unique_ids), 900):
+                chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                cursor.execute(
+                    f"""
+                    SELECT discord_id, steam_id
+                    FROM player_steam_ids
+                    WHERE discord_id IN ({placeholders})
+                    ORDER BY discord_id, is_primary DESC, added_at ASC
+                    """,
+                    chunk,
+                )
+
+                for row in cursor.fetchall():
+                    did = row["discord_id"]
+                    sid = row["steam_id"]
+                    result[did].append(sid)
+                    junction_found.add(did)
 
             # Fallback to legacy column for players not in junction table
-            missing = [did for did in discord_ids if did not in junction_found]
-            if missing:
-                placeholders = ",".join("?" * len(missing))
+            missing = [did for did in unique_ids if did not in junction_found]
+            for offset in range(0, len(missing), 900):
+                chunk = missing[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
                 cursor.execute(
                     f"SELECT discord_id, steam_id FROM players WHERE discord_id IN ({placeholders})",
-                    missing,
+                    chunk,
                 )
                 for row in cursor.fetchall():
                     did = row["discord_id"]

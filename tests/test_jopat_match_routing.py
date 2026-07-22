@@ -280,6 +280,48 @@ async def test_match_hook_keeps_selected_facts_attached_to_their_player(
 
 
 @pytest.mark.asyncio
+async def test_match_hook_reuses_settlement_balances_and_bulk_degen_scores(
+    monkeypatch,
+) -> None:
+    neon = SimpleNamespace(
+        _get_degen_scores=Mock(return_value={2: 91, 3: 40}),
+        on_degen_milestone=AsyncMock(return_value=NeonResult(layer=2, text_block="milestone")),
+    )
+    send_result = AsyncMock()
+    monkeypatch.setattr(match_module, "get_neon_service", lambda _bot: neon)
+    monkeypatch.setattr(match_module, "send_neon_result", send_result)
+    player_service = Mock()
+    cog = MatchCommands(Mock(), Mock(), Mock(), player_service)
+
+    await cog._run_neon_match_hooks(
+        Mock(),
+        10,
+        [],
+        [
+            {
+                "discord_id": 2,
+                "amount": 10,
+                "leverage": 1,
+                "balance_after": 100,
+            },
+            {
+                "discord_id": 3,
+                "amount": 20,
+                "leverage": 1,
+                "balance_after": 200,
+            },
+        ],
+        {"match_id": 99, "winning_player_ids": []},
+    )
+
+    neon._get_degen_scores.assert_called_once_with([2, 3], 10)
+    neon.on_degen_milestone.assert_awaited_once_with(2, 10, 91)
+    player_service.get_balances.assert_not_called()
+    player_service.get_balance.assert_not_called()
+    send_result.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_enrichment_rolls_once_and_returns_at_most_one_callout(
     monkeypatch,
 ) -> None:

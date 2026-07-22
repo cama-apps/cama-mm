@@ -556,6 +556,24 @@ class MatchCommands(commands.Cog):
             _conditional_player_ids_included,
             excluded_conditional_ids,
         ) = await self._select_shuffle_roster(lobby, guild_id)
+        roster_players = dict(zip(player_ids, players, strict=False))
+        roster_players.update(
+            {
+                player.discord_id: player
+                for player in players
+                if getattr(player, "discord_id", None) is not None
+            }
+        )
+
+        async def get_roster_player(player_id: int):
+            player = roster_players.get(player_id)
+            if player is None:
+                player = await asyncio.to_thread(
+                    self.player_service.get_player, player_id, guild_id
+                )
+                if player is not None:
+                    roster_players[player_id] = player
+            return player
 
         # Check if any of the players to be shuffled are already in a pending match
         pending_player_ids = await asyncio.to_thread(
@@ -566,7 +584,7 @@ class MatchCommands(commands.Cog):
             # Get player names for the error message
             blocked_names = []
             for pid in players_in_pending:
-                player_obj = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
+                player_obj = await get_roster_player(pid)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     blocked_names.append(display_name)
@@ -731,9 +749,7 @@ class MatchCommands(commands.Cog):
                         betting_svc.award_streaming_bonus, list(streaming_ids), guild_id
                     )
                 for sid in streaming_ids:
-                    player_obj = await asyncio.to_thread(
-                        self.player_service.get_player, sid, guild_id
-                    )
+                    player_obj = await get_roster_player(sid)
                     if player_obj:
                         streaming_bonus_names.append(
                             get_player_display_name(player_obj, discord_id=sid, guild=guild)
@@ -817,7 +833,7 @@ class MatchCommands(commands.Cog):
         all_excluded_names = []
         if excluded_ids:
             for pid in excluded_ids:
-                player_obj = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
+                player_obj = await get_roster_player(pid)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     all_excluded_names.append(display_name)
@@ -1558,6 +1574,8 @@ class MatchCommands(commands.Cog):
 
         try:
             neon_sent = False
+            active_losers = [entry for entry in losers if not entry.get("refunded")]
+            loser_ids = list(dict.fromkeys(entry["discord_id"] for entry in active_losers))
 
             # Headline: a big match-bet win (rare, payout-scaled). The top payout
             # takes the slot; an underdog upset (winning side was the minority
@@ -1578,16 +1596,33 @@ class MatchCommands(commands.Cog):
                         neon_sent = True
 
             # Wire on_bet_settled + on_leverage_loss for losers (max ONE per match)
-            if not neon_sent and losers:
-                for entry in losers:
-                    if entry.get("refunded"):
-                        continue
+            if not neon_sent and active_losers:
+                balances_by_id = {
+                    entry["discord_id"]: int(entry["balance_after"])
+                    for entry in active_losers
+                    if entry.get("balance_after") is not None
+                }
+                missing_balance_ids = [
+                    discord_id for discord_id in loser_ids if discord_id not in balances_by_id
+                ]
+                if missing_balance_ids:
+                    get_balances = getattr(self.player_service, "get_balances", None)
+                    if get_balances is not None:
+                        bulk_balances = await asyncio.to_thread(
+                            get_balances, missing_balance_ids, guild_id
+                        )
+                        if isinstance(bulk_balances, dict):
+                            balances_by_id.update(bulk_balances)
+                    for discord_id in missing_balance_ids:
+                        if discord_id not in balances_by_id:
+                            balances_by_id[discord_id] = await asyncio.to_thread(
+                                self.player_service.get_balance, discord_id, guild_id
+                            )
+                for entry in active_losers:
                     loser_id = entry["discord_id"]
                     leverage = entry.get("leverage", 1) or 1
                     amount = entry.get("effective_bet", entry["amount"])
-                    new_bal = await asyncio.to_thread(
-                        self.player_service.get_balance, loser_id, guild_id
-                    )
+                    new_bal = balances_by_id.get(loser_id, 0)
 
                     # on_leverage_loss: 5x leverage into debt
                     if leverage >= 5 and new_bal < 0:
@@ -1611,14 +1646,18 @@ class MatchCommands(commands.Cog):
                             break
 
             # Wire on_degen_milestone for losers
-            if not neon_sent and losers:
-                for entry in losers:
-                    if entry.get("refunded"):
-                        continue
+            if not neon_sent and active_losers:
+                get_degen_scores = getattr(neon, "_get_degen_scores", None)
+                if get_degen_scores is not None:
+                    degen_scores = await asyncio.to_thread(get_degen_scores, loser_ids, guild_id)
+                else:
+                    degen_scores = {
+                        loser_id: await asyncio.to_thread(neon._get_degen_score, loser_id, guild_id)
+                        for loser_id in loser_ids
+                    }
+                for entry in active_losers:
                     loser_id = entry["discord_id"]
-                    degen_score = await asyncio.to_thread(
-                        neon._get_degen_score, loser_id, guild_id
-                    )
+                    degen_score = degen_scores.get(loser_id)
                     if degen_score is not None and degen_score >= 90:
                         mr = await neon.on_degen_milestone(loser_id, guild_id, degen_score)
                         if mr:

@@ -6,6 +6,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import pytest
 
 from commands.match import MatchCommands, select_players_for_shuffle
+from domain.models.player import Player
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -55,3 +56,27 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
         shuffle_mode="balanced",
         excluded_conditional_ids=[],
     )
+
+
+@pytest.mark.asyncio
+async def test_execute_shuffle_reuses_loaded_roster_for_pending_names(monkeypatch):
+    player_ids = list(range(100, 110))
+    players = [Player(name=f"Player {player_id}", discord_id=player_id) for player_id in player_ids]
+    lobby = SimpleNamespace(get_player_count=lambda: 10)
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = {100}
+    player_service = MagicMock()
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(MagicMock(), MagicMock(), match_service, player_service)
+    monkeypatch.setattr(cog, "_validate_shuffle_preconditions", AsyncMock(return_value=lobby))
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, players, [], [])),
+    )
+
+    await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    player_service.get_player.assert_not_called()
+    sent = interaction.followup.send.await_args.args[0]
+    assert "Player 100" in sent

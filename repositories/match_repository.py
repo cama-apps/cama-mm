@@ -1015,39 +1015,101 @@ class MatchRepository(BaseRepository, IMatchRepository):
             ]
 
     def get_player_matches(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
-        """Get recent matches for a player in a guild."""
+        """Get recent matches and the target player's enrichment in one read."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT m.match_id, m.team1_players, m.team2_players,
-                       m.winning_team, m.match_date, m.valve_match_id,
-                       m.lobby_type, mp.team_number, mp.won, mp.side
-                FROM matches m
-                JOIN match_participants mp ON m.match_id = mp.match_id
-                WHERE mp.discord_id = ? AND mp.guild_id = ?
-                ORDER BY m.match_date DESC
-                LIMIT ?
-            """,
-                (discord_id, guild_id, limit),
+                WITH recent AS (
+                    SELECT
+                        m.match_id,
+                        m.team1_players,
+                        m.team2_players,
+                        m.winning_team,
+                        m.match_date,
+                        m.valve_match_id,
+                        m.lobby_type,
+                        mp.team_number AS player_team,
+                        mp.won AS player_won,
+                        mp.side,
+                        mp.hero_id,
+                        mp.kills,
+                        mp.deaths,
+                        mp.assists,
+                        mp.gpm,
+                        mp.hero_damage,
+                        mp.net_worth,
+                        mp.tower_damage,
+                        mp.hero_healing,
+                        mp.lane_role,
+                        mp.lane_efficiency
+                    FROM matches m
+                    JOIN match_participants mp ON m.match_id = mp.match_id
+                    WHERE mp.discord_id = ? AND mp.guild_id = ?
+                    ORDER BY m.match_date DESC
+                    LIMIT ?
+                )
+                SELECT
+                    recent.*,
+                    all_mp.discord_id AS participant_discord_id,
+                    all_mp.side AS participant_side,
+                    all_mp.lane_role AS participant_lane_role,
+                    all_mp.lane_efficiency AS participant_lane_efficiency
+                FROM recent
+                LEFT JOIN match_participants all_mp
+                  ON all_mp.match_id = recent.match_id
+                 AND all_mp.guild_id = ?
+                ORDER BY recent.match_date DESC, all_mp.rowid
+                """,
+                (discord_id, guild_id, limit, guild_id),
             )
 
             rows = cursor.fetchall()
-            return [
-                {
-                    "match_id": row["match_id"],
-                    "team1_players": json.loads(row["team1_players"]),
-                    "team2_players": json.loads(row["team2_players"]),
-                    "winning_team": row["winning_team"],
-                    "match_date": row["match_date"],
-                    "player_team": row["team_number"],
-                    "player_won": bool(row["won"]),
-                    "side": row["side"],
-                    "valve_match_id": row["valve_match_id"],
-                    "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
-                }
-                for row in rows
-            ]
+            matches_by_id: dict[int, dict] = {}
+            for row in rows:
+                match_id = row["match_id"]
+                match = matches_by_id.get(match_id)
+                if match is None:
+                    match = {
+                        "match_id": row["match_id"],
+                        "team1_players": json.loads(row["team1_players"]),
+                        "team2_players": json.loads(row["team2_players"]),
+                        "winning_team": row["winning_team"],
+                        "match_date": row["match_date"],
+                        "player_team": row["player_team"],
+                        "player_won": bool(row["player_won"]),
+                        "side": row["side"],
+                        "valve_match_id": row["valve_match_id"],
+                        "lobby_type": row["lobby_type"]
+                        if "lobby_type" in row.keys()
+                        else "shuffle",
+                        "hero_id": row["hero_id"],
+                        "kills": row["kills"],
+                        "deaths": row["deaths"],
+                        "assists": row["assists"],
+                        "gpm": row["gpm"],
+                        "hero_damage": row["hero_damage"],
+                        "net_worth": row["net_worth"],
+                        "tower_damage": row["tower_damage"],
+                        "hero_healing": row["hero_healing"],
+                        "lane_role": row["lane_role"],
+                        "lane_efficiency": row["lane_efficiency"],
+                        "participants": [],
+                    }
+                    matches_by_id[match_id] = match
+
+                participant_id = row["participant_discord_id"]
+                if participant_id is not None:
+                    match["participants"].append(
+                        {
+                            "discord_id": participant_id,
+                            "side": row["participant_side"],
+                            "lane_role": row["participant_lane_role"],
+                            "lane_efficiency": row["participant_lane_efficiency"],
+                        }
+                    )
+
+            return list(matches_by_id.values())
 
     def get_rating_history(self, discord_id: int, guild_id: int, limit: int = 20) -> list[dict]:
         """Get rating history for a player in a guild."""
