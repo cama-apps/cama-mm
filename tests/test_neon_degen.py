@@ -27,6 +27,7 @@ from utils.neon_terminal import (
     render_prediction_market_crash,
     render_prediction_resolved,
     render_registration,
+    render_rivalry_detected,
     render_soft_avoid,
     render_soft_avoid_surveillance,
     render_streak,
@@ -94,6 +95,13 @@ def test_render_contains_signature_keyword(render_call, must_contain_any):
     assert any(kw in result for kw in must_contain_any), (
         f"Expected one of {must_contain_any} in render output"
     )
+
+
+def test_rivalry_render_labels_head_to_head_games():
+    result = render_rivalry_detected("Winner", "Loser", 10, 80.0)
+
+    assert "Games against:" in result
+    assert "Games together:" not in result
 
 
 def test_all_renders_produce_ansi_block_under_45_lines():

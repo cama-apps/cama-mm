@@ -265,22 +265,30 @@ class RecordingMixin:
         if self.pairings_repo:
             try:
                 all_players = radiant_team_ids + dire_team_ids
-                for i, p1 in enumerate(all_players):
-                    for p2 in all_players[i + 1:]:
-                        pairing = self.pairings_repo.get_pairing(p1, p2, guild_id)
-                        if not pairing or pairing.get("games_together", 0) < 10:
+                pairings = self.pairings_repo.get_pairings_for_players(
+                    all_players, guild_id
+                )
+                for p1 in radiant_team_ids:
+                    for p2 in dire_team_ids:
+                        canonical_pair = (min(p1, p2), max(p1, p2))
+                        pairing = pairings.get(canonical_pair)
+                        if not pairing:
                             continue
-                        wins = pairing.get("p1_wins", 0)
-                        losses = pairing.get("p1_losses", 0)
-                        total = wins + losses
-                        if total < 10:
+                        games_against = pairing.get("games_against", 0)
+                        if games_against < 10:
                             continue
-                        winrate = (wins / total) * 100
+                        canonical_wins = pairing.get("player1_wins_against", 0)
+                        p1_wins = (
+                            canonical_wins
+                            if p1 == canonical_pair[0]
+                            else games_against - canonical_wins
+                        )
+                        winrate = (p1_wins / games_against) * 100
                         if winrate >= 70 or winrate <= 30:
                             easter_egg_data["rivalries_detected"].append({
                                 "player1_id": p1,
                                 "player2_id": p2,
-                                "games_together": total,
+                                "games_against": games_against,
                                 "winrate_vs": winrate,
                             })
             except Exception as e:

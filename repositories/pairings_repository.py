@@ -111,6 +111,35 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_pairings_for_players(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[tuple[int, int], dict]:
+        """Get all pairings wholly contained within a group in one query."""
+        unique_ids = sorted(set(discord_ids))
+        if len(unique_ids) < 2:
+            return {}
+
+        guild_id = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(unique_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    player1_id, player2_id,
+                    games_together, wins_together,
+                    games_against, player1_wins_against,
+                    last_match_id
+                FROM player_pairings
+                WHERE guild_id = ?
+                  AND player1_id IN ({placeholders})
+                  AND player2_id IN ({placeholders})
+                """,
+                (guild_id, *unique_ids, *unique_ids),
+            )
+            rows = (dict(row) for row in cursor.fetchall())
+            return {(row["player1_id"], row["player2_id"]): row for row in rows}
+
     def get_best_teammates(self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on same team (win rate > 50%)."""
         guild_id = self.normalize_guild_id(guild_id)

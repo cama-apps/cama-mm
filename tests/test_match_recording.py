@@ -109,6 +109,65 @@ def test_match_easter_egg_batches_personal_streak_records(
     assert connection_count == 2
 
 
+def test_match_easter_egg_batches_rivalries_with_correct_perspective(
+    player_repository, match_repository, pairings_repository, monkeypatch
+):
+    dire_id = 99200
+    radiant_ids = [99301, 99302]
+    _seed_repo_players(player_repository, [dire_id, *radiant_ids])
+    for match_id in range(1, 11):
+        pairings_repository.update_pairings_for_match(
+            match_id=match_id,
+            guild_id=TEST_GUILD_ID,
+            team1_ids=radiant_ids,
+            team2_ids=[dire_id],
+            winning_team=1 if match_id <= 8 else 2,
+        )
+
+    service = MatchService(
+        player_repo=player_repository,
+        match_repo=match_repository,
+        pairings_repo=pairings_repository,
+    )
+    connection_count = 0
+    original_get_connection = pairings_repository.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
+    monkeypatch.setattr(
+        pairings_repository, "get_connection", counted_get_connection
+    )
+
+    easter_eggs = service._collect_match_easter_eggs(
+        radiant_team_ids=radiant_ids,
+        dire_team_ids=[dire_id],
+        winning_ids=radiant_ids,
+        expected_ids={dire_id, *radiant_ids},
+        streak_data={},
+        guild_id=TEST_GUILD_ID,
+    )
+
+    assert easter_eggs["rivalries_detected"] == [
+        {
+            "player1_id": radiant_ids[0],
+            "player2_id": dire_id,
+            "games_against": 10,
+            "winrate_vs": 80.0,
+        },
+        {
+            "player1_id": radiant_ids[1],
+            "player2_id": dire_id,
+            "games_against": 10,
+            "winrate_vs": 80.0,
+        },
+    ]
+    # The two opponent histories and the teammate history use one bulk read.
+    assert connection_count == 1
+
+
 # =============================================================================
 # === Win/Loss API ===
 # =============================================================================

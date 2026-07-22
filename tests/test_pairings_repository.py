@@ -368,6 +368,40 @@ class TestPairingsRepository:
         # 4 teammates + 5 opponents = 9
         assert len(pairings) == 9
 
+    def test_get_pairings_for_players_batches_group(
+        self, pairings_repo, player_repo, monkeypatch
+    ):
+        players = list(range(1, 11))
+        register_players(player_repo, players)
+        pairings_repo.update_pairings_for_match(
+            match_id=1,
+            guild_id=TEST_GUILD_ID,
+            team1_ids=players[:5],
+            team2_ids=players[5:],
+            winning_team=1,
+        )
+
+        connection_count = 0
+        original_get_connection = pairings_repo.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(pairings_repo, "get_connection", counted_get_connection)
+
+        pairings = pairings_repo.get_pairings_for_players(
+            [6, 2, 1, 6], TEST_GUILD_ID
+        )
+
+        assert set(pairings) == {(1, 2), (1, 6), (2, 6)}
+        assert pairings[(1, 2)]["games_together"] == 1
+        assert pairings[(1, 6)]["games_against"] == 1
+        assert connection_count == 1
+        assert pairings_repo.get_pairings_for_players([1], TEST_GUILD_ID) == {}
+        assert connection_count == 1
+
     def test_best_worst_teammates_no_overlap(self, pairings_repo, player_repo):
         """Test that best and worst teammates never overlap - catches conflation bug."""
         players = list(range(1, 16))

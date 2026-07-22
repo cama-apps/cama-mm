@@ -1955,14 +1955,14 @@ class NeonDegenService:
         guild_id: int | None,
         player1_id: int,
         player2_id: int,
-        games_together: int,
+        games_against: int,
         winrate_vs: float,
     ) -> NeonResult | None:
         """Trigger on 10+ games with 70%+ winrate imbalance. Layer 2 at 1%."""
         try:
             if not self._is_enabled():
                 return None
-            if games_together < 10:
+            if games_against < 10:
                 return None
             if winrate_vs < 70 and winrate_vs > 30:
                 return None  # Only trigger if one-sided
@@ -1973,7 +1973,9 @@ class NeonDegenService:
                 asyncio.to_thread(self._get_player_name, player1_id, guild_id),
                 asyncio.to_thread(self._get_player_name, player2_id, guild_id),
             )
-            text = render_rivalry_detected(player1_name, player2_name, games_together, winrate_vs)
+            text = render_rivalry_detected(
+                player1_name, player2_name, games_against, winrate_vs
+            )
             return NeonResult(layer=2, text_block=text)
         except Exception as e:
             logger.debug(f"neon on_rivalry_detected error: {e}")
