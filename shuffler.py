@@ -27,9 +27,21 @@ logger = logging.getLogger("cama_bot.shuffler")
 
 # Fix player index 0 on team 1 so each unordered 5-vs-5 split is generated
 # exactly once: C(9, 4) = 126 rather than generating 252 and deduplicating.
+# Store each complement too; these immutable index sets are reused in every
+# shuffle and avoid rebuilding team 2 in the hottest enumeration loops.
 _UNIQUE_TEAM_SPLITS = tuple(
-    (0, *other_indices)
-    for other_indices in itertools.combinations(range(1, 10), 4)
+    (team1_indices, tuple(i for i in range(10) if i not in team1_indices))
+    for team1_indices in (
+        (0, *other_indices)
+        for other_indices in itertools.combinations(range(1, 10), 4)
+    )
+)
+
+# Captain draft pool scoring evaluates all C(8, 4) ways to distribute the
+# non-captains. Captains distinguish the two sides, so all 70 splits matter.
+_DRAFT_POOL_SPLITS = tuple(
+    (team_a_indices, tuple(i for i in range(8) if i not in team_a_indices))
+    for team_a_indices in itertools.combinations(range(8), 4)
 )
 
 
@@ -727,7 +739,13 @@ class BalancedShuffler:
             team1_off_role_penalty = (
                 team1_assignment.off_role_count * off_role_flat_penalty
             )
-            t1_values = team1_assignment.role_values
+            (
+                t1_carry,
+                t1_mid,
+                t1_offlane,
+                t1_soft_support,
+                t1_hard_support,
+            ) = team1_assignment.role_values
             for team2_assignment in team2_metrics:
                 value_diff = abs(team1_value - team2_assignment.team_value)
 
@@ -736,13 +754,19 @@ class BalancedShuffler:
                     + team2_assignment.off_role_count * off_role_flat_penalty
                 )
 
-                t2_values = team2_assignment.role_values
+                (
+                    t2_carry,
+                    t2_mid,
+                    t2_offlane,
+                    t2_soft_support,
+                    t2_hard_support,
+                ) = team2_assignment.role_values
                 role_matchup_delta = (
-                    abs(t1_values[0] - t2_values[2])
-                    + abs(t2_values[0] - t1_values[2])
-                    + abs(t1_values[1] - t2_values[1])
-                    + abs(t1_values[3] - t2_values[4])
-                    + abs(t2_values[3] - t1_values[4])
+                    abs(t1_carry - t2_offlane)
+                    + abs(t2_carry - t1_offlane)
+                    + abs(t1_mid - t2_mid)
+                    + abs(t1_soft_support - t2_hard_support)
+                    + abs(t2_soft_support - t1_hard_support)
                 )
                 weighted_role_delta = (
                     role_matchup_delta * role_matchup_delta_weight
@@ -861,9 +885,9 @@ class BalancedShuffler:
         scoring_context = _ShuffleScoringContext()
         rd_priority = self._calculate_rd_priority(players)
 
-        for team1_indices in _UNIQUE_TEAM_SPLITS:
+        for team1_indices, team2_indices in _UNIQUE_TEAM_SPLITS:
             team1_players = [players[i] for i in team1_indices]
-            team2_players = [players[i] for i in range(10) if i not in team1_indices]
+            team2_players = [players[i] for i in team2_indices]
 
             # Optimize role assignments for this matchup
             team1, team2, total_score = self._optimize_role_assignments_for_matchup(
@@ -1218,9 +1242,9 @@ class BalancedShuffler:
             rd_priority = self._calculate_rd_priority(selected_players)
 
             # For this combination of 10, try all ways to split into teams
-            for team1_indices in _UNIQUE_TEAM_SPLITS:
+            for team1_indices, team2_indices in _UNIQUE_TEAM_SPLITS:
                 team1_players = [selected_players[i] for i in team1_indices]
-                team2_players = [selected_players[i] for i in range(10) if i not in team1_indices]
+                team2_players = [selected_players[i] for i in team2_indices]
 
                 matchup = self._evaluate_pool_matchup(
                     team1_players,
@@ -1401,19 +1425,17 @@ class BalancedShuffler:
                 len(selected_player_names & recent_match_names)
                 * self.recent_match_penalty_weight
             )
+            lower_bound = recent_penalty + combo_lower_bound
 
             # Step 3: Iterate once through each unordered team split with pruning.
-            for team1_indices in _UNIQUE_TEAM_SPLITS:
-                team1_players = [selected_players[i] for i in team1_indices]
-                team2_indices = [i for i in range(10) if i not in team1_indices]
-                team2_players = [selected_players[i] for i in team2_indices]
-
-                lower_bound = recent_penalty + combo_lower_bound
-
+            for team1_indices, team2_indices in _UNIQUE_TEAM_SPLITS:
                 # Prune if lower bound >= best score
                 if lower_bound >= best_score:
                     pruned_team_splits += 1
                     continue
+
+                team1_players = [selected_players[i] for i in team1_indices]
+                team2_players = [selected_players[i] for i in team2_indices]
 
                 # Step 4: Full role optimization (only for promising splits)
                 evaluated_matchups += 1
@@ -1471,9 +1493,9 @@ class BalancedShuffler:
             [captain_a, captain_b, *pool]
         )
 
-        for team_a_indices in itertools.combinations(range(len(pool)), 4):
+        for team_a_indices, team_b_indices in _DRAFT_POOL_SPLITS:
             team_a_players = [captain_a] + [pool[i] for i in team_a_indices]
-            team_b_players = [captain_b] + [pool[i] for i in range(len(pool)) if i not in team_a_indices]
+            team_b_players = [captain_b] + [pool[i] for i in team_b_indices]
 
             _, _, score = self._optimize_role_assignments_for_matchup(
                 team_a_players,
