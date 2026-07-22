@@ -379,7 +379,14 @@ class DigService(
         )
         return None, paid_dig_cost
 
-    def dig(self, discord_id: int, guild_id, paid: bool = False) -> dict:
+    def dig(
+        self,
+        discord_id: int,
+        guild_id,
+        paid: bool = False,
+        *,
+        player_verified: bool = False,
+    ) -> dict:
         """
         Main dig action.
 
@@ -389,7 +396,7 @@ class DigService(
         items_used, tip.
         """
         # 0. Check player is registered
-        if not self.player_repo.exists(discord_id, guild_id):
+        if not player_verified and not self.player_repo.exists(discord_id, guild_id):
             return self._error("You need to register first. Use /player register.")
 
         now = int(time.time())
@@ -413,6 +420,9 @@ class DigService(
 
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
+        tunnel["guild_id"] = guild_id
+        deferred_tunnel_updates: dict = {}
+        relic_trim_notice = int(tunnel.get("relic_trim_notice", 0) or 0) == 1
 
         # 2. Slow Drip relic: idle income since last dig (credited inline,
         # surfaces only via balance change + audit log).
@@ -479,10 +489,9 @@ class DigService(
             injury["digs_remaining"] = injury["digs_remaining"] - 1
             if injury["digs_remaining"] <= 0:
                 injury = None
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                injury_state=json.dumps(injury) if injury else None,
-            )
+            injury_state = json.dumps(injury) if injury else None
+            deferred_tunnel_updates["injury_state"] = injury_state
+            tunnel["injury_state"] = injury_state
 
         # 6. Get queued items and apply effects. The queued rows are NOT deleted
         # here — their ids ride along in ``consumed_item_row_ids`` and are
@@ -513,24 +522,26 @@ class DigService(
         # 7b. Apply luminosity drain
         layer_name = layer.get("name", "Dirt")
 
-        # 7a. Get layer weather effects
-        weather_fx = self._get_weather_effects(guild_id, layer_name)
-        weather_info = None
-        if weather_fx:
-            # Find the weather entry for display
-            for entry in self._ensure_weather(guild_id):
-                if entry.get("layer_name") == layer_name:
-                    w = WEATHER_BY_ID.get(entry.get("weather_id"))
-                    if w:
-                        weather_info = {"name": w.name, "description": w.description}
+        # 7a. Resolve weather and equipped gear once for the whole request.
+        weather_fx, weather_info, weather_code = self._get_weather_snapshot(guild_id, layer_name)
+        if not weather_fx:
+            weather_info = None
+        equipped_gear = self.dig_repo.get_equipped_gear(discord_id, guild_id)
 
-        lum_info = self._apply_luminosity_drain(discord_id, guild_id, tunnel, layer_name)
+        lum_info = self._apply_luminosity_drain(
+            discord_id,
+            guild_id,
+            tunnel,
+            layer_name,
+            equipped_gear=equipped_gear,
+            persist=False,
+        )
         luminosity = lum_info["luminosity_after"]
 
         # Torch restores +50 luminosity
         if has_torch:
             luminosity = min(LUMINOSITY_MAX, luminosity + 50)
-            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
             lum_info["luminosity_after"] = luminosity
 
         # Spore Cloak relic: -50% luminosity drain
@@ -539,7 +550,7 @@ class DigService(
             luminosity = min(LUMINOSITY_MAX, luminosity + restored)
             lum_info["drained"] -= restored
             lum_info["luminosity_after"] = luminosity
-            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
 
         # 7c. Get and apply active temp buff
         active_buff = self._get_active_buff(tunnel)
@@ -550,7 +561,12 @@ class DigService(
         # base loot AND lifts the base-payout cap proportionally, so the buff is
         # not silently swallowed by the flat cap.
         buff_yield_mult = float(buff_effects.get("yield_multiplier", 1.0))
-        self._decrement_buff(discord_id, guild_id, tunnel)
+        self._decrement_buff(
+            discord_id,
+            guild_id,
+            tunnel,
+            tunnel_updates=deferred_tunnel_updates,
+        )
 
         # 7d. Get and apply active temp curse (event "curse" threat). Mirrors
         # the buff read/decrement; effects drain rather than boost.
@@ -562,7 +578,12 @@ class DigService(
         curse_cave_in_bonus = self._capped_curse_effect(
             curse_effects, "cave_in_bonus",
         )
-        self._decrement_curse(discord_id, guild_id, tunnel)
+        self._decrement_curse(
+            discord_id,
+            guild_id,
+            tunnel,
+            tunnel_updates=deferred_tunnel_updates,
+        )
 
         # 8. Prestige perks, relics, and ASCENSION
         perks = self._get_prestige_perks(tunnel)
@@ -583,7 +604,7 @@ class DigService(
             luminosity = max(0, luminosity - bonus_drain)
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] += bonus_drain
-            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
 
         # 8d. Apply weather luminosity drain modifier
         weather_drain = weather_fx.get("luminosity_drain_multiplier", 0)
@@ -592,7 +613,7 @@ class DigService(
             luminosity = max(0, luminosity - bonus_drain)
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] += bonus_drain
-            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
 
         # 8e. Apply temp-curse luminosity drain (guttering-light hex). Flat
         # extra light lost — drains even when the layer has no base drain.
@@ -600,14 +621,24 @@ class DigService(
             luminosity = max(0, luminosity - curse_luminosity_drain)
             lum_info["luminosity_after"] = luminosity
             lum_info["drained"] += curse_luminosity_drain
-            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
 
         luminosity = self._apply_lantern_stub_restore(
             discord_id, guild_id, tunnel, lum_info, today,
         )
 
-        pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
-        pickaxe_data = self._get_active_pickaxe_data(discord_id, guild_id, tunnel)
+        pickaxe_tier = self._get_active_pickaxe_tier(
+            discord_id,
+            guild_id,
+            tunnel,
+            equipped_gear=equipped_gear,
+        )
+        pickaxe_data = self._get_active_pickaxe_data(
+            discord_id,
+            guild_id,
+            tunnel,
+            equipped_gear=equipped_gear,
+        )
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
 
@@ -624,7 +655,6 @@ class DigService(
             restored = max(1, lum_info["drained"] // 4)
             luminosity = min(LUMINOSITY_MAX, luminosity + restored)
             lum_info["luminosity_after"] = luminosity
-            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
             tunnel["luminosity"] = luminosity
 
         relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
@@ -651,7 +681,7 @@ class DigService(
         # Weather cave-in modifier (negated during Storm if Stormcaller equipped)
         weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
         if weather_cave_in_bonus and self._relic_storm_negates_hazard(
-            discord_id, guild_id, self._get_weather_code(guild_id, layer_name)
+            discord_id, guild_id, weather_code
         ):
             weather_cave_in_bonus = 0
         cave_in_chance += weather_cave_in_bonus
@@ -782,11 +812,16 @@ class DigService(
             # counter bump, last_dig_at, cave-in loot credit, medical bill
             # debit, and the audit log all flip together.
             cave_in_tunnel_updates: dict = {
+                **deferred_tunnel_updates,
                 "depth": new_depth,
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
                 "cavein_free_streak": 0,  # Prospector's Streak resets on collapse
+                "luminosity": luminosity,
+                "last_lum_update_at": tunnel.get("last_lum_update_at", now),
             }
+            if relic_trim_notice:
+                cave_in_tunnel_updates["relic_trim_notice"] = 0
             cave_in_balance_delta = blue_refund
 
             if thick_skin_saved:
@@ -864,6 +899,8 @@ class DigService(
                 },
                 log_action_type="dig",
             )
+            tunnel.update(cave_in_tunnel_updates)
+            next_free_dig_at = now + self._get_free_dig_cooldown_duration(tunnel)
             if overgrowth_active:
                 try:
                     self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
@@ -894,6 +931,8 @@ class DigService(
                 tip=self._pick_tip(new_depth),
                 luminosity_info=lum_info,
                 weather=weather_info,
+                relic_trim_notice=relic_trim_notice,
+                next_free_dig_at=next_free_dig_at,
             )
 
         # 11. Roll advance (no cave-in) — with ascension/corruption/mutation
@@ -962,7 +1001,7 @@ class DigService(
         # income (does not affect milestones, perks, or flat bonuses).
         jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0) + weather_fx.get("jc_multiplier", 0)
         jc_mult = max(0.0, jc_mult - ascension.get("jc_layer_penalty", 0))
-        weather_code_now = self._get_weather_code(guild_id, layer_name)
+        weather_code_now = weather_code
         relic_yield_mult = self._relic_jc_yield_multiplier(
             discord_id, guild_id, weather_code=weather_code_now,
             luminosity=luminosity,
@@ -1089,6 +1128,7 @@ class DigService(
             artifact = self.roll_artifact(
                 discord_id, guild_id, new_depth,
                 extra_rate_mod=weather_fx.get("artifact_multiplier", 1.0),
+                tunnel=tunnel,
             )
 
         # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
@@ -1196,6 +1236,7 @@ class DigService(
         run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
         run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
         final_tunnel_updates: dict = {
+            **deferred_tunnel_updates,
             "depth": new_depth,
             "max_depth": max(prev_max_depth, new_depth),
             "total_digs": total_digs,
@@ -1207,7 +1248,11 @@ class DigService(
             "current_run_jc": run_jc,
             "current_run_artifacts": run_artifacts,
             "current_run_events": run_events_count,
+            "luminosity": luminosity,
+            "last_lum_update_at": tunnel.get("last_lum_update_at", now),
         }
+        if relic_trim_notice:
+            final_tunnel_updates["relic_trim_notice"] = 0
         if void_bait_charge_used:
             final_tunnel_updates["void_bait_digs"] = void_bait_digs - 1
         if sonar_skip_consumed:
@@ -1234,6 +1279,8 @@ class DigService(
             },
             log_action_type="dig",
         )
+        tunnel.update(final_tunnel_updates)
+        next_free_dig_at = now + self._get_free_dig_cooldown_duration(tunnel)
         # Blood Pact: an active pact on this digger skims a share of the dig
         # payout to the pact holder. Dig is the primary earnings source, so this
         # is where the shop's advertised "skim of the target's earnings" mostly
@@ -1283,6 +1330,8 @@ class DigService(
             sonar_skipped=sonar_skip_consumed,
             weather=weather_info,
             streak_charm_used=streak_charm_used,
+            relic_trim_notice=relic_trim_notice,
+            next_free_dig_at=next_free_dig_at,
         )
 
     # ------------------------------------------------------------------

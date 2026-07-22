@@ -64,3 +64,34 @@ class NotificationRepository(BaseRepository, IReminderRepository):
                 (normalized,),
             )
             return [row["discord_id"] for row in cursor.fetchall()]
+
+    def get_enabled_users_by_type_bulk(
+        self,
+        guild_id: int,
+        reminder_types: tuple[str, ...],
+    ) -> dict[str, list[int]]:
+        """Load several subscriber lists from one preference snapshot."""
+        valid_types = tuple(
+            dict.fromkeys(
+                reminder_type for reminder_type in reminder_types if reminder_type in _VALID_TYPES
+            )
+        )
+        subscribers = {reminder_type: [] for reminder_type in valid_types}
+        if not valid_types:
+            return subscribers
+
+        columns = ", ".join(
+            ["discord_id", *(f"{reminder_type}_enabled" for reminder_type in valid_types)]
+        )
+        normalized = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {columns} FROM reminder_preferences WHERE guild_id = ?",
+                (normalized,),
+            ).fetchall()
+
+        for row in rows:
+            for reminder_type in valid_types:
+                if row[f"{reminder_type}_enabled"]:
+                    subscribers[reminder_type].append(row["discord_id"])
+        return subscribers

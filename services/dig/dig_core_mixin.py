@@ -51,7 +51,8 @@ class DigCoreMixin:
     Composed into :class:`~services.dig_service.DigService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
-    def _get_free_dig_cooldown_duration(self, tunnel: dict) -> int:
+
+    def _get_free_dig_cooldown_duration(self, tunnel: dict, *, mana_effects=None) -> int:
         """Return the effective free-dig cooldown after every modifier."""
         cooldown = FREE_DIG_COOLDOWN
         # Mutation: restless — extra cooldown.
@@ -74,8 +75,13 @@ class DigCoreMixin:
             curse_effects, "cooldown_penalty",
         )
         cooldown = int(cooldown * (1.0 + cooldown_penalty))
+        if mana_effects is None:
+            return self._apply_mana_cooldown_reduction(
+                tunnel.get("discord_id"), tunnel.get("guild_id"), cooldown,
+            )
         return self._apply_mana_cooldown_reduction(
             tunnel.get("discord_id"), tunnel.get("guild_id"), cooldown,
+            effects=mana_effects,
         )
 
     def _get_cooldown_remaining(self, tunnel: dict, *, now: int | None = None) -> int:
@@ -91,12 +97,77 @@ class DigCoreMixin:
     ) -> int | None:
         """Return the effective ready timestamp, or ``None`` when already ready."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        return self._get_free_dig_ready_at_from_tunnel(
+            tunnel,
+            discord_id,
+            guild_id,
+            now=now,
+        )
+
+    def get_free_dig_ready_times_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id,
+        *,
+        now: int | None = None,
+    ) -> dict[int, int | None]:
+        """Resolve restart reminder times from one tunnel and mana snapshot."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        requested_ids = set(unique_ids)
+        tunnels = {
+            tunnel["discord_id"]: tunnel
+            for tunnel in self.dig_repo.get_all_tunnels(guild_id)
+            if tunnel["discord_id"] in requested_ids
+        }
+        mana_effects = {}
+        if self.mana_effects_service is not None:
+            try:
+                mana_effects = self.mana_effects_service.get_effects_bulk(
+                    unique_ids,
+                    guild_id,
+                )
+            except Exception:
+                logger.exception("Failed to bulk-load mana effects for dig reminder recovery")
+
+        ready_times: dict[int, int | None] = {}
+        for discord_id in unique_ids:
+            try:
+                ready_times[discord_id] = self._get_free_dig_ready_at_from_tunnel(
+                    tunnels.get(discord_id),
+                    discord_id,
+                    guild_id,
+                    now=now,
+                    mana_effects=mana_effects.get(discord_id),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to calculate dig reminder for discord_id=%d guild_id=%s",
+                    discord_id,
+                    guild_id,
+                )
+        return ready_times
+
+    def _get_free_dig_ready_at_from_tunnel(
+        self,
+        tunnel: dict | None,
+        discord_id: int,
+        guild_id,
+        *,
+        now: int | None = None,
+        mana_effects=None,
+    ) -> int | None:
         if tunnel is None or tunnel.get("last_dig_at") is None:
             return None
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
         tunnel["guild_id"] = guild_id
-        ready_at = int(tunnel["last_dig_at"]) + self._get_free_dig_cooldown_duration(tunnel)
+        ready_at = int(tunnel["last_dig_at"]) + self._get_free_dig_cooldown_duration(
+            tunnel,
+            mana_effects=mana_effects,
+        )
         current_time = int(time.time()) if now is None else int(now)
         return ready_at if ready_at > current_time else None
 

@@ -312,6 +312,35 @@ class TestManaEffectsService:
         get_mana_spy.assert_called_once_with(discord_id, GID)
         consumed_spy.assert_not_called()
 
+    def test_get_effects_bulk_uses_one_snapshot_and_preserves_suppression(
+        self, service, monkeypatch
+    ):
+        today = get_today_pst()
+        for discord_id in (10011, 10012, 10013):
+            _register_player(service["player_repo"], discord_id)
+        service["mana_repo"].set_mana(10011, GID, "Forest", today)
+        service["mana_repo"].set_mana(10012, GID, "Mountain", "2020-01-01")
+        service["mana_repo"].set_mana(10013, GID, "Mountain", today)
+        assert service["mana_repo"].mark_mana_consumed_atomic(10013, GID)
+
+        get_all_spy = MagicMock(wraps=service["mana_repo"].get_all_mana)
+        get_one_spy = MagicMock(wraps=service["mana_repo"].get_mana)
+        monkeypatch.setattr(service["mana_repo"], "get_all_mana", get_all_spy)
+        monkeypatch.setattr(service["mana_repo"], "get_mana", get_one_spy)
+
+        effects = service["effects_service"].get_effects_bulk(
+            [10011, 10012, 10013, 10014, 10011],
+            GID,
+        )
+
+        assert list(effects) == [10011, 10012, 10013, 10014]
+        assert effects[10011].color == "Green"
+        assert effects[10012].color is None
+        assert effects[10013].color is None
+        assert effects[10014].color is None
+        get_all_spy.assert_called_once_with(GID)
+        get_one_spy.assert_not_called()
+
     def test_get_effects_stale_mana(self, service):
         """Player with yesterday's mana gets default (no) effects."""
         _register_player(service["player_repo"], 10002)

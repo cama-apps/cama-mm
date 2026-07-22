@@ -360,7 +360,14 @@ class GearMixin:
         out["crit_bonus"] = int(base.get("crit_bonus", 0) or 0) + int(mods["crit_bonus"])
         return out
 
-    def _get_active_pickaxe_tier(self, discord_id: int, guild_id, tunnel: dict) -> int:
+    def _get_active_pickaxe_tier(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        *,
+        equipped_gear: dict | None = None,
+    ) -> int:
         """Tier index used by dig-flow code.
 
         Reads the equipped Weapon row first; falls back to the legacy
@@ -368,7 +375,11 @@ class GearMixin:
         tests, brand-new tunnels, and the rare case of a player
         unequipping their only pickaxe).
         """
-        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        equipped = (
+            equipped_gear
+            if equipped_gear is not None
+            else self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        )
         wpn = equipped.get("weapon")
         if wpn is not None:
             if int(wpn["durability"]) <= 0:
@@ -385,10 +396,19 @@ class GearMixin:
         return int(tunnel.get("pickaxe_tier", 0) or 0)
 
     def _get_active_pickaxe_data(
-        self, discord_id: int, guild_id, tunnel: dict,
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        *,
+        equipped_gear: dict | None = None,
     ) -> dict:
         """Dig-flow modifiers authored by the equipped weapon definition."""
-        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        equipped = (
+            equipped_gear
+            if equipped_gear is not None
+            else self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        )
         wpn = equipped.get("weapon")
         if wpn is not None:
             if int(wpn["durability"]) <= 0:
@@ -924,7 +944,15 @@ class GearMixin:
     # Artifacts
     # ------------------------------------------------------------------
 
-    def roll_artifact(self, discord_id: int, guild_id, depth: int, *, extra_rate_mod: float = 1.0) -> dict | None:
+    def roll_artifact(
+        self,
+        discord_id: int,
+        guild_id,
+        depth: int,
+        *,
+        extra_rate_mod: float = 1.0,
+        tunnel: dict | None = None,
+    ) -> dict | None:
         """Roll for a raw-dig relic find. Returns relic info or None.
 
         Ordinary relics are findable at a 60/30/9/1 rarity split, excluding
@@ -932,7 +960,8 @@ class GearMixin:
         in their dedicated reward pools. The overall find chance remains 0.5%
         before the existing modifiers.
         """
-        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return None
 

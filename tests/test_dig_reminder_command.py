@@ -1,6 +1,6 @@
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -21,6 +21,58 @@ async def test_schedule_dig_reminder_delegates_to_reconciliation():
     await cog._schedule_dig_reminder(10001, 12345)
 
     reconcile_dig_reminder.assert_awaited_once_with(bot, 10001, 12345)
+
+
+@pytest.mark.asyncio
+async def test_schedule_dig_reminder_reuses_ready_timestamp():
+    reconcile_dig_reminder = AsyncMock()
+    bot = SimpleNamespace(
+        reminder_service=SimpleNamespace(
+            reconcile_dig_reminder=reconcile_dig_reminder,
+        )
+    )
+    cog = DigCommands(bot, SimpleNamespace())
+
+    await cog._schedule_dig_reminder(10001, 12345, 1_000_500)
+
+    reconcile_dig_reminder.assert_awaited_once_with(
+        bot,
+        10001,
+        12345,
+        ready_at=1_000_500,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_dig_reuses_registration_check_and_embedded_notice():
+    dig = Mock(
+        return_value={
+            "success": True,
+            "relic_trim_notice": False,
+            "next_free_dig_at": 1_000_500,
+        }
+    )
+    dig_service = SimpleNamespace(
+        dig=dig,
+        pop_relic_trim_notice=Mock(),
+    )
+    cog = DigCommands(SimpleNamespace(), dig_service)
+
+    result = await cog._run_dig(
+        10001,
+        12345,
+        paid=True,
+        player_verified=True,
+    )
+
+    assert result.next_free_dig_at == 1_000_500
+    dig.assert_called_once_with(
+        10001,
+        12345,
+        paid=True,
+        player_verified=True,
+    )
+    dig_service.pop_relic_trim_notice.assert_not_called()
 
 
 @pytest.mark.asyncio
