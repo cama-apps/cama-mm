@@ -112,8 +112,27 @@ class MatchService(
     def _load_glicko_player(self, player_id: int, guild_id: int | None = None) -> tuple[Player, int]:
         rating_data = self.player_repo.get_glicko_rating(player_id, guild_id)
         last_dates = self.player_repo.get_last_match_date(player_id, guild_id)
-        last_match_dt = None
-        created_at_dt = None
+
+        current_mmr = None
+        if not rating_data:
+            player_obj = self.player_repo.get_by_id(player_id, guild_id)
+            current_mmr = player_obj.mmr if player_obj else None
+
+        rating, rd, volatility = rating_data or (None, None, None)
+        last_match_date, created_at = last_dates or (None, None)
+        rating_input = {
+            "current_mmr": current_mmr,
+            "glicko_rating": rating,
+            "glicko_rd": rd,
+            "glicko_volatility": volatility,
+            "last_match_date": last_match_date,
+            "created_at": created_at,
+        }
+        return self._glicko_player_from_input(rating_input), player_id
+
+    def _glicko_player_from_input(self, rating_input: dict | None) -> Player:
+        """Build a decay-adjusted Glicko player from a preloaded repository row."""
+        rating_input = rating_input or {}
 
         def _parse_dt(value):
             if not value:
@@ -123,20 +142,21 @@ class MatchService(
             except Exception:
                 return None
 
-        if last_dates:
-            last_match_dt = _parse_dt(last_dates[0])
-            created_at_dt = _parse_dt(last_dates[1])
+        last_match_dt = _parse_dt(rating_input.get("last_match_date"))
+        created_at_dt = _parse_dt(rating_input.get("created_at"))
 
-        base_player: Player
-        if rating_data:
-            rating, rd, vol = rating_data
-            base_player = self.rating_system.create_player_from_rating(rating, rd, vol)
+        rating = rating_input.get("glicko_rating")
+        if rating is not None:
+            base_player = self.rating_system.create_player_from_rating(
+                rating,
+                rating_input.get("glicko_rd"),
+                rating_input.get("glicko_volatility"),
+            )
         else:
-            player_obj = self.player_repo.get_by_id(player_id, guild_id)
-            if player_obj and player_obj.mmr is not None:
-                base_player = self.rating_system.create_player_from_mmr(player_obj.mmr)
-            else:
-                base_player = self.rating_system.create_player_from_mmr(None)
+            current_mmr = rating_input.get("current_mmr")
+            base_player = self.rating_system.create_player_from_mmr(
+                int(current_mmr) if current_mmr else None
+            )
 
         # Apply RD decay if applicable
         reference_dt = last_match_dt or created_at_dt
@@ -147,7 +167,7 @@ class MatchService(
             days_since = (now - reference_dt).days
             base_player.rd = self.rating_system.apply_rd_decay(base_player.rd, days_since)
 
-        return base_player, player_id
+        return base_player
 
     def is_first_game_of_night(self, guild_id: int | None = None) -> bool:
         """Check if no matches have been recorded since the most recent reset boundary.

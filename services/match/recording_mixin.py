@@ -361,16 +361,30 @@ class RecordingMixin:
             betting_mode = last_shuffle.betting_mode
 
             # ---- PURE COMPUTATION (reads only; safe to run before the atomic block) ----
-            radiant_glicko = [self._load_glicko_player(pid, guild_id) for pid in radiant_team_ids]
-            dire_glicko = [self._load_glicko_player(pid, guild_id) for pid in dire_team_ids]
-
             all_player_ids = radiant_team_ids + dire_team_ids
+            rating_inputs = self.player_repo.get_match_rating_inputs(
+                all_player_ids, guild_id
+            )
+            radiant_glicko = [
+                (self._glicko_player_from_input(rating_inputs.get(pid)), pid)
+                for pid in radiant_team_ids
+            ]
+            dire_glicko = [
+                (self._glicko_player_from_input(rating_inputs.get(pid)), pid)
+                for pid in dire_team_ids
+            ]
+
+            recent_outcomes_by_player = (
+                self.match_repo.get_player_recent_outcomes_bulk(
+                    all_player_ids, normalized_gid, limit=20
+                )
+            )
             streak_multipliers: dict[int, float] = {}
             streak_data: dict[int, tuple[int, float]] = {}
             for pid in all_player_ids:
                 won = (pid in radiant_team_ids and winning_team == "radiant") or \
                       (pid in dire_team_ids and winning_team == "dire")
-                recent_outcomes = self.match_repo.get_player_recent_outcomes(pid, normalized_gid, limit=20)
+                recent_outcomes = recent_outcomes_by_player.get(pid, [])
                 streak_length, multiplier = self.rating_system.calculate_streak_multiplier(
                     recent_outcomes, won=won
                 )
@@ -430,7 +444,14 @@ class RecordingMixin:
             ]
 
             # Phase 1 OpenSkill update (equal weights). Phase 2 happens post-enrichment.
-            os_ratings = self.player_repo.get_openskill_ratings_bulk(all_player_ids, guild_id)
+            os_ratings = {
+                pid: (
+                    rating_inputs[pid].get("os_mu"),
+                    rating_inputs[pid].get("os_sigma"),
+                )
+                for pid in all_player_ids
+                if pid in rating_inputs
+            }
             radiant_os_data = [
                 (pid, *os_ratings.get(pid, (None, None))) for pid in radiant_team_ids
             ]
@@ -485,13 +506,12 @@ class RecordingMixin:
             # a read-per-player detour inside the transaction.
             now_unix = int(time.time())
             first_calibration_ids: list[int] = []
-            if hasattr(self.player_repo, "get_first_calibrated_at"):
-                for pid, _rating, rd, _vol in glicko_updates:
-                    if (
-                        rd <= CALIBRATION_RD_THRESHOLD
-                        and self.player_repo.get_first_calibrated_at(pid, guild_id) is None
-                    ):
-                        first_calibration_ids.append(pid)
+            for pid, _rating, rd, _vol in glicko_updates:
+                if (
+                    rd <= CALIBRATION_RD_THRESHOLD
+                    and not rating_inputs.get(pid, {}).get("first_calibrated_at")
+                ):
+                    first_calibration_ids.append(pid)
 
             # Consumable charges: only consumed for shuffle mode (not draft).
             effective_avoid_ids: list[int] = []

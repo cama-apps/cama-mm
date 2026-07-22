@@ -64,6 +64,13 @@ class IPlayerRepository(ABC):
     @abstractmethod
     def get_glicko_rating(self, discord_id: int, guild_id: int) -> tuple[float, float, float] | None: ...
 
+    @abstractmethod
+    def get_match_rating_inputs(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, dict]:
+        """Bulk-load player fields needed to calculate a match's rating updates."""
+        ...
+
 
     @abstractmethod
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
@@ -514,6 +521,16 @@ class IMatchRepository(ABC):
     @abstractmethod
     def get_player_recent_outcomes(self, discord_id: int, guild_id: int, limit: int = 20) -> list[bool]:
         """Get recent match outcomes for a player (True=win, most recent first)."""
+        ...
+
+    @abstractmethod
+    def get_player_recent_outcomes_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        limit: int = 20,
+    ) -> dict[int, list[bool]]:
+        """Get recent outcomes for multiple players using one connection."""
         ...
 
     @abstractmethod
