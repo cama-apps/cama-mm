@@ -1419,6 +1419,7 @@ class BalancedShuffler:
         captain_b: Player,
         pool: list[Player],
         max_assignments_per_team: int = 3,
+        _scoring_context: _ShuffleScoringContext | None = None,
     ) -> float:
         """
         Score a candidate draft pool by evaluating all possible team splits.
@@ -1432,6 +1433,7 @@ class BalancedShuffler:
             captain_b: Second captain
             pool: 8 non-captain players
             max_assignments_per_team: Max role assignments to try per team
+            _scoring_context: Request-local cache shared across candidate pools
 
         Returns:
             Best (lowest) score across all splits.
@@ -1443,7 +1445,10 @@ class BalancedShuffler:
             team_b_players = [captain_b] + [pool[i] for i in range(len(pool)) if i not in team_a_indices]
 
             _, _, score = self._optimize_role_assignments_for_matchup(
-                team_a_players, team_b_players, max_assignments_per_team=max_assignments_per_team
+                team_a_players,
+                team_b_players,
+                max_assignments_per_team=max_assignments_per_team,
+                _scoring_context=_scoring_context,
             )
 
             if score < best_score:
@@ -1459,6 +1464,7 @@ class BalancedShuffler:
         excluded: list[Player],
         exclusion_counts: dict[str, int],
         recent_match_names: set[str],
+        _scoring_context: _ShuffleScoringContext | None = None,
     ) -> float:
         """
         Compute full pool score including split score and penalties.
@@ -1470,11 +1476,17 @@ class BalancedShuffler:
             excluded: Players excluded from the pool
             exclusion_counts: Dict mapping player names to exclusion counts
             recent_match_names: Set of player names from most recent match
+            _scoring_context: Request-local cache shared across candidate pools
 
         Returns:
             Full pool score (lower is better)
         """
-        best_split_score = self._score_draft_pool(captain_a, captain_b, pool)
+        best_split_score = self._score_draft_pool(
+            captain_a,
+            captain_b,
+            pool,
+            _scoring_context=_scoring_context,
+        )
 
         # Exclusion penalty: penalize excluding frequently-excluded players
         exclusion_penalty = (
@@ -1528,6 +1540,8 @@ class BalancedShuffler:
 
         exclusion_counts = exclusion_counts or {}
         recent_match_names = recent_match_names or set()
+        # Neighboring pools repeatedly contain the same five-player teams.
+        scoring_context = _ShuffleScoringContext()
 
         # Greedy initial pool: sort by rating (descending) and take top 8
         sorted_candidates = sorted(
@@ -1540,7 +1554,8 @@ class BalancedShuffler:
 
         initial_score = self._score_full_pool(
             captain_a, captain_b, initial_pool, initial_excluded,
-            exclusion_counts, recent_match_names
+            exclusion_counts, recent_match_names,
+            _scoring_context=scoring_context,
         )
 
         # Early exit if initial pool is already excellent
@@ -1596,7 +1611,8 @@ class BalancedShuffler:
                         if score is None:
                             score = self._score_full_pool(
                                 captain_a, captain_b, new_pool, new_excluded,
-                                exclusion_counts, recent_match_names
+                                exclusion_counts, recent_match_names,
+                                _scoring_context=scoring_context,
                             )
                             score_cache[new_pool_set] = score
 
@@ -1678,10 +1694,17 @@ class BalancedShuffler:
 
         exclusion_counts = exclusion_counts or {}
         recent_match_names = recent_match_names or set()
+        # Exhaustive pools repeatedly contain the same captain-plus-four teams.
+        scoring_context = _ShuffleScoringContext()
 
         if len(candidates) == 8:
             # Only one possible pool
-            best_split_score = self._score_draft_pool(captain_a, captain_b, candidates)
+            best_split_score = self._score_draft_pool(
+                captain_a,
+                captain_b,
+                candidates,
+                _scoring_context=scoring_context,
+            )
 
             # Add recent match penalty
             selected_names = {p.name for p in candidates}
@@ -1717,7 +1740,12 @@ class BalancedShuffler:
             pool = [candidates[i] for i in pool_indices]
             excluded = [candidates[i] for i in range(len(candidates)) if i not in pool_indices]
 
-            best_split_score = self._score_draft_pool(captain_a, captain_b, pool)
+            best_split_score = self._score_draft_pool(
+                captain_a,
+                captain_b,
+                pool,
+                _scoring_context=scoring_context,
+            )
 
             # Exclusion penalty: penalize excluding frequently-excluded players
             exclusion_penalty = (
