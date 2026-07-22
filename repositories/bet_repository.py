@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from repositories.base_repository import BaseRepository
 
@@ -105,6 +107,56 @@ class BetRepository(BaseRepository, IBetRepository):
 
         This prevents race conditions where concurrent calls could double-spend.
         """
+        self._validate_bet_placement(team=team, amount=amount, leverage=leverage)
+
+        with self.atomic_transaction() as conn:
+            return self._place_bet_with_cursor(
+                conn.cursor(),
+                guild_id=guild_id,
+                discord_id=discord_id,
+                team=team,
+                amount=amount,
+                bet_time=bet_time,
+                since_ts=since_ts,
+                leverage=leverage,
+                max_debt=max_debt,
+                is_blind=is_blind,
+                odds_at_placement=odds_at_placement,
+                allow_negative=allow_negative,
+                pending_match_id=pending_match_id,
+            )
+
+    @contextmanager
+    def automatic_bet_batch(self) -> Iterator[Callable[..., int]]:
+        """Yield a savepoint-isolated bet placer backed by one transaction.
+
+        Automatic betting services keep their existing sequential result and
+        odds calculations while every placement shares one ``BEGIN IMMEDIATE``
+        transaction. A rejected candidate rolls back only its savepoint; an
+        unexpected exception escaping the batch still rolls back the full
+        transaction.
+        """
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            attempt = 0
+
+            def place_bet(**kwargs) -> int:
+                nonlocal attempt
+                savepoint = f"automatic_bet_{attempt}"
+                attempt += 1
+                cursor.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    bet_id = self._place_bet_with_cursor(cursor, **kwargs)
+                except Exception:
+                    cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    raise
+                cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return bet_id
+
+            yield place_bet
+
+    def _validate_bet_placement(self, *, team: str, amount: int, leverage: int) -> None:
         if amount <= 0:
             raise ValueError("Bet amount must be positive.")
         if team not in self.VALID_TEAMS:
@@ -112,126 +164,155 @@ class BetRepository(BaseRepository, IBetRepository):
         if leverage < 1:
             raise ValueError("Leverage must be at least 1.")
 
+    def _place_bet_with_cursor(
+        self,
+        cursor,
+        *,
+        guild_id: int | None,
+        discord_id: int,
+        team: str,
+        amount: int,
+        bet_time: int,
+        since_ts: int,
+        leverage: int = 1,
+        max_debt: int = 500,
+        is_blind: bool = False,
+        odds_at_placement: float | None = None,
+        allow_negative: bool = False,
+        pending_match_id: int | None = None,
+    ) -> int:
+        """Validate, debit, and insert one bet using the caller's transaction."""
+        self._validate_bet_placement(team=team, amount=amount, leverage=leverage)
         effective_bet = amount * leverage
         normalized_guild = self.normalize_guild_id(guild_id)
 
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-
-            # Reject opposite-team bets unless shuffle spectator dual-team is allowed
-            payload: dict | None = None
-            if pending_match_id is not None:
-                cursor.execute(
-                    """
-                    SELECT payload FROM pending_matches
-                    WHERE pending_match_id = ? AND guild_id = ?
-                    """,
-                    (pending_match_id, normalized_guild),
-                )
-                pm_row = cursor.fetchone()
-                if pm_row:
-                    try:
-                        payload = json.loads(pm_row["payload"])
-                    except Exception:
-                        payload = None
-
-            if pending_match_id is not None:
-                cursor.execute(
-                    """
-                    SELECT team_bet_on
-                    FROM bets
-                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
-                    ORDER BY bet_time ASC
-                    """,
-                    (normalized_guild, discord_id, pending_match_id),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT team_bet_on
-                    FROM bets
-                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
-                    ORDER BY bet_time ASC
-                    """,
-                    (normalized_guild, discord_id, int(since_ts)),
-                )
-            existing_bets = cursor.fetchall()
-            if existing_bets:
-                existing_team = existing_bets[0]["team_bet_on"]
-                if existing_team != team:
-                    allow_dual = payload is not None and _allows_shuffle_spectator_dual_team(
-                        payload, discord_id=discord_id
-                    )
-                    if not allow_dual:
-                        _raise_one_side_bet_required(existing_team, payload)
-
-            cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, normalized_guild),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError("Player not found.")
-
-            balance = int(row["balance"])
-
-            # Users in debt cannot place any bets (unless allow_negative for bomb pot)
-            if balance < 0 and not allow_negative:
-                raise ValueError(
-                    "You cannot place bets while in debt. Win some games to pay it off!"
-                )
-
-            # Balance check depends on leverage and allow_negative:
-            # - No leverage (1x): cannot go negative, must have enough balance
-            # - With leverage (>1x): can go into debt up to -max_debt
-            # - allow_negative=True (bomb pot): can go into debt at 1x leverage up to -max_debt
-            new_balance = balance - effective_bet
-            if allow_negative:
-                # Bomb pot mode: allow going into debt up to max_debt at 1x leverage
-                if new_balance < -max_debt:
-                    raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
-            elif leverage == 1:
-                if balance < amount:
-                    raise ValueError(f"Insufficient balance. You have {balance} jopacoin.")
-            else:
-                if new_balance < -max_debt:
-                    raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
-
-            self._set_economy_ledger_context(
-                cursor,
-                source="bet",
-                related_type="pending_match" if pending_match_id is not None else "bet_window",
-                related_id=pending_match_id if pending_match_id is not None else since_ts,
-                reason="bet stake placed",
-                metadata={
-                    "team": team,
-                    "amount": amount,
-                    "effective_bet": effective_bet,
-                    "leverage": leverage,
-                    "is_blind": is_blind,
-                    "allow_negative": allow_negative,
-                },
-            )
-            try:
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (effective_bet, discord_id, normalized_guild),
-                )
-            finally:
-                self._clear_economy_ledger_context(cursor)
-
+        # Reject opposite-team bets unless shuffle spectator dual-team is allowed
+        payload: dict | None = None
+        if pending_match_id is not None:
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement, pending_match_id)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT payload FROM pending_matches
+                WHERE pending_match_id = ? AND guild_id = ?
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement, pending_match_id),
+                (pending_match_id, normalized_guild),
             )
-            return cursor.lastrowid
+            pm_row = cursor.fetchone()
+            if pm_row:
+                try:
+                    payload = json.loads(pm_row["payload"])
+                except Exception:
+                    payload = None
+
+        if pending_match_id is not None:
+            cursor.execute(
+                """
+                SELECT team_bet_on
+                FROM bets
+                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
+                ORDER BY bet_time ASC
+                """,
+                (normalized_guild, discord_id, pending_match_id),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT team_bet_on
+                FROM bets
+                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
+                ORDER BY bet_time ASC
+                """,
+                (normalized_guild, discord_id, int(since_ts)),
+            )
+        existing_bets = cursor.fetchall()
+        if existing_bets:
+            existing_team = existing_bets[0]["team_bet_on"]
+            if existing_team != team:
+                allow_dual = payload is not None and _allows_shuffle_spectator_dual_team(
+                    payload, discord_id=discord_id
+                )
+                if not allow_dual:
+                    _raise_one_side_bet_required(existing_team, payload)
+
+        cursor.execute(
+            "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+            (discord_id, normalized_guild),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("Player not found.")
+
+        balance = int(row["balance"])
+
+        # Users in debt cannot place any bets (unless allow_negative for bomb pot)
+        if balance < 0 and not allow_negative:
+            raise ValueError(
+                "You cannot place bets while in debt. Win some games to pay it off!"
+            )
+
+        # Balance check depends on leverage and allow_negative:
+        # - No leverage (1x): cannot go negative, must have enough balance
+        # - With leverage (>1x): can go into debt up to -max_debt
+        # - allow_negative=True (bomb pot): can go into debt at 1x leverage up to -max_debt
+        new_balance = balance - effective_bet
+        if allow_negative:
+            # Bomb pot mode: allow going into debt up to max_debt at 1x leverage
+            if new_balance < -max_debt:
+                raise ValueError(
+                    f"Bet would exceed maximum debt limit of {max_debt} jopacoin."
+                )
+        elif leverage == 1:
+            if balance < amount:
+                raise ValueError(f"Insufficient balance. You have {balance} jopacoin.")
+        elif new_balance < -max_debt:
+            raise ValueError(
+                f"Bet would exceed maximum debt limit of {max_debt} jopacoin."
+            )
+
+        self._set_economy_ledger_context(
+            cursor,
+            source="bet",
+            related_type="pending_match" if pending_match_id is not None else "bet_window",
+            related_id=pending_match_id if pending_match_id is not None else since_ts,
+            reason="bet stake placed",
+            metadata={
+                "team": team,
+                "amount": amount,
+                "effective_bet": effective_bet,
+                "leverage": leverage,
+                "is_blind": is_blind,
+                "allow_negative": allow_negative,
+            },
+        )
+        try:
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (effective_bet, discord_id, normalized_guild),
+            )
+        finally:
+            self._clear_economy_ledger_context(cursor)
+
+        cursor.execute(
+            """
+            INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement, pending_match_id)
+            VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                normalized_guild,
+                discord_id,
+                team,
+                amount,
+                bet_time,
+                leverage,
+                1 if is_blind else 0,
+                odds_at_placement,
+                pending_match_id,
+            ),
+        )
+        return cursor.lastrowid
 
     def place_bet_against_pending_match_atomic(
         self,
