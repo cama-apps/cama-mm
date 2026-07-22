@@ -3,7 +3,7 @@ Tests for MatchDiscoveryService and related functionality.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,16 +16,14 @@ from tests.conftest import TEST_GUILD_ID
 def _setup_shared_roster_batch(match_repo, player_repo) -> tuple[int, int]:
     """Configure two internal matches with the same ten linked players."""
     match_repo.get_matches_without_enrichment.return_value = [
-        {"match_id": 1},
-        {"match_id": 2},
-    ]
-    match_repo.get_match.side_effect = [
         {"match_id": 1, "match_date": "2024-01-15 12:00:00"},
         {"match_id": 2, "match_date": "2024-01-16 12:00:00"},
     ]
-    match_repo.get_match_participants.return_value = [
-        {"discord_id": discord_id} for discord_id in range(1, 11)
-    ]
+    participants = [{"discord_id": discord_id} for discord_id in range(1, 11)]
+    match_repo.get_match_participants_bulk.return_value = {
+        1: participants,
+        2: participants,
+    }
     player_repo.get_steam_ids_bulk.return_value = {
         discord_id: [discord_id + 1000] for discord_id in range(1, 11)
     }
@@ -199,16 +197,16 @@ class TestMatchDiscoveryService:
 
         # Two unenriched matches
         match_repo.get_matches_without_enrichment.return_value = [
-            {"match_id": 1},
-            {"match_id": 2},
-        ]
-
-        # Both matches have same structure
-        match_repo.get_match.side_effect = [
             {"match_id": 1, "match_date": "2024-01-15 12:00:00"},
             {"match_id": 2, "match_date": "2024-01-16 12:00:00"},
         ]
-        match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
+
+        # Both matches have same structure
+        participants = [{"discord_id": i} for i in range(1, 11)]
+        match_repo.get_match_participants_bulk.return_value = {
+            1: participants,
+            2: participants,
+        }
 
         # Only 3 steam_ids (will skip both)
         # Bulk method returns dict of lists
@@ -235,39 +233,36 @@ class TestMatchDiscoveryService:
         ]
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        with patch("services.match_discovery_service.time.sleep") as sleep:
-            results = service.discover_all_matches(dry_run=True)
+        results = service.discover_all_matches(dry_run=True)
 
         assert results["discovered"] == 2
         assert mock_opendota_api.get_player_matches.call_count == 10
         assert {
             call.args[0] for call in mock_opendota_api.get_player_matches.call_args_list
         } == set(range(1001, 1011))
-        assert sleep.call_args_list == [call(0.2)] * 10 + [call(0.5)]
+        match_repo.get_match_participants_bulk.assert_called_once_with([1, 2], 0)
+        player_repo.get_steam_ids_bulk.assert_called_once_with(list(range(1, 11)))
+        match_repo.get_match.assert_not_called()
+        match_repo.get_match_participants.assert_not_called()
 
     def test_discover_all_matches_does_not_throttle_without_history_requests(
         self, mock_repos, mock_opendota_api
     ):
         match_repo, player_repo = mock_repos
-        match_repo.get_matches_without_enrichment.return_value = [{"match_id": 1}]
-        match_repo.get_match.return_value = {
-            "match_id": 1,
-            "match_date": "2024-01-15 12:00:00",
-        }
-        match_repo.get_match_participants.return_value = [
-            {"discord_id": discord_id} for discord_id in range(1, 11)
+        match_repo.get_matches_without_enrichment.return_value = [
+            {"match_id": 1, "match_date": "2024-01-15 12:00:00"}
         ]
+        participants = [{"discord_id": discord_id} for discord_id in range(1, 11)]
+        match_repo.get_match_participants_bulk.return_value = {1: participants}
         player_repo.get_steam_ids_bulk.return_value = {
             discord_id: [] for discord_id in range(1, 11)
         }
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        with patch("services.match_discovery_service.time.sleep") as sleep:
-            results = service.discover_all_matches(dry_run=True)
+        results = service.discover_all_matches(dry_run=True)
 
         assert results["skipped_no_steam_ids"] == 1
         mock_opendota_api.get_player_matches.assert_not_called()
-        sleep.assert_not_called()
 
     @pytest.mark.parametrize("failure", [None, RuntimeError("temporary failure")])
     def test_discover_all_matches_retries_transient_history_failures(
@@ -295,8 +290,7 @@ class TestMatchDiscoveryService:
         mock_opendota_api.get_player_matches.side_effect = get_player_matches
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
 
-        with patch("services.match_discovery_service.time.sleep"):
-            results = service.discover_all_matches(dry_run=True)
+        results = service.discover_all_matches(dry_run=True)
 
         assert results["skipped_low_confidence"] == 1
         assert results["discovered"] == 1
@@ -320,8 +314,7 @@ class TestMatchDiscoveryService:
         mock_opendota_api.get_player_matches.side_effect = get_player_matches
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
 
-        with patch("services.match_discovery_service.time.sleep"):
-            results = service.discover_all_matches(dry_run=True)
+        results = service.discover_all_matches(dry_run=True)
 
         assert results["skipped_low_confidence"] == 2
         assert mock_opendota_api.get_player_matches.call_count == 10

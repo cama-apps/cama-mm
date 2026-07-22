@@ -173,6 +173,72 @@ class TestPlayerRepository:
         assert player_repository.get_balances_bulk([], TEST_GUILD_ID) == {}
         assert connection_count == 1
 
+    def test_get_reminder_timestamps_bulk_is_single_read_and_guild_scoped(
+        self, player_repository, monkeypatch
+    ):
+        player_ids = [12348, 12349]
+        for discord_id in player_ids:
+            player_repository.add(
+                discord_id=discord_id,
+                discord_username=f"ReminderPlayer{discord_id}",
+                guild_id=TEST_GUILD_ID,
+            )
+        player_repository.add(
+            discord_id=player_ids[0],
+            discord_username="OtherGuildReminderPlayer",
+            guild_id=TEST_GUILD_ID_SECONDARY,
+        )
+        with sqlite3.connect(player_repository.db_path) as connection:
+            connection.executemany(
+                """
+                UPDATE players
+                SET last_wheel_spin = ?, last_trivia_session = ?
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                [
+                    (100, 200, player_ids[0], TEST_GUILD_ID),
+                    (300, None, player_ids[1], TEST_GUILD_ID),
+                    (999, 999, player_ids[0], TEST_GUILD_ID_SECONDARY),
+                ],
+            )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository,
+            "get_connection",
+            counted_get_connection,
+        )
+
+        timestamps = player_repository.get_reminder_timestamps_bulk(
+            [player_ids[1], 99999, player_ids[0], player_ids[1]],
+            TEST_GUILD_ID,
+        )
+
+        assert timestamps == {
+            player_ids[1]: {
+                "last_wheel_spin": 300,
+                "last_trivia_session": None,
+            },
+            99999: {
+                "last_wheel_spin": None,
+                "last_trivia_session": None,
+            },
+            player_ids[0]: {
+                "last_wheel_spin": 100,
+                "last_trivia_session": 200,
+            },
+        }
+        assert connection_count == 1
+        assert player_repository.get_reminder_timestamps_bulk([], TEST_GUILD_ID) == {}
+        assert connection_count == 1
+
     def test_update_personal_best_win_streaks_is_atomic_and_guild_scoped(
         self, player_repository, monkeypatch
     ):
@@ -804,21 +870,73 @@ class TestMatchRepository:
     def test_get_player_matches(self, match_repository):
         """Test getting player match history."""
         # Record a few matches
-        match_repository.record_match(
+        first_match_id = match_repository.record_match(
             team1_ids=[1, 2, 3, 4, 5],
             team2_ids=[6, 7, 8, 9, 10],
             winning_team=1,
             guild_id=TEST_GUILD_ID,
         )
-        match_repository.record_match(
+        second_match_id = match_repository.record_match(
             team1_ids=[1, 6, 3, 8, 5],
             team2_ids=[2, 7, 4, 9, 10],
             winning_team=2,
             guild_id=TEST_GUILD_ID,
         )
+        match_repository.update_participant_stats(
+            second_match_id,
+            1,
+            hero_id=42,
+            kills=8,
+            deaths=2,
+            assists=11,
+            gpm=612,
+            xpm=700,
+            hero_damage=25_000,
+            tower_damage=3_000,
+            last_hits=250,
+            denies=12,
+            net_worth=19_000,
+            hero_healing=400,
+            lane_role=2,
+            lane_efficiency=61,
+        )
 
         matches = match_repository.get_player_matches(1, TEST_GUILD_ID, limit=10)
         assert len(matches) == 2
+        assert {match["match_id"] for match in matches} == {
+            first_match_id,
+            second_match_id,
+        }
+        enriched = next(match for match in matches if match["match_id"] == second_match_id)
+        assert {
+            key: enriched[key]
+            for key in (
+                "hero_id",
+                "kills",
+                "deaths",
+                "assists",
+                "gpm",
+                "hero_damage",
+                "tower_damage",
+                "net_worth",
+                "hero_healing",
+                "lane_role",
+                "lane_efficiency",
+            )
+        } == {
+            "hero_id": 42,
+            "kills": 8,
+            "deaths": 2,
+            "assists": 11,
+            "gpm": 612,
+            "hero_damage": 25_000,
+            "tower_damage": 3_000,
+            "net_worth": 19_000,
+            "hero_healing": 400,
+            "lane_role": 2,
+            "lane_efficiency": 61,
+        }
+        assert len(enriched["participants"]) == 10
 
     def test_get_player_recent_outcomes_bulk_matches_point_reads(self, match_repository):
         histories = {
@@ -1072,20 +1190,36 @@ class TestMatchRepository:
             "lobby_type": "draft",
             "balancing_rating_system": "openskill",
         }
-        assert player_matches == [
-            {
-                "match_id": match_id,
-                "team1_players": team1,
-                "team2_players": team2,
-                "winning_team": 1,
-                "match_date": match["match_date"],
-                "player_team": 1,
-                "player_won": True,
-                "side": "radiant",
-                "valve_match_id": 8181518332,
-                "lobby_type": "draft",
-            }
-        ]
+        assert len(player_matches) == 1
+        player_match = player_matches[0]
+        assert {
+            key: player_match[key]
+            for key in (
+                "match_id",
+                "team1_players",
+                "team2_players",
+                "winning_team",
+                "match_date",
+                "player_team",
+                "player_won",
+                "side",
+                "valve_match_id",
+                "lobby_type",
+            )
+        } == {
+            "match_id": match_id,
+            "team1_players": team1,
+            "team2_players": team2,
+            "winning_team": 1,
+            "match_date": match["match_date"],
+            "player_team": 1,
+            "player_won": True,
+            "side": "radiant",
+            "valve_match_id": 8181518332,
+            "lobby_type": "draft",
+        }
+        assert player_match["hero_id"] is None
+        assert [p["discord_id"] for p in player_match["participants"]] == team1 + team2
         assert most_recent == {
             "match_id": match_id,
             "team1_players": team1,

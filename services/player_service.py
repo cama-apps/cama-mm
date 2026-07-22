@@ -221,6 +221,10 @@ class PlayerService:
         """Return the player's current jopacoin balance."""
         return self.player_repo.get_balance(discord_id, guild_id)
 
+    def get_balances(self, discord_ids: list[int], guild_id: int | None) -> dict[int, int]:
+        """Return multiple current balances using one repository read."""
+        return self.player_repo.get_balances_bulk(discord_ids, guild_id)
+
     def get_stats(self, discord_id: int, guild_id: int) -> dict:
         """Return stats payload for a player."""
         player = self.player_repo.get_by_id(discord_id, guild_id)

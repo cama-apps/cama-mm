@@ -9,8 +9,6 @@ Uses OpenDota API to find matches by correlating:
 """
 
 import logging
-import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from config import ENRICHMENT_DISCOVERY_TIME_WINDOW, ENRICHMENT_MIN_PLAYER_MATCH
@@ -24,13 +22,6 @@ MIN_PLAYERS_FOR_DISCOVERY = 5
 
 # For discovery phase, we require all 10 players by default (from config)
 # But we can still try discovery with fewer if we have at least MIN_PLAYERS_FOR_DISCOVERY
-
-
-@dataclass(slots=True)
-class _DiscoveryRequestStats:
-    """Track whether one match-discovery attempt used the OpenDota API."""
-
-    made_history_request: bool = False
 
 
 class MatchDiscoveryService:
@@ -85,16 +76,30 @@ class MatchDiscoveryService:
         }
         player_matches_cache: dict[int, list[dict]] = {}
 
+        match_ids = [match["match_id"] for match in unenriched]
+        participants_by_match = self.match_repo.get_match_participants_bulk(
+            match_ids, normalized_guild
+        )
+        discord_ids = list(
+            dict.fromkeys(
+                participant["discord_id"]
+                for participants in participants_by_match.values()
+                for participant in participants
+            )
+        )
+        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
+
         for match in unenriched:
             match_id = match["match_id"]
-            request_stats = _DiscoveryRequestStats()
             try:
                 result = self._discover_single_match(
                     match_id,
                     normalized_guild,
                     dry_run,
                     player_matches_cache=player_matches_cache,
-                    request_stats=request_stats,
+                    match=match,
+                    participants=participants_by_match.get(match_id, []),
+                    discord_to_steam_ids=discord_to_steam_ids,
                 )
                 results["details"].append(result)
 
@@ -118,11 +123,6 @@ class MatchDiscoveryService:
                     }
                 )
 
-            if request_stats.made_history_request:
-                # Pace matches that performed network I/O without penalizing
-                # later matches served entirely from the request-local cache.
-                time.sleep(0.5)
-
         logger.info(
             f"Discovery complete: {results['discovered']} discovered, "
             f"{results['skipped_low_confidence']} low confidence, "
@@ -140,22 +140,27 @@ class MatchDiscoveryService:
         dry_run: bool,
         *,
         player_matches_cache: dict[int, list[dict]] | None = None,
-        request_stats: _DiscoveryRequestStats | None = None,
+        match: dict | None = None,
+        participants: list[dict] | None = None,
+        discord_to_steam_ids: dict[int, list[int]] | None = None,
     ) -> dict:
         """
         Attempt to discover the Dota 2 match ID for a single internal match.
 
         Returns dict with match_id, status, and optionally valve_match_id/confidence.
         """
-        match = self.match_repo.get_match(match_id, guild_id)
+        if match is None:
+            match = self.match_repo.get_match(match_id, guild_id)
         if not match:
             return {"match_id": match_id, "status": "not_found"}
 
-        participants = self.match_repo.get_match_participants(match_id, guild_id)
+        if participants is None:
+            participants = self.match_repo.get_match_participants(match_id, guild_id)
 
         # Get all steam_ids for participants (supports multiple per player)
         discord_ids = [p["discord_id"] for p in participants]
-        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
+        if discord_to_steam_ids is None:
+            discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
 
         # Flatten all steam_ids and track which discord_id each came from
         steam_ids = []
@@ -199,14 +204,8 @@ class MatchDiscoveryService:
                 if cache_hit:
                     recent_matches = player_matches_cache[steam_id]
                 else:
-                    if request_stats is not None:
-                        request_stats.made_history_request = True
-                    recent_matches = self.opendota_api.get_player_matches(
-                        steam_id, limit=100
-                    )
-                    if player_matches_cache is not None and isinstance(
-                        recent_matches, list
-                    ):
+                    recent_matches = self.opendota_api.get_player_matches(steam_id, limit=100)
+                    if player_matches_cache is not None and isinstance(recent_matches, list):
                         player_matches_cache[steam_id] = recent_matches
 
                 if not recent_matches:
@@ -226,10 +225,6 @@ class MatchDiscoveryService:
 
             except Exception as e:
                 logger.warning(f"Error fetching matches for steam_id {steam_id}: {e}")
-
-            if not cache_hit:
-                # Small delay between actual API calls, not cached reads.
-                time.sleep(0.2)
 
         if not candidate_matches:
             return {"match_id": match_id, "status": "no_candidates"}

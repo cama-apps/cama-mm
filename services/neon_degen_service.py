@@ -480,6 +480,20 @@ class NeonDegenService:
                 logger.debug("Failed to get degen score for %s: %s", discord_id, e)
         return None
 
+    def _get_degen_scores(self, discord_ids: list[int], guild_id: int | None) -> dict[int, int]:
+        """Get several degen scores through the aggregate batch path."""
+        if not self.gambling_stats_service:
+            return {}
+        try:
+            return {
+                discord_id: score.total
+                for discord_id, score in (
+                    self.gambling_stats_service.calculate_degen_scores_bulk(discord_ids, guild_id)
+                ).items()
+            }
+        except Exception as e:
+            logger.debug("Failed to get bulk degen scores: %s", e)
+            return {}
 
     async def _generate_text(
         self,
