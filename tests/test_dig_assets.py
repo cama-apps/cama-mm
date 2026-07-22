@@ -22,6 +22,13 @@ from utils.dig_drawing import (
     has_event_scene,
 )
 
+NEW_PRESTIGE2_BOSS_ASSET_IDS = (
+    "cairn_general",
+    "brass_croupier",
+    "saltveil_commodore",
+)
+BOSS_ART_STATES = ("encounter", "victory", "defeat")
+
 # =============================================================================
 # dig_drawing tests
 # =============================================================================
@@ -180,6 +187,29 @@ class TestGetBossArt:
         from utils.dig_assets import BOSS_SLUGS
         missing = [bid for bid in BOSSES_BY_ID if bid not in BOSS_SLUGS]
         assert not missing, f"boss_ids missing from BOSS_SLUGS: {missing}"
+
+
+class TestPrestige2BossAssets:
+    """The new boss illustrations match the established asset contract."""
+
+    def test_assets_are_consistently_sized_rgba_pngs(self):
+        for boss_id in NEW_PRESTIGE2_BOSS_ASSET_IDS:
+            for state in BOSS_ART_STATES:
+                path = ASSETS_DIR / "bosses" / f"{boss_id}_{state}.png"
+                assert path.is_file(), f"missing boss asset: {path}"
+                with Image.open(path) as image:
+                    assert image.format == "PNG"
+                    assert image.size == (512, 288)
+                    assert image.mode == "RGBA"
+
+    def test_boss_loader_resolves_every_new_asset(self):
+        for boss_id in NEW_PRESTIGE2_BOSS_ASSET_IDS:
+            for state in BOSS_ART_STATES:
+                path = ASSETS_DIR / "bosses" / f"{boss_id}_{state}.png"
+                asset = get_boss_art(boss_id, state, "Stone")
+                assert asset is not None
+                assert asset.filename == f"boss_{state}.png"
+                assert asset.fp.read() == path.read_bytes()
 
 
 class TestGetLayerThumbnail:
