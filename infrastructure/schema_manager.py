@@ -558,6 +558,10 @@ class SchemaManager:
                 "add_bets_recent_loss_index",
                 self._migration_add_bets_recent_loss_index,
             ),
+            (
+                "add_dig_action_history_indexes",
+                self._migration_add_dig_action_history_indexes,
+            ),
         ]
 
     # --- Migrations ---
@@ -617,6 +621,27 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_bets_guild_discord_time "
             "ON bets(guild_id, discord_id, bet_time)"
         )
+
+    def _migration_add_dig_action_history_indexes(self, cursor) -> None:
+        """Cover player-scoped dig histories in chronological order."""
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_actions_guild_actor_created
+            ON dig_actions(guild_id, actor_id, created_at DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_actions_guild_target_created
+            ON dig_actions(guild_id, target_id, created_at DESC)
+            """
+        )
+
+        # The chronological indexes cover every lookup supported by the old
+        # two-column prefixes, so retaining both sets would only make each dig
+        # action pay for two redundant index writes.
+        cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_actor")
+        cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_target")
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
         """Idempotency claim for the post-core bonus credits.
