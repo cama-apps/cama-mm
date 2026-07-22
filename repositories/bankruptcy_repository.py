@@ -269,6 +269,63 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
             row = cursor.fetchone()
             return row["penalty_games_remaining"] if row else 0
 
+    def decrement_penalty_games_bulk(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, int]:
+        """Atomically decrement penalty games for multiple winners.
+
+        Duplicate IDs preserve the point-operation behavior by decrementing
+        once per occurrence. Missing bankruptcy rows are returned as zero.
+        """
+        if not discord_ids:
+            return {}
+
+        decrement_counts: dict[int, int] = {}
+        for discord_id in discord_ids:
+            decrement_counts[discord_id] = decrement_counts.get(discord_id, 0) + 1
+
+        normalized_id = self.normalize_guild_id(guild_id)
+        unique_ids = list(decrement_counts)
+        case_parts = " ".join("WHEN ? THEN ?" for _ in unique_ids)
+        placeholders = ",".join("?" * len(unique_ids))
+        case_params = [
+            value
+            for discord_id, count in decrement_counts.items()
+            for value in (discord_id, count)
+        ]
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                UPDATE bankruptcy_state
+                SET penalty_games_remaining = MAX(
+                        0,
+                        COALESCE(penalty_games_remaining, 0)
+                        - CASE discord_id {case_parts} ELSE 0 END
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
+                """,
+                (*case_params, normalized_id, *unique_ids),
+            )
+            cursor.execute(
+                f"""
+                SELECT discord_id, penalty_games_remaining
+                FROM bankruptcy_state
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
+                """,
+                (normalized_id, *unique_ids),
+            )
+            remaining = dict.fromkeys(unique_ids, 0)
+            remaining.update(
+                {
+                    row["discord_id"]: row["penalty_games_remaining"]
+                    for row in cursor.fetchall()
+                }
+            )
+            return remaining
+
 
     def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """Get the number of penalty games remaining for a player."""

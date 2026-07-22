@@ -12,7 +12,7 @@ from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
-from tests.conftest import TEST_GUILD_ID
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 from tests.repository_harness import RepositoryTestDatabase as Database
 
 
@@ -364,6 +364,51 @@ class TestBettingServiceIntegration:
         # Penalty games should be decremented after winning
         assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 4
 
+    def test_win_bonus_batches_bankruptcy_io(self, db_and_repos, monkeypatch):
+        """Five winners use one state read and one atomic counter decrement."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+        bankruptcy_service = BankruptcyService(
+            bankruptcy_repo=bankruptcy_repo,
+            player_repo=player_repo,
+            cooldown_seconds=604800,
+            penalty_games=5,
+            penalty_rate=0.5,
+        )
+        betting_service = BettingService(
+            bet_repo=db_and_repos["bet_repo"],
+            player_repo=player_repo,
+            bankruptcy_service=bankruptcy_service,
+        )
+        winning_ids = list(range(1101, 1106))
+        for pid in winning_ids:
+            create_test_player(player_repo, pid, balance=100)
+            bankruptcy_repo.upsert_state(
+                pid,
+                TEST_GUILD_ID,
+                last_bankruptcy_at=int(time.time()),
+                penalty_games_remaining=3,
+            )
+
+        connection_count = 0
+        original_get_connection = bankruptcy_repo.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(bankruptcy_repo, "get_connection", counted_get_connection)
+
+        results = betting_service.award_win_bonus(winning_ids, TEST_GUILD_ID)
+
+        assert connection_count == 2
+        assert all(results[pid]["bankruptcy_penalty"] > 0 for pid in winning_ids)
+        assert all(
+            bankruptcy_repo.get_penalty_games(pid, TEST_GUILD_ID) == 2
+            for pid in winning_ids
+        )
+
 
 class TestBankruptcyState:
     """Tests for bankruptcy state retrieval."""
@@ -615,3 +660,31 @@ class TestBulkBankruptcyState:
         # Should still return just one entry
         assert len(states) == 1
         assert states[pid].penalty_games_remaining == 5
+
+    def test_bulk_decrement_preserves_duplicates_and_guild(self, db_and_repos, monkeypatch):
+        """Bulk wins decrement per occurrence in one connection and stay guild-scoped."""
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+        now = int(time.time())
+        bankruptcy_repo.upsert_state(1201, TEST_GUILD_ID, now, 3)
+        bankruptcy_repo.upsert_state(1202, TEST_GUILD_ID, now, 1)
+        bankruptcy_repo.upsert_state(1201, TEST_GUILD_ID_SECONDARY, now, 4)
+
+        connection_count = 0
+        original_get_connection = bankruptcy_repo.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(bankruptcy_repo, "get_connection", counted_get_connection)
+
+        remaining = bankruptcy_repo.decrement_penalty_games_bulk(
+            [1201, 1202, 1201, 1299], TEST_GUILD_ID
+        )
+
+        assert remaining == {1201: 1, 1202: 0, 1299: 0}
+        assert connection_count == 1
+        assert (
+            bankruptcy_repo.get_penalty_games(1201, TEST_GUILD_ID_SECONDARY) == 4
+        )

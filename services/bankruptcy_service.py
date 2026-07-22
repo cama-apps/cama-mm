@@ -190,6 +190,12 @@ class BankruptcyService:
         """
         return self.bankruptcy_repo.decrement_penalty_games(discord_id, guild_id)
 
+    def on_games_won(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, int]:
+        """Clear one penalty game per win in a single atomic repository call."""
+        return self.bankruptcy_repo.decrement_penalty_games_bulk(discord_ids, guild_id)
+
     def add_penalty_games(self, discord_id: int, guild_id: int | None, games: int) -> int:
         """
         Add penalty games to a player's bankruptcy state.
