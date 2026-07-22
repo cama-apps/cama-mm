@@ -340,6 +340,32 @@ class TestShuffler:
         bonus = shuffler._calculate_rd_priority(players)
         assert bonus == pytest.approx((200.0 + 50.0) * weight)
 
+    def test_shuffle_reuses_rd_priority_for_same_player_selection(self, monkeypatch):
+        players = [
+            Player(
+                name=f"Player{i}",
+                discord_id=i + 1,
+                glicko_rating=1300.0 + i * 40,
+                glicko_rd=75.0 + i,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(10)
+        ]
+        shuffler = BalancedShuffler(rd_priority_weight=0.137)
+        priority_calls = 0
+        original = shuffler._calculate_rd_priority
+
+        def counted(selected_players):
+            nonlocal priority_calls
+            priority_calls += 1
+            return original(selected_players)
+
+        monkeypatch.setattr(shuffler, "_calculate_rd_priority", counted)
+
+        shuffler.shuffle(players)
+
+        assert priority_calls == 1
+
     def test_rd_priority_favors_high_rd_players_in_pool(self):
         """With high RD weight, high-RD players should be favored for inclusion."""
         # 11 players: 10 active (low RD) and 1 inactive/new (high RD)
