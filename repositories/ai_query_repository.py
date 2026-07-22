@@ -199,6 +199,37 @@ class AIQueryRepository(BaseRepository, IAIQueryRepository):
             )
             return [row["name"] for row in cursor.fetchall()]
 
+    def get_schema_metadata(self) -> dict[str, dict[str, list[dict]]]:
+        """Load table schemas and foreign keys through one read-only connection.
+
+        Table insertion order matches :meth:`get_all_tables`; each column and
+        foreign-key list retains the order returned by its SQLite PRAGMA. The
+        snapshot includes every non-internal base table so callers can apply
+        their own allow/block policy without opening additional connections.
+        """
+        with self.readonly_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            table_names = [row["name"] for row in cursor.fetchall()]
+
+            metadata: dict[str, dict[str, list[dict]]] = {}
+            for table_name in table_names:
+                # Names originate from sqlite_master rather than user input.
+                # Quoting still handles any unusual but valid SQLite identifier.
+                quoted_name = table_name.replace('"', '""')
+                cursor.execute(f'PRAGMA table_info("{quoted_name}")')
+                columns = [dict(row) for row in cursor.fetchall()]
+                cursor.execute(f'PRAGMA foreign_key_list("{quoted_name}")')
+                foreign_keys = [dict(row) for row in cursor.fetchall()]
+                metadata[table_name] = {
+                    "columns": columns,
+                    "foreign_keys": foreign_keys,
+                }
+
+            return metadata
+
     def get_foreign_keys(self, table_name: str) -> list[dict]:
         """
         Get foreign key relationships for a table.
