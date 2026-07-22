@@ -14,6 +14,8 @@ update raises the winning team's mu and lowers the losing team's.
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 from openskill_rating_system import CamaOpenSkillSystem
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -266,6 +268,35 @@ def test_backfill_no_matches_reports_empty(repo_db_path):
     assert summary["matches_processed"] == 0
     assert summary["players_updated"] == 0
     assert summary["errors"] == ["No matches found"]
+
+
+def test_backfill_loads_all_match_participants_once_without_point_reads(
+    repo_db_path, monkeypatch
+):
+    service, player_repo, match_repo = _build_service(repo_db_path)
+    player_ids = _seed_players(player_repo)
+    match_ids = [
+        _record_a_match(service, player_ids),
+        _record_a_match(service, player_ids),
+    ]
+    bulk_loader = Mock(wraps=match_repo.get_match_participants_bulk)
+    point_loader = Mock(
+        side_effect=AssertionError("backfill must not issue participant point reads")
+    )
+    monkeypatch.setattr(match_repo, "get_match_participants_bulk", bulk_loader)
+    monkeypatch.setattr(match_repo, "get_match_participants", point_loader)
+
+    summary = service.backfill_openskill_ratings(
+        guild_id=TEST_GUILD_ID, reset_first=True
+    )
+
+    assert summary["matches_processed"] == 2
+    assert summary["errors"] == []
+    bulk_loader.assert_called_once()
+    loaded_match_ids, loaded_guild_id = bulk_loader.call_args.args
+    assert set(loaded_match_ids) == set(match_ids)
+    assert loaded_guild_id == TEST_GUILD_ID
+    point_loader.assert_not_called()
 
 
 def test_openskill_prediction_uses_requested_guild_and_shared_probability_model(repo_db_path):

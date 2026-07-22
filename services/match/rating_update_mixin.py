@@ -231,6 +231,10 @@ class RatingUpdateMixin:
                 "errors": ["No matches found"],
             }
 
+        participants_by_match = self.match_repo.get_match_participants_bulk(
+            [match["match_id"] for match in all_matches], normalized_guild
+        )
+
         # Reset all players' OpenSkill ratings if requested
         # Seed from initial_mmr (what they started with), falling back to DEFAULT_MU
         if reset_first:
@@ -257,7 +261,7 @@ class RatingUpdateMixin:
 
             try:
                 # Get participants to check for fantasy data
-                participants = self.match_repo.get_match_participants(match_id, normalized_guild)
+                participants = participants_by_match[match_id]
 
                 if not participants:
                     # No participants recorded - use team lists from match

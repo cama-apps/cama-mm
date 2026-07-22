@@ -558,6 +558,13 @@ class IMatchRepository(ABC):
     def get_match(self, match_id: int, guild_id: int | None = None): ...
 
     @abstractmethod
+    def get_match_participants_bulk(
+        self, match_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, list[dict]]:
+        """Load participants for multiple matches using one connection."""
+        ...
+
+    @abstractmethod
     def get_enrichment_data(self, match_id: int, guild_id: int | None = None) -> dict | None: ...
 
     @abstractmethod

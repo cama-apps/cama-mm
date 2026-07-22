@@ -723,6 +723,84 @@ class TestMatchRepository:
         assert match["team2_players"] == [6, 7, 8, 9, 10]
         assert match["winning_team"] == 1
 
+    def test_get_match_participants_bulk_matches_point_reads_and_input_order(
+        self, match_repository
+    ):
+        first_match_id = match_repository.record_match(
+            team1_ids=[1, 2],
+            team2_ids=[3, 4],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID,
+        )
+        second_match_id = match_repository.record_match(
+            team1_ids=[5, 6],
+            team2_ids=[7, 8],
+            winning_team=2,
+            guild_id=TEST_GUILD_ID,
+        )
+        other_guild_match_id = match_repository.record_match(
+            team1_ids=[9],
+            team2_ids=[10],
+            winning_team=1,
+            guild_id=TEST_GUILD_ID_SECONDARY,
+        )
+        missing_match_id = 999_999
+
+        participants = match_repository.get_match_participants_bulk(
+            [
+                second_match_id,
+                missing_match_id,
+                first_match_id,
+                other_guild_match_id,
+                second_match_id,
+            ],
+            TEST_GUILD_ID,
+        )
+
+        assert list(participants) == [
+            second_match_id,
+            missing_match_id,
+            first_match_id,
+            other_guild_match_id,
+        ]
+        assert participants[second_match_id] == (
+            match_repository.get_match_participants(second_match_id, TEST_GUILD_ID)
+        )
+        assert participants[first_match_id] == (
+            match_repository.get_match_participants(first_match_id, TEST_GUILD_ID)
+        )
+        assert participants[missing_match_id] == []
+        assert participants[other_guild_match_id] == []
+
+    def test_get_match_participants_bulk_chunks_on_one_connection(
+        self, match_repository, monkeypatch
+    ):
+        match_ids = list(range(1, 1_002))
+        connection_count = 0
+        original_get_connection = match_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            match_repository, "get_connection", counted_get_connection
+        )
+
+        participants = match_repository.get_match_participants_bulk(
+            match_ids, TEST_GUILD_ID
+        )
+
+        assert list(participants) == match_ids
+        assert all(rows == [] for rows in participants.values())
+        assert connection_count == 1
+
+        assert (
+            match_repository.get_match_participants_bulk([], TEST_GUILD_ID) == {}
+        )
+        assert connection_count == 1
+
     def test_get_player_matches(self, match_repository):
         """Test getting player match history."""
         # Record a few matches
