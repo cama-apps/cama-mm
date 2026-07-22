@@ -7,6 +7,7 @@ charge-and-mutate paths regressed.
 """
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -235,6 +236,118 @@ class TestBuyItem:
 # ─────────────────────────────────────────────────────────────────────────
 # use_item / queue_item
 # ─────────────────────────────────────────────────────────────────────────
+
+
+class TestEnsureAutoBuyItems:
+    """Auto-buy shares one state snapshot while retaining sequential rules."""
+
+    def test_two_purchases_read_each_state_once_and_keep_per_item_ledgers(
+        self,
+        inv_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+        monkeypatch,
+    ):
+        _register_player(player_repository, balance=14)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        original_queued = dig_repo.get_queued_items
+        original_inventory = dig_repo.get_inventory
+        original_balance = player_repository.get_balance
+        queued_spy = MagicMock(wraps=original_queued)
+        inventory_spy = MagicMock(wraps=original_inventory)
+        balance_spy = MagicMock(wraps=original_balance)
+        tunnel_spy = MagicMock(wraps=dig_repo.get_tunnel)
+        purchase_spy = MagicMock(wraps=dig_repo.atomic_auto_buy_items)
+        monkeypatch.setattr(dig_repo, "get_queued_items", queued_spy)
+        monkeypatch.setattr(dig_repo, "get_inventory", inventory_spy)
+        monkeypatch.setattr(player_repository, "get_balance", balance_spy)
+        monkeypatch.setattr(dig_repo, "get_tunnel", tunnel_spy)
+        monkeypatch.setattr(dig_repo, "atomic_auto_buy_items", purchase_spy)
+
+        results = inv_service.ensure_auto_buy_items(
+            10001, guild_id, ["hard_hat", "torch"]
+        )
+
+        assert [result["type"] for result in results] == ["hard_hat", "torch"]
+        assert [result["status"] for result in results] == ["purchased", "purchased"]
+        queued_spy.assert_called_once_with(10001, guild_id)
+        inventory_spy.assert_called_once_with(10001, guild_id)
+        balance_spy.assert_called_once_with(10001, guild_id)
+        tunnel_spy.assert_called_once_with(10001, guild_id)
+        purchase_spy.assert_called_once_with(
+            10001,
+            guild_id,
+            queue_item_ids=[],
+            purchases=[("hard_hat", 8), ("torch", 6)],
+        )
+
+        assert original_balance(10001, guild_id) == 0
+        inventory = original_inventory(10001, guild_id)
+        inventory_types_by_id = {
+            item["id"]: item["item_type"] for item in inventory
+        }
+        assert [
+            inventory_types_by_id[result["item_id"]] for result in results
+        ] == [
+            "hard_hat",
+            "torch",
+        ]
+        assert all(item["queued"] == 1 for item in inventory)
+        with dig_repo.connection() as conn:
+            ledger = conn.execute(
+                """
+                SELECT delta, source, related_type, reason
+                FROM economy_ledger_entries
+                WHERE guild_id = ? AND account_id = ? AND source = 'dig'
+                ORDER BY ledger_id
+                """,
+                (guild_id, 10001),
+            ).fetchall()
+        assert [tuple(row) for row in ledger] == [
+            (-8, "dig", "dig_action", "dig cost or penalty"),
+            (-6, "dig", "dig_action", "dig cost or penalty"),
+        ]
+
+    def test_insufficient_first_item_does_not_block_affordable_second(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        _register_player(player_repository, balance=7)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        results = inv_service.ensure_auto_buy_items(
+            10001, guild_id, ["hard_hat", "torch"]
+        )
+
+        assert [result["status"] for result in results] == [
+            "skipped_insufficient_balance",
+            "purchased",
+        ]
+        assert player_repository.get_balance(10001, guild_id) == 1
+        assert [
+            item["item_type"]
+            for item in dig_repo.get_queued_items(10001, guild_id)
+        ] == ["torch"]
+
+    def test_first_purchase_consumes_last_inventory_slot(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        for _ in range(MAX_INVENTORY_SIZE - 1):
+            dig_repo.add_item(10001, guild_id, "lantern")
+
+        results = inv_service.ensure_auto_buy_items(
+            10001, guild_id, ["hard_hat", "torch"]
+        )
+
+        assert [result["status"] for result in results] == [
+            "purchased",
+            "skipped_inventory_full",
+        ]
+        assert len(dig_repo.get_inventory(10001, guild_id)) == MAX_INVENTORY_SIZE
+        assert player_repository.get_balance(10001, guild_id) == 92
 
 
 class TestUseItem:
