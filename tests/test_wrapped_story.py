@@ -335,16 +335,11 @@ class TestGetPairwiseWrapped:
 
         svc, _, player_repo = _build_service(pairings_repo=pairings_repo)
 
-        # Mock player lookups
-        def mock_get_by_id(pid, gid):
-            names = {222: "Alice", 333: "Bob", 444: "Charlie", 555: "Diana", 666: "Eve"}
-            if pid in names:
-                m = MagicMock()
-                m.name = names[pid]
-                return m
-            return None
-
-        player_repo.get_by_id.side_effect = mock_get_by_id
+        names = {222: "Alice", 333: "Bob", 444: "Charlie", 555: "Diana", 666: "Eve"}
+        player_repo.get_by_ids.return_value = [
+            SimpleNamespace(discord_id=pid, name=name)
+            for pid, name in names.items()
+        ]
 
         result = svc.get_pairwise_wrapped(111, guild_id=0)
 
@@ -367,6 +362,51 @@ class TestGetPairwiseWrapped:
 
         assert len(result.most_played_against) == 1
         assert result.most_played_against[0].username == "Eve"
+        player_repo.get_by_ids.assert_called_once_with(
+            [222, 333, 444, 555, 666], 0
+        )
+        player_repo.get_by_id.assert_not_called()
+
+    def test_pairwise_name_lookup_deduplicates_overlapping_players(self):
+        pairings_repo = MagicMock()
+        pairings_repo.get_best_teammates.return_value = [
+            {
+                "teammate_id": 222,
+                "games_together": 10,
+                "wins_together": 8,
+                "win_rate": 0.8,
+            }
+        ]
+        pairings_repo.get_most_played_with.return_value = [
+            {
+                "teammate_id": 222,
+                "games_together": 12,
+                "wins_together": 9,
+                "win_rate": 0.75,
+            }
+        ]
+        pairings_repo.get_worst_matchups.return_value = []
+        pairings_repo.get_best_matchups.return_value = []
+        pairings_repo.get_most_played_against.return_value = [
+            {
+                "opponent_id": 222,
+                "games_against": 6,
+                "wins_against": 3,
+                "win_rate": 0.5,
+            }
+        ]
+        svc, _, player_repo = _build_service(pairings_repo=pairings_repo)
+        player_repo.get_by_ids.return_value = [
+            SimpleNamespace(discord_id=222, name="Alice")
+        ]
+
+        result = svc.get_pairwise_wrapped(111, guild_id=0)
+
+        assert result is not None
+        assert result.best_teammates[0].username == "Alice"
+        assert result.most_played_with[0].username == "Alice"
+        assert result.most_played_against[0].username == "Alice"
+        player_repo.get_by_ids.assert_called_once_with([222], 0)
 
     def test_guild_id_none_normalizes_to_zero(self):
         pairings_repo = MagicMock()
@@ -380,13 +420,15 @@ class TestGetPairwiseWrapped:
 
         svc, _, player_repo = _build_service(pairings_repo=pairings_repo)
         player_mock = MagicMock()
+        player_mock.discord_id = 222
         player_mock.name = "Teammate"
-        player_repo.get_by_id.return_value = player_mock
+        player_repo.get_by_ids.return_value = [player_mock]
 
         svc.get_pairwise_wrapped(111, guild_id=None)
 
         # guild_id=None is passed through; repos handle normalization internally
         pairings_repo.get_best_teammates.assert_called_once_with(111, None, min_games=3, limit=3)
+        player_repo.get_by_ids.assert_called_once_with([222], None)
 
 
 # ===========================================================================
