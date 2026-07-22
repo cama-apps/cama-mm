@@ -3,7 +3,7 @@ Tests for MatchDiscoveryService and related functionality.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -11,6 +11,27 @@ from services.match_discovery_service import (
     MatchDiscoveryService,
 )
 from tests.conftest import TEST_GUILD_ID
+
+
+def _setup_shared_roster_batch(match_repo, player_repo) -> tuple[int, int]:
+    """Configure two internal matches with the same ten linked players."""
+    match_repo.get_matches_without_enrichment.return_value = [
+        {"match_id": 1},
+        {"match_id": 2},
+    ]
+    match_repo.get_match.side_effect = [
+        {"match_id": 1, "match_date": "2024-01-15 12:00:00"},
+        {"match_id": 2, "match_date": "2024-01-16 12:00:00"},
+    ]
+    match_repo.get_match_participants.return_value = [
+        {"discord_id": discord_id} for discord_id in range(1, 11)
+    ]
+    player_repo.get_steam_ids_bulk.return_value = {
+        discord_id: [discord_id + 1000] for discord_id in range(1, 11)
+    }
+    first_time = int(datetime(2024, 1, 15, 12, 0, tzinfo=UTC).timestamp())
+    second_time = int(datetime(2024, 1, 16, 12, 0, tzinfo=UTC).timestamp())
+    return first_time, second_time
 
 
 class TestMatchDiscoveryService:
@@ -202,6 +223,84 @@ class TestMatchDiscoveryService:
         assert results["total_unenriched"] == 2
         assert results["skipped_no_steam_ids"] == 2
         assert results["discovered"] == 0
+
+    def test_discover_all_matches_reuses_shared_player_histories(
+        self, mock_repos, mock_opendota_api
+    ):
+        match_repo, player_repo = mock_repos
+        first_time, second_time = _setup_shared_roster_batch(match_repo, player_repo)
+        mock_opendota_api.get_player_matches.return_value = [
+            {"match_id": 9001, "start_time": first_time},
+            {"match_id": 9002, "start_time": second_time},
+        ]
+
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+        with patch("services.match_discovery_service.time.sleep") as sleep:
+            results = service.discover_all_matches(dry_run=True)
+
+        assert results["discovered"] == 2
+        assert mock_opendota_api.get_player_matches.call_count == 10
+        assert {
+            call.args[0] for call in mock_opendota_api.get_player_matches.call_args_list
+        } == set(range(1001, 1011))
+        assert sleep.call_count == 12  # 10 API calls plus two per-match delays
+
+    @pytest.mark.parametrize("failure", [None, RuntimeError("temporary failure")])
+    def test_discover_all_matches_retries_transient_history_failures(
+        self, mock_repos, mock_opendota_api, failure
+    ):
+        match_repo, player_repo = mock_repos
+        first_time, second_time = _setup_shared_roster_batch(match_repo, player_repo)
+        histories = [
+            {"match_id": 9001, "start_time": first_time},
+            {"match_id": 9002, "start_time": second_time},
+        ]
+        target_attempts = 0
+
+        def get_player_matches(steam_id, limit):
+            nonlocal target_attempts
+            assert limit == 100
+            if steam_id == 1001:
+                target_attempts += 1
+                if target_attempts == 1:
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+            return histories
+
+        mock_opendota_api.get_player_matches.side_effect = get_player_matches
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+
+        with patch("services.match_discovery_service.time.sleep"):
+            results = service.discover_all_matches(dry_run=True)
+
+        assert results["skipped_low_confidence"] == 1
+        assert results["discovered"] == 1
+        assert target_attempts == 2
+        assert mock_opendota_api.get_player_matches.call_count == 11
+
+    def test_discover_all_matches_caches_successful_empty_histories(
+        self, mock_repos, mock_opendota_api
+    ):
+        match_repo, player_repo = mock_repos
+        first_time, second_time = _setup_shared_roster_batch(match_repo, player_repo)
+        histories = [
+            {"match_id": 9001, "start_time": first_time},
+            {"match_id": 9002, "start_time": second_time},
+        ]
+
+        def get_player_matches(steam_id, limit):
+            assert limit == 100
+            return [] if steam_id == 1001 else histories
+
+        mock_opendota_api.get_player_matches.side_effect = get_player_matches
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+
+        with patch("services.match_discovery_service.time.sleep"):
+            results = service.discover_all_matches(dry_run=True)
+
+        assert results["skipped_low_confidence"] == 2
+        assert mock_opendota_api.get_player_matches.call_count == 10
 
     def test_parse_match_time_iso_format(self, mock_repos, mock_opendota_api):
         """Test parsing ISO format timestamps."""
