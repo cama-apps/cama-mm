@@ -749,70 +749,67 @@ class BettingService:
             radiant_ids + dire_ids, guild_id
         )
 
-        # Process each team
+        automatic_bets: list[tuple[int, str, int]] = []
+        # Size each bet from the one-query balance snapshot. Live balance and
+        # debt validation still happen inside the shared write transaction.
         for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
             for discord_id in player_ids:
+                balance = balances.get(discord_id, 0)
+
+                if is_bomb_pot:
+                    # Bomb pot: mandatory ante for everyone, no threshold check
+                    # Per-player ante (e.g. Red mana tripled)
+                    player_ante = (ante_overrides or {}).get(
+                        discord_id, BOMB_POT_ANTE
+                    )
+                    # Calculate: configured percentage of balance + flat ante
+                    percentage_amount = (
+                        round(balance * blind_percentage) if balance > 0 else 0
+                    )
+                    blind_amount = percentage_amount + player_ante
+
+                    # Ensure minimum bet is at least the ante
+                    if blind_amount < player_ante:
+                        blind_amount = player_ante
+                else:
+                    # Normal mode: skip players below threshold
+                    if balance < AUTO_BLIND_THRESHOLD:
+                        result["skipped"].append({
+                            "discord_id": discord_id,
+                            "reason": f"balance {balance} < threshold {AUTO_BLIND_THRESHOLD}",
+                        })
+                        continue
+
+                    # Calculate blind amount (round to nearest integer)
+                    blind_amount = round(balance * blind_percentage)
+
+                    # Skip if rounded amount is less than 1
+                    if blind_amount < 1:
+                        result["skipped"].append({
+                            "discord_id": discord_id,
+                            "reason": f"blind amount {blind_amount} < 1",
+                        })
+                        continue
+
+                automatic_bets.append((discord_id, team, blind_amount))
+
+        if not automatic_bets:
+            return result
+
+        with self.bet_repo.automatic_bet_batch() as place_bet:
+            for discord_id, team, blind_amount in automatic_bets:
+                # Odds are calculated in original placement order and totals
+                # advance only after a successful savepoint.
+                total_pool = cached_totals["radiant"] + cached_totals["dire"]
+                team_total = cached_totals[team]
+                odds_at_placement = (
+                    total_pool / team_total
+                    if team_total > 0 and total_pool > 0
+                    else None
+                )
+
                 try:
-                    # Use the one-query balance snapshot only to size the bet.
-                    # ``place_bet_atomic`` re-reads the live balance under
-                    # BEGIN IMMEDIATE and remains the source of truth for
-                    # sufficient-funds and max-debt validation.
-                    balance = balances.get(discord_id, 0)
-
-                    if is_bomb_pot:
-                        # Bomb pot: mandatory ante for everyone, no threshold check
-                        # Per-player ante (e.g. Red mana tripled)
-                        player_ante = (ante_overrides or {}).get(discord_id, BOMB_POT_ANTE)
-                        # Calculate: configured percentage of balance + flat ante
-                        percentage_amount = round(balance * blind_percentage) if balance > 0 else 0
-                        blind_amount = percentage_amount + player_ante
-
-                        # Ensure minimum bet is at least the ante
-                        if blind_amount < player_ante:
-                            blind_amount = player_ante
-                    else:
-                        # Normal mode: skip players below threshold
-                        if balance < AUTO_BLIND_THRESHOLD:
-                            result["skipped"].append({
-                                "discord_id": discord_id,
-                                "reason": f"balance {balance} < threshold {AUTO_BLIND_THRESHOLD}",
-                            })
-                            continue
-
-                        # Calculate blind amount (round to nearest integer)
-                        blind_amount = round(balance * blind_percentage)
-
-                        # Skip if rounded amount is less than 1
-                        if blind_amount < 1:
-                            result["skipped"].append({
-                                "discord_id": discord_id,
-                                "reason": f"blind amount {blind_amount} < 1",
-                            })
-                            continue
-
-                    # Calculate current odds using cached totals (updated after each bet)
-                    total_pool = cached_totals["radiant"] + cached_totals["dire"]
-                    team_total = cached_totals[team]
-
-                    # Odds at placement: what multiplier you'd get if you win
-                    # If no bets yet, odds are undefined (will be calculated when more bets come in)
-                    if team_total > 0:
-                        # After this bet, total_pool increases and team_total increases
-                        # Show the odds that existed before this bet
-                        odds_at_placement = total_pool / team_total if total_pool > 0 else None
-                    else:
-                        # First bet on this team - no meaningful odds yet
-                        odds_at_placement = None
-
-                    # Place the blind bet. ``place_bet_atomic`` re-reads balance
-                    # inside a BEGIN IMMEDIATE transaction and enforces:
-                    #   - bomb pot: new_balance >= -max_debt
-                    #   - normal:   balance >= 0 AND balance >= amount
-                    # So if the balance has flipped past max_debt between our
-                    # read above and this call, the atomic op raises and the
-                    # bet lands in ``skipped`` — no over-leveraged blind is
-                    # ever placed.
-                    self.bet_repo.place_bet_atomic(
+                    place_bet(
                         guild_id=guild_id,
                         discord_id=discord_id,
                         team=team,
@@ -826,25 +823,24 @@ class BettingService:
                         allow_negative=is_bomb_pot,  # Bomb pot antes can go into debt
                         pending_match_id=pending_match_id,
                     )
-
-                    result["created"] += 1
-                    result["bets"].append({
-                        "discord_id": discord_id,
-                        "team": team,
-                        "amount": blind_amount,
-                    })
-                    # Update cached totals so next iteration has accurate odds
-                    cached_totals[team] += blind_amount
-                    if team == "radiant":
-                        result["total_radiant"] += blind_amount
-                    else:
-                        result["total_dire"] += blind_amount
-
                 except ValueError as e:
                     result["skipped"].append({
                         "discord_id": discord_id,
                         "reason": str(e),
                     })
+                    continue
+
+                result["created"] += 1
+                result["bets"].append({
+                    "discord_id": discord_id,
+                    "team": team,
+                    "amount": blind_amount,
+                })
+                cached_totals[team] += blind_amount
+                if team == "radiant":
+                    result["total_radiant"] += blind_amount
+                else:
+                    result["total_dire"] += blind_amount
 
         return result
 
@@ -896,8 +892,7 @@ class BettingService:
         cached_totals = self.bet_repo.get_total_bets_by_guild(
             guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
         )
-        spectator_totals = {"radiant": 0, "dire": 0}
-
+        automatic_bets: list[tuple[int, dict, int, int]] = []
         for index, spectator in enumerate(spectators):
             discord_id = int(spectator["discord_id"])
             balance = int(spectator.get("jopacoin_balance") or 0)
@@ -909,54 +904,67 @@ class BettingService:
                 })
                 continue
 
-            team = self._choose_auto_spectator_team(
-                amount=amount,
-                spectator_totals=spectator_totals,
-                guild_id=guild_id,
-                discord_id=discord_id,
-                shuffle_timestamp=shuffle_timestamp,
-                pending_match_id=pending_match_id,
-                index=index,
-            )
+            automatic_bets.append((index, spectator, discord_id, amount))
 
-            total_pool = cached_totals["radiant"] + cached_totals["dire"]
-            team_total = cached_totals[team]
-            odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
+        if not automatic_bets:
+            return result
 
-            try:
-                self.bet_repo.place_bet_atomic(
+        spectator_totals = {"radiant": 0, "dire": 0}
+        with self.bet_repo.automatic_bet_batch() as place_bet:
+            for index, spectator, discord_id, amount in automatic_bets:
+                team = self._choose_auto_spectator_team(
+                    amount=amount,
+                    spectator_totals=spectator_totals,
                     guild_id=guild_id,
                     discord_id=discord_id,
-                    team=team,
-                    amount=amount,
-                    bet_time=shuffle_timestamp,
-                    since_ts=shuffle_timestamp,
-                    leverage=1,
-                    max_debt=self.max_debt,
-                    is_blind=True,
-                    odds_at_placement=odds_at_placement,
+                    shuffle_timestamp=shuffle_timestamp,
                     pending_match_id=pending_match_id,
+                    index=index,
                 )
-            except ValueError as e:
-                result["skipped"].append({
-                    "discord_id": discord_id,
-                    "reason": str(e),
-                })
-                continue
 
-            result["created"] += 1
-            result["bets"].append({
-                "discord_id": discord_id,
-                "team": team,
-                "amount": amount,
-                "networth": balance,
-            })
-            cached_totals[team] += amount
-            spectator_totals[team] += amount
-            if team == "radiant":
-                result["total_radiant"] += amount
-            else:
-                result["total_dire"] += amount
+                total_pool = cached_totals["radiant"] + cached_totals["dire"]
+                team_total = cached_totals[team]
+                odds_at_placement = (
+                    total_pool / team_total
+                    if team_total > 0 and total_pool > 0
+                    else None
+                )
+
+                try:
+                    place_bet(
+                        guild_id=guild_id,
+                        discord_id=discord_id,
+                        team=team,
+                        amount=amount,
+                        bet_time=shuffle_timestamp,
+                        since_ts=shuffle_timestamp,
+                        leverage=1,
+                        max_debt=self.max_debt,
+                        is_blind=True,
+                        odds_at_placement=odds_at_placement,
+                        pending_match_id=pending_match_id,
+                    )
+                except ValueError as e:
+                    result["skipped"].append({
+                        "discord_id": discord_id,
+                        "reason": str(e),
+                    })
+                    continue
+
+                balance = int(spectator.get("jopacoin_balance") or 0)
+                result["created"] += 1
+                result["bets"].append({
+                    "discord_id": discord_id,
+                    "team": team,
+                    "amount": amount,
+                    "networth": balance,
+                })
+                cached_totals[team] += amount
+                spectator_totals[team] += amount
+                if team == "radiant":
+                    result["total_radiant"] += amount
+                else:
+                    result["total_dire"] += amount
 
         return result
 
