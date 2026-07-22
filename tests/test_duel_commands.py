@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import logging
 from dataclasses import replace
 from types import SimpleNamespace
@@ -8,6 +10,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 import discord
 import pytest
 
+import commands.duel as duel_module
 from commands.duel import (
     TRIAL_BY_COMBAT_RULES,
     DuelChallengeView,
@@ -185,6 +188,47 @@ def test_duel_is_one_top_level_group_with_approved_subcommands():
         "list",
         "resolve",
     }
+
+
+def test_duel_service_calls_are_offloaded_from_the_event_loop():
+    """Every synchronous duel service entry point must run via to_thread."""
+    tree = ast.parse(inspect.getsource(duel_module))
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    violations = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        owner = node.value
+        is_service_method = (
+            isinstance(owner, ast.Name) and owner.id == "duel_service"
+        ) or (
+            isinstance(owner, ast.Attribute)
+            and owner.attr == "duel_service"
+            and isinstance(owner.value, ast.Name)
+            and owner.value.id == "self"
+        )
+        if not is_service_method:
+            continue
+
+        parent = parents[node]
+        is_offloaded = (
+            isinstance(parent, ast.Call)
+            and bool(parent.args)
+            and parent.args[0] is node
+            and isinstance(parent.func, ast.Attribute)
+            and parent.func.attr == "to_thread"
+            and isinstance(parent.func.value, ast.Name)
+            and parent.func.value.id == "asyncio"
+        )
+        if not is_offloaded:
+            violations.append(f"{node.attr} at line {node.lineno}")
+
+    assert not violations, violations
 
 
 @pytest.mark.asyncio

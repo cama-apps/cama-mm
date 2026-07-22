@@ -61,11 +61,14 @@ def _get_litellm() -> Any:
 def acompletion(**kwargs: Any) -> Any:
     """Return LiteLLM's completion coroutine while preserving the test seam.
 
-    This wrapper is deliberately synchronous: evaluating it imports LiteLLM
-    before the returned coroutine is handed to ``asyncio.wait_for``, so the
-    one-time import does not consume the provider's hard timeout budget.
+    ``AIService._invoke`` prepares the lazy import in a worker thread before
+    evaluating this wrapper, so first use neither blocks the event loop nor
+    consumes the provider's hard timeout budget.
     """
     return _get_litellm().acompletion(**kwargs)
+
+
+_DEFAULT_ACOMPLETION = acompletion
 
 
 def _litellm_error_kind(exc: Exception) -> str | None:
@@ -291,6 +294,11 @@ class AIService:
 
         started = time.perf_counter()
         try:
+            if (
+                acompletion is _DEFAULT_ACOMPLETION
+                and _get_litellm.cache_info().currsize == 0
+            ):
+                await asyncio.to_thread(_get_litellm)
             response = await asyncio.wait_for(
                 acompletion(**kwargs),
                 timeout=self.timeout,

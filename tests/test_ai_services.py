@@ -2,16 +2,20 @@
 Tests for AI services: AIService, SQLQueryService, FlavorTextService, AIQueryRepository.
 """
 
+import asyncio
 import json
 import sqlite3
 import subprocess
 import sys
+import threading
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import services.ai_service as ai_module
 from repositories.ai_query_repository import AIQueryRepository
 from services.ai_service import (
     SQL_TOOL,
@@ -110,6 +114,74 @@ assert fake_litellm.num_retries == 0
     assert completed.returncode == 0, (
         "AI completion lazy-import delegation failed:\n"
         f"{completed.stderr or completed.stdout}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_provider_use_loads_litellm_off_loop_before_timeout(
+    monkeypatch,
+):
+    """Cold SDK initialization must finish off-loop before the provider clock starts."""
+    loop_thread_id = threading.get_ident()
+    events: list[tuple[str, int]] = []
+
+    class FakeLiteLLM:
+        def __setattr__(self, name, value):
+            if name == "num_retries":
+                events.append(("configured", threading.get_ident()))
+            object.__setattr__(self, name, value)
+
+        async def acompletion(self, **_kwargs):
+            events.append(("provider", threading.get_ident()))
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="done"))]
+            )
+
+    real_to_thread = asyncio.to_thread
+    real_wait_for = asyncio.wait_for
+
+    async def traced_to_thread(func, *args, **kwargs):
+        events.append(("thread-dispatch", threading.get_ident()))
+        result = await real_to_thread(func, *args, **kwargs)
+        events.append(("thread-complete", threading.get_ident()))
+        return result
+
+    async def traced_wait_for(awaitable, timeout):
+        events.append(("timeout-start", threading.get_ident()))
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    ai_module._get_litellm.cache_clear()
+    monkeypatch.setitem(sys.modules, "litellm", FakeLiteLLM())
+    monkeypatch.setattr(
+        ai_module,
+        "asyncio",
+        SimpleNamespace(to_thread=traced_to_thread, wait_for=traced_wait_for),
+    )
+    service = AIService(
+        model="cerebras/zai-glm-4.7",
+        api_key="test-api-key",
+        timeout=30.0,
+        max_tokens=500,
+    )
+
+    try:
+        result = await service.complete("Test prompt")
+    finally:
+        ai_module._get_litellm.cache_clear()
+
+    assert result == "done"
+    assert [name for name, _ in events] == [
+        "thread-dispatch",
+        "configured",
+        "thread-complete",
+        "timeout-start",
+        "provider",
+    ]
+    assert events[1][1] != loop_thread_id
+    assert all(
+        thread_id == loop_thread_id
+        for name, thread_id in events
+        if name != "configured"
     )
 
 
