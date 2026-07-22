@@ -53,19 +53,26 @@ class OpenDotaPlayerService:
         # In-memory cache (fallback if no DB cache)
         self._memory_cache: dict[int, dict] = {}
 
-    def get_player_profile(self, discord_id: int, force_refresh: bool = False) -> dict | None:
+    def get_player_profile(
+        self,
+        discord_id: int,
+        force_refresh: bool = False,
+        *,
+        steam_id: int | None = None,
+    ) -> dict | None:
         """
         Get comprehensive player profile from OpenDota.
 
         Args:
             discord_id: Player's Discord ID
             force_refresh: Force API refresh, ignoring cache
+            steam_id: Known Steam ID, avoiding another repository lookup
 
         Returns:
             Profile dict with stats, or None if unavailable
         """
-        # Get steam_id
-        steam_id = self.player_repo.get_steam_id(discord_id)
+        if steam_id is None:
+            steam_id = self.player_repo.get_steam_id(discord_id)
         if not steam_id:
             logger.warning(f"No steam_id for discord {discord_id}")
             return None
@@ -319,55 +326,87 @@ class OpenDotaPlayerService:
 
         try:
             # Get basic profile first
-            profile = self.get_player_profile(discord_id)
+            profile = self.get_player_profile(discord_id, steam_id=steam_id)
             if not profile:
                 return None
 
             # Fetch matches with lane_role projection for distribution analysis
             matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
-
-            # Calculate distributions
-            attr_dist = self._calc_attribute_distribution(matches)
-            lane_dist, lane_parsed_count = self._calc_lane_distribution(matches)
-
-            # Calculate recent performance (last 20 matches)
-            recent_matches = matches[:20] if matches else []
-            recent_wins = sum(1 for m in recent_matches if self._did_win(m))
-            recent_losses = len(recent_matches) - recent_wins
-            recent_winrate = self._calc_win_rate(recent_wins, recent_losses)
-
-            return {
-                # Basic stats from profile
-                "steam_id": steam_id,
-                "persona_name": profile.get("persona_name", "Unknown"),
-                "rank_tier": profile.get("rank_tier"),
-                "mmr_estimate": profile.get("mmr_estimate"),
-                "total_wins": profile.get("wins", 0),
-                "total_losses": profile.get("losses", 0),
-                "total_winrate": profile.get("win_rate", 0),
-                "avg_kills": profile.get("avg_kills", 0),
-                "avg_deaths": profile.get("avg_deaths", 0),
-                "avg_assists": profile.get("avg_assists", 0),
-                "avg_gpm": profile.get("avg_gpm", 0),
-                "avg_xpm": profile.get("avg_xpm", 0),
-                "avg_last_hits": profile.get("avg_last_hits", 0),
-                # Distributions
-                "attribute_distribution": attr_dist,
-                "lane_distribution": lane_dist,
-                "lane_parsed_count": lane_parsed_count,
-                # Top heroes
-                "top_heroes": profile.get("top_heroes", []),
-                # Recent matches (for display)
-                "recent_matches": profile.get("recent_matches", []),
-                # Recent performance
-                "recent_wins": recent_wins,
-                "recent_losses": recent_losses,
-                "recent_winrate": recent_winrate,
-                "matches_analyzed": len(matches) if matches else 0,
-            }
+            return self._build_full_stats(steam_id, profile, matches)
         except Exception as e:
             logger.error(f"Error getting full stats for discord {discord_id}: {e}")
             return None
+
+    def get_dota_tab_stats(
+        self,
+        discord_id: int,
+        match_limit: int = 50,
+        *,
+        steam_id: int | None = None,
+    ) -> dict:
+        """Get role and full Dota-tab stats from one projected match request."""
+        result = {"role_distribution": None, "full_stats": None}
+
+        if steam_id is None:
+            steam_id = self.player_repo.get_steam_id(discord_id)
+        if not steam_id:
+            logger.warning(f"No steam_id for discord {discord_id}")
+            return result
+
+        matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
+        try:
+            result["role_distribution"] = self._calc_hero_role_distribution(matches)
+        except Exception as e:
+            logger.error(f"Error calculating role distribution: {e}")
+
+        try:
+            profile = self.get_player_profile(discord_id, steam_id=steam_id)
+            if profile:
+                result["full_stats"] = self._build_full_stats(steam_id, profile, matches)
+        except Exception as e:
+            logger.error(f"Error getting full Dota-tab stats for discord {discord_id}: {e}")
+
+        return result
+
+    def _build_full_stats(self, steam_id: int, profile: dict, matches: list[dict]) -> dict:
+        """Build full player statistics from a profile and already-fetched matches."""
+        attr_dist = self._calc_attribute_distribution(matches)
+        lane_dist, lane_parsed_count = self._calc_lane_distribution(matches)
+
+        recent_matches = matches[:20]
+        recent_wins = sum(1 for match in recent_matches if self._did_win(match))
+        recent_losses = len(recent_matches) - recent_wins
+        recent_winrate = self._calc_win_rate(recent_wins, recent_losses)
+
+        return {
+            # Basic stats from profile
+            "steam_id": steam_id,
+            "persona_name": profile.get("persona_name", "Unknown"),
+            "rank_tier": profile.get("rank_tier"),
+            "mmr_estimate": profile.get("mmr_estimate"),
+            "total_wins": profile.get("wins", 0),
+            "total_losses": profile.get("losses", 0),
+            "total_winrate": profile.get("win_rate", 0),
+            "avg_kills": profile.get("avg_kills", 0),
+            "avg_deaths": profile.get("avg_deaths", 0),
+            "avg_assists": profile.get("avg_assists", 0),
+            "avg_gpm": profile.get("avg_gpm", 0),
+            "avg_xpm": profile.get("avg_xpm", 0),
+            "avg_last_hits": profile.get("avg_last_hits", 0),
+            # Distributions
+            "attribute_distribution": attr_dist,
+            "lane_distribution": lane_dist,
+            "lane_parsed_count": lane_parsed_count,
+            # Top heroes
+            "top_heroes": profile.get("top_heroes", []),
+            # Recent matches (for display)
+            "recent_matches": profile.get("recent_matches", []),
+            # Recent performance
+            "recent_wins": recent_wins,
+            "recent_losses": recent_losses,
+            "recent_winrate": recent_winrate,
+            "matches_analyzed": len(matches),
+        }
 
     def _fetch_matches_for_stats(self, steam_id: int, limit: int = 100) -> list[dict]:
         """Fetch recent matches with projections for stats analysis."""
@@ -545,38 +584,38 @@ class OpenDotaPlayerService:
         try:
             # Fetch matches
             matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
-            if not matches:
-                return None
-
-            # Get hero roles from dotabase
-            hero_roles = self._get_hero_roles()
-            if not hero_roles:
-                return None
-
-            # Count role occurrences (weighted by games)
-            role_counts: dict[str, float] = {}
-            total = 0
-
-            for match in matches:
-                hero_id = match.get("hero_id")
-                if hero_id and hero_id in hero_roles:
-                    roles = hero_roles[hero_id]
-                    # Each role gets weighted contribution
-                    for role, weight in roles.items():
-                        role_counts[role] = role_counts.get(role, 0) + weight
-                        total += weight
-
-            if total == 0:
-                return None
-
-            # Normalize to percentages
-            return {
-                role: round((count / total) * 100, 1)
-                for role, count in sorted(role_counts.items(), key=lambda x: x[1], reverse=True)
-            }
+            return self._calc_hero_role_distribution(matches)
         except Exception as e:
             logger.error(f"Error calculating role distribution: {e}")
             return None
+
+    def _calc_hero_role_distribution(self, matches: list[dict]) -> dict[str, float] | None:
+        """Calculate weighted hero roles from already-fetched matches."""
+        if not matches:
+            return None
+
+        hero_roles = self._get_hero_roles()
+        if not hero_roles:
+            return None
+
+        role_counts: dict[str, float] = {}
+        total = 0
+
+        for match in matches:
+            hero_id = match.get("hero_id")
+            if hero_id and hero_id in hero_roles:
+                roles = hero_roles[hero_id]
+                for role, weight in roles.items():
+                    role_counts[role] = role_counts.get(role, 0) + weight
+                    total += weight
+
+        if total == 0:
+            return None
+
+        return {
+            role: round((count / total) * 100, 1)
+            for role, count in sorted(role_counts.items(), key=lambda item: item[1], reverse=True)
+        }
 
     def _get_hero_roles(self) -> dict[int, dict[str, float]]:
         """
@@ -618,4 +657,3 @@ class OpenDotaPlayerService:
         except Exception as e:
             logger.error(f"Error loading hero roles from dotabase: {e}")
             return {}
-
