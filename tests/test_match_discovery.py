@@ -3,7 +3,7 @@ Tests for MatchDiscoveryService and related functionality.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -243,7 +243,31 @@ class TestMatchDiscoveryService:
         assert {
             call.args[0] for call in mock_opendota_api.get_player_matches.call_args_list
         } == set(range(1001, 1011))
-        assert sleep.call_count == 12  # 10 API calls plus two per-match delays
+        assert sleep.call_args_list == [call(0.2)] * 10 + [call(0.5)]
+
+    def test_discover_all_matches_does_not_throttle_without_history_requests(
+        self, mock_repos, mock_opendota_api
+    ):
+        match_repo, player_repo = mock_repos
+        match_repo.get_matches_without_enrichment.return_value = [{"match_id": 1}]
+        match_repo.get_match.return_value = {
+            "match_id": 1,
+            "match_date": "2024-01-15 12:00:00",
+        }
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": discord_id} for discord_id in range(1, 11)
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {
+            discord_id: [] for discord_id in range(1, 11)
+        }
+
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+        with patch("services.match_discovery_service.time.sleep") as sleep:
+            results = service.discover_all_matches(dry_run=True)
+
+        assert results["skipped_no_steam_ids"] == 1
+        mock_opendota_api.get_player_matches.assert_not_called()
+        sleep.assert_not_called()
 
     @pytest.mark.parametrize("failure", [None, RuntimeError("temporary failure")])
     def test_discover_all_matches_retries_transient_history_failures(
