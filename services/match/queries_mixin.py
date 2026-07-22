@@ -199,6 +199,12 @@ class QueriesMixin:
         """Get OpenSkill ratings for teams in a match."""
         return self.match_repo.get_os_ratings_for_match(match_id, guild_id)
 
+    def get_os_ratings_for_matches(
+        self, match_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, list[tuple[float, float]]]]:
+        """Bulk-load OpenSkill team ratings for multiple matches."""
+        return self.match_repo.get_os_ratings_for_matches(match_ids, guild_id)
+
     def get_player_lobby_type_stats(self, discord_id: int, guild_id: int | None) -> list[dict]:
         """Get lobby type statistics for a specific player."""
         return self.match_repo.get_player_lobby_type_stats(discord_id, guild_id)
