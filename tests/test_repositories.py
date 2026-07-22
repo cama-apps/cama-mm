@@ -590,6 +590,49 @@ class TestMatchRepository:
         assert bulk[303] == []
         assert match_repository.get_player_recent_outcomes_bulk([], TEST_GUILD_ID) == {}
 
+    def test_get_os_ratings_for_matches_bulk_and_guild_scoped(self, match_repository):
+        match_ids = [
+            match_repository.record_match(
+                team1_ids=[1, 2, 3, 4, 5],
+                team2_ids=[6, 7, 8, 9, 10],
+                winning_team=1,
+                guild_id=TEST_GUILD_ID,
+            )
+            for _ in range(2)
+        ]
+        for match_id in match_ids:
+            for discord_id, team_number in ((1, 1), (2, 1), (6, 2), (7, 2)):
+                match_repository.add_rating_history(
+                    discord_id,
+                    TEST_GUILD_ID,
+                    rating=1500,
+                    match_id=match_id,
+                    team_number=team_number,
+                    os_mu_before=float(discord_id),
+                    os_sigma_before=5.0,
+                )
+        match_repository.add_rating_history(
+            99,
+            TEST_GUILD_ID + 1,
+            rating=1500,
+            match_id=match_ids[0],
+            team_number=1,
+            os_mu_before=99.0,
+            os_sigma_before=5.0,
+        )
+
+        ratings = match_repository.get_os_ratings_for_matches(
+            [match_ids[1], match_ids[0], 999999, match_ids[1]],
+            TEST_GUILD_ID,
+        )
+
+        assert list(ratings) == [match_ids[1], match_ids[0], 999999]
+        for match_id in match_ids:
+            assert sorted(ratings[match_id]["team1"]) == [(1.0, 5.0), (2.0, 5.0)]
+            assert sorted(ratings[match_id]["team2"]) == [(6.0, 5.0), (7.0, 5.0)]
+        assert ratings[999999] == {"team1": [], "team2": []}
+        assert match_repository.get_os_ratings_for_matches([], TEST_GUILD_ID) == {}
+
     def test_match_summary_reads_do_not_load_enrichment_data(
         self, match_repository, monkeypatch
     ):

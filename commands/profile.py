@@ -34,7 +34,7 @@ from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.rating_insights import (
     compute_player_calibration,
-    get_os_win_probability,
+    get_os_win_probabilities,
     get_rd_tier_name,
     rd_to_certainty,
 )
@@ -548,16 +548,22 @@ class ProfileCommands(commands.Cog):
         if matches_with_predictions:
             os_system = CamaOpenSkillSystem()
             recent_lines = []
-            for h in matches_with_predictions[:5]:
+            recent_matches = matches_with_predictions[:5]
+            os_probabilities = await get_os_win_probabilities(
+                match_repo,
+                os_system,
+                [
+                    (match.get("match_id"), match.get("team_number"))
+                    for match in recent_matches
+                ],
+                guild_id,
+            )
+            for h, os_prob in zip(
+                recent_matches, os_probabilities, strict=True
+            ):
                 glicko_prob = h.get("expected_team_win_prob", 0.5)
                 won = h.get("won")
-                match_id = h.get("match_id")
                 expected_win = glicko_prob >= 0.5
-
-                # Get OpenSkill expected outcome
-                os_prob = await get_os_win_probability(
-                    match_repo, os_system, match_id, h.get("team_number"), guild_id
-                )
 
                 if won:
                     emoji = "✅" if expected_win else "🔥"  # expected win or upset

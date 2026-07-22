@@ -2,7 +2,41 @@ import pytest
 
 from domain.models.player import Player
 from openskill_rating_system import CamaOpenSkillSystem
-from utils.rating_insights import compute_calibration_stats
+from utils.rating_insights import (
+    compute_calibration_stats,
+    get_os_win_probabilities,
+)
+
+
+@pytest.mark.asyncio
+async def test_get_os_win_probabilities_bulk_loads_once_and_preserves_alignment():
+    class MatchSource:
+        def __init__(self):
+            self.calls = []
+
+        def get_os_ratings_for_matches(self, match_ids, guild_id):
+            self.calls.append((match_ids, guild_id))
+            return {
+                11: {"team1": [(60.0, 5.0)], "team2": [(40.0, 5.0)]},
+                12: {"team1": [(55.0, 5.0)], "team2": []},
+            }
+
+    class OpenSkillSystem:
+        @staticmethod
+        def os_predict_calibrated_win_probability(team, _opponent):
+            return team[0][0] / 100
+
+    source = MatchSource()
+
+    probabilities = await get_os_win_probabilities(
+        source,
+        OpenSkillSystem(),
+        [(11, 1), (12, 1), (11, 2), (None, 1)],
+        guild_id=77,
+    )
+
+    assert probabilities == [0.6, None, 0.4, None]
+    assert source.calls == [([11, 12], 77)]
 
 
 def test_compute_calibration_stats_with_predictions_and_drift():

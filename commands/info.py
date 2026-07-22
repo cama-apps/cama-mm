@@ -27,7 +27,7 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.rating_insights import (
     compute_calibration_stats,
     compute_player_calibration,
-    get_os_win_probability,
+    get_os_win_probabilities,
     rd_to_certainty,
 )
 
@@ -1651,7 +1651,19 @@ class InfoCommands(commands.Cog):
         # Shows Glicko-2 vs OpenSkill expected outcomes vs actual result
         os_system = CamaOpenSkillSystem()
         recent_game_details = []
-        for h in history[:5]:
+        recent_history = history[:5]
+        os_probabilities = await get_os_win_probabilities(
+            self.match_service,
+            os_system,
+            [
+                (match.get("match_id"), match.get("team_number"))
+                for match in recent_history
+            ],
+            guild_id,
+        )
+        for h, os_expected in zip(
+            recent_history, os_probabilities, strict=True
+        ):
             rating_after = h.get("rating")
             rating_before = h.get("rating_before")
             won = h.get("won")
@@ -1669,11 +1681,6 @@ class InfoCommands(commands.Cog):
 
             result = "W" if won else "L"
             result_emoji = "✅" if won else "❌"
-
-            # Get OpenSkill expected outcome for this match
-            os_expected = await get_os_win_probability(
-                self.match_service, os_system, match_id, h.get("team_number"), guild_id
-            )
 
             # Build compact prediction string: G=Glicko, O=OpenSkill
             pred_parts = []

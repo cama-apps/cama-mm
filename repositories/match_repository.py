@@ -1238,34 +1238,47 @@ class MatchRepository(BaseRepository, IMatchRepository):
             Dict with 'team1' and 'team2' keys, each containing list of (os_mu, os_sigma) tuples.
             Returns empty lists if no OpenSkill data available.
         """
+        return self.get_os_ratings_for_matches([match_id], guild_id).get(
+            match_id, {"team1": [], "team2": []}
+        )
+
+    def get_os_ratings_for_matches(
+        self, match_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, list[tuple[float, float]]]]:
+        """Bulk-load pre-match OpenSkill team ratings with one connection."""
+        unique_ids = list(dict.fromkeys(match_ids))
+        if not unique_ids:
+            return {}
+
         normalized_guild = self.normalize_guild_id(guild_id) if guild_id is not None else None
+        ratings_by_match: dict[int, dict[str, list[tuple[float, float]]]] = {
+            match_id: {"team1": [], "team2": []} for match_id in unique_ids
+        }
         with self.connection() as conn:
             cursor = conn.cursor()
-            query = """
-                SELECT discord_id, team_number, os_mu_before, os_sigma_before
+            placeholders = ",".join("?" for _ in unique_ids)
+            query = f"""
+                SELECT match_id, team_number, os_mu_before, os_sigma_before
                 FROM rating_history
-                WHERE match_id = ?
+                WHERE match_id IN ({placeholders})
                   AND os_mu_before IS NOT NULL
                   AND os_sigma_before IS NOT NULL
             """
-            params: list[int] = [match_id]
+            params: list[int] = list(unique_ids)
             if normalized_guild is not None:
                 query += " AND guild_id = ?"
                 params.append(normalized_guild)
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
-            team1_ratings: list[tuple[float, float]] = []
-            team2_ratings: list[tuple[float, float]] = []
-
             for row in rows:
                 rating_tuple = (row["os_mu_before"], row["os_sigma_before"])
                 if row["team_number"] == 1:
-                    team1_ratings.append(rating_tuple)
+                    ratings_by_match[row["match_id"]]["team1"].append(rating_tuple)
                 elif row["team_number"] == 2:
-                    team2_ratings.append(rating_tuple)
+                    ratings_by_match[row["match_id"]]["team2"].append(rating_tuple)
 
-            return {"team1": team1_ratings, "team2": team2_ratings}
+        return ratings_by_match
 
     def get_recent_rating_history(self, guild_id: int, limit: int = 200) -> list[dict]:
         """Get recent rating history entries for all players in a guild."""

@@ -633,14 +633,55 @@ async def get_os_win_probability(
     if not match_id or match_source is None:
         return None
     os_ratings = await asyncio.to_thread(match_source.get_os_ratings_for_match, match_id, guild_id)
-    if not (os_ratings["team1"] and os_ratings["team2"]):
+    return _os_win_probability_from_ratings(os_system, os_ratings, team_number)
+
+
+def _os_win_probability_from_ratings(
+    os_system: CamaOpenSkillSystem,
+    os_ratings: dict[str, list[tuple[float, float]]],
+    team_number: int | None,
+) -> float | None:
+    """Calculate one side's probability from a preloaded OpenSkill snapshot."""
+    team1 = os_ratings.get("team1", [])
+    team2 = os_ratings.get("team2", [])
+    if not (team1 and team2):
         return None
     if team_number == 1:
         return os_system.os_predict_calibrated_win_probability(
-            os_ratings["team1"], os_ratings["team2"]
+            team1, team2
         )
     if team_number == 2:
         return os_system.os_predict_calibrated_win_probability(
-            os_ratings["team2"], os_ratings["team1"]
+            team2, team1
         )
     return None
+
+
+async def get_os_win_probabilities(
+    match_source: Any,
+    os_system: CamaOpenSkillSystem,
+    match_sides: Iterable[tuple[int | None, int | None]],
+    guild_id: int | None = None,
+) -> list[float | None]:
+    """Bulk-load OpenSkill snapshots and return probabilities aligned to input."""
+    match_sides = list(match_sides)
+    match_ids = list(
+        dict.fromkeys(match_id for match_id, _team in match_sides if match_id)
+    )
+    if not match_ids or match_source is None:
+        return [None] * len(match_sides)
+
+    ratings_by_match = await asyncio.to_thread(
+        match_source.get_os_ratings_for_matches, match_ids, guild_id
+    )
+    empty_ratings = {"team1": [], "team2": []}
+    return [
+        _os_win_probability_from_ratings(
+            os_system,
+            ratings_by_match.get(match_id, empty_ratings),
+            team_number,
+        )
+        if match_id
+        else None
+        for match_id, team_number in match_sides
+    ]
