@@ -136,6 +136,12 @@ class LoanService:
             outstanding_fee=state["outstanding_fee"],
         )
 
+    def get_outstanding_borrower_ids(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> set[int]:
+        """Return participant IDs whose guild-scoped loan principal is outstanding."""
+        return self.loan_repo.get_outstanding_borrower_ids(discord_ids, guild_id)
+
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the total collected in the nonprofit fund."""
         return self.loan_repo.get_nonprofit_fund(guild_id)

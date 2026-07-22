@@ -41,6 +41,30 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 "outstanding_fee": row["outstanding_fee"],
             }
 
+    def get_outstanding_borrower_ids(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> set[int]:
+        """Return requested players with outstanding principal in one query."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return set()
+
+        normalized_id = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id
+                FROM loan_state
+                WHERE guild_id = ?
+                  AND discord_id IN ({placeholders})
+                  AND COALESCE(outstanding_principal, 0) > 0
+                """,
+                [normalized_id, *unique_ids],
+            )
+            return {int(row["discord_id"]) for row in cursor.fetchall()}
+
     def upsert_state(
         self,
         discord_id: int,
