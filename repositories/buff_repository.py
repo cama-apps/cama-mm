@@ -141,6 +141,31 @@ class BuffRepository(BaseRepository):
                 row["data"] = safe_json_loads(row.get("data"), {}, context="manashop_buffs.data")
             return rows
 
+    def active_target_ids(
+        self, target_ids: list[int], guild_id: int | None, buff_type: str
+    ) -> set[int]:
+        """Return targets with an active buff in one read-only query."""
+        unique_ids = list(dict.fromkeys(target_ids))
+        if not unique_ids:
+            return set()
+
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        placeholders = ",".join("?" * len(unique_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT DISTINCT target_id
+                FROM manashop_buffs
+                WHERE target_id IN ({placeholders})
+                  AND guild_id = ? AND buff_type = ?
+                  AND triggered = 0 AND expires_at > ?
+                """,
+                (*unique_ids, gid, buff_type, now),
+            )
+            return {row["target_id"] for row in cursor.fetchall()}
+
     def refresh_atomic(
         self,
         discord_id: int,
