@@ -1662,7 +1662,7 @@ class MatchCommands(commands.Cog):
                         guild_id,
                         rivalry["player1_id"],
                         rivalry["player2_id"],
-                        rivalry["games_together"],
+                        rivalry["games_against"],
                         rivalry["winrate_vs"],
                     )
                     if rv_result:

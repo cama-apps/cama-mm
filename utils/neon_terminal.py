@@ -1130,7 +1130,7 @@ def rivalry_detected_box(player1: str, player2: str, games: int, winrate: float)
         f"{DIM}{'=' * 36}{RESET}",
         f"{DIM}Player 1:{RESET} {player1}",
         f"{DIM}Player 2:{RESET} {player2}",
-        f"{DIM}Games together:{RESET} {games}",
+        f"{DIM}Games against:{RESET} {games}",
         f"{DIM}{'=' * 36}{RESET}",
         "",
         f"{DIM}[{_ts()}] Pattern:{RESET} {RED}ONE-SIDED{RESET}",

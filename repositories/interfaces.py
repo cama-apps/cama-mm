@@ -689,6 +689,13 @@ class IPairingsRepository(ABC):
         ...
 
     @abstractmethod
+    def get_pairings_for_players(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[tuple[int, int], dict]:
+        """Get pairwise stats whose two players are both in ``discord_ids``."""
+        ...
+
+    @abstractmethod
     def get_best_teammates(
         self, discord_id: int, guild_id: int | None, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
