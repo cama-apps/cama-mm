@@ -1079,6 +1079,75 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 if has_context:
                     self._clear_economy_ledger_context(cursor)
 
+    def add_balance_batch(
+        self,
+        balance_updates: list[tuple[int, int, dict | str | None]],
+        guild_id: int | None,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Apply ordered balance updates with per-update ledger metadata.
+
+        Unlike :meth:`add_balance_many`, this keeps duplicate player entries
+        distinct and attaches the matching metadata to each ledger row.
+        """
+        if not balance_updates:
+            return
+
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            for discord_id, amount, metadata in balance_updates:
+                has_context = any(
+                    value is not None
+                    for value in (
+                        source,
+                        actor_id,
+                        related_type,
+                        related_id,
+                        reason,
+                        metadata,
+                    )
+                )
+                if has_context:
+                    self._set_economy_ledger_context(
+                        cursor,
+                        source=source,
+                        actor_id=actor_id,
+                        related_type=related_type,
+                        related_id=related_id,
+                        reason=reason,
+                        metadata=metadata,
+                    )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (amount, discord_id, guild_id),
+                    )
+                    if amount < 0:
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET lowest_balance_ever = jopacoin_balance
+                            WHERE discord_id = ? AND guild_id = ?
+                              AND (lowest_balance_ever IS NULL
+                                   OR jopacoin_balance < lowest_balance_ever)
+                            """,
+                            (discord_id, guild_id),
+                        )
+                finally:
+                    if has_context:
+                        self._clear_economy_ledger_context(cursor)
+
     def add_balance_with_garnishment(
         self,
         discord_id: int,
