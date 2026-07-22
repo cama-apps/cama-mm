@@ -38,6 +38,7 @@ from services.dig_data.balance import (
     scale_positive_dig_jc,
     strengthen_dig_event_penalty,
 )
+from services.protection_service import ProtectionService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
@@ -223,6 +224,113 @@ class _ReposBundle:
         self.dig_repo = dig_repo
 
 
+def _resolve_protected_hostile_splash(
+    *,
+    player_repo,
+    dig_repo,
+    protection_service: ProtectionService,
+    guild_id: int,
+    digger_id: int,
+    event_name: str,
+    strategy: str,
+    victim_ids: list[int],
+    scaled_penalty_jc: int,
+    mode: str,
+    event_key_prefix: str,
+    audit_detail: str,
+) -> SplashResult:
+    """Settle protected burn/steal victims in one ordered transaction."""
+    candidates: list[tuple[int, int]] = []
+    losses = []
+    for victim_id in victim_ids:
+        try:
+            current_balance = player_repo.get_balance(victim_id, guild_id)
+        except Exception:
+            logger.exception(
+                "Splash %s: get_balance failed for victim %s in guild %s",
+                mode,
+                victim_id,
+                guild_id,
+            )
+            continue
+        if current_balance < HOSTILE_LOSS_MIN_BALANCE:
+            continue
+
+        requested = int(scaled_penalty_jc)
+        if mode == "burn":
+            requested = min(requested, current_balance)
+        if requested <= 0:
+            continue
+        candidates.append((victim_id, requested))
+        losses.append(
+            {
+                "victim_id": victim_id,
+                "guild_id": guild_id,
+                "amount": requested,
+                "kind": f"dig_splash_{mode}",
+                "actor_id": digger_id,
+                "event_key": f"{event_key_prefix}:{victim_id}",
+                "destination": "player" if mode == "steal" else "burn",
+                "recipient_id": digger_id if mode == "steal" else None,
+                "clamp_to_balance": mode == "burn",
+                "min_balance": HOSTILE_LOSS_MIN_BALANCE,
+                "metadata": {
+                    "event_name": event_name,
+                    "strategy": strategy,
+                    "mode": mode,
+                },
+            }
+        )
+
+    outcomes = protection_service.apply_hostile_losses(losses)
+    victims: list[tuple[int, int]] = []
+    absorbed_total = 0
+    shielded_count = 0
+    for (victim_id, _requested), outcome in zip(candidates, outcomes, strict=True):
+        if isinstance(outcome, Exception):
+            logger.warning(
+                "Splash %s settlement failed for victim %s in guild %s: %s",
+                mode,
+                victim_id,
+                guild_id,
+                outcome,
+            )
+            continue
+        actual = outcome.applied
+        if outcome.absorbed > 0:
+            absorbed_total += outcome.absorbed
+            shielded_count += 1
+        if actual <= 0:
+            continue
+
+        dig_repo.log_action(
+            discord_id=victim_id,
+            guild_id=guild_id,
+            action_type="splash_victim",
+            jc_delta=-actual,
+            details=audit_detail,
+        )
+        if mode == "steal":
+            dig_repo.log_action(
+                discord_id=digger_id,
+                guild_id=guild_id,
+                action_type="splash_thief",
+                jc_delta=actual,
+                details=audit_detail,
+            )
+        victims.append((victim_id, actual))
+
+    return SplashResult(
+        strategy=strategy,
+        event_name=event_name,
+        victims=victims,
+        total_burned=sum(amount for _, amount in victims),
+        mode=mode,
+        absorbed_total=absorbed_total,
+        shielded_count=shielded_count,
+    )
+
+
 def resolve_splash(
     *,
     player_repo,
@@ -291,6 +399,22 @@ def resolve_splash(
         ),
         "mode": mode,
     })
+
+    if type(protection_service) is ProtectionService and mode in {"burn", "steal"}:
+        return _resolve_protected_hostile_splash(
+            player_repo=player_repo,
+            dig_repo=dig_repo,
+            protection_service=protection_service,
+            guild_id=guild_id,
+            digger_id=digger_id,
+            event_name=event_name,
+            strategy=strategy,
+            victim_ids=victim_ids,
+            scaled_penalty_jc=scaled_penalty_jc,
+            mode=mode,
+            event_key_prefix=event_key_prefix,
+            audit_detail=audit_detail,
+        )
 
     victims: list[tuple[int, int]] = []
     absorbed_total = 0

@@ -231,300 +231,364 @@ class ProtectionRepository(BaseRepository):
         """Apply one hostile loss, consuming protection and moving JC atomically."""
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())
+        with self.atomic_transaction() as conn:
+            return self._apply_hostile_loss_with_cursor(
+                conn.cursor(),
+                victim_id=victim_id,
+                guild_id=gid,
+                requested=requested,
+                kind=kind,
+                actor_id=actor_id,
+                event_key=event_key,
+                destination=destination,
+                recipient_id=recipient_id,
+                clamp_to_balance=clamp_to_balance,
+                min_balance=min_balance,
+                metadata=metadata,
+                occurred_at=occurred_at,
+                mana_date=mana_date,
+                now=now,
+            )
 
+    def apply_hostile_losses(
+        self, losses: list[dict[str, Any]]
+    ) -> list[HostileLossResult | Exception]:
+        """Settle ordered hostile losses in one write transaction.
+
+        Each victim is isolated by a savepoint so a rejected settlement is
+        returned in its input position without discarding successful victims.
+        Updates made by earlier victims remain visible to later ones, which is
+        required for shared Sanctuary capacity and shared destinations.
+        """
+        if not losses:
+            return []
+
+        outcomes: list[HostileLossResult | Exception] = []
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            existing = cursor.execute(
-                "SELECT * FROM hostile_loss_events "
-                "WHERE guild_id = ? AND victim_id = ? AND event_key = ?",
-                (gid, victim_id, event_key),
-            ).fetchone()
-            if existing is not None:
-                expected = (
-                    requested,
-                    kind.value,
-                    destination.value,
-                    actor_id,
-                    recipient_id,
-                )
-                actual = (
-                    int(existing["requested"]),
-                    existing["kind"],
-                    existing["destination"],
-                    existing["actor_id"],
-                    existing["recipient_id"],
-                )
-                if actual != expected:
-                    raise ValueError("event_key already exists with a different payload")
-                return self._row_to_result(existing, duplicate=True)
-
-            victim = cursor.execute(
-                "SELECT jopacoin_balance FROM players "
-                "WHERE discord_id = ? AND guild_id = ?",
-                (victim_id, gid),
-            ).fetchone()
-            if victim is None:
-                raise ValueError("victim is not registered in this guild")
-            victim_before = int(victim["jopacoin_balance"] or 0)
-
-            attempted = requested
-            if min_balance is not None and victim_before < min_balance:
-                attempted = 0
-            if clamp_to_balance:
-                attempted = min(attempted, max(0, victim_before))
-
-            destination_before: int | None = None
-            if destination is HostileLossDestination.PLAYER:
-                if recipient_id is None:
-                    raise ValueError("recipient_id is required for player destination")
-                if recipient_id == victim_id:
-                    raise ValueError("recipient_id cannot be the victim")
-                recipient = cursor.execute(
-                    "SELECT jopacoin_balance FROM players "
-                    "WHERE discord_id = ? AND guild_id = ?",
-                    (recipient_id, gid),
-                ).fetchone()
-                if recipient is None:
-                    raise ValueError("recipient is not registered in this guild")
-                destination_before = int(recipient["jopacoin_balance"] or 0)
-            elif destination is HostileLossDestination.RESERVE:
-                reserve = cursor.execute(
-                    "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
-                    (gid,),
-                ).fetchone()
-                destination_before = int(reserve["total_collected"] or 0) if reserve else 0
-
-            shieldable = actor_id != victim_id
-            remaining = attempted
-            details: list[ProtectionDetail] = []
-            pool_keys: list[str] = []
-
-            if shieldable and remaining > 0:
-                counterspells = self._active_buffs(
-                    cursor,
-                    victim_id=victim_id,
-                    guild_id=gid,
-                    buff_type="counterspell",
-                    now=now,
-                )
-                if counterspells:
-                    row = counterspells[0]
-                    absorbed = remaining
-                    details.append(
-                        ProtectionDetail(
-                            source="counterspell",
-                            absorbed=absorbed,
-                            rate=1.0,
-                            buff_id=int(row["id"]),
-                        )
-                    )
-                    pool_keys.append(f"counterspell:{row['id']}")
-                    remaining = 0
-
-            for buff_type, shared in (
-                ("aegis", False),
-                ("sanctuary", True),
-                ("reprieve", False),
-            ):
-                if not shieldable or remaining <= 0:
-                    break
-                for row in self._active_buffs(
-                    cursor,
-                    victim_id=victim_id,
-                    guild_id=gid,
-                    buff_type=buff_type,
-                    now=now,
-                    shared=shared,
-                ):
-                    data, capacity, rate = self._decode_pool(row)
-                    if capacity <= 0 or rate <= 0:
-                        self._persist_pool(cursor, row, data, 0)
-                        continue
-                    rate_limit = self._rate_absorption(remaining, rate)
-                    absorbed = min(remaining, capacity, rate_limit)
-                    if absorbed <= 0:
-                        continue
-                    after = capacity - absorbed
-                    self._persist_pool(cursor, row, data, after)
-                    details.append(
-                        ProtectionDetail(
-                            source=buff_type,
-                            absorbed=absorbed,
-                            rate=rate,
-                            capacity_before=capacity,
-                            capacity_after=after,
-                            buff_id=int(row["id"]),
-                        )
-                    )
-                    pool_keys.append(f"buff:{row['id']}")
-                    remaining -= absorbed
-                    if remaining <= 0:
-                        break
-
-            if shieldable and remaining > 0:
-                mana = cursor.execute(
-                    """
-                    SELECT white_shield_remaining
-                    FROM player_mana
-                    WHERE discord_id = ? AND guild_id = ?
-                      AND current_land = 'Plains' AND assigned_date = ?
-                      AND consumed_today = 0
-                    """,
-                    (victim_id, gid, mana_date),
-                ).fetchone()
-                capacity = int(mana["white_shield_remaining"] or 0) if mana else 0
-                if capacity > 0:
-                    absorbed = min(
-                        capacity, self._rate_absorption(remaining, 0.5)
-                    )
-                    after = capacity - absorbed
-                    cursor.execute(
-                        "UPDATE player_mana SET white_shield_remaining = ?, "
-                        "updated_at = CURRENT_TIMESTAMP "
-                        "WHERE discord_id = ? AND guild_id = ?",
-                        (after, victim_id, gid),
-                    )
-                    details.append(
-                        ProtectionDetail(
-                            source="guardian",
-                            absorbed=absorbed,
-                            rate=0.5,
-                            capacity_before=capacity,
-                            capacity_after=after,
-                        )
-                    )
-                    pool_keys.append(f"guardian:{mana_date}")
-                    remaining -= absorbed
-
-            applied = remaining
-            absorbed_total = attempted - applied
-            victim_after = victim_before - applied
-            destination_after = (
-                destination_before + applied
-                if destination_before is not None
-                else None
-            )
-            details_json = self._details_json(details)
-            metadata_json = json.dumps(metadata, sort_keys=True) if metadata else None
-
-            cursor.execute(
-                """
-                INSERT INTO hostile_loss_events (
-                    guild_id, victim_id, actor_id, event_key, kind, destination,
-                    recipient_id, requested, attempted, absorbed, applied,
-                    victim_balance_before, victim_balance_after,
-                    destination_balance_before, destination_balance_after,
-                    shieldable, retro_covered, protection_details, metadata,
-                    occurred_at, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-                """,
-                (
-                    gid,
-                    victim_id,
-                    actor_id,
-                    event_key,
-                    kind.value,
-                    destination.value,
-                    recipient_id,
-                    requested,
-                    attempted,
-                    absorbed_total,
-                    applied,
-                    victim_before,
-                    victim_after,
-                    destination_before,
-                    destination_after,
-                    int(shieldable),
-                    details_json,
-                    metadata_json,
-                    occurred_at,
-                    now,
-                ),
-            )
-            event_id = int(cursor.lastrowid)
-
-            for detail, pool_key in zip(details, pool_keys, strict=True):
-                self._insert_protection_event(
-                    cursor,
-                    hostile_event_id=event_id,
-                    guild_id=gid,
-                    victim_id=victim_id,
-                    detail=detail,
-                    pool_key=pool_key,
-                    created_at=now,
-                )
-
-            if applied > 0:
-                ledger_metadata = {
-                    **metadata,
-                    "kind": kind.value,
-                    "event_key": event_key,
-                    "requested": requested,
-                    "attempted": attempted,
-                    "absorbed": absorbed_total,
-                    "applied": applied,
-                    "destination": destination.value,
-                    "recipient_id": recipient_id,
-                }
-                self._set_economy_ledger_context(
-                    cursor,
-                    source="hostile_loss",
-                    actor_id=actor_id,
-                    related_type="hostile_loss_event",
-                    related_id=event_id,
-                    reason=f"{kind.value} hostile loss",
-                    metadata=ledger_metadata,
-                )
+            for index, loss in enumerate(losses):
+                savepoint = f"hostile_loss_{index}"
+                cursor.execute(f"SAVEPOINT {savepoint}")
                 try:
+                    normalized = dict(loss)
+                    normalized["guild_id"] = self.normalize_guild_id(normalized["guild_id"])
+                    outcome = self._apply_hostile_loss_with_cursor(
+                        cursor,
+                        **normalized,
+                        now=int(time.time()),
+                    )
+                except Exception as exc:
+                    cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    outcomes.append(exc)
+                    continue
+                cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                outcomes.append(outcome)
+        return outcomes
+
+    def _apply_hostile_loss_with_cursor(
+        self,
+        cursor,
+        *,
+        victim_id: int,
+        guild_id: int,
+        requested: int,
+        kind: HostileLossKind,
+        actor_id: int | None,
+        event_key: str,
+        destination: HostileLossDestination,
+        recipient_id: int | None,
+        clamp_to_balance: bool,
+        min_balance: int | None,
+        metadata: dict,
+        occurred_at: int,
+        mana_date: str,
+        now: int,
+    ) -> HostileLossResult:
+        """Apply one normalized settlement using the caller's transaction."""
+        existing = cursor.execute(
+            "SELECT * FROM hostile_loss_events "
+            "WHERE guild_id = ? AND victim_id = ? AND event_key = ?",
+            (guild_id, victim_id, event_key),
+        ).fetchone()
+        if existing is not None:
+            expected = (
+                requested,
+                kind.value,
+                destination.value,
+                actor_id,
+                recipient_id,
+            )
+            actual = (
+                int(existing["requested"]),
+                existing["kind"],
+                existing["destination"],
+                existing["actor_id"],
+                existing["recipient_id"],
+            )
+            if actual != expected:
+                raise ValueError("event_key already exists with a different payload")
+            return self._row_to_result(existing, duplicate=True)
+
+        victim = cursor.execute(
+            "SELECT jopacoin_balance FROM players WHERE discord_id = ? AND guild_id = ?",
+            (victim_id, guild_id),
+        ).fetchone()
+        if victim is None:
+            raise ValueError("victim is not registered in this guild")
+        victim_before = int(victim["jopacoin_balance"] or 0)
+
+        attempted = requested
+        if min_balance is not None and victim_before < min_balance:
+            attempted = 0
+        if clamp_to_balance:
+            attempted = min(attempted, max(0, victim_before))
+
+        destination_before: int | None = None
+        if destination is HostileLossDestination.PLAYER:
+            if recipient_id is None:
+                raise ValueError("recipient_id is required for player destination")
+            if recipient_id == victim_id:
+                raise ValueError("recipient_id cannot be the victim")
+            recipient = cursor.execute(
+                "SELECT jopacoin_balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (recipient_id, guild_id),
+            ).fetchone()
+            if recipient is None:
+                raise ValueError("recipient is not registered in this guild")
+            destination_before = int(recipient["jopacoin_balance"] or 0)
+        elif destination is HostileLossDestination.RESERVE:
+            reserve = cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+            destination_before = int(reserve["total_collected"] or 0) if reserve else 0
+
+        shieldable = actor_id != victim_id
+        remaining = attempted
+        details: list[ProtectionDetail] = []
+        pool_keys: list[str] = []
+
+        if shieldable and remaining > 0:
+            counterspells = self._active_buffs(
+                cursor,
+                victim_id=victim_id,
+                guild_id=guild_id,
+                buff_type="counterspell",
+                now=now,
+            )
+            if counterspells:
+                row = counterspells[0]
+                absorbed = remaining
+                details.append(
+                    ProtectionDetail(
+                        source="counterspell",
+                        absorbed=absorbed,
+                        rate=1.0,
+                        buff_id=int(row["id"]),
+                    )
+                )
+                pool_keys.append(f"counterspell:{row['id']}")
+                remaining = 0
+
+        for buff_type, shared in (
+            ("aegis", False),
+            ("sanctuary", True),
+            ("reprieve", False),
+        ):
+            if not shieldable or remaining <= 0:
+                break
+            for row in self._active_buffs(
+                cursor,
+                victim_id=victim_id,
+                guild_id=guild_id,
+                buff_type=buff_type,
+                now=now,
+                shared=shared,
+            ):
+                data, capacity, rate = self._decode_pool(row)
+                if capacity <= 0 or rate <= 0:
+                    self._persist_pool(cursor, row, data, 0)
+                    continue
+                rate_limit = self._rate_absorption(remaining, rate)
+                absorbed = min(remaining, capacity, rate_limit)
+                if absorbed <= 0:
+                    continue
+                after = capacity - absorbed
+                self._persist_pool(cursor, row, data, after)
+                details.append(
+                    ProtectionDetail(
+                        source=buff_type,
+                        absorbed=absorbed,
+                        rate=rate,
+                        capacity_before=capacity,
+                        capacity_after=after,
+                        buff_id=int(row["id"]),
+                    )
+                )
+                pool_keys.append(f"buff:{row['id']}")
+                remaining -= absorbed
+                if remaining <= 0:
+                    break
+
+        if shieldable and remaining > 0:
+            mana = cursor.execute(
+                """
+                SELECT white_shield_remaining
+                FROM player_mana
+                WHERE discord_id = ? AND guild_id = ?
+                  AND current_land = 'Plains' AND assigned_date = ?
+                  AND consumed_today = 0
+                """,
+                (victim_id, guild_id, mana_date),
+            ).fetchone()
+            capacity = int(mana["white_shield_remaining"] or 0) if mana else 0
+            if capacity > 0:
+                absorbed = min(capacity, self._rate_absorption(remaining, 0.5))
+                after = capacity - absorbed
+                cursor.execute(
+                    "UPDATE player_mana SET white_shield_remaining = ?, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE discord_id = ? AND guild_id = ?",
+                    (after, victim_id, guild_id),
+                )
+                details.append(
+                    ProtectionDetail(
+                        source="guardian",
+                        absorbed=absorbed,
+                        rate=0.5,
+                        capacity_before=capacity,
+                        capacity_after=after,
+                    )
+                )
+                pool_keys.append(f"guardian:{mana_date}")
+                remaining -= absorbed
+
+        applied = remaining
+        absorbed_total = attempted - applied
+        victim_after = victim_before - applied
+        destination_after = destination_before + applied if destination_before is not None else None
+        details_json = self._details_json(details)
+        metadata_json = json.dumps(metadata, sort_keys=True) if metadata else None
+
+        cursor.execute(
+            """
+            INSERT INTO hostile_loss_events (
+                guild_id, victim_id, actor_id, event_key, kind, destination,
+                recipient_id, requested, attempted, absorbed, applied,
+                victim_balance_before, victim_balance_after,
+                destination_balance_before, destination_balance_after,
+                shieldable, retro_covered, protection_details, metadata,
+                occurred_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                victim_id,
+                actor_id,
+                event_key,
+                kind.value,
+                destination.value,
+                recipient_id,
+                requested,
+                attempted,
+                absorbed_total,
+                applied,
+                victim_before,
+                victim_after,
+                destination_before,
+                destination_after,
+                int(shieldable),
+                details_json,
+                metadata_json,
+                occurred_at,
+                now,
+            ),
+        )
+        event_id = int(cursor.lastrowid)
+
+        for detail, pool_key in zip(details, pool_keys, strict=True):
+            self._insert_protection_event(
+                cursor,
+                hostile_event_id=event_id,
+                guild_id=guild_id,
+                victim_id=victim_id,
+                detail=detail,
+                pool_key=pool_key,
+                created_at=now,
+            )
+
+        if applied > 0:
+            ledger_metadata = {
+                **metadata,
+                "kind": kind.value,
+                "event_key": event_key,
+                "requested": requested,
+                "attempted": attempted,
+                "absorbed": absorbed_total,
+                "applied": applied,
+                "destination": destination.value,
+                "recipient_id": recipient_id,
+            }
+            self._set_economy_ledger_context(
+                cursor,
+                source="hostile_loss",
+                actor_id=actor_id,
+                related_type="hostile_loss_event",
+                related_id=event_id,
+                reason=f"{kind.value} hostile loss",
+                metadata=ledger_metadata,
+            )
+            try:
+                cursor.execute(
+                    "UPDATE players SET jopacoin_balance = ?, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE discord_id = ? AND guild_id = ?",
+                    (victim_after, victim_id, guild_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("victim disappeared during settlement")
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND (lowest_balance_ever IS NULL
+                           OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    (victim_id, guild_id),
+                )
+                if destination is HostileLossDestination.PLAYER:
                     cursor.execute(
                         "UPDATE players SET jopacoin_balance = ?, "
                         "updated_at = CURRENT_TIMESTAMP "
                         "WHERE discord_id = ? AND guild_id = ?",
-                        (victim_after, victim_id, gid),
+                        (destination_after, recipient_id, guild_id),
                     )
                     if cursor.rowcount != 1:
-                        raise ValueError("victim disappeared during settlement")
+                        raise ValueError("recipient disappeared during settlement")
+                elif destination is HostileLossDestination.RESERVE:
                     cursor.execute(
                         """
-                        UPDATE players
-                        SET lowest_balance_ever = jopacoin_balance
-                        WHERE discord_id = ? AND guild_id = ?
-                          AND (lowest_balance_ever IS NULL
-                               OR jopacoin_balance < lowest_balance_ever)
+                        INSERT INTO nonprofit_fund (
+                            guild_id, total_collected, updated_at
+                        )
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT(guild_id) DO UPDATE SET
+                            total_collected = excluded.total_collected,
+                            updated_at = CURRENT_TIMESTAMP
                         """,
-                        (victim_id, gid),
+                        (guild_id, destination_after),
                     )
-                    if destination is HostileLossDestination.PLAYER:
-                        cursor.execute(
-                            "UPDATE players SET jopacoin_balance = ?, "
-                            "updated_at = CURRENT_TIMESTAMP "
-                            "WHERE discord_id = ? AND guild_id = ?",
-                            (destination_after, recipient_id, gid),
-                        )
-                        if cursor.rowcount != 1:
-                            raise ValueError("recipient disappeared during settlement")
-                    elif destination is HostileLossDestination.RESERVE:
-                        cursor.execute(
-                            """
-                            INSERT INTO nonprofit_fund (
-                                guild_id, total_collected, updated_at
-                            )
-                            VALUES (?, ?, CURRENT_TIMESTAMP)
-                            ON CONFLICT(guild_id) DO UPDATE SET
-                                total_collected = excluded.total_collected,
-                                updated_at = CURRENT_TIMESTAMP
-                            """,
-                            (gid, destination_after),
-                        )
-                finally:
-                    self._clear_economy_ledger_context(cursor)
+            finally:
+                self._clear_economy_ledger_context(cursor)
 
-            row = cursor.execute(
-                "SELECT * FROM hostile_loss_events WHERE event_id = ?",
-                (event_id,),
-            ).fetchone()
-            return self._row_to_result(row, duplicate=False)
+        row = cursor.execute(
+            "SELECT * FROM hostile_loss_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        return self._row_to_result(row, duplicate=False)
 
     def _eligible_retro_events(
         self,

@@ -22,6 +22,7 @@ from commands.shop import (
     ShopCommands,
     _calculate_soft_avoid_cost,
 )
+from services.protection_service import ProtectionService
 
 
 def _make_interaction(user_id: int = 1001, guild_id: int | None = None):
@@ -1319,6 +1320,58 @@ async def test_regrowth_recovers_losses_within_24h_even_before_4am_reset(monkeyp
     )
 
 
+def test_recent_loss_aggregate_combines_only_recent_losing_bets_and_wheel(
+    repo_db_path,
+):
+    import sqlite3
+
+    from repositories.bet_repository import BetRepository
+    from repositories.player_repository import PlayerRepository
+    from tests.conftest import TEST_GUILD_ID
+
+    discord_id = 4242
+    cutoff = 1_000_000
+    with sqlite3.connect(repo_db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO matches (
+                match_id, team1_players, team2_players, winning_team, guild_id
+            ) VALUES (?, '[]', '[]', ?, ?)
+            """,
+            [
+                (101, 2, TEST_GUILD_ID),
+                (102, 1, TEST_GUILD_ID),
+                (103, 2, TEST_GUILD_ID),
+                (104, 2, TEST_GUILD_ID + 1),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO bets (
+                guild_id, match_id, discord_id, team_bet_on,
+                amount, leverage, bet_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (TEST_GUILD_ID, 101, discord_id, "radiant", 10, 5, cutoff + 1),
+                (TEST_GUILD_ID, 102, discord_id, "radiant", 100, 5, cutoff + 2),
+                (TEST_GUILD_ID, 103, discord_id, "radiant", 30, 1, cutoff + 3),
+                (TEST_GUILD_ID, 103, discord_id, "radiant", 999, 1, cutoff - 1),
+                (TEST_GUILD_ID + 1, 104, discord_id, "radiant", 999, 1, cutoff + 4),
+            ],
+        )
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.log_wheel_spin(discord_id, TEST_GUILD_ID, -70, cutoff + 5)
+    player_repo.log_wheel_spin(discord_id, TEST_GUILD_ID, 500, cutoff + 6)
+    player_repo.log_wheel_spin(discord_id, TEST_GUILD_ID, -1000, cutoff - 1)
+    player_repo.log_wheel_spin(discord_id, TEST_GUILD_ID + 1, -900, cutoff + 7)
+
+    assert BetRepository(repo_db_path).get_recent_loss_aggregates(
+        discord_id, TEST_GUILD_ID, cutoff
+    ) == {"largest": 70, "total": 150}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("item", "color", "loss_method"),
@@ -1489,6 +1542,57 @@ async def test_manashop_pyroclasm_uses_applied_losses_for_bounty(monkeypatch):
     assert "**27" in message
     assert "You claim **13" in message
     assert "Shields absorbed **27" in message
+
+
+@pytest.mark.asyncio
+async def test_manashop_pyroclasm_batches_real_protection_gateway(monkeypatch):
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.shop.random.sample", lambda population, count: population[:count])
+    monkeypatch.setattr("commands.shop.random.randint", lambda low, high: 20)
+
+    buyer_id = 4242
+    guild_id = 9001
+    targets = [
+        SimpleNamespace(
+            discord_id=5100 + index,
+            name=f"Target {index}",
+            jopacoin_balance=100,
+        )
+        for index in range(3)
+    ]
+    outcomes = [
+        SimpleNamespace(applied=22, absorbed=0),
+        SimpleNamespace(applied=11, absorbed=11),
+        SimpleNamespace(applied=0, absorbed=22),
+    ]
+    protection_service = ProtectionService(MagicMock())
+    protection_service.apply_hostile_losses = MagicMock(return_value=outcomes)
+    protection_service.apply_hostile_loss = MagicMock()
+
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = SimpleNamespace(color="Red")
+    bot.mana_service.is_mana_consumed.return_value = False
+    bot.mana_repo.mark_item_used_atomic.return_value = True
+    bot.protection_service = protection_service
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(discord_id=buyer_id)
+    player_service.get_balance.return_value = 500
+    player_service.get_leaderboard.return_value = targets
+
+    shop = ShopCommands(bot, player_service)
+    interaction = _make_interaction(user_id=buyer_id, guild_id=guild_id)
+
+    await shop.manashop.callback(shop, interaction, SimpleNamespace(value="pyroclasm"), target=None)
+
+    protection_service.apply_hostile_losses.assert_called_once()
+    losses = protection_service.apply_hostile_losses.call_args.args[0]
+    assert [loss["victim_id"] for loss in losses] == [5100, 5101, 5102]
+    assert [loss["amount"] for loss in losses] == [22, 22, 22]
+    assert all(loss["kind"] == "pyroclasm" for loss in losses)
+    assert all(loss["destination"] == "burn" for loss in losses)
+    assert len({loss["event_key"].rsplit(":", 1)[0] for loss in losses}) == 1
+    protection_service.apply_hostile_loss.assert_not_called()
 
 
 @pytest.mark.asyncio

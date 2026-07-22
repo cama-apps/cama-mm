@@ -435,6 +435,51 @@ class GamblingStatsService:
             leverage_dist=leverage_distribution,
         )
 
+    def calculate_degen_scores_bulk(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, DegenScoreBreakdown]:
+        """Calculate degen scores without loading each player's bet history."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        summaries = {
+            summary["discord_id"]: summary
+            for summary in self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=1)
+            if summary["discord_id"] in unique_ids
+        }
+        bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, unique_ids)
+        bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, unique_ids)
+        bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(unique_ids, guild_id)
+        bulk_unique_matches = self.bet_repo.get_bulk_unique_matches_bet_on(guild_id, unique_ids)
+        total_matches = self.bet_repo.get_total_settled_matches(guild_id)
+        lowest_balances = self.player_repo.get_lowest_balances_bulk(unique_ids, guild_id)
+        negative_loans_by_id = (
+            self.loan_repo.get_negative_loans_bulk(unique_ids, guild_id) if self.loan_repo else {}
+        )
+
+        scores: dict[int, DegenScoreBreakdown] = {}
+        for discord_id in unique_ids:
+            summary = summaries.get(discord_id, {})
+            scores[discord_id] = self._calculate_degen_score_from_batch(
+                leverage_dist=bulk_leverage.get(discord_id, {}),
+                loss_chase_data=bulk_loss_chase.get(
+                    discord_id,
+                    {
+                        "sequences_analyzed": 0,
+                        "times_increased_after_loss": 0,
+                    },
+                ),
+                bankruptcy_count=bulk_bankruptcy.get(discord_id, 0),
+                total_matches=total_matches,
+                matches_bet_on=bulk_unique_matches.get(discord_id, 0),
+                lowest_balance=lowest_balances.get(discord_id),
+                negative_loans=negative_loans_by_id.get(discord_id, 0),
+                total_wagered=summary.get("total_wagered", 0),
+                total_bets=summary.get("total_bets", 0),
+            )
+        return scores
+
     def _calculate_degen_score_with_bet_data(
         self,
         discord_id: int,

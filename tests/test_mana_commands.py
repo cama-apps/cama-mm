@@ -9,7 +9,7 @@ Covers:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -133,3 +133,24 @@ class TestDoubleTapClaimRace:
         assert call is not None
         assert "already claimed" in call.kwargs["content"]
         assert call.kwargs["ephemeral"] is True
+
+
+def test_fresh_plains_stipends_only_process_batch_claim_winners():
+    effects = MagicMock()
+    effects.apply_bankrupt_stipend.side_effect = [5, 0]
+
+    paid = mana_commands._apply_fresh_plains_stipends(
+        effects,
+        [
+            {"discord_id": 1, "land": "Plains"},
+            {"discord_id": 2, "land": "Forest"},
+            {"discord_id": 3, "land": "Plains"},
+        ],
+        GID,
+    )
+
+    assert effects.apply_bankrupt_stipend.call_args_list == [
+        call(1, GID, "Plains"),
+        call(3, GID, "Plains"),
+    ]
+    assert paid == {1: 5, 3: 0}

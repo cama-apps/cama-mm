@@ -268,6 +268,72 @@ class TipRepository(BaseRepository, ITipRepository):
                 "tips_received_count": received_row["tips_received_count"],
             }
 
+    def get_user_tip_stats_bulk(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> dict[int, dict]:
+        """Get tip aggregates for many users using one connection."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        stats = {
+            discord_id: {
+                "total_sent": 0,
+                "tips_sent_count": 0,
+                "fees_paid": 0,
+                "total_received": 0,
+                "tips_received_count": 0,
+            }
+            for discord_id in unique_ids
+        }
+        with self.connection() as conn:
+            for offset in range(0, len(unique_ids), 900):
+                chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                sent_rows = conn.execute(
+                    f"""
+                    SELECT
+                        sender_id,
+                        COALESCE(SUM(amount), 0) AS total_sent,
+                        COUNT(*) AS tips_sent_count,
+                        COALESCE(SUM(fee), 0) AS fees_paid
+                    FROM tip_transactions
+                    WHERE guild_id = ? AND sender_id IN ({placeholders})
+                    GROUP BY sender_id
+                    """,
+                    (normalized_guild, *chunk),
+                ).fetchall()
+                for row in sent_rows:
+                    stats[int(row["sender_id"])].update(
+                        {
+                            "total_sent": int(row["total_sent"]),
+                            "tips_sent_count": int(row["tips_sent_count"]),
+                            "fees_paid": int(row["fees_paid"]),
+                        }
+                    )
+
+                received_rows = conn.execute(
+                    f"""
+                    SELECT
+                        recipient_id,
+                        COALESCE(SUM(amount), 0) AS total_received,
+                        COUNT(*) AS tips_received_count
+                    FROM tip_transactions
+                    WHERE guild_id = ? AND recipient_id IN ({placeholders})
+                    GROUP BY recipient_id
+                    """,
+                    (normalized_guild, *chunk),
+                ).fetchall()
+                for row in received_rows:
+                    stats[int(row["recipient_id"])].update(
+                        {
+                            "total_received": int(row["total_received"]),
+                            "tips_received_count": int(row["tips_received_count"]),
+                        }
+                    )
+        return stats
+
     def get_total_tip_volume(self, guild_id: int | None) -> dict:
         """
         Get server-wide tip statistics.

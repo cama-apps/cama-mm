@@ -236,6 +236,46 @@ def test_leverage_distribution_from_history_matches_repository_semantics(
     assert _leverage_distribution_from_history(history) == expected
 
 
+def test_bulk_current_streaks_and_degen_scores_match_point_paths(
+    gambling_stats_service, repositories
+):
+    bet_repo = repositories["bet_repo"]
+    player_repo = repositories["player_repo"]
+    match_repo = repositories["match_repo"]
+    first_id = _setup_player(player_repo, discord_id=1001, balance=500)
+    second_id = _setup_player(player_repo, discord_id=1002, balance=500)
+
+    for winner in ("radiant", "dire", "radiant", "radiant"):
+        _place_and_settle_bet(
+            bet_repo,
+            match_repo,
+            player_repo,
+            first_id,
+            10,
+            "radiant",
+            winner,
+        )
+    for winner in ("radiant", "dire", "dire", "dire"):
+        _place_and_settle_bet(
+            bet_repo,
+            match_repo,
+            player_repo,
+            second_id,
+            10,
+            "radiant",
+            winner,
+        )
+
+    assert bet_repo.get_current_bet_streaks_bulk([first_id, second_id, 9999], 0) == {
+        first_id: 2,
+        second_id: -3,
+    }
+
+    bulk = gambling_stats_service.calculate_degen_scores_bulk([first_id, second_id], 0)
+    assert bulk[first_id] == gambling_stats_service.calculate_degen_score(first_id, 0)
+    assert bulk[second_id] == gambling_stats_service.calculate_degen_score(second_id, 0)
+
+
 class TestGambaStats:
     """Tests for gambling statistics."""
 

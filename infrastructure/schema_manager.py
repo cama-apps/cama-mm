@@ -554,6 +554,10 @@ class SchemaManager:
                 "add_prediction_positions_user_index",
                 self._migration_add_prediction_positions_user_index,
             ),
+            (
+                "add_bets_recent_loss_index",
+                self._migration_add_bets_recent_loss_index,
+            ),
         ]
 
     # --- Migrations ---
@@ -605,6 +609,13 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_prediction_positions_user "
             "ON prediction_positions(discord_id, prediction_id)"
+        )
+
+    def _migration_add_bets_recent_loss_index(self, cursor) -> None:
+        """Cover user/timestamp filters used by recent-loss shop effects."""
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bets_guild_discord_time "
+            "ON bets(guild_id, discord_id, bet_time)"
         )
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:

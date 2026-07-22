@@ -40,6 +40,7 @@ from domain.soft_avoid_constants import SOFT_AVOID_GAMES
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
+from services.protection_service import ProtectionService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
@@ -1892,6 +1893,36 @@ class ShopCommands(commands.Cog):
                 "applied_loss": amount,
             }
 
+        async def _apply_hostile_losses(losses: list[dict]) -> list:
+            """Batch real gateway calls; preserve lightweight-test fallback."""
+            if type(protection_service) is ProtectionService:
+                requests = [
+                    {
+                        "victim_id": loss["victim_id"],
+                        "guild_id": guild_id,
+                        "amount": loss["amount"],
+                        "kind": loss["kind"],
+                        "actor_id": user_id,
+                        "event_key": loss["event_key"],
+                        "destination": loss["destination"],
+                        "recipient_id": loss.get("recipient_id"),
+                        "clamp_to_balance": loss.get("clamp_to_balance", True),
+                        "min_balance": HOSTILE_LOSS_MIN_BALANCE,
+                    }
+                    for loss in losses
+                ]
+                return await asyncio.to_thread(protection_service.apply_hostile_losses, requests)
+
+            outcomes = []
+            for loss in losses:
+                try:
+                    outcome = await _apply_hostile_loss(**loss)
+                except Exception as exc:
+                    outcomes.append(exc)
+                else:
+                    outcomes.append(outcome)
+            return outcomes
+
         # Mana Conduit relic: refund 25% of tap-mana ultimate cost.
         ult_refund = 0
         if tier == "ult":
@@ -1929,33 +1960,41 @@ class ShopCommands(commands.Cog):
             total_destroyed = 0
             total_absorbed = 0
             victim_lines = []
+            loss_targets = []
+            losses = []
             for t in targets:
                 destroy_amt = scale_deflationary_minigame_jc_delta(
                     random.randint(12, 28)
                 )
                 destroy_amt = min(destroy_amt, t.jopacoin_balance)
                 if destroy_amt > 0:
-                    outcome = await _apply_hostile_loss(
-                        t.discord_id,
-                        destroy_amt,
-                        kind="pyroclasm",
-                        event_key=f"{event_prefix}:{t.discord_id}",
-                        destination="burn",
+                    loss_targets.append((t, destroy_amt))
+                    losses.append(
+                        {
+                            "victim_id": t.discord_id,
+                            "amount": destroy_amt,
+                            "kind": "pyroclasm",
+                            "event_key": f"{event_prefix}:{t.discord_id}",
+                            "destination": "burn",
+                        }
                     )
-                    applied = _protection_result_int(
-                        outcome, "applied_loss", destroy_amt
+            outcomes = await _apply_hostile_losses(losses)
+            for (target_player, destroy_amt), outcome in zip(loss_targets, outcomes, strict=True):
+                if isinstance(outcome, Exception):
+                    logger.warning(
+                        "Pyroclasm failed for victim %s: %s",
+                        target_player.discord_id,
+                        outcome,
                     )
-                    absorbed = _protection_result_int(
-                        outcome, "absorbed_amount"
-                    )
-                    total_destroyed += applied
-                    total_absorbed += absorbed
-                    shield_note = (
-                        f" (shield absorbed {absorbed})" if absorbed else ""
-                    )
-                    victim_lines.append(
-                        f"  - {t.name}: -{applied} {JOPACOIN_EMOTE}{shield_note}"
-                    )
+                    continue
+                applied = _protection_result_int(outcome, "applied_loss", destroy_amt)
+                absorbed = _protection_result_int(outcome, "absorbed_amount")
+                total_destroyed += applied
+                total_absorbed += absorbed
+                shield_note = f" (shield absorbed {absorbed})" if absorbed else ""
+                victim_lines.append(
+                    f"  - {target_player.name}: -{applied} {JOPACOIN_EMOTE}{shield_note}"
+                )
             bounty = min(35, total_destroyed // 2)
             if bounty > 0:
                 await asyncio.to_thread(
@@ -2105,26 +2144,36 @@ class ShopCommands(commands.Cog):
             total_drained = 0
             total_absorbed = 0
             scaled_drain = scale_minigame_jc_delta(SOUL_HARVEST_DRAIN_PER_TARGET)
+            requested_drains = []
+            losses = []
             for p in eligible:
                 bonus_drain = 1 if random.random() < SOUL_HARVEST_BONUS_DRAIN_CHANCE else 0
                 drain = min(
                     scaled_drain + bonus_drain,
                     p.jopacoin_balance,
                 )
-                outcome = await _apply_hostile_loss(
-                    p.discord_id,
-                    drain,
-                    kind="soul_harvest",
-                    event_key=f"{event_prefix}:{p.discord_id}",
-                    destination="player",
-                    recipient_id=user_id,
+                requested_drains.append((p, drain))
+                losses.append(
+                    {
+                        "victim_id": p.discord_id,
+                        "amount": drain,
+                        "kind": "soul_harvest",
+                        "event_key": f"{event_prefix}:{p.discord_id}",
+                        "destination": "player",
+                        "recipient_id": user_id,
+                    }
                 )
-                total_drained += _protection_result_int(
-                    outcome, "applied_loss", drain
-                )
-                total_absorbed += _protection_result_int(
-                    outcome, "absorbed_amount"
-                )
+            outcomes = await _apply_hostile_losses(losses)
+            for (victim, drain), outcome in zip(requested_drains, outcomes, strict=True):
+                if isinstance(outcome, Exception):
+                    logger.warning(
+                        "Soul Harvest failed for victim %s: %s",
+                        victim.discord_id,
+                        outcome,
+                    )
+                    continue
+                total_drained += _protection_result_int(outcome, "applied_loss", drain)
+                total_absorbed += _protection_result_int(outcome, "absorbed_amount")
             # ProtectionService moves each applied loss to the caster inside the
             # hostile-loss transaction. The legacy fallback debits victims only,
             # so preserve the old aggregate credit when no gateway is wired.
@@ -2296,23 +2345,33 @@ class ShopCommands(commands.Cog):
             event_prefix = f"wildfire:{uuid.uuid4().hex}"
             total_drained = 0
             total_absorbed = 0
+            requested_drains = []
+            losses = []
             for p in eligible:
                 drain = scale_deflationary_minigame_jc_delta(random.randint(4, 14))
                 drain = min(drain, p.jopacoin_balance)
                 if drain > 0:
-                    outcome = await _apply_hostile_loss(
-                        p.discord_id,
-                        drain,
-                        kind="wildfire",
-                        event_key=f"{event_prefix}:{p.discord_id}",
-                        destination="burn",
+                    requested_drains.append((p, drain))
+                    losses.append(
+                        {
+                            "victim_id": p.discord_id,
+                            "amount": drain,
+                            "kind": "wildfire",
+                            "event_key": f"{event_prefix}:{p.discord_id}",
+                            "destination": "burn",
+                        }
                     )
-                    total_drained += _protection_result_int(
-                        outcome, "applied_loss", drain
+            outcomes = await _apply_hostile_losses(losses)
+            for (victim, drain), outcome in zip(requested_drains, outcomes, strict=True):
+                if isinstance(outcome, Exception):
+                    logger.warning(
+                        "Wildfire failed for victim %s: %s",
+                        victim.discord_id,
+                        outcome,
                     )
-                    total_absorbed += _protection_result_int(
-                        outcome, "absorbed_amount"
-                    )
+                    continue
+                total_drained += _protection_result_int(outcome, "applied_loss", drain)
+                total_absorbed += _protection_result_int(outcome, "absorbed_amount")
             user_gain = int(total_drained * 0.45)
             if user_gain > 0:
                 await asyncio.to_thread(
@@ -2440,51 +2499,30 @@ class ShopCommands(commands.Cog):
     ) -> int:
         """Return the largest single JC loss for the player since `cutoff_ts`.
 
-        Combines match-bet losses (`bet_repo.get_player_bet_history`) and wheel-spin
-        losses (`player_repo.get_wheel_spin_history`). Returns the absolute value
-        of the most negative outcome — 0 if no losses or no signal source available.
+        Match-bet and wheel losses are aggregated in SQL without materializing
+        the player's lifetime histories.
         """
         if not self.gambling_stats_service:
             return 0
-        largest = 0
-        bet_repo = self.gambling_stats_service.bet_repo
-        player_repo = self.gambling_stats_service.player_repo
-        for bet in bet_repo.get_player_bet_history(discord_id, guild_id):
-            if bet.get("bet_time", 0) >= cutoff_ts and bet.get("outcome") == "lost":
-                loss_amt = abs(bet.get("profit", 0) or 0)
-                if loss_amt > largest:
-                    largest = loss_amt
-        for spin in player_repo.get_wheel_spin_history(discord_id, guild_id):
-            if spin.get("spin_time", 0) >= cutoff_ts:
-                result = spin.get("result", 0)
-                if isinstance(result, int) and result < 0:
-                    loss_amt = abs(result)
-                    if loss_amt > largest:
-                        largest = loss_amt
-        return largest
+        aggregates = self.gambling_stats_service.bet_repo.get_recent_loss_aggregates(
+            discord_id, guild_id, cutoff_ts
+        )
+        return aggregates["largest"]
 
     def _compute_cumulative_recent_losses(
         self, discord_id: int, guild_id: int | None, cutoff_ts: int
     ) -> int:
         """Return the total JC lost by the player since `cutoff_ts`.
 
-        Sums match-bet losses and wheel-spin losses. Returns 0 if no losses or
-        no signal source available.
+        Sums match-bet and wheel losses in SQL. Returns 0 if no losses or no
+        signal source is available.
         """
         if not self.gambling_stats_service:
             return 0
-        total = 0
-        bet_repo = self.gambling_stats_service.bet_repo
-        player_repo = self.gambling_stats_service.player_repo
-        for bet in bet_repo.get_player_bet_history(discord_id, guild_id):
-            if bet.get("bet_time", 0) >= cutoff_ts and bet.get("outcome") == "lost":
-                total += abs(bet.get("profit", 0) or 0)
-        for spin in player_repo.get_wheel_spin_history(discord_id, guild_id):
-            if spin.get("spin_time", 0) >= cutoff_ts:
-                result = spin.get("result", 0)
-                if isinstance(result, int) and result < 0:
-                    total += abs(result)
-        return total
+        aggregates = self.gambling_stats_service.bet_repo.get_recent_loss_aggregates(
+            discord_id, guild_id, cutoff_ts
+        )
+        return aggregates["total"]
 
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
