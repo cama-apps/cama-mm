@@ -642,33 +642,79 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Returns 0 if the player row doesn't exist.
         """
+        return self.advance_dota_streaks_bulk(
+            [discord_id], guild_id, today, yesterday
+        )[0]
+
+    def advance_dota_streaks_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        today: str,
+        yesterday: str,
+    ) -> list[int]:
+        """Atomically advance Dota streaks for a player batch.
+
+        The returned list is aligned with ``discord_ids``: input order and
+        duplicates are preserved, and missing players produce ``0``. Each
+        existing player is updated at most once within the transaction.
+        """
+        if not discord_ids:
+            return []
+
         guild_id = self.normalize_guild_id(guild_id)
+        unique_ids = list(dict.fromkeys(discord_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            row = cursor.execute(
-                "SELECT dota_streak_days, dota_last_played_date FROM players WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, guild_id),
-            ).fetchone()
-            if row is None:
-                return 0
-
-            current = int(row["dota_streak_days"] or 0)
-            last_date = row["dota_last_played_date"]
-
-            if last_date == today:
-                return current
-
-            new_streak = current + 1 if last_date == yesterday else 1
-
-            cursor.execute(
-                """
-                UPDATE players
-                SET dota_streak_days = ?, dota_last_played_date = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
+            rows = cursor.execute(
+                f"""
+                SELECT discord_id, dota_streak_days, dota_last_played_date
+                FROM players
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
                 """,
-                (new_streak, today, discord_id, guild_id),
+                (guild_id, *unique_ids),
+            ).fetchall()
+            rows_by_id = {int(row["discord_id"]): row for row in rows}
+
+            resulting_streaks: dict[int, int] = {}
+            for discord_id in unique_ids:
+                row = rows_by_id.get(discord_id)
+                if row is None:
+                    resulting_streaks[discord_id] = 0
+                    continue
+                current = int(row["dota_streak_days"] or 0)
+                last_date = row["dota_last_played_date"]
+                resulting_streaks[discord_id] = (
+                    current
+                    if last_date == today
+                    else current + 1
+                    if last_date == yesterday
+                    else 1
+                )
+
+            # Same-day replays intentionally do not touch updated_at, matching
+            # the single-player behavior. BEGIN IMMEDIATE keeps the read and
+            # set-based update serialized with concurrent match finalizations.
+            cursor.execute(
+                f"""
+                UPDATE players
+                SET dota_streak_days = CASE
+                        WHEN dota_last_played_date = ?
+                            THEN COALESCE(dota_streak_days, 0) + 1
+                        ELSE 1
+                    END,
+                    dota_last_played_date = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ?
+                  AND discord_id IN ({placeholders})
+                  AND (dota_last_played_date IS NULL OR dota_last_played_date <> ?)
+                """,
+                (yesterday, today, guild_id, *unique_ids, today),
             )
-            return new_streak
+
+        return [resulting_streaks[discord_id] for discord_id in discord_ids]
 
     def get_dota_streak(self, discord_id: int, guild_id: int) -> tuple[int, str | None]:
         """Read (streak_days, last_played_date) for a player."""

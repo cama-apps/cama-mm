@@ -71,6 +71,16 @@ class IPlayerRepository(ABC):
         """Bulk-load player fields needed to calculate a match's rating updates."""
         ...
 
+    @abstractmethod
+    def advance_dota_streaks_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        today: str,
+        yesterday: str,
+    ) -> list[int]:
+        """Atomically advance daily streaks, returning results aligned to the input."""
+        ...
 
     @abstractmethod
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
