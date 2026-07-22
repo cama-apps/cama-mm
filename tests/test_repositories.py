@@ -5,7 +5,7 @@ Tests for the repository layer.
 import sqlite3
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
-from tests.conftest import TEST_GUILD_ID
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
 def _expected_after_exclusions(exclusions: int) -> int:
@@ -126,6 +126,80 @@ class TestPlayerRepository:
         assert inputs[12345]["last_match_date"] == "2026-07-20T12:00:00+00:00"
         assert inputs[12345]["first_calibrated_at"] == 1_750_000_000
         assert player_repository.get_match_rating_inputs([], TEST_GUILD_ID) == {}
+
+    def test_update_personal_best_win_streaks_is_atomic_and_guild_scoped(
+        self, player_repository, monkeypatch
+    ):
+        player_ids = [12351, 12352, 12353]
+        for pid in player_ids:
+            player_repository.add(
+                discord_id=pid,
+                discord_username=f"StreakPlayer{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+        player_repository.add(
+            discord_id=player_ids[0],
+            discord_username="OtherGuildStreakPlayer",
+            guild_id=TEST_GUILD_ID_SECONDARY,
+        )
+        player_repository.update_personal_best_win_streak(
+            player_ids[0], TEST_GUILD_ID, 4
+        )
+        player_repository.update_personal_best_win_streak(
+            player_ids[1], TEST_GUILD_ID, 8
+        )
+        player_repository.update_personal_best_win_streak(
+            player_ids[0], TEST_GUILD_ID_SECONDARY, 10
+        )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository, "get_connection", counted_get_connection
+        )
+
+        previous = player_repository.update_personal_best_win_streaks(
+            {
+                player_ids[0]: 6,
+                player_ids[1]: 7,
+                player_ids[2]: 5,
+                99999: 12,
+            },
+            TEST_GUILD_ID,
+        )
+
+        assert previous == {player_ids[0]: 4, player_ids[2]: 0}
+        assert connection_count == 1
+        assert (
+            player_repository.get_personal_best_win_streak(
+                player_ids[0], TEST_GUILD_ID
+            )
+            == 6
+        )
+        assert (
+            player_repository.get_personal_best_win_streak(
+                player_ids[1], TEST_GUILD_ID
+            )
+            == 8
+        )
+        assert (
+            player_repository.get_personal_best_win_streak(
+                player_ids[2], TEST_GUILD_ID
+            )
+            == 5
+        )
+        assert (
+            player_repository.get_personal_best_win_streak(
+                player_ids[0], TEST_GUILD_ID_SECONDARY
+            )
+            == 10
+        )
 
     def test_get_by_ids_preserves_order(self, player_repository):
         """Test that get_by_ids preserves input order."""

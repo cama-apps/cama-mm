@@ -60,6 +60,55 @@ def _seed_repo_players(player_repo, player_ids):
     return player_ids
 
 
+def test_match_easter_egg_batches_personal_streak_records(
+    player_repository, match_repository, monkeypatch
+):
+    player_ids = [99101, 99102]
+    _seed_repo_players(player_repository, player_ids)
+    player_repository.update_personal_best_win_streak(
+        player_ids[0], TEST_GUILD_ID, 4
+    )
+    player_repository.update_personal_best_win_streak(
+        player_ids[1], TEST_GUILD_ID, 6
+    )
+    service = MatchService(
+        player_repo=player_repository,
+        match_repo=match_repository,
+    )
+
+    connection_count = 0
+    original_get_connection = player_repository.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
+    monkeypatch.setattr(player_repository, "get_connection", counted_get_connection)
+
+    easter_eggs = service._collect_match_easter_eggs(
+        radiant_team_ids=player_ids,
+        dire_team_ids=[],
+        winning_ids=player_ids,
+        expected_ids=set(player_ids),
+        streak_data={
+            player_ids[0]: (5, 1.0),
+            player_ids[1]: (6, 1.0),
+        },
+        guild_id=TEST_GUILD_ID,
+    )
+
+    assert easter_eggs["win_streak_records"] == [
+        {
+            "discord_id": player_ids[0],
+            "current_streak": 5,
+            "previous_best": 4,
+        }
+    ]
+    # One milestone-player read plus one atomic personal-best batch.
+    assert connection_count == 2
+
+
 # =============================================================================
 # === Win/Loss API ===
 # =============================================================================

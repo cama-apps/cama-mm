@@ -2293,6 +2293,58 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return cursor.rowcount > 0
 
+    def update_personal_best_win_streaks(
+        self, streaks_by_discord_id: dict[int, int], guild_id: int | None
+    ) -> dict[int, int]:
+        """Atomically compare and update personal-best win streaks in bulk.
+
+        Returns ``{discord_id: previous_best}`` only for records improved by
+        this call. Missing players and non-improvements are omitted.
+        """
+        if not streaks_by_discord_id:
+            return {}
+
+        guild_id = self.normalize_guild_id(guild_id)
+        discord_ids = list(streaks_by_discord_id)
+        placeholders = ",".join("?" * len(discord_ids))
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id, COALESCE(personal_best_win_streak, 0) AS personal_best
+                FROM players
+                WHERE discord_id IN ({placeholders}) AND guild_id = ?
+                """,
+                (*discord_ids, guild_id),
+            )
+            previous_bests = {
+                row["discord_id"]: int(row["personal_best"])
+                for row in cursor.fetchall()
+            }
+            improvements = {
+                discord_id: streak
+                for discord_id, streak in streaks_by_discord_id.items()
+                if discord_id in previous_bests
+                and streak > previous_bests[discord_id]
+            }
+            cursor.executemany(
+                """
+                UPDATE players
+                SET personal_best_win_streak = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND COALESCE(personal_best_win_streak, 0) < ?
+                """,
+                [
+                    (streak, discord_id, guild_id, streak)
+                    for discord_id, streak in improvements.items()
+                ],
+            )
+            return {
+                discord_id: previous_bests[discord_id]
+                for discord_id in improvements
+            }
+
     def get_personal_best_win_streak(self, discord_id: int, guild_id: int) -> int:
         """Get player's personal best win streak."""
         guild_id = self.normalize_guild_id(guild_id)

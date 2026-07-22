@@ -83,6 +83,13 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def update_personal_best_win_streaks(
+        self, streaks_by_discord_id: dict[int, int], guild_id: int | None
+    ) -> dict[int, int]:
+        """Update new personal records and return their previous values."""
+        ...
+
+    @abstractmethod
     def get_balance(self, discord_id: int, guild_id: int) -> int: ...
 
     @abstractmethod
