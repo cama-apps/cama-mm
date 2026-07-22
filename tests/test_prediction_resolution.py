@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -68,6 +69,119 @@ def _rollback_ledger_count(
 # --------------------------------------------------------------------------- #
 # check_and_lock_expired
 # --------------------------------------------------------------------------- #
+
+
+def test_lock_expired_predictions_is_atomic_ordered_and_guild_scoped(
+    prediction_repo, monkeypatch
+):
+    now = 2_000_000_000
+
+    def create(question, *, closes_at, guild_id=TEST_GUILD_ID):
+        return prediction_repo.create_prediction(
+            guild_id=guild_id,
+            creator_id=1,
+            question=question,
+            closes_at=closes_at,
+        )
+
+    expired_old = create("expired old?", closes_at=now - 30)
+    expired_new = create("expired new?", closes_at=now)
+    expired_middle = create("expired middle?", closes_at=now - 10)
+    future = create("future?", closes_at=now + 1)
+    already_locked = create("already locked?", closes_at=now - 20)
+    other_guild = create(
+        "other guild expired?",
+        closes_at=now - 20,
+        guild_id=TEST_GUILD_ID + 1,
+    )
+    prediction_repo.update_prediction_status(already_locked, "locked")
+    created_at_by_id = {
+        expired_old: 100,
+        expired_middle: 200,
+        expired_new: 300,
+        future: 400,
+        already_locked: 500,
+        other_guild: 600,
+    }
+    with prediction_repo.connection() as conn:
+        conn.executemany(
+            "UPDATE predictions SET created_at = ? WHERE prediction_id = ?",
+            [
+                (created_at, prediction_id)
+                for prediction_id, created_at in created_at_by_id.items()
+            ],
+        )
+
+    legacy_list = Mock(
+        side_effect=AssertionError("bulk expiry must not list predictions first")
+    )
+    legacy_update = Mock(
+        side_effect=AssertionError("bulk expiry must not issue point updates")
+    )
+    monkeypatch.setattr(prediction_repo, "get_predictions_by_status", legacy_list)
+    monkeypatch.setattr(prediction_repo, "update_prediction_status", legacy_update)
+    connection_count = 0
+    statements = []
+    original_get_connection = prediction_repo.get_connection
+
+    def traced_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        conn = original_get_connection()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(prediction_repo, "get_connection", traced_get_connection)
+
+    locked = prediction_repo.lock_expired_predictions(TEST_GUILD_ID, now)
+
+    assert locked == [expired_new, expired_middle, expired_old]
+    assert connection_count == 1
+    normalized_statements = [" ".join(statement.split()).upper() for statement in statements]
+    assert normalized_statements.count("BEGIN IMMEDIATE") == 1
+    assert sum(
+        statement.startswith("UPDATE PREDICTIONS SET STATUS = 'LOCKED'")
+        for statement in normalized_statements
+    ) == 1
+    legacy_list.assert_not_called()
+    legacy_update.assert_not_called()
+
+    with sqlite3.connect(prediction_repo.db_path) as conn:
+        statuses = dict(
+            conn.execute(
+                "SELECT prediction_id, status FROM predictions"
+            ).fetchall()
+        )
+    assert statuses[expired_old] == "locked"
+    assert statuses[expired_middle] == "locked"
+    assert statuses[expired_new] == "locked"
+    assert statuses[future] == "open"
+    assert statuses[already_locked] == "locked"
+    assert statuses[other_guild] == "open"
+
+
+def test_check_and_lock_expired_delegates_once_without_legacy_path(
+    prediction_service, prediction_repo, monkeypatch
+):
+    now = 2_000_000_000
+    bulk_lock = Mock(return_value=[31, 29])
+    legacy_list = Mock(
+        side_effect=AssertionError("service must delegate to atomic bulk expiry")
+    )
+    legacy_update = Mock(
+        side_effect=AssertionError("service must not issue point updates")
+    )
+    monkeypatch.setattr(prediction_repo, "lock_expired_predictions", bulk_lock)
+    monkeypatch.setattr(prediction_repo, "get_predictions_by_status", legacy_list)
+    monkeypatch.setattr(prediction_repo, "update_prediction_status", legacy_update)
+
+    with patch("services.prediction_service.time.time", return_value=now):
+        locked = prediction_service.check_and_lock_expired(TEST_GUILD_ID)
+
+    assert locked == [31, 29]
+    bulk_lock.assert_called_once_with(TEST_GUILD_ID, now)
+    legacy_list.assert_not_called()
+    legacy_update.assert_not_called()
 
 
 def test_check_and_lock_expired_locks_only_past_close(prediction_service, prediction_repo):

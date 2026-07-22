@@ -119,6 +119,32 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 (status, prediction_id),
             )
 
+    def lock_expired_predictions(self, guild_id: int, now: int) -> list[int]:
+        """Atomically lock all expired open predictions for one guild."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT prediction_id
+                FROM predictions
+                WHERE guild_id = ? AND status = 'open' AND closes_at <= ?
+                ORDER BY created_at DESC
+                """,
+                (normalized_guild, now),
+            )
+            prediction_ids = [row["prediction_id"] for row in cursor.fetchall()]
+            if prediction_ids:
+                cursor.execute(
+                    """
+                    UPDATE predictions
+                    SET status = 'locked'
+                    WHERE guild_id = ? AND status = 'open' AND closes_at <= ?
+                    """,
+                    (normalized_guild, now),
+                )
+            return prediction_ids
+
     def close_prediction_betting(self, prediction_id: int, closes_at: int) -> None:
         """Lock a prediction and set closes_at to the given timestamp.
 
