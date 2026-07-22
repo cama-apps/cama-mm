@@ -33,6 +33,13 @@ class IPlayerRepository(ABC):
     def get_by_ids(self, discord_ids: list[int], guild_id: int): ...
 
     @abstractmethod
+    def get_shuffle_inputs(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> tuple[list, dict[int, str | None], dict[int, int]]:
+        """Load players and shuffle metadata in one query."""
+        ...
+
+    @abstractmethod
     def get_by_username(self, username: str, guild_id: int): ...
 
     @abstractmethod
