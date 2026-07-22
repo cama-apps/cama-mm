@@ -548,6 +548,12 @@ class SchemaManager:
                 "create_llm_request_attempts_table",
                 self._migration_create_llm_request_attempts_table,
             ),
+            # User-scoped prediction views should not walk every market before
+            # probing the market-first position primary key.
+            (
+                "add_prediction_positions_user_index",
+                self._migration_add_prediction_positions_user_index,
+            ),
         ]
 
     # --- Migrations ---
@@ -592,6 +598,13 @@ class SchemaManager:
             CREATE INDEX IF NOT EXISTS idx_llm_attempts_provider_model
             ON llm_request_attempts(provider, model, created_at DESC)
             """
+        )
+
+    def _migration_add_prediction_positions_user_index(self, cursor) -> None:
+        """Index prediction positions for user-scoped lookups."""
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_positions_user "
+            "ON prediction_positions(discord_id, prediction_id)"
         )
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
