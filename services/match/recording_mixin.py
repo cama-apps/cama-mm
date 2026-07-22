@@ -186,12 +186,12 @@ class RecordingMixin:
             return {}
         today = get_game_date()
         yesterday = yesterday_of(today)
+        new_streaks = self.player_repo.advance_dota_streaks_bulk(
+            actual_player_ids, guild_id, today, yesterday
+        )
 
         result: dict[int, dict[str, int]] = {}
-        for pid in actual_player_ids:
-            new_streak = self.player_repo.advance_dota_streak(
-                pid, guild_id, today, yesterday
-            )
+        for pid, new_streak in zip(actual_player_ids, new_streaks, strict=True):
             bonus = streak_bonus_for(new_streak, STREAKS)
             result[pid] = {"days": new_streak, "bonus": bonus}
             if bonus > 0:

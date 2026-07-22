@@ -3,11 +3,14 @@ and the per-(player, guild) repository state machine."""
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock, call
 
 import pytest
 
 from repositories.player_repository import PlayerRepository
 from services.dig_constants import STREAKS
+from services.match.recording_mixin import RecordingMixin
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 from utils.game_date import (
     game_date_for,
@@ -118,6 +121,137 @@ class TestAdvanceDotaStreak:
         # Other guild's streak unaffected
         days_other, _ = player_repository.get_dota_streak(104, TEST_GUILD_ID_SECONDARY)
         assert days_other == 0
+
+    def test_bulk_preserves_order_duplicates_and_missing_players(
+        self, player_repository, monkeypatch
+    ):
+        _register(player_repository, 105)
+        _register(player_repository, 106)
+        player_repository.advance_dota_streaks_bulk(
+            [105, 106], TEST_GUILD_ID, "2026-05-06", "2026-05-05"
+        )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(player_repository, "get_connection", counted_get_connection)
+        result = player_repository.advance_dota_streaks_bulk(
+            [99999, 106, 105, 106],
+            TEST_GUILD_ID,
+            "2026-05-07",
+            "2026-05-06",
+        )
+
+        assert result == [0, 2, 2, 2]
+        assert connection_count == 1
+        assert player_repository.get_dota_streak(105, TEST_GUILD_ID)[0] == 2
+        assert player_repository.get_dota_streak(106, TEST_GUILD_ID)[0] == 2
+
+    def test_bulk_streak_is_per_guild(self, player_repository):
+        _register(player_repository, 107, guild_id=TEST_GUILD_ID)
+        _register(player_repository, 107, guild_id=TEST_GUILD_ID_SECONDARY)
+
+        assert player_repository.advance_dota_streaks_bulk(
+            [107], TEST_GUILD_ID, "2026-05-07", "2026-05-06"
+        ) == [1]
+        assert player_repository.get_dota_streak(107, TEST_GUILD_ID_SECONDARY) == (
+            0,
+            None,
+        )
+
+    def test_concurrent_bulk_advances_increment_once(self, player_repository):
+        _register(player_repository, 108)
+        player_repository.advance_dota_streaks_bulk(
+            [108], TEST_GUILD_ID, "2026-05-06", "2026-05-05"
+        )
+
+        def advance():
+            repo = PlayerRepository(player_repository.db_path)
+            return repo.advance_dota_streaks_bulk(
+                [108], TEST_GUILD_ID, "2026-05-07", "2026-05-06"
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: advance(), range(2)))
+
+        assert results == [[2], [2]]
+        assert player_repository.get_dota_streak(108, TEST_GUILD_ID) == (
+            2,
+            "2026-05-07",
+        )
+
+
+class TestMatchStreakAwards:
+    def test_bulk_advance_keeps_per_participant_bonus_and_skim_handling(
+        self, monkeypatch
+    ):
+        service = RecordingMixin()
+        service.player_repo = Mock()
+        service.player_repo.advance_dota_streaks_bulk.return_value = [3, 7, 3, 0]
+        service.betting_service = Mock()
+        service.betting_service._apply_blood_pact_skim.side_effect = [1, 1, 0]
+        accumulated = []
+        monkeypatch.setattr("utils.game_date.get_game_date", lambda: "2026-05-07")
+
+        result = service._award_dota_streak_bonuses(
+            [20, 10, 20, 99999], TEST_GUILD_ID, accumulated.append
+        )
+
+        service.player_repo.advance_dota_streaks_bulk.assert_called_once_with(
+            [20, 10, 20, 99999],
+            TEST_GUILD_ID,
+            "2026-05-07",
+            "2026-05-06",
+        )
+        assert service.player_repo.add_balance.call_args_list == [
+            call(
+                20,
+                TEST_GUILD_ID,
+                1,
+                source="match_streak",
+                related_type="dota_streak",
+                reason="Dota streak match bonus",
+                metadata={"streak_days": 3, "bonus": 1},
+            ),
+            call(
+                10,
+                TEST_GUILD_ID,
+                3,
+                source="match_streak",
+                related_type="dota_streak",
+                reason="Dota streak match bonus",
+                metadata={"streak_days": 7, "bonus": 3},
+            ),
+            call(
+                20,
+                TEST_GUILD_ID,
+                1,
+                source="match_streak",
+                related_type="dota_streak",
+                reason="Dota streak match bonus",
+                metadata={"streak_days": 3, "bonus": 1},
+            ),
+        ]
+        assert service.betting_service._apply_blood_pact_skim.call_args_list == [
+            call(20, TEST_GUILD_ID, 1),
+            call(10, TEST_GUILD_ID, 3),
+            call(20, TEST_GUILD_ID, 1),
+        ]
+        assert accumulated == [
+            {20: {"net": 0}},
+            {10: {"net": 2}},
+            {20: {"net": 1}},
+        ]
+        assert result == {
+            20: {"days": 3, "bonus": 1},
+            10: {"days": 7, "bonus": 3},
+            99999: {"days": 0, "bonus": 0},
+        }
 
 
 class TestGameDateHelpers:
