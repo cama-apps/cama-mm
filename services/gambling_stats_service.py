@@ -373,7 +373,12 @@ class GamblingStatsService:
         matches_played = paper_hands_data["matches_played"]
 
         # Degen score
-        degen_score = self.calculate_degen_score(discord_id, guild_id)
+        degen_score = self._calculate_degen_score_with_bet_data(
+            discord_id,
+            guild_id,
+            history=history,
+            leverage_dist=leverage_distribution,
+        )
 
         return GambaStats(
             discord_id=discord_id,
@@ -402,7 +407,28 @@ class GamblingStatsService:
         """Calculate the degen score with component breakdown."""
         history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
         leverage_dist = self.bet_repo.get_player_leverage_distribution(discord_id, guild_id)
-        loss_chase_data = self.bet_repo.count_player_loss_chasing(discord_id, guild_id)
+
+        return self._calculate_degen_score_with_bet_data(
+            discord_id,
+            guild_id,
+            history=history,
+            leverage_dist=leverage_dist,
+        )
+
+    def _calculate_degen_score_with_bet_data(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        history: list[dict],
+        leverage_dist: dict[int, int],
+    ) -> DegenScoreBreakdown:
+        """Calculate a degen score using already-fetched bet data."""
+        loss_chase_data = self.bet_repo.count_player_loss_chasing(
+            discord_id,
+            guild_id,
+            history=history,
+        )
 
         bankruptcy_count = self.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)

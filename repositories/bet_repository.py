@@ -1544,13 +1544,23 @@ class BetRepository(BaseRepository, IBetRepository):
             row = cursor.fetchone()
             return row["count"] if row else 0
 
-    def count_player_loss_chasing(self, discord_id: int, guild_id: int | None = None) -> dict:
+    def count_player_loss_chasing(
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+        *,
+        history: list[dict] | None = None,
+    ) -> dict:
         """
         Analyze loss chasing behavior: how often does player increase bet after a loss?
 
+        Reuses ``history`` when provided so callers that already loaded the
+        player's bets do not repeat the same query.
+
         Returns dict with: sequences_analyzed, times_increased_after_loss, loss_chase_rate
         """
-        history = self.get_player_bet_history(discord_id, guild_id)
+        if history is None:
+            history = self.get_player_bet_history(discord_id, guild_id)
         if len(history) < 2:
             return {"sequences_analyzed": 0, "times_increased_after_loss": 0, "loss_chase_rate": 0.0}
 
