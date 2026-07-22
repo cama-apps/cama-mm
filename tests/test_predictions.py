@@ -26,6 +26,7 @@ from config import (
     PREDICTION_SIZE_PER_LEVEL,
     PREDICTION_SPREAD_TICKS,
 )
+from infrastructure.schema_manager import SchemaManager
 from repositories.player_repository import PlayerRepository
 from repositories.prediction_repository import PredictionRepository, _quote_total
 from services.prediction_service import PredictionService
@@ -73,6 +74,41 @@ def test_schema_has_orderbook_tables(prediction_repo):
     assert "prediction_levels" in tables
     assert "prediction_positions" in tables
     assert "prediction_trades" in tables
+
+
+def test_prediction_positions_user_index_supports_direct_lookup(prediction_repo):
+    """The user-leading position index is stable and selected for user lookups."""
+    manager = SchemaManager(prediction_repo.db_path)
+    manager.initialize()
+    manager.initialize()
+
+    with prediction_repo.connection() as conn:
+        indexes = [
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(prediction_positions)")
+        ]
+        columns = [
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA index_info('idx_prediction_positions_user')"
+            )
+        ]
+        plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT prediction_id
+            FROM prediction_positions
+            WHERE discord_id = ?
+            """,
+            (12345,),
+        ).fetchall()
+
+    assert indexes.count("idx_prediction_positions_user") == 1
+    assert columns == ["discord_id", "prediction_id"]
+    assert any(
+        "idx_prediction_positions_user" in row["detail"]
+        for row in plan
+    ), [row["detail"] for row in plan]
 
 
 def test_position_transfer_rejects_non_open_market(prediction_repo):
