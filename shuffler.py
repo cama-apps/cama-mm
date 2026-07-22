@@ -471,6 +471,7 @@ class BalancedShuffler:
             avoids=avoids,
             deals=deals,
             _scoring_context=_scoring_context,
+            _rd_priority=self._calculate_rd_priority(selected),
         )
 
         # Add exclusion penalty
@@ -670,6 +671,7 @@ class BalancedShuffler:
         avoids: list | None = None,
         deals: list | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
+        _rd_priority: float | None = None,
 
     ) -> tuple[Team, Team, float]:
         """
@@ -684,6 +686,7 @@ class BalancedShuffler:
             max_assignments_per_team: Maximum number of role assignments to try per team
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
+            _rd_priority: Selection-wide bonus already computed by the caller
 
 
         Returns:
@@ -699,7 +702,11 @@ class BalancedShuffler:
         avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
-        rd_priority = self._calculate_rd_priority(team1_players + team2_players)
+        rd_priority = (
+            self._calculate_rd_priority(team1_players + team2_players)
+            if _rd_priority is None
+            else _rd_priority
+        )
 
         # These five-player teams recur across many pool selections. Keep their
         # values and per-assignment metrics local to this shuffle request.
@@ -838,6 +845,7 @@ class BalancedShuffler:
         # Track top matchups for logging.
         top_matchups = []  # List of (score, value_diff, off_role_penalty, team1, team2)
         scoring_context = _ShuffleScoringContext()
+        rd_priority = self._calculate_rd_priority(players)
 
         for team1_indices in _UNIQUE_TEAM_SPLITS:
             team1_players = [players[i] for i in team1_indices]
@@ -850,6 +858,7 @@ class BalancedShuffler:
                 avoids=avoids,
                 deals=deals,
                 _scoring_context=scoring_context,
+                _rd_priority=rd_priority,
             )
             team1_metrics = self._assigned_role_metrics(team1, scoring_context)
             team2_metrics = self._assigned_role_metrics(team2, scoring_context)
@@ -946,6 +955,7 @@ class BalancedShuffler:
         exclusion_penalty: float,
         excluded_names: list[str],
         recent_penalty: float,
+        rd_priority: float,
         max_assignments_per_team: int,
         avoids: list | None,
         deals: list | None,
@@ -965,6 +975,7 @@ class BalancedShuffler:
             avoids=avoids,
             deals=deals,
             _scoring_context=scoring_context,
+            _rd_priority=rd_priority,
         )
 
         # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
@@ -1190,6 +1201,7 @@ class BalancedShuffler:
                 exclusion_penalty + deal_split_penalty + rating_spread_penalty
                 - lobby_rating_bonus
             )
+            rd_priority = self._calculate_rd_priority(selected_players)
 
             # For this combination of 10, try all ways to split into teams
             for team1_indices in _UNIQUE_TEAM_SPLITS:
@@ -1203,6 +1215,7 @@ class BalancedShuffler:
                     exclusion_penalty,
                     excluded_names,
                     recent_penalty,
+                    rd_priority,
                     pool_max_assignments_per_team,
                     avoids,
                     deals,
@@ -1397,6 +1410,7 @@ class BalancedShuffler:
                     avoids=avoids,
                     deals=deals,
                     _scoring_context=scoring_context,
+                    _rd_priority=rd_priority,
                 )
 
                 total_score = base_score + recent_penalty + combo_penalty
@@ -1439,6 +1453,9 @@ class BalancedShuffler:
             Best (lowest) score across all splits.
         """
         best_score = float("inf")
+        rd_priority = self._calculate_rd_priority(
+            [captain_a, captain_b, *pool]
+        )
 
         for team_a_indices in itertools.combinations(range(len(pool)), 4):
             team_a_players = [captain_a] + [pool[i] for i in team_a_indices]
@@ -1449,6 +1466,7 @@ class BalancedShuffler:
                 team_b_players,
                 max_assignments_per_team=max_assignments_per_team,
                 _scoring_context=_scoring_context,
+                _rd_priority=rd_priority,
             )
 
             if score < best_score:
