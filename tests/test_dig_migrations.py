@@ -96,6 +96,53 @@ class TestDigAutoBuySettingsMigration:
         assert updated["auto_buy_hard_hat"] == 1
 
 
+class TestDigActionHistoryIndexesMigration:
+    def test_replaces_prefix_indexes_with_chronological_indexes(self, repo_db_path):
+        manager = SchemaManager(repo_db_path)
+        conn = sqlite3.connect(repo_db_path)
+        try:
+            manager._migration_add_dig_action_history_indexes(conn.cursor())
+            manager._migration_add_dig_action_history_indexes(conn.cursor())
+            conn.commit()
+
+            indexes = {
+                row[1]
+                for row in conn.execute("PRAGMA index_list(dig_actions)").fetchall()
+            }
+            assert "idx_dig_actions_guild_actor" not in indexes
+            assert "idx_dig_actions_guild_target" not in indexes
+
+            expected = {
+                "idx_dig_actions_guild_actor_created": [
+                    "guild_id",
+                    "actor_id",
+                    "created_at",
+                ],
+                "idx_dig_actions_guild_target_created": [
+                    "guild_id",
+                    "target_id",
+                    "created_at",
+                ],
+            }
+            for index_name, columns in expected.items():
+                assert index_name in indexes
+                index_info = conn.execute(
+                    f"PRAGMA index_xinfo({index_name})"
+                ).fetchall()
+                assert [row[2] for row in index_info if row[5]] == columns
+                assert next(row[3] for row in index_info if row[2] == "created_at") == 1
+
+            applied = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM schema_migrations"
+                ).fetchall()
+            }
+            assert "add_dig_action_history_indexes" in applied
+        finally:
+            conn.close()
+
+
 class TestClearActiveBossIdsMigration:
     """Covers _migration_clear_active_boss_ids_for_pool_reroll."""
 

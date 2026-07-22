@@ -422,25 +422,44 @@ class DigRepository(BaseRepository, IDigRepository):
         - hours: only return actions within the last N hours
         """
         gid = self.normalize_guild_id(guild_id)
-        clauses = ["guild_id = ?", "(actor_id = ? OR target_id = ?)"]
-        params: list = [gid, discord_id, discord_id]
+        filters: list[str] = []
+        filter_params: list = []
 
         if action_type is not None:
-            clauses.append("action_type = ?")
-            params.append(action_type)
+            filters.append("action_type = ?")
+            filter_params.append(action_type)
 
         if hours is not None:
-            clauses.append("created_at >= ?")
-            params.append(int(time.time()) - hours * 3600)
+            filters.append("created_at >= ?")
+            filter_params.append(int(time.time()) - hours * 3600)
 
-        params.append(limit)
-        where = " AND ".join(clauses)
+        suffix = "".join(f" AND {clause}" for clause in filters)
+        params = [
+            gid,
+            discord_id,
+            *filter_params,
+            gid,
+            discord_id,
+            discord_id,
+            *filter_params,
+            limit,
+        ]
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 f"""
-                SELECT * FROM dig_actions
-                WHERE {where}
+                SELECT *
+                FROM (
+                    SELECT *
+                    FROM dig_actions
+                    WHERE guild_id = ? AND actor_id = ?{suffix}
+
+                    UNION ALL
+
+                    SELECT *
+                    FROM dig_actions
+                    WHERE guild_id = ? AND target_id = ? AND actor_id <> ?{suffix}
+                ) AS player_actions
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
@@ -464,11 +483,22 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor.execute(
                 """
                 SELECT actor_id, target_id, action_type, detail, created_at, jc_delta
-                FROM dig_actions
-                WHERE guild_id = ? AND (actor_id = ? OR target_id = ?)
+                FROM (
+                    SELECT
+                        actor_id, target_id, action_type, detail, created_at, jc_delta
+                    FROM dig_actions
+                    WHERE guild_id = ? AND actor_id = ?
+
+                    UNION ALL
+
+                    SELECT
+                        actor_id, target_id, action_type, detail, created_at, jc_delta
+                    FROM dig_actions
+                    WHERE guild_id = ? AND target_id = ? AND actor_id <> ?
+                ) AS player_actions
                 ORDER BY created_at ASC
                 """,
-                (gid, discord_id, discord_id),
+                (gid, discord_id, gid, discord_id, discord_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -1768,15 +1798,26 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT * FROM dig_actions
-                WHERE guild_id = ?
-                  AND (actor_id = ? OR target_id = ?)
-                  AND action_type IN ('sabotage', 'help', 'cheer')
-                  AND created_at >= ?
+                SELECT *
+                FROM (
+                    SELECT *
+                    FROM dig_actions
+                    WHERE guild_id = ? AND actor_id = ?
+                      AND action_type IN ('sabotage', 'help', 'cheer')
+                      AND created_at >= ?
+
+                    UNION ALL
+
+                    SELECT *
+                    FROM dig_actions
+                    WHERE guild_id = ? AND target_id = ? AND actor_id <> ?
+                      AND action_type IN ('sabotage', 'help', 'cheer')
+                      AND created_at >= ?
+                ) AS player_actions
                 ORDER BY created_at DESC
                 LIMIT 20
                 """,
-                (gid, discord_id, discord_id, cutoff),
+                (gid, discord_id, cutoff, gid, discord_id, discord_id, cutoff),
             )
             return [dict(row) for row in cursor.fetchall()]
 
