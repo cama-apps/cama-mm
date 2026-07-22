@@ -70,6 +70,17 @@ class RatingComparisonService:
 
         logger.info(f"Analyzing {len(matches)} matches with predictions")
 
+        snapshot_match_ids = [
+            match["match_id"]
+            for match in matches
+            if match.get("expected_radiant_win_prob") is not None
+            and match.get("team1_players")
+            and match.get("team2_players")
+        ]
+        os_ratings_by_match = self.match_repo.get_os_ratings_for_matches(
+            snapshot_match_ids, guild_id
+        )
+
         # Collect per-match prediction data
         match_data = []
 
@@ -92,7 +103,9 @@ class RatingComparisonService:
             # OpenSkill prediction from pre-match rating_history snapshots.
             # Do not use current player ratings here, or old matches leak future
             # information and become incomparable with stored Glicko snapshots.
-            os_ratings = self.match_repo.get_os_ratings_for_match(match_id, guild_id)
+            os_ratings = os_ratings_by_match.get(
+                match_id, {"team1": [], "team2": []}
+            )
             team1_os_ratings = os_ratings.get("team1", [])
             team2_os_ratings = os_ratings.get("team2", [])
             if (

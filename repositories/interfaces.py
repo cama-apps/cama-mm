@@ -568,6 +568,13 @@ class IMatchRepository(ABC):
         ...
 
     @abstractmethod
+    def get_os_ratings_for_matches(
+        self, match_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, list[tuple[float, float]]]]:
+        """Bulk-load pre-match OpenSkill team ratings."""
+        ...
+
+    @abstractmethod
     def get_recent_rating_history(self, guild_id: int, limit: int = 200): ...
 
     @abstractmethod

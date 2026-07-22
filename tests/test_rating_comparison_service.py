@@ -33,15 +33,18 @@ class _FakeMatchRepo:
     def get_all_matches_with_predictions(self, guild_id=None):
         return self._matches
 
-    def get_os_ratings_for_match(self, match_id, guild_id=None):
-        self.os_calls.append((match_id, guild_id))
-        return self._os_ratings_by_match.get(
-            match_id,
-            {
-                "team1": [(30.0, 8.0)] * 5,
-                "team2": [(30.0, 8.0)] * 5,
-            },
-        )
+    def get_os_ratings_for_matches(self, match_ids, guild_id=None):
+        self.os_calls.append((list(match_ids), guild_id))
+        return {
+            match_id: self._os_ratings_by_match.get(
+                match_id,
+                {
+                    "team1": [(30.0, 8.0)] * 5,
+                    "team2": [(30.0, 8.0)] * 5,
+                },
+            )
+            for match_id in match_ids
+        }
 
 
 class _FakeMatchService:
@@ -277,8 +280,11 @@ def test_analyze_skips_matches_missing_prob_or_rosters_then_guards():
         }
         for i in range(5)
     ]
-    svc = _service(complete + missing_prob + missing_roster)
+    svc, fake_match_repo, _fake_match_service = _service_with_fake(
+        complete + missing_prob + missing_roster
+    )
     assert svc.analyze_rating_systems(guild_id=1) is None
+    assert fake_match_repo.os_calls == [([0, 1], 1)]
 
 
 def test_analyze_passes_guild_id_to_historical_openskill_snapshots():
@@ -300,8 +306,7 @@ def test_analyze_passes_guild_id_to_historical_openskill_snapshots():
     result = svc.analyze_rating_systems(guild_id=guild_id)
 
     assert result is not None
-    assert fake_match_repo.os_calls
-    assert all(call[1] == guild_id for call in fake_match_repo.os_calls)
+    assert fake_match_repo.os_calls == [(list(range(10)), guild_id)]
     assert fake_match_service.calls == []
 
 

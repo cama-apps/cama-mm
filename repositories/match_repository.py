@@ -1256,27 +1256,34 @@ class MatchRepository(BaseRepository, IMatchRepository):
         }
         with self.connection() as conn:
             cursor = conn.cursor()
-            placeholders = ",".join("?" for _ in unique_ids)
-            query = f"""
-                SELECT match_id, team_number, os_mu_before, os_sigma_before
-                FROM rating_history
-                WHERE match_id IN ({placeholders})
-                  AND os_mu_before IS NOT NULL
-                  AND os_sigma_before IS NOT NULL
-            """
-            params: list[int] = list(unique_ids)
-            if normalized_guild is not None:
-                query += " AND guild_id = ?"
-                params.append(normalized_guild)
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
+            # Stay below conservative SQLite bind limits while retaining one
+            # connection for arbitrarily long match histories.
+            for offset in range(0, len(unique_ids), 900):
+                match_id_chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in match_id_chunk)
+                query = f"""
+                    SELECT match_id, team_number, os_mu_before, os_sigma_before
+                    FROM rating_history
+                    WHERE match_id IN ({placeholders})
+                      AND os_mu_before IS NOT NULL
+                      AND os_sigma_before IS NOT NULL
+                """
+                params: list[int] = list(match_id_chunk)
+                if normalized_guild is not None:
+                    query += " AND guild_id = ?"
+                    params.append(normalized_guild)
+                cursor.execute(query, params)
 
-            for row in rows:
-                rating_tuple = (row["os_mu_before"], row["os_sigma_before"])
-                if row["team_number"] == 1:
-                    ratings_by_match[row["match_id"]]["team1"].append(rating_tuple)
-                elif row["team_number"] == 2:
-                    ratings_by_match[row["match_id"]]["team2"].append(rating_tuple)
+                for row in cursor.fetchall():
+                    rating_tuple = (row["os_mu_before"], row["os_sigma_before"])
+                    if row["team_number"] == 1:
+                        ratings_by_match[row["match_id"]]["team1"].append(
+                            rating_tuple
+                        )
+                    elif row["team_number"] == 2:
+                        ratings_by_match[row["match_id"]]["team2"].append(
+                            rating_tuple
+                        )
 
         return ratings_by_match
 
