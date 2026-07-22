@@ -2887,6 +2887,172 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
     ),
 
     # ================================================================
+    # PRESTIGE-2 ROSTER EXPANSION
+    # ================================================================
+    "cairn_remnant": BossMechanic(
+        id="cairn_remnant",
+        archetype="remnant_formation",
+        trigger_round=3,
+        prompt_title="The Cairn General raises a remnant formation",
+        prompt_description="Buried soldiers lock shields around a jade core.",
+        options=(
+            MechanicOption(
+                label="Circle the formation",
+                flavor="You keep the stone soldiers between you and the core.",
+                outcome_rolls=(
+                    OutcomeRoll(0.8, -1, 0, None, None, "The formation grinds past without closing."),
+                    OutcomeRoll(0.2, -2, 0, None, None, "A shield edge catches your shoulder."),
+                ),
+            ),
+            MechanicOption(
+                label="Break the keystone",
+                flavor="You aim for the jade seam holding the ranks together.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, "reveal", "The formation splits around the exposed core."),
+                    OutcomeRoll(0.45, -2, 0, None, None, "The ranks close before the seam breaks."),
+                ),
+            ),
+            MechanicOption(
+                label="Claim the standard",
+                flavor="You wrench the banner free and dare the host to follow.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, 0, -3, None, None, "The whole formation follows the stolen standard."),
+                    OutcomeRoll(0.65, -3, 0, None, "bleed", "Stone hands drag you through the ranks."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "cairn_rolling_fault": _variety_mechanic(
+        mechanic_id="cairn_rolling_fault",
+        archetype="charge_telegraph",
+        trigger_round=4,
+        title="The Cairn General rolls a fault through the floor",
+        description="A buried impact races beneath the chamber toward your boots.",
+        labels=("Step onto high stone", "Crack the leading seam", "Ride the upheaval"),
+        flavors=("You move to a shelf above the trembling ground.", "You split the fault before it reaches you.", "You leap onto the rolling stone wave."),
+        failure_status="bleed",
+    ),
+    "cairn_magnetic_recall": _variety_mechanic(
+        mechanic_id="cairn_magnetic_recall",
+        archetype="summon_swarm",
+        trigger_round=5,
+        title="The Cairn General calls his scattered soldiers home",
+        description="Stone fragments whistle back toward the commander's open hand.",
+        labels=("Shelter behind a pillar", "Jam the recall sigil", "Follow the fragments"),
+        flavors=("You let the pillar take the returning stone.", "You strike the jade mark pulling the host together.", "You race the fragments toward the General."),
+        failure_status="silence",
+    ),
+    "croupier_malice_cube": BossMechanic(
+        id="croupier_malice_cube",
+        archetype="gamble",
+        trigger_round=3,
+        prompt_title="The Brass Croupier presents the malice cube",
+        prompt_description="Its glowing faces turn toward the wager it wants from you.",
+        options=(
+            MechanicOption(
+                label="Take the quiet face",
+                flavor="You choose the face with no lights and no promise.",
+                outcome_rolls=(
+                    OutcomeRoll(0.75, -1, 0, None, None, "The cube clicks shut around a modest loss."),
+                    OutcomeRoll(0.25, -2, 0, None, None, "A hidden edge snaps across your knuckles."),
+                ),
+            ),
+            MechanicOption(
+                label="Turn the cyan face",
+                flavor="You spin the bright face toward the dealer's chest.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, "reveal", "The cube maps a weak point in the dealer's casing."),
+                    OutcomeRoll(0.45, -2, 0, None, None, "The face turns back and bites."),
+                ),
+            ),
+            MechanicOption(
+                label="Open every face",
+                flavor="You force the cube apart before it can settle the wager.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, 0, -3, None, None, "The engine spills its charge into the Croupier."),
+                    OutcomeRoll(0.65, -3, 0, None, "burn", "The cube vents hot brass in every direction."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "croupier_clockwork_ballet": _variety_mechanic(
+        mechanic_id="croupier_clockwork_ballet",
+        archetype="channel_multi",
+        trigger_round=4,
+        title="The Brass Croupier begins a clockwork ballet",
+        description="Brass arms trace a killing pattern across the cavern floor.",
+        labels=("Watch the first step", "Jam the pivot gear", "Dance through the pattern"),
+        flavors=("You wait for the rhythm to reveal itself.", "You wedge your pick into the lowest turning gear.", "You match the machine one dangerous step at a time."),
+        failure_status="burn",
+    ),
+    "croupier_overdraw": _variety_mechanic(
+        mechanic_id="croupier_overdraw",
+        archetype="gamble",
+        trigger_round=5,
+        title="The Brass Croupier doubles the wager",
+        description="A second ledger appears, already signed in brass dust.",
+        labels=("Call the old wager", "Cover the difference", "Exploit the ledger"),
+        flavors=("You refuse to add another mark.", "You pin the ledger before it can close.", "You rewrite the dealer's tally with your pick."),
+        failure_status="silence",
+    ),
+    "saltveil_spyglass": BossMechanic(
+        id="saltveil_spyglass",
+        archetype="reform_predict",
+        trigger_round=3,
+        prompt_title="The Saltveil Commodore studies you through a spyglass",
+        prompt_description="Its green lens reads every shift of your stance.",
+        options=(
+            MechanicOption(
+                label="Break line of sight",
+                flavor="You move beneath the broken deck's deepest shadow.",
+                outcome_rolls=(
+                    OutcomeRoll(0.8, -1, 0, None, None, "The lens loses you in the cavern haze."),
+                    OutcomeRoll(0.2, -2, 0, None, None, "A powder flash finds your outline."),
+                ),
+            ),
+            MechanicOption(
+                label="Glint the lens",
+                flavor="You angle a wet shard toward the spyglass.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, "reveal", "The reflected flare exposes the Commodore's helm."),
+                    OutcomeRoll(0.45, -2, 0, None, None, "The lens catches the flare and keeps tracking."),
+                ),
+            ),
+            MechanicOption(
+                label="Charge the sightline",
+                flavor="You run straight through the line the Commodore has measured.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, 0, -3, None, None, "You arrive under the spyglass before the broadside fires."),
+                    OutcomeRoll(0.65, -3, 0, None, "bleed", "Chainshot rips across the route you chose."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "saltveil_chainshot": _variety_mechanic(
+        mechanic_id="saltveil_chainshot",
+        archetype="charge_telegraph",
+        trigger_round=4,
+        title="The Saltveil Commodore fires a chainshot",
+        description="Twin iron balls skip toward you on a glittering chain.",
+        labels=("Duck below the rail", "Cut the chain", "Ride the swing"),
+        flavors=("You drop beneath the broken deck rail.", "You strike the chain at its lowest arc.", "You catch the chain and let it carry you forward."),
+        failure_status="bleed",
+    ),
+    "saltveil_boarding": _variety_mechanic(
+        mechanic_id="saltveil_boarding",
+        archetype="weapon_duel",
+        trigger_round=5,
+        title="The Saltveil Commodore calls a boarding action",
+        description="Drowned deckhands climb from the underground surf with hooked blades.",
+        labels=("Hold the gangplank", "Cut the leading hook", "Board first"),
+        flavors=("You make them cross one narrow plank.", "You sever the hook hauling the first sailor up.", "You leap into the boarding swarm before it forms."),
+        failure_status="frostbite",
+    ),
+
+    # ================================================================
     # VARIETY EXPANSION — PINNACLE PHASES
     # ================================================================
     "king_crownfall": _variety_mechanic(
