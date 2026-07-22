@@ -16,6 +16,7 @@ from utils.embeds import (
     create_match_summary_embed,
     format_player_list,
 )
+from utils.formatting import TOMBSTONE_EMOJI
 
 
 def test_lobby_embeds_do_not_expose_captain_eligibility():
@@ -507,3 +508,35 @@ class TestFormatPlayerListMissingRows:
         assert count == 2
         assert "<@2>" in text
         assert "unregistered" in text
+
+
+def test_format_player_list_bulk_loads_bankruptcy_penalties():
+    players = [
+        SimpleNamespace(
+            discord_id=discord_id,
+            glicko_rating=1000.0,
+            mmr=None,
+            preferred_roles=None,
+            guild_id=77,
+        )
+        for discord_id in range(1, 15)
+    ]
+    bankruptcy_repo = MagicMock()
+    bankruptcy_repo.get_bulk_states.return_value = {
+        4: {"penalty_games_remaining": 2}
+    }
+    bankruptcy_repo.get_penalty_games.side_effect = AssertionError(
+        "point bankruptcy lookup used"
+    )
+
+    text, count = format_player_list(
+        players,
+        list(range(1, 15)),
+        bankruptcy_repo=bankruptcy_repo,
+        guild_id=77,
+    )
+
+    assert count == 14
+    assert f"{TOMBSTONE_EMOJI} <@4>" in text
+    bankruptcy_repo.get_bulk_states.assert_called_once_with(list(range(1, 15)), 77)
+    bankruptcy_repo.get_penalty_games.assert_not_called()
