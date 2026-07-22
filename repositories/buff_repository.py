@@ -68,6 +68,46 @@ class BuffRepository(BaseRepository):
                 row["data"] = safe_json_loads(row.get("data"), {}, context="manashop_buffs.data")
             return rows
 
+    def active_for_many(
+        self, discord_ids: list[int], guild_id: int | None, buff_type: str
+    ) -> dict[int, list[dict]]:
+        """Return active buffs for multiple owners in one query.
+
+        The mapping contains every unique requested ID and each player's rows
+        retain the same most-recent-first order as :meth:`active_for`.
+        """
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        placeholders = ",".join("?" * len(unique_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT id, discord_id, guild_id, buff_type, target_id,
+                       granted_at, expires_at, triggered, data
+                FROM manashop_buffs
+                WHERE discord_id IN ({placeholders})
+                  AND guild_id = ? AND buff_type = ?
+                  AND triggered = 0 AND expires_at > ?
+                ORDER BY discord_id, granted_at DESC
+                """,
+                (*unique_ids, gid, buff_type, now),
+            )
+            result: dict[int, list[dict]] = {
+                discord_id: [] for discord_id in unique_ids
+            }
+            for db_row in cursor.fetchall():
+                row = dict(db_row)
+                row["data"] = safe_json_loads(
+                    row.get("data"), {}, context="manashop_buffs.data"
+                )
+                result[row["discord_id"]].append(row)
+            return result
+
     def has_active(
         self, discord_id: int, guild_id: int | None, buff_type: str
     ) -> bool:

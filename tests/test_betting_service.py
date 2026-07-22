@@ -874,7 +874,7 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
 
     buff_service = MagicMock()
     buff_service.has_sanctuary_match_bonus.side_effect = RuntimeError("boom")
-    buff_service.buff_repo.active_for.return_value = [{"id": 1}]
+    buff_service.buff_repo.active_for_many.return_value = {pid: [{"id": 1}]}
     buff_service.buff_repo.consume_and_credit_atomic.side_effect = fake_consume_and_credit
     buff_service.apply_blood_pact_skim.return_value = 0
     betting_service.buff_service = buff_service
@@ -904,6 +904,39 @@ def test_blessing_bonus_survives_sanctuary_exception(services):
         player_repo.get_balance(pid, TEST_GUILD_ID)
         == JOPACOIN_WIN_REWARD + blessing_bonus
     )
+
+
+def test_win_bonus_bulk_loads_communion_blessings(services):
+    """A normal five-winner award performs one blessing lookup."""
+    from unittest.mock import MagicMock
+
+    from services.buff_service import BUFF_COMMUNION_BLESSING
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+    winning_ids = list(range(7180, 7185))
+    for pid in winning_ids:
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"Winner{pid}",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=1500,
+        )
+
+    buff_service = MagicMock()
+    buff_service.has_sanctuary_match_bonus.return_value = False
+    buff_service.buff_repo.active_for_many.return_value = {
+        pid: [] for pid in winning_ids
+    }
+    buff_service.apply_blood_pact_skim.return_value = 0
+    betting_service.buff_service = buff_service
+
+    betting_service.award_win_bonus(winning_ids, TEST_GUILD_ID)
+
+    buff_service.buff_repo.active_for_many.assert_called_once_with(
+        winning_ids, TEST_GUILD_ID, BUFF_COMMUNION_BLESSING
+    )
+    buff_service.buff_repo.active_for.assert_not_called()
 
 
 def test_consume_and_credit_atomic_pays_once(repo_db_path):
@@ -1087,7 +1120,7 @@ def test_award_win_bonus_skims_blood_pact_on_net(services):
     betting_service.bankruptcy_service = bankruptcy_service
     buff_service = MagicMock()
     buff_service.has_sanctuary_match_bonus.return_value = False
-    buff_service.buff_repo.active_for.return_value = []
+    buff_service.buff_repo.active_for_many.return_value = {pid: []}
     buff_service.apply_blood_pact_skim.return_value = 1
     betting_service.buff_service = buff_service
 

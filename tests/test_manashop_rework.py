@@ -21,7 +21,7 @@ from services.buff_service import (
     BuffService,
 )
 from services.mana_effects_service import ManaEffectsService
-from tests.conftest import TEST_GUILD_ID
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 from utils.economy_scaling import scale_minigame_jc_delta
 
 USER = 111
@@ -110,6 +110,42 @@ def test_buff_service_grant_and_active_for(buff_service):
     assert len(active) == 1
     assert active[0]["buff_type"] == BUFF_COUNTERSPELL
     assert active[0]["expires_at"] > int(time.time())
+
+
+def test_active_for_many_batches_owners_and_preserves_missing(
+    buff_repo, monkeypatch
+):
+    future = int(time.time()) + 3600
+    user_buff_ids = {
+        buff_repo.grant(USER, TEST_GUILD_ID, BUFF_COUNTERSPELL, future),
+        buff_repo.grant(USER, TEST_GUILD_ID, BUFF_COUNTERSPELL, future),
+    }
+    ally_buff_id = buff_repo.grant(
+        ALLY, TEST_GUILD_ID, BUFF_COUNTERSPELL, future
+    )
+    buff_repo.grant(ALLY, TEST_GUILD_ID_SECONDARY, BUFF_COUNTERSPELL, future)
+    buff_repo.grant(TARGET, TEST_GUILD_ID, BUFF_OVERGROWTH, future)
+    buff_repo.grant(TARGET, TEST_GUILD_ID, BUFF_COUNTERSPELL, int(time.time()) - 1)
+
+    connection_count = 0
+    original_get_connection = buff_repo.get_connection
+
+    def counted_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection()
+
+    monkeypatch.setattr(buff_repo, "get_connection", counted_get_connection)
+
+    active = buff_repo.active_for_many(
+        [ALLY, USER, ALLY, TARGET], TEST_GUILD_ID, BUFF_COUNTERSPELL
+    )
+
+    assert list(active) == [ALLY, USER, TARGET]
+    assert [row["id"] for row in active[ALLY]] == [ally_buff_id]
+    assert {row["id"] for row in active[USER]} == user_buff_ids
+    assert active[TARGET] == []
+    assert connection_count == 1
 
 
 def test_pvp_immunity_via_counterspell_or_sanctuary(buff_service):

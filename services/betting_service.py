@@ -334,6 +334,13 @@ class BettingService:
         # match finalizations can't double-pay it.
         if self.buff_service and winning_ids:
             from services.buff_service import BUFF_COMMUNION_BLESSING
+
+            try:
+                communion_blessings = self.buff_service.buff_repo.active_for_many(
+                    winning_ids, guild_id, BUFF_COMMUNION_BLESSING
+                )
+            except Exception:
+                communion_blessings = {}
             for pid in winning_ids:
                 credited = 0
                 sanctuary_bonus = 0
@@ -368,13 +375,7 @@ class BettingService:
                 # burn without its payout. Only the caller that wins the
                 # conditional UPDATE gets True; a second concurrent match
                 # finalization observes False and skips.
-                blessing = None
-                try:
-                    blessing = self.buff_service.buff_repo.active_for(
-                        pid, guild_id, BUFF_COMMUNION_BLESSING,
-                    )
-                except Exception:
-                    blessing = None
+                blessing = communion_blessings.get(pid)
                 if blessing:
                     blessing_bonus = adjust_generated_jc_reward(
                         max(1, int(JOPACOIN_WIN_REWARD * 0.10)),
