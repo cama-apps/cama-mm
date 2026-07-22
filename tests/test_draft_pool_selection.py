@@ -2,6 +2,7 @@
 
 import pytest
 
+import shuffler as shuffler_module
 from domain.models.player import Player
 from shuffler import BalancedShuffler, DraftPoolResult
 
@@ -68,6 +69,23 @@ class TestScoreDraftPool:
         # The best split should produce a reasonably balanced game
         # despite the 600-point captain gap (by giving stronger players to captain_b)
         assert score < 1000.0
+
+    def test_does_not_materialize_discarded_teams(self, monkeypatch):
+        """Draft-pool scoring should compare role tuples without building teams."""
+        shuffler = BalancedShuffler()
+        captain_a = _make_player("CaptA", 1600)
+        captain_b = _make_player("CaptB", 1550)
+        pool = [_make_player(f"P{i}", 1400 + i * 30) for i in range(8)]
+
+        class FailTeamConstruction:
+            TEAM_SIZE = shuffler_module.Team.TEAM_SIZE
+
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("score-only draft pool path constructed a Team")
+
+        monkeypatch.setattr(shuffler_module, "Team", FailTeamConstruction)
+
+        assert isinstance(shuffler._score_draft_pool(captain_a, captain_b, pool), float)
 
 
 class TestSelectDraftPool:

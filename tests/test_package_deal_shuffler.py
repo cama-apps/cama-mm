@@ -237,10 +237,10 @@ class TestPackageDealWithPoolShuffle:
         monkeypatch.setattr(shuffler, "_greedy_shuffle", greedy)
         monkeypatch.setattr(
             shuffler,
-            "_optimize_role_assignments_for_matchup",
+            "_score_role_assignments_for_matchup",
             lambda team1, team2, **kwargs: (
-                Team(team1, role_assignments=roles),
-                Team(team2, role_assignments=roles),
+                tuple(roles),
+                tuple(roles),
                 0.0,
             ),
         )

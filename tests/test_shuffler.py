@@ -1022,16 +1022,16 @@ class TestShuffler14Players:
 
         optimized_calls = 0
 
-        def optimize(team1_players, team2_players, **kwargs):
+        def score_roles(team1_players, team2_players, **kwargs):
             nonlocal optimized_calls
             optimized_calls += 1
             return (
-                Team(team1_players, role_assignments=["1", "2", "3", "4", "5"]),
-                Team(team2_players, role_assignments=["1", "2", "3", "4", "5"]),
+                ("1", "2", "3", "4", "5"),
+                ("1", "2", "3", "4", "5"),
                 -50.0,
             )
 
-        monkeypatch.setattr(shuffler, "_optimize_role_assignments_for_matchup", optimize)
+        monkeypatch.setattr(shuffler, "_score_role_assignments_for_matchup", score_roles)
 
         shuffler.shuffle_branch_bound(players)
 
@@ -1045,18 +1045,18 @@ class TestShuffler14Players:
         shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
         roles = ["1", "2", "3", "4", "5"]
 
-        def optimize(team1_players, team2_players, **kwargs):
+        def score_roles(team1_players, team2_players, **kwargs):
             score = abs(
                 sum(player.glicko_rating for player in team1_players)
                 - sum(player.glicko_rating for player in team2_players)
             )
             return (
-                Team(team1_players, role_assignments=roles),
-                Team(team2_players, role_assignments=roles),
+                tuple(roles),
+                tuple(roles),
                 score,
             )
 
-        monkeypatch.setattr(shuffler, "_optimize_role_assignments_for_matchup", optimize)
+        monkeypatch.setattr(shuffler, "_score_role_assignments_for_matchup", score_roles)
 
         exclusion_counts = {pl.name: 0 for pl in players}
 
@@ -1088,6 +1088,22 @@ class TestShuffler14Players:
         assert first_team1.role_assignments == second_team1.role_assignments
         assert first_team2.role_assignments == second_team2.role_assignments
         assert first_score == second_score
+
+    def test_score_only_role_optimizer_matches_materialized_result(self):
+        """The hot score-only path must choose the same roles and score."""
+        players = _create_players_with_roles(10)
+        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+
+        team1_roles, team2_roles, score = shuffler._score_role_assignments_for_matchup(
+            players[:5], players[5:], max_assignments_per_team=3
+        )
+        team1, team2, materialized_score = shuffler._optimize_role_assignments_for_matchup(
+            players[:5], players[5:], max_assignments_per_team=3
+        )
+
+        assert team1_roles == tuple(team1.role_assignments)
+        assert team2_roles == tuple(team2.role_assignments)
+        assert score == materialized_score
 
     def test_role_optimizer_reads_each_player_value_once(self, monkeypatch):
         """Role-pair exploration must reuse values instead of rescanning players."""

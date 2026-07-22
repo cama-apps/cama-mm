@@ -704,6 +704,39 @@ class BalancedShuffler:
         Returns:
             Tuple of (best_team1, best_team2, best_score)
         """
+        best_team1_roles, best_team2_roles, best_score = self._score_role_assignments_for_matchup(
+            team1_players,
+            team2_players,
+            max_assignments_per_team=max_assignments_per_team,
+            avoids=avoids,
+            deals=deals,
+            _scoring_context=_scoring_context,
+            _rd_priority=_rd_priority,
+        )
+
+        # Fallback to default if no assignments were found.
+        if best_team1_roles is None or best_team2_roles is None:
+            best_team1 = Team(team1_players)
+            best_team2 = Team(team2_players)
+            best_team1.ensure_role_assignments()
+            best_team2.ensure_role_assignments()
+        else:
+            best_team1 = Team(team1_players, role_assignments=best_team1_roles)
+            best_team2 = Team(team2_players, role_assignments=best_team2_roles)
+
+        return best_team1, best_team2, best_score
+
+    def _score_role_assignments_for_matchup(
+        self,
+        team1_players: list[Player],
+        team2_players: list[Player],
+        max_assignments_per_team: int = 20,
+        avoids: list | None = None,
+        deals: list | None = None,
+        _scoring_context: _ShuffleScoringContext | None = None,
+        _rd_priority: float | None = None,
+    ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, float]:
+        """Return the best role tuples and score without constructing teams."""
         best_team1_roles: tuple[str, ...] | None = None
         best_team2_roles: tuple[str, ...] | None = None
         best_score = float("inf")
@@ -781,18 +814,7 @@ class BalancedShuffler:
                     best_team1_roles = team1_assignment.role_assignments
                     best_team2_roles = team2_assignment.role_assignments
 
-        # Fallback to default if no assignments found
-        if best_team1_roles is None:
-            best_team1 = Team(team1_players)
-            best_team2 = Team(team2_players)
-            best_team1.ensure_role_assignments()
-            best_team2.ensure_role_assignments()
-            best_score = float("inf")
-        else:
-            best_team1 = Team(team1_players, role_assignments=best_team1_roles)
-            best_team2 = Team(team2_players, role_assignments=best_team2_roles)
-
-        return best_team1, best_team2, best_score
+        return best_team1_roles, best_team2_roles, best_score
 
     def _log_top_matchups(
         self,
@@ -1439,7 +1461,7 @@ class BalancedShuffler:
 
                 # Step 4: Full role optimization (only for promising splits)
                 evaluated_matchups += 1
-                team1, team2, base_score = self._optimize_role_assignments_for_matchup(
+                team1_roles, team2_roles, base_score = self._score_role_assignments_for_matchup(
                     team1_players,
                     team2_players,
                     max_assignments_per_team=3,
@@ -1452,8 +1474,14 @@ class BalancedShuffler:
                 total_score = base_score + recent_penalty + combo_penalty
 
                 if total_score < best_score:
+                    if team1_roles is None or team2_roles is None:
+                        continue
                     best_score = total_score
-                    best_result = (team1, team2, excluded_players)
+                    best_result = (
+                        Team(team1_players, role_assignments=team1_roles),
+                        Team(team2_players, role_assignments=team2_roles),
+                        excluded_players,
+                    )
 
         logger.info(
             f"Branch & bound stats: pruned {pruned_player_selections} player selections, "
@@ -1497,7 +1525,7 @@ class BalancedShuffler:
             team_a_players = [captain_a] + [pool[i] for i in team_a_indices]
             team_b_players = [captain_b] + [pool[i] for i in team_b_indices]
 
-            _, _, score = self._optimize_role_assignments_for_matchup(
+            _, _, score = self._score_role_assignments_for_matchup(
                 team_a_players,
                 team_b_players,
                 max_assignments_per_team=max_assignments_per_team,
