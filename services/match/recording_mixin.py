@@ -296,17 +296,39 @@ class RecordingMixin:
                     "total_games": total_games,
                 })
 
-        for pid in winning_ids:
-            slen, _ = streak_data.get(pid, (1, 1.0))
-            if slen >= 5 and hasattr(self.player_repo, "get_personal_best_win_streak"):
-                prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
+        record_candidates = {
+            pid: streak_data.get(pid, (1, 1.0))[0]
+            for pid in winning_ids
+            if streak_data.get(pid, (1, 1.0))[0] >= 5
+        }
+        previous_bests: dict[int, int] = {}
+        update_many = getattr(
+            self.player_repo, "update_personal_best_win_streaks", None
+        )
+        if record_candidates and callable(update_many):
+            previous_bests = update_many(record_candidates, guild_id)
+        elif record_candidates:
+            # Compatibility for lightweight repository fakes outside the
+            # production interface; real repositories always take the batch.
+            for pid, slen in record_candidates.items():
+                if not hasattr(self.player_repo, "get_personal_best_win_streak"):
+                    continue
+                prev_best = self.player_repo.get_personal_best_win_streak(
+                    pid, guild_id
+                )
                 if slen > prev_best:
-                    self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
-                    easter_egg_data["win_streak_records"].append({
-                        "discord_id": pid,
-                        "current_streak": slen,
-                        "previous_best": prev_best,
-                    })
+                    self.player_repo.update_personal_best_win_streak(
+                        pid, guild_id, slen
+                    )
+                    previous_bests[pid] = prev_best
+        for pid in winning_ids:
+            if pid not in previous_bests:
+                continue
+            easter_egg_data["win_streak_records"].append({
+                "discord_id": pid,
+                "current_streak": record_candidates[pid],
+                "previous_best": previous_bests[pid],
+            })
 
         return easter_egg_data
 
