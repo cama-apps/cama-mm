@@ -820,12 +820,12 @@ class WrappedService:
         losses = match_details["losses"]
 
         # Get rating change
-        rating_changes = self.wrapped_repo.get_month_rating_changes(guild_id, start_ts, end_ts)
-        rating_change = 0
-        for rc in rating_changes:
-            if rc["discord_id"] == discord_id:
-                rating_change = int(rc["rating_change"] or 0)
-                break
+        rating_change = int(
+            self.wrapped_repo.get_player_rating_change(
+                discord_id, guild_id, start_ts, end_ts
+            )
+            or 0
+        )
 
         # Get top heroes
         player_heroes = self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
@@ -1277,12 +1277,12 @@ class WrappedService:
         win_rate = wins / games_played if games_played > 0 else 0
 
         # Get rating change
-        rating_changes = self.wrapped_repo.get_month_rating_changes(guild_id, start_ts, end_ts)
-        rating_change = 0
-        for rc in rating_changes:
-            if rc["discord_id"] == discord_id:
-                rating_change = int(rc["rating_change"] or 0)
-                break
+        rating_change = int(
+            self.wrapped_repo.get_player_rating_change(
+                discord_id, guild_id, start_ts, end_ts
+            )
+            or 0
+        )
 
         # Get aggregate stats from match_stats
         match_stats = self.wrapped_repo.get_month_match_stats(guild_id, start_ts, end_ts)
@@ -2012,4 +2012,3 @@ class WrappedService:
                 )
 
         return awards
-

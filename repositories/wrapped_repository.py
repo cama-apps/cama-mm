@@ -183,6 +183,59 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_player_rating_change(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        start_ts: int,
+        end_ts: int,
+    ) -> float | None:
+        """Get one player's first-to-last rating change for a time period."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    (
+                        SELECT rating_before
+                        FROM rating_history
+                        WHERE guild_id = ?
+                          AND discord_id = ?
+                          AND timestamp >= datetime(?, 'unixepoch')
+                          AND timestamp < datetime(?, 'unixepoch')
+                          AND rating_before IS NOT NULL
+                        ORDER BY timestamp ASC
+                        LIMIT 1
+                    ) AS first_rating,
+                    (
+                        SELECT rating
+                        FROM rating_history
+                        WHERE guild_id = ?
+                          AND discord_id = ?
+                          AND timestamp >= datetime(?, 'unixepoch')
+                          AND timestamp < datetime(?, 'unixepoch')
+                          AND rating IS NOT NULL
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    ) AS last_rating
+                """,
+                (
+                    guild_id,
+                    discord_id,
+                    start_ts,
+                    end_ts,
+                    guild_id,
+                    discord_id,
+                    start_ts,
+                    end_ts,
+                ),
+            )
+            row = cursor.fetchone()
+
+        if row is None or row["first_rating"] is None or row["last_rating"] is None:
+            return None
+        return row["last_rating"] - row["first_rating"]
+
     def get_month_betting_stats(
         self, guild_id: int, start_ts: int, end_ts: int
     ) -> list[dict]:

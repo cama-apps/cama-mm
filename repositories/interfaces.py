@@ -1178,6 +1178,17 @@ class IWrappedRepository(ABC):
         ...
 
     @abstractmethod
+    def get_player_rating_change(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        start_ts: int,
+        end_ts: int,
+    ) -> float | None:
+        """Get one player's rating change over a time period."""
+        ...
+
+    @abstractmethod
     def get_month_betting_stats(
         self, guild_id: int, start_ts: int, end_ts: int
     ) -> list[dict]:

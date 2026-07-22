@@ -2,6 +2,7 @@
 Tests for Cama Wrapped yearly summary feature.
 """
 
+import sqlite3
 import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
@@ -24,6 +25,34 @@ class TestWrappedRepository:
         summary = repo.get_month_summary(0, start_ts, end_ts)
         # Should return empty or zeros
         assert summary.get("total_matches", 0) == 0
+
+    def test_get_player_rating_change_uses_first_and_last_in_period(self, repo_db_path):
+        repo = WrappedRepository(repo_db_path)
+        start_ts = int(datetime(2026, 1, 1, tzinfo=UTC).timestamp())
+        end_ts = int(datetime(2027, 1, 1, tzinfo=UTC).timestamp())
+
+        rows = [
+            (111, 42, 1300.0, 1320.0, "2025-12-31 12:00:00"),
+            (111, 42, None, 1400.0, "2026-01-01 12:00:00"),
+            (111, 42, 1400.0, 1420.0, "2026-01-02 12:00:00"),
+            (111, 42, 1420.0, None, "2026-06-01 12:00:00"),
+            (111, 42, 1480.0, 1505.0, "2026-12-30 12:00:00"),
+            (111, 42, 1505.0, 1510.0, "2027-01-01 12:00:00"),
+            (111, 7, 900.0, 2000.0, "2026-07-01 12:00:00"),
+            (222, 42, 1000.0, 2000.0, "2026-07-01 12:00:00"),
+        ]
+        with sqlite3.connect(repo_db_path) as connection:
+            connection.executemany(
+                """
+                INSERT INTO rating_history (
+                    discord_id, guild_id, rating_before, rating, timestamp
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        assert repo.get_player_rating_change(111, 42, start_ts, end_ts) == 105.0
+        assert repo.get_player_rating_change(999, 42, start_ts, end_ts) is None
 
 
 class TestWrappedService:
