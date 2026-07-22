@@ -863,6 +863,11 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
+    def lock_expired_predictions(self, guild_id: int, now: int) -> list[int]:
+        """Atomically lock and return expired open predictions for a guild."""
+        ...
+
+    @abstractmethod
     def update_prediction_discord_ids(
         self,
         prediction_id: int,

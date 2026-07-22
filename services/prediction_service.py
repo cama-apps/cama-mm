@@ -204,17 +204,7 @@ class PredictionService:
         Returns list of prediction IDs that were locked.
         """
         now = int(time.time())
-        predictions = self.prediction_repo.get_predictions_by_status(guild_id, "open")
-        locked = []
-
-        for pred in predictions:
-            if pred["closes_at"] <= now:
-                self.prediction_repo.update_prediction_status(
-                    pred["prediction_id"], "locked"
-                )
-                locked.append(pred["prediction_id"])
-
-        return locked
+        return self.prediction_repo.lock_expired_predictions(guild_id, now)
 
     # =========================================================================
     # Order-book mechanic (feat/predict-orderbook)
