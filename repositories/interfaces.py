@@ -5,6 +5,8 @@ These interfaces define the contracts implemented by concrete repositories.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 
 
 class IPlayerRepository(ABC):
@@ -59,6 +61,11 @@ class IPlayerRepository(ABC):
 
     @abstractmethod
     def update_inferred_region(self, discord_id: int, guild_id: int, region: str | None) -> None: ...
+
+    @abstractmethod
+    def update_inferred_regions_bulk(self, updates: list[tuple[int, int, str]]) -> None:
+        """Cache multiple inferred regions in one transaction."""
+        ...
 
     @abstractmethod
     def get_players_needing_region_backfill(self) -> list[dict]: ...
@@ -192,6 +199,13 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def add_steam_ids_bulk(
+        self, steam_ids: list[tuple[int, int]]
+    ) -> list[dict[str, bool | str]]:
+        """Add Steam IDs in one transaction and return aligned outcomes."""
+        ...
+
+    @abstractmethod
     def remove_steam_id(self, discord_id: int, steam_id: int) -> bool:
         """Remove a Steam ID from a player. Returns True if removed."""
         ...
@@ -276,6 +290,21 @@ class IPlayerRepository(ABC):
         metadata: dict | str | None = None,
     ) -> None:
         """Apply multiple balance deltas in a single transaction."""
+        ...
+
+    @abstractmethod
+    def add_balance_batch(
+        self,
+        balance_updates: list[tuple[int, int, dict | str | None]],
+        guild_id: int | None,
+        *,
+        source: str | None = None,
+        actor_id: int | None = None,
+        related_type: str | None = None,
+        related_id: str | int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Apply ordered balance updates with per-update ledger metadata."""
         ...
 
     @abstractmethod
@@ -376,6 +405,11 @@ class IBetRepository(ABC):
         pending_match_id: int | None = None,
     ) -> int:
         """Atomically place a bet (balance debit + bet insert in one transaction)."""
+        ...
+
+    @abstractmethod
+    def automatic_bet_batch(self) -> AbstractContextManager[Callable[..., int]]:
+        """Open one transaction for savepoint-isolated automatic bets."""
         ...
 
     @abstractmethod
@@ -1355,6 +1389,11 @@ class IAIQueryRepository(ABC):
         ...
 
     @abstractmethod
+    def get_schema_metadata(self) -> dict[str, dict[str, list[dict]]]:
+        """Load ordered table column and foreign-key metadata in one read."""
+        ...
+
+    @abstractmethod
     def get_foreign_keys(self, table_name: str) -> list[dict]:
         """Get foreign key relationships for a table."""
         ...
@@ -1871,6 +1910,18 @@ class IDigRepository(ABC):
     def repair_gear(self, gear_id: int, to_durability: int) -> None: ...
 
     # Atomic Operations
+    @abstractmethod
+    def atomic_auto_buy_items(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        queue_item_ids: list[int],
+        purchases: list[tuple[str, int]],
+    ) -> list[int]:
+        """Queue reserves and buy auto-use items in one transaction."""
+        ...
+
     @abstractmethod
     def atomic_tunnel_balance_update(
         self,
