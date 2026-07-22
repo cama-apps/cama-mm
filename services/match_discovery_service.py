@@ -75,11 +75,17 @@ class MatchDiscoveryService:
             "errors": 0,
             "details": [],
         }
+        player_matches_cache: dict[int, list[dict]] = {}
 
         for match in unenriched:
             match_id = match["match_id"]
             try:
-                result = self._discover_single_match(match_id, normalized_guild, dry_run)
+                result = self._discover_single_match(
+                    match_id,
+                    normalized_guild,
+                    dry_run,
+                    player_matches_cache=player_matches_cache,
+                )
                 results["details"].append(result)
 
                 if result["status"] == "discovered":
@@ -116,7 +122,12 @@ class MatchDiscoveryService:
         return results
 
     def _discover_single_match(
-        self, match_id: int, guild_id: int | None, dry_run: bool
+        self,
+        match_id: int,
+        guild_id: int | None,
+        dry_run: bool,
+        *,
+        player_matches_cache: dict[int, list[dict]] | None = None,
     ) -> dict:
         """
         Attempt to discover the Dota 2 match ID for a single internal match.
@@ -167,8 +178,22 @@ class MatchDiscoveryService:
         time_window = ENRICHMENT_DISCOVERY_TIME_WINDOW
 
         for steam_id in steam_ids:
+            cache_hit = (
+                player_matches_cache is not None
+                and steam_id in player_matches_cache
+            )
             try:
-                recent_matches = self.opendota_api.get_player_matches(steam_id, limit=100)
+                if cache_hit:
+                    recent_matches = player_matches_cache[steam_id]
+                else:
+                    recent_matches = self.opendota_api.get_player_matches(
+                        steam_id, limit=100
+                    )
+                    if player_matches_cache is not None and isinstance(
+                        recent_matches, list
+                    ):
+                        player_matches_cache[steam_id] = recent_matches
+
                 if not recent_matches:
                     continue
 
@@ -187,8 +212,9 @@ class MatchDiscoveryService:
             except Exception as e:
                 logger.warning(f"Error fetching matches for steam_id {steam_id}: {e}")
 
-            # Small delay between API calls
-            time.sleep(0.2)
+            if not cache_hit:
+                # Small delay between actual API calls, not cached reads.
+                time.sleep(0.2)
 
         if not candidate_matches:
             return {"match_id": match_id, "status": "no_candidates"}
