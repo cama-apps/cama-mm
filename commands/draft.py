@@ -351,14 +351,34 @@ class DraftCommands(commands.Cog):
         if view is not None and not view.is_finished():
             view.stop()
 
+    async def _resolve_channel(self, channel_id: int | None, fallback=None):
+        """Resolve a persisted channel ID, falling back when it is unavailable."""
+        if not channel_id:
+            return fallback
+        if getattr(fallback, "id", None) == channel_id:
+            return fallback
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+            return channel
+        except Exception as exc:
+            logger.warning("Could not resolve channel %s: %s", channel_id, exc)
+            return fallback
+
     async def _delete_captain_ping_message(
-        self, interaction: discord.Interaction, state: DraftState
+        self,
+        state: DraftState,
+        fallback_channel=None,
     ) -> None:
         """Delete the captain ping message if it exists."""
         if not state.captain_ping_message_id:
             return
         try:
-            channel = interaction.channel
+            channel = await self._resolve_channel(
+                state.draft_channel_id,
+                fallback=fallback_channel,
+            )
             if channel:
                 msg = await channel.fetch_message(state.captain_ping_message_id)
                 await msg.delete()
@@ -434,10 +454,16 @@ class DraftCommands(commands.Cog):
         # Get user name for the message
         user_name = interaction.user.display_name
 
-        await interaction.response.send_message(
-            f"🔄 **Draft Restarted** by {user_name}\n\n"
-            "The lobby has been preserved. Use `/draft start` to start a new draft.",
-        )
+        try:
+            await interaction.response.send_message(
+                f"🔄 **Draft Restarted** by {user_name}\n\n"
+                "The lobby has been preserved. Use `/draft start` to start a new draft.",
+            )
+        finally:
+            await self._delete_captain_ping_message(
+                state,
+                fallback_channel=interaction.channel,
+            )
 
         logger.info(
             f"Draft restarted by {interaction.user} (captain={is_captain}, admin={is_admin}) "
@@ -703,6 +729,7 @@ class DraftCommands(commands.Cog):
         # Wrap post-creation in try/except so draft state is cleaned up on failure.
         # Without this, a Discord API error (e.g. followup.send fails) leaves a
         # zombie draft state that blocks future shuffles and drafts.
+        ping_msg = None
         try:
             # Initialize state
             state.player_pool_ids = pool_result.selected_ids
@@ -713,7 +740,15 @@ class DraftCommands(commands.Cog):
             state.captain2_id = captain_pair.captain2_id
             state.captain1_rating = captain_pair.captain1_rating
             state.captain2_rating = captain_pair.captain2_rating
-            state.draft_channel_id = interaction.channel_id
+            origin_channel_id = await asyncio.to_thread(
+                self.lobby_manager.get_origin_channel_id,
+                guild_id=guild_id,
+            )
+            draft_channel = await self._resolve_channel(
+                origin_channel_id,
+                fallback=interaction.channel,
+            )
+            state.draft_channel_id = draft_channel.id
 
             # Cache player data for the pool (avoids repeated DB queries during pre-draft phases)
             # Use get_player_display_name to resolve server nicknames at cache time
@@ -789,24 +824,24 @@ class DraftCommands(commands.Cog):
                     inline=False,
                 )
 
-            # Send with winner choice buttons — reuse the progress message so
-            # the draft appears in place instead of as a second message.
+            # Send with winner choice buttons in the matchmaking channel. The
+            # captain ping is posted first so it renders above the draft embed.
             view = WinnerChoiceView(self, guild_id, coinflip_winner_id, draft_state=state)
             self._track_draft_view(guild_id, view)
-            await progress_message.edit(content=None, embed=embed, view=view)
-            message = progress_message
-
-            # Store message ID for later updates
-            state.draft_message_id = message.id
+            with contextlib.suppress(Exception):
+                await progress_message.delete()
 
             # Ping both captains once (will be deleted when first choice is made)
             try:
-                ping_msg = await interaction.channel.send(
+                ping_msg = await draft_channel.send(
                     f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> Draft starting!"
                 )
                 state.captain_ping_message_id = ping_msg.id
             except Exception as e:
                 logger.debug("Failed to send captain ping message: %s", e)
+
+            message = await draft_channel.send(embed=embed, view=view)
+            state.draft_message_id = message.id
 
             # Neon Degen Terminal hook (draft coinflip)
             try:
@@ -823,6 +858,9 @@ class DraftCommands(commands.Cog):
             logger.error("Draft setup failed after state creation, cleaning up", exc_info=True)
             await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
             self._stop_tracked_draft_view(guild_id)
+            if ping_msg:
+                with contextlib.suppress(Exception):
+                    await ping_msg.delete()
             with contextlib.suppress(Exception):
                 await progress_message.delete()
             raise
@@ -982,7 +1020,10 @@ class DraftCommands(commands.Cog):
         # Delete captain ping message (first choice made). This awaits a network
         # round-trip, so a double-click could re-enter here before the phase
         # advances; re-check the phase afterward so the second click is rejected.
-        await self._delete_captain_ping_message(interaction, state)
+        await self._delete_captain_ping_message(
+            state,
+            fallback_channel=interaction.channel,
+        )
         if state.phase != DraftPhase.WINNER_CHOICE:
             await interaction.response.send_message(
                 "❌ That choice has already been made.", ephemeral=True
@@ -1035,7 +1076,10 @@ class DraftCommands(commands.Cog):
         # Delete captain ping message (first choice made). This awaits a network
         # round-trip, so a double-click could re-enter here before the phase
         # advances; re-check the phase afterward so the second click is rejected.
-        await self._delete_captain_ping_message(interaction, state)
+        await self._delete_captain_ping_message(
+            state,
+            fallback_channel=interaction.channel,
+        )
         if state.phase != DraftPhase.WINNER_CHOICE:
             await interaction.response.send_message(
                 "❌ That choice has already been made.", ephemeral=True
@@ -1634,6 +1678,10 @@ class DraftCommands(commands.Cog):
                 if lobby_service
                 else None
             )
+            lobby_channel_id = await asyncio.to_thread(
+                self.lobby_manager.get_lobby_channel_id,
+                guild_id=guild_id,
+            )
 
             # Create pending match for betting and recording
             pending_match_id = await self._create_pending_match(
@@ -1727,6 +1775,7 @@ class DraftCommands(commands.Cog):
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
             draft_message = await self._edit_interaction_message(interaction, embed=embed, view=None)
+            lobby_message = await self._post_to_lobby_channel(embed, lobby_channel_id)
 
             # === NEW: Store message info for odds updates ===
             try:
@@ -1734,17 +1783,30 @@ class DraftCommands(commands.Cog):
                 if original_message is None:
                     with contextlib.suppress(Exception):
                         original_message = await interaction.original_response()
-                if original_message:
-                    message_channel = getattr(original_message, "channel", None)
+                primary_message = lobby_message or original_message
+                command_message = (
+                    original_message
+                    if lobby_message
+                    and original_message
+                    and getattr(original_message, "id", None)
+                    != getattr(lobby_message, "id", None)
+                    else None
+                )
+                if primary_message:
+                    message_channel = getattr(primary_message, "channel", None)
+                    command_channel = getattr(command_message, "channel", None)
                     await asyncio.to_thread(
                         functools.partial(
                             self.match_service.set_shuffle_message_info,
                             guild_id,
-                            message_id=getattr(original_message, "id", None) or state.draft_message_id,
+                            message_id=getattr(primary_message, "id", None)
+                            or state.draft_message_id,
                             channel_id=getattr(message_channel, "id", None) or state.draft_channel_id,
-                            jump_url=getattr(original_message, "jump_url", None),
+                            jump_url=getattr(primary_message, "jump_url", None),
                             origin_channel_id=state.draft_channel_id,
                             pending_match_id=pending_state.pending_match_id if pending_state else None,
+                            cmd_message_id=getattr(command_message, "id", None),
+                            cmd_channel_id=getattr(command_channel, "id", None),
                         )
                     )
             except Exception as exc:
@@ -2221,6 +2283,23 @@ class DraftCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post to match thread: {exc}")
 
+    async def _post_to_lobby_channel(
+        self,
+        embed: discord.Embed,
+        lobby_channel_id: int | None,
+    ) -> discord.Message | None:
+        """Post the completed draft embed to the persisted lobby channel."""
+        if not lobby_channel_id:
+            return None
+        channel = await self._resolve_channel(lobby_channel_id)
+        if not channel:
+            return None
+        try:
+            return await channel.send(embed=embed)
+        except Exception as exc:
+            logger.warning("Failed to post completed draft to lobby channel: %s", exc)
+            return None
+
     async def _handle_draft_timeout(
         self, guild_id: int, view: discord.ui.View | None = None
     ) -> None:
@@ -2243,6 +2322,8 @@ class DraftCommands(commands.Cog):
                 return
 
         logger.info(f"Draft timed out for guild {guild_id} in phase {state.phase.value}")
+
+        await self._delete_captain_ping_message(state)
 
         # Clear the draft state
         await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)

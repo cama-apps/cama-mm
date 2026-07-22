@@ -1113,7 +1113,7 @@ class _FakeMessage:
 
     _counter = 0
 
-    def __init__(self, content=None, embed=None, view=None, fail_edit=False, channel=None):
+    def __init__(self, content=None, embed=None, view=None, channel=None):
         _FakeMessage._counter += 1
         self.id = 9_000_000 + _FakeMessage._counter
         self.content = content
@@ -1127,11 +1127,8 @@ class _FakeMessage:
         )
         self.edited = False
         self.deleted = False
-        self._fail_edit = fail_edit
 
     async def edit(self, content=None, embed=None, view=None):
-        if self._fail_edit:
-            raise RuntimeError("simulated Discord edit failure")
         self.edited = True
         self.content = content
         self.embed = embed
@@ -1145,30 +1142,36 @@ class _FakeMessage:
 class _FakeFollowup:
     """Records every followup.send and returns an editable fake message."""
 
-    def __init__(self, fail_edit=False):
+    def __init__(self):
         self.messages = []
-        self._fail_edit = fail_edit
 
     async def send(self, content=None, **kwargs):
         msg = _FakeMessage(
             content=content,
             embed=kwargs.get("embed"),
             view=kwargs.get("view"),
-            fail_edit=self._fail_edit,
         )
         self.messages.append(msg)
         return msg
 
 
 class _FakeChannel:
-    def __init__(self):
-        self.id = 555_000
+    def __init__(self, channel_id=555_000):
+        self.id = channel_id
         self.sent = []
 
     async def send(self, content=None, **kwargs):
-        msg = _FakeMessage(content=content, channel=self)
+        msg = _FakeMessage(
+            content=content,
+            embed=kwargs.get("embed"),
+            view=kwargs.get("view"),
+            channel=self,
+        )
         self.sent.append(msg)
         return msg
+
+    async def fetch_message(self, message_id):
+        return next(message for message in self.sent if message.id == message_id)
 
 
 class _FakeGuild:
@@ -1183,12 +1186,12 @@ class _FakeGuild:
 class _FakeInteraction:
     """Minimal stand-in for an already-deferred discord.Interaction."""
 
-    def __init__(self, guild_id, fail_edit=False):
+    def __init__(self, guild_id):
         self.guild = _FakeGuild(guild_id)
         self.guild_id = guild_id
         self.channel = _FakeChannel()
         self.channel_id = self.channel.id
-        self.followup = _FakeFollowup(fail_edit=fail_edit)
+        self.followup = _FakeFollowup()
 
 
 class _FakeComponentResponse:
@@ -1323,12 +1326,15 @@ def _register_draft_players(player_repo, guild_id, count, *, start_id=50001):
     return ids
 
 
-def _make_draft_cog(player_repo):
+def _make_draft_cog(player_repo, *, bot=None, lobby_manager=None):
     """Build a DraftCommands cog with real services and a stub bot."""
+    if lobby_manager is None:
+        lobby_manager = MagicMock()
+        lobby_manager.get_origin_channel_id.return_value = None
     return DraftCommands(
-        bot=MagicMock(),
+        bot=bot or MagicMock(),
         player_repo=player_repo,
-        lobby_manager=MagicMock(),
+        lobby_manager=lobby_manager,
         draft_state_manager=DraftStateManager(),
         draft_service=DraftService(),
         match_service=None,
@@ -1447,16 +1453,113 @@ class TestExecuteDraft:
         assert set(state.full_exclusion_increment_ids) == set(state.excluded_player_ids)
         assert state.half_exclusion_increment_ids == []
         assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
-        # the progress message is converted in place into the draft embed
+        # the temporary progress message is removed once setup is complete
         assert len(interaction.followup.messages) == 1
-        draft_msg = interaction.followup.messages[0]
-        assert draft_msg.edited is True
+        progress_message = interaction.followup.messages[0]
+        assert progress_message.deleted is True
+        # the captain ping is sent first so it renders above the draft embed
+        assert len(interaction.channel.sent) == 2
+        ping_message, draft_msg = interaction.channel.sent
+        assert "Draft starting!" in ping_message.content
         assert draft_msg.embed is not None
         assert draft_msg.view is not None
         assert state.draft_message_id == draft_msg.id
-        # both captains were pinged
-        assert len(interaction.channel.sent) == 1
+
+    async def test_posts_captain_ping_then_embed_to_origin_channel(self, player_repository):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        origin_channel = _FakeChannel(channel_id=777_000)
+        lobby_manager = MagicMock()
+        lobby_manager.get_origin_channel_id.return_value = origin_channel.id
+        bot = SimpleNamespace(
+            get_channel=lambda channel_id: (
+                origin_channel if channel_id == origin_channel.id else None
+            )
+        )
+        cog = _make_draft_cog(
+            player_repository,
+            bot=bot,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        assert result is True
+        assert len(origin_channel.sent) == 2
+        ping_message, draft_message = origin_channel.sent
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+        assert ping_message.content == f"<@{state.captain1_id}> <@{state.captain2_id}> Draft starting!"
+        assert draft_message.embed is not None
+        assert draft_message.view is not None
+        assert state.captain_ping_message_id == ping_message.id
+        assert state.draft_message_id == draft_message.id
+        assert state.draft_channel_id == origin_channel.id
+        assert interaction.channel.sent == []
+
+    async def test_captain_ping_failure_does_not_block_draft_embed(self, player_repository):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+
+        class _PingFailingChannel(_FakeChannel):
+            async def send(self, content=None, **kwargs):
+                if content is not None:
+                    raise RuntimeError("simulated captain ping failure")
+                return await super().send(content, **kwargs)
+
+        origin_channel = _PingFailingChannel(channel_id=777_004)
+        lobby_manager = MagicMock()
+        lobby_manager.get_origin_channel_id.return_value = origin_channel.id
+        bot = SimpleNamespace(get_channel=lambda _channel_id: origin_channel)
+        cog = _make_draft_cog(
+            player_repository,
+            bot=bot,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert result is True
+        assert state is not None
+        assert state.captain_ping_message_id is None
+        assert len(origin_channel.sent) == 1
+        assert origin_channel.sent[0].embed is not None
+        assert state.draft_message_id == origin_channel.sent[0].id
+
+    async def test_unavailable_origin_channel_falls_back_to_interaction_channel(
+        self, player_repository
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_manager = MagicMock()
+        lobby_manager.get_origin_channel_id.return_value = 777_005
+
+        async def fail_fetch(_channel_id):
+            raise RuntimeError("simulated origin channel fetch failure")
+
+        bot = SimpleNamespace(
+            get_channel=lambda _channel_id: None,
+            fetch_channel=fail_fetch,
+        )
+        cog = _make_draft_cog(
+            player_repository,
+            bot=bot,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert result is True
+        assert state is not None
+        assert state.draft_channel_id == interaction.channel.id
+        assert len(interaction.channel.sent) == 2
         assert "Draft starting!" in interaction.channel.sent[0].content
+        assert interaction.channel.sent[1].embed is not None
 
     async def test_legacy_conditional_players_are_ignored(self, player_repository):
         guild_id = TEST_GUILD_ID
@@ -1532,9 +1635,17 @@ class TestExecuteDraft:
             player_repository.set_captain_eligible(pid, guild_id, True)
 
         cog = _make_draft_cog(player_repository)
-        # the draft embed is posted by editing the progress message — make
-        # that edit fail to simulate a Discord API error mid-setup
-        interaction = _FakeInteraction(guild_id, fail_edit=True)
+        class _FailingDraftChannel(_FakeChannel):
+            async def send(self, content=None, **kwargs):
+                if kwargs.get("embed") is not None:
+                    raise RuntimeError("simulated Discord send failure")
+                return await super().send(content, **kwargs)
+
+        # The draft embed is posted after the captain ping. Make that send fail
+        # to simulate a Discord API error mid-setup.
+        interaction = _FakeInteraction(guild_id)
+        interaction.channel = _FailingDraftChannel()
+        interaction.channel_id = interaction.channel.id
 
         with pytest.raises(RuntimeError):
             await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
@@ -1543,6 +1654,8 @@ class TestExecuteDraft:
         assert cog.draft_state_manager.get_state(guild_id) is None
         # and the progress message was cleaned up
         assert interaction.followup.messages[0].deleted is True
+        # the already-sent captain ping must not falsely announce a rolled-back draft
+        assert interaction.channel.sent[0].deleted is True
 
 def _make_final_pick_scenario(
     player_repository, guild_id, player_ids, *, bot, match_service, lobby_manager=None
@@ -1648,6 +1761,107 @@ class TestHandlePlayerPick:
         assert match_service.state.pending_match_id == 1234
         assert match_service.message_info["message_id"] == interaction.message.id
         assert match_service.message_info["channel_id"] == interaction.channel.id
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id)
+
+    async def test_final_pick_copies_completion_embed_to_lobby_channel(
+        self, player_repository
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        captain1 = player_ids[0]
+        final_pick = player_ids[9]
+        lobby_channel = _FakeChannel(channel_id=777_002)
+        stored_lobby_channel_id = {"value": lobby_channel.id}
+        lobby_manager = MagicMock()
+        lobby_manager.get_lobby_channel_id.side_effect = (
+            lambda guild_id=None: stored_lobby_channel_id["value"]
+        )
+        lobby_manager.reset_lobby.side_effect = (
+            lambda guild_id=None: stored_lobby_channel_id.update(value=None)
+        )
+        match_service = _FakeDraftMatchService()
+        bot = SimpleNamespace(
+            betting_service=None,
+            lobby_service=None,
+            get_cog=lambda _name: None,
+            get_channel=lambda channel_id: (
+                lobby_channel if channel_id == lobby_channel.id else None
+            ),
+        )
+        cog, _ = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=bot,
+            match_service=match_service,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
+
+        await cog.handle_player_pick(interaction, guild_id, final_pick)
+
+        assert len(lobby_channel.sent) == 1
+        lobby_message = lobby_channel.sent[0]
+        assert lobby_message.embed is interaction.message.embed
+        assert match_service.message_info["message_id"] == lobby_message.id
+        assert match_service.message_info["channel_id"] == lobby_channel.id
+        assert match_service.message_info["jump_url"] == lobby_message.jump_url
+        assert match_service.message_info["cmd_message_id"] == interaction.message.id
+        assert match_service.message_info["cmd_channel_id"] == interaction.channel.id
+        lobby_manager.get_lobby_channel_id.assert_called_once_with(guild_id=guild_id)
+        lobby_manager.reset_lobby.assert_called_once_with(guild_id)
+
+    async def test_lobby_channel_copy_failure_does_not_break_completion(
+        self, player_repository
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        captain1 = player_ids[0]
+        final_pick = player_ids[9]
+
+        class _FailingChannel(_FakeChannel):
+            def __init__(self, channel_id):
+                super().__init__(channel_id)
+                self.send_attempts = 0
+
+            async def send(self, content=None, **kwargs):
+                self.send_attempts += 1
+                raise RuntimeError("simulated lobby channel send failure")
+
+        lobby_channel = _FailingChannel(channel_id=777_003)
+        lobby_manager = MagicMock()
+        lobby_manager.get_lobby_channel_id.return_value = lobby_channel.id
+        match_service = _FakeDraftMatchService()
+        bot = SimpleNamespace(
+            betting_service=None,
+            lobby_service=None,
+            get_cog=lambda _name: None,
+            get_channel=lambda channel_id: (
+                lobby_channel if channel_id == lobby_channel.id else None
+            ),
+        )
+        cog, state = _make_final_pick_scenario(
+            player_repository,
+            guild_id,
+            player_ids,
+            bot=bot,
+            match_service=match_service,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
+
+        await cog.handle_player_pick(interaction, guild_id, final_pick)
+
+        assert lobby_channel.send_attempts == 1
+        assert interaction.edited_original is True
+        assert interaction.followup.messages == []
+        assert state.phase == DraftPhase.COMPLETE
+        assert match_service.message_info is not None
+        assert match_service.message_info["message_id"] == interaction.message.id
+        assert match_service.message_info["channel_id"] == interaction.channel.id
+        assert match_service.message_info["cmd_message_id"] is None
+        assert match_service.message_info["cmd_channel_id"] is None
+        assert cog.draft_state_manager.get_state(guild_id) is None
         lobby_manager.reset_lobby.assert_called_once_with(guild_id)
 
     async def test_final_pick_stores_thread_info_for_record_finalize(self, player_repository):
@@ -2033,6 +2247,81 @@ class TestDraftingViewInteractionCheck:
         result = await view.interaction_check(interaction)
 
         assert result is True
+
+
+class TestDraftCaptainPingCleanup:
+    def _make_cog(self, bot):
+        return DraftCommands(
+            bot=bot,
+            player_repo=MagicMock(),
+            lobby_manager=MagicMock(),
+            draft_state_manager=DraftStateManager(),
+            draft_service=DraftService(),
+            match_service=None,
+        )
+
+    async def test_restart_deletes_ping_from_persisted_draft_channel(self):
+        guild_id = 123
+        captain_id = 456
+        events = []
+
+        class _OrderedOriginChannel(_FakeChannel):
+            async def fetch_message(self, message_id):
+                events.append("ping_fetch")
+                return await super().fetch_message(message_id)
+
+        class _OrderedResponse:
+            async def send_message(self, *args, **kwargs):
+                events.append("response")
+
+        origin_channel = _OrderedOriginChannel(channel_id=777_010)
+        command_channel = _FakeChannel(channel_id=777_011)
+        ping_message = await origin_channel.send(f"<@{captain_id}> Draft starting!")
+        bot = SimpleNamespace(
+            get_channel=lambda channel_id: (
+                origin_channel if channel_id == origin_channel.id else None
+            )
+        )
+        cog = self._make_cog(bot)
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.captain1_id = captain_id
+        state.captain2_id = captain_id + 1
+        state.draft_channel_id = origin_channel.id
+        state.captain_ping_message_id = ping_message.id
+        interaction = SimpleNamespace(
+            guild=_FakeGuild(guild_id),
+            user=SimpleNamespace(id=captain_id, display_name="Captain"),
+            channel=command_channel,
+            response=_OrderedResponse(),
+        )
+
+        await cog.restartdraft.callback(cog, interaction)
+
+        assert ping_message.deleted is True
+        assert events == ["response", "ping_fetch"]
+        assert cog.draft_state_manager.get_state(guild_id) is None
+
+    async def test_timeout_deletes_ping_from_persisted_draft_channel(self):
+        guild_id = 123
+        origin_channel = _FakeChannel(channel_id=777_012)
+        ping_message = await origin_channel.send("<@456> <@457> Draft starting!")
+        draft_message = await origin_channel.send(embed=SimpleNamespace(title="Draft"))
+        bot = SimpleNamespace(
+            get_channel=lambda channel_id: (
+                origin_channel if channel_id == origin_channel.id else None
+            )
+        )
+        cog = self._make_cog(bot)
+        state = cog.draft_state_manager.create_draft(guild_id)
+        state.draft_channel_id = origin_channel.id
+        state.draft_message_id = draft_message.id
+        state.captain_ping_message_id = ping_message.id
+
+        await cog._handle_draft_timeout(guild_id)
+
+        assert ping_message.deleted is True
+        assert cog.draft_state_manager.get_state(guild_id) is None
+        assert draft_message.embed.title == "⏰ Draft Timed Out"
 
 
 class TestDraftTimeoutOwnership:
