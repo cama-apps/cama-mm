@@ -9,7 +9,7 @@ import pytest
 from domain.models.player import Player
 from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
-from shuffler import BalancedShuffler
+from shuffler import BalancedShuffler, _PoolMatchup
 from utils.region import region_split_mismatches, resolve_region
 
 
@@ -215,6 +215,38 @@ class TestTeam:
 
 class TestShuffler:
     """Test BalancedShuffler algorithm."""
+
+    @staticmethod
+    def _mock_pool_matchup(
+        team1_players: list[Player],
+        team2_players: list[Player],
+        numeric_prefix: tuple[float, float, int],
+    ) -> _PoolMatchup:
+        total_score, value_diff, total_off_roles = numeric_prefix
+        roles = ("1", "2", "3", "4", "5")
+        team1 = Team(team1_players, role_assignments=roles)
+        team2 = Team(team2_players, role_assignments=roles)
+        return _PoolMatchup(
+            team1=team1,
+            team2=team2,
+            total_score=total_score,
+            value_diff=value_diff,
+            total_off_roles=total_off_roles,
+            log_entry=(
+                total_score,
+                value_diff,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+                0,
+                [],
+                team1,
+                team2,
+            ),
+        )
 
     def test_get_cached_role_assignments_reuses_immutable_cache_value(
         self, monkeypatch
@@ -448,6 +480,103 @@ class TestShuffler:
         all_player_names = {p.name for p in all_players}
         player_names = {p.name for p in players}
         assert all_player_names == player_names
+
+    def test_pool_signature_only_built_for_numeric_improvements(self, monkeypatch):
+        players = [
+            Player(
+                name=f"Player{i}",
+                mmr=1500 + i,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(11)
+        ]
+        shuffler = BalancedShuffler(use_glicko=False)
+        numeric_prefixes = [(30.0, 3.0, 1), (40.0, 1.0, 0), (20.0, 10.0, 2)]
+        evaluate_calls = 0
+        expected_team1_names = None
+
+        def evaluate(team1_players, team2_players, *args, **kwargs):
+            nonlocal evaluate_calls, expected_team1_names
+            if evaluate_calls < len(numeric_prefixes):
+                total_score, value_diff, total_off_roles = numeric_prefixes[evaluate_calls]
+            else:
+                total_score, value_diff, total_off_roles = (50.0, 0.0, 0)
+
+            matchup = self._mock_pool_matchup(
+                team1_players,
+                team2_players,
+                (total_score, value_diff, total_off_roles),
+            )
+            if evaluate_calls == 2:
+                expected_team1_names = tuple(
+                    player.name for player in matchup.team1.players
+                )
+            evaluate_calls += 1
+            return matchup
+
+        original_signature = shuffler._pool_matchup_signature
+        signature_calls = 0
+
+        def counted_signature(*args, **kwargs):
+            nonlocal signature_calls
+            signature_calls += 1
+            return original_signature(*args, **kwargs)
+
+        monkeypatch.setattr(shuffler, "_evaluate_pool_matchup", evaluate)
+        monkeypatch.setattr(shuffler, "_pool_matchup_signature", counted_signature)
+
+        team1, _, _ = shuffler.shuffle_from_pool(players)
+
+        assert signature_calls == 2
+        assert tuple(player.name for player in team1.players) == expected_team1_names
+
+    def test_pool_signature_built_for_exact_numeric_tie(self, monkeypatch):
+        players = [
+            Player(
+                name=f"Player{i}",
+                mmr=1500 + i,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for i in range(11)
+        ]
+        shuffler = BalancedShuffler(use_glicko=False)
+        evaluate_calls = 0
+        expected_team1_names = None
+
+        def evaluate(team1_players, team2_players, *args, **kwargs):
+            nonlocal evaluate_calls, expected_team1_names
+            if evaluate_calls < 2:
+                total_score, value_diff, total_off_roles = (10.0, 2.0, 1)
+            else:
+                total_score, value_diff, total_off_roles = (20.0, 0.0, 0)
+
+            matchup = self._mock_pool_matchup(
+                team1_players,
+                team2_players,
+                (total_score, value_diff, total_off_roles),
+            )
+            if evaluate_calls == 1:
+                expected_team1_names = tuple(
+                    player.name for player in matchup.team1.players
+                )
+            evaluate_calls += 1
+            return matchup
+
+        signature_calls = 0
+
+        def ordered_signature(*args, **kwargs):
+            nonlocal signature_calls
+            signature_calls += 1
+            marker = "z" if signature_calls == 1 else "a"
+            return ((marker,), (), ())
+
+        monkeypatch.setattr(shuffler, "_evaluate_pool_matchup", evaluate)
+        monkeypatch.setattr(shuffler, "_pool_matchup_signature", ordered_signature)
+
+        team1, _, _ = shuffler.shuffle_from_pool(players)
+
+        assert signature_calls == 2
+        assert tuple(player.name for player in team1.players) == expected_team1_names
 
     def test_shuffle_from_pool_less_than_10(self):
         """Test that shuffle_from_pool fails with less than 10 players."""
