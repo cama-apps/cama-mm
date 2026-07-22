@@ -1395,12 +1395,23 @@ class WrappedService:
         if not any([best_teammates_raw, most_played_raw, worst_matchups_raw, best_matchups_raw, most_against_raw]):
             return None
 
+        pairwise_ids = list(dict.fromkeys(
+            [entry["teammate_id"] for entry in best_teammates_raw]
+            + [entry["teammate_id"] for entry in most_played_raw]
+            + [entry["opponent_id"] for entry in worst_matchups_raw]
+            + [entry["opponent_id"] for entry in best_matchups_raw]
+            + [entry["opponent_id"] for entry in most_against_raw]
+        ))
+        pairwise_players = self.player_repo.get_by_ids(pairwise_ids, guild_id)
+        usernames = {
+            player.discord_id: player.name for player in pairwise_players
+        }
+
         def _resolve_entries(raw_list: list[dict], id_key: str) -> list[PairwiseEntry]:
             entries = []
             for r in raw_list:
                 pid = r[id_key]
-                p = self.player_repo.get_by_id(pid, guild_id)
-                username = p.name if p else str(pid)
+                username = usernames.get(pid, str(pid))
                 games = r.get("games_together") or r.get("games_against") or 0
                 wins = r.get("wins_together") or r.get("wins_against") or 0
                 entries.append(PairwiseEntry(
