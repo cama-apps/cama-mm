@@ -691,10 +691,10 @@ class ILobbyRepository(ABC):
 
     @abstractmethod
     def load_all_lobby_states(self) -> list[dict]:
-        """Return a list of ``{"lobby_id": int, "guild_id": int}`` rows for every persisted lobby.
+        """Return every persisted lobby as decoded state.
 
         Used on startup to rehydrate per-guild lobby state for every guild
-        that had an open lobby before the restart.
+        that had an open lobby before the restart, without point reads.
         """
         ...
 
