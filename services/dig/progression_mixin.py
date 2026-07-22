@@ -162,15 +162,21 @@ class ProgressionMixin:
         return max(1, adjusted)
 
     def _apply_mana_cooldown_reduction(
-        self, discord_id: int, guild_id, cooldown_seconds: int
+        self,
+        discord_id: int,
+        guild_id,
+        cooldown_seconds: int,
+        *,
+        effects=None,
     ) -> int:
         """Silently apply the player's mana cooldown reduction (Forest -30s)."""
         if self.mana_effects_service is None or cooldown_seconds <= 0:
             return cooldown_seconds
-        try:
-            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
-        except Exception:
-            return cooldown_seconds
+        if effects is None:
+            try:
+                effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+            except Exception:
+                return cooldown_seconds
         if effects.color is None or effects.dig_cooldown_reduction_seconds <= 0:
             return cooldown_seconds
         return max(0, cooldown_seconds - effects.dig_cooldown_reduction_seconds)
@@ -270,6 +276,36 @@ class ProgressionMixin:
                 if w:
                     return dict(w.effects)
         return {}
+
+    def _get_weather_snapshot(
+        self, guild_id, layer_name: str
+    ) -> tuple[dict, dict | None, str | None]:
+        """Resolve one layer's effects, display data, and code in one read."""
+        # Preserve instance-level overrides used by deterministic simulations
+        # and extensions that customize weather mechanics.
+        effects_override = self.__dict__.get("_get_weather_effects")
+        class_effects = getattr(type(self), "_get_weather_effects", None)
+        if (
+            effects_override is not None
+            and getattr(effects_override, "__func__", None) is not class_effects
+        ):
+            return dict(effects_override(guild_id, layer_name)), None, None
+        for entry in self._ensure_weather(guild_id):
+            if entry.get("layer_name") != layer_name:
+                continue
+            weather_id = entry.get("weather_id")
+            weather = WEATHER_BY_ID.get(weather_id)
+            if weather is None:
+                return {}, None, (str(weather_id).lower() if weather_id is not None else None)
+            return (
+                dict(weather.effects),
+                {
+                    "name": weather.name,
+                    "description": weather.description,
+                },
+                str(weather_id).lower(),
+            )
+        return {}, None, None
 
     def _get_weather_code(self, guild_id, layer_name: str) -> str | None:
         """Return the active weather id for ``layer_name`` (lowercase

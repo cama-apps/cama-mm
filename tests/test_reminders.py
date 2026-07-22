@@ -23,6 +23,17 @@ def player_repo_mock():
     mock = MagicMock()
     mock.get_last_wheel_spin.return_value = None
     mock.get_last_trivia_session.return_value = None
+
+    def get_reminder_timestamps_bulk(discord_ids, _guild_id):
+        return {
+            discord_id: {
+                "last_wheel_spin": mock.get_last_wheel_spin.return_value,
+                "last_trivia_session": mock.get_last_trivia_session.return_value,
+            }
+            for discord_id in discord_ids
+        }
+
+    mock.get_reminder_timestamps_bulk.side_effect = get_reminder_timestamps_bulk
     return mock
 
 
@@ -75,6 +86,23 @@ class TestNotificationRepository:
 
     def test_get_enabled_users_empty(self, notification_repo):
         assert notification_repo.get_enabled_users_for_type(TEST_GUILD_ID, "betting") == []
+
+    def test_get_enabled_users_by_type_bulk(self, notification_repo):
+        notification_repo.set_preference(1, TEST_GUILD_ID, "wheel", True)
+        notification_repo.set_preference(1, TEST_GUILD_ID, "dig", True)
+        notification_repo.set_preference(2, TEST_GUILD_ID, "trivia", True)
+        notification_repo.set_preference(3, TEST_GUILD_ID + 1, "wheel", True)
+
+        subscribers = notification_repo.get_enabled_users_by_type_bulk(
+            TEST_GUILD_ID,
+            ("wheel", "trivia", "dig", "invalid", "wheel"),
+        )
+
+        assert subscribers == {
+            "wheel": [1],
+            "trivia": [2],
+            "dig": [1],
+        }
 
     def test_invalid_type_raises(self, notification_repo):
         with pytest.raises(ValueError):
@@ -251,6 +279,18 @@ class TestReminderServiceBetting:
 def dig_service_mock():
     mock = MagicMock()
     mock.get_free_dig_ready_at.return_value = None
+
+    def get_free_dig_ready_times_bulk(discord_ids, guild_id, *, now):
+        return {
+            discord_id: mock.get_free_dig_ready_at(
+                discord_id,
+                guild_id,
+                now=now,
+            )
+            for discord_id in discord_ids
+        }
+
+    mock.get_free_dig_ready_times_bulk.side_effect = get_free_dig_ready_times_bulk
     return mock
 
 
@@ -324,7 +364,11 @@ class TestDigReminder:
             1, TEST_GUILD_ID, now=now,
         )
         schedule_dig_reminder.assert_called_once_with(
-            mock_bot, 1, TEST_GUILD_ID, ready_at,
+            mock_bot,
+            1,
+            TEST_GUILD_ID,
+            ready_at,
+            preference_enabled=True,
         )
 
     @pytest.mark.asyncio
@@ -695,37 +739,37 @@ class TestDigReminder:
         ]
 
     @pytest.mark.asyncio
-    async def test_recovery_continues_after_dig_subscriber_failure(
+    async def test_recovery_continues_when_bulk_dig_result_omits_subscriber(
         self,
         reminder_service_with_dig,
         notification_repo,
         dig_service_mock,
         mock_bot,
         monkeypatch,
-        caplog,
     ):
         now = 1_000_000
         observed = []
         release_send = asyncio.Event()
 
-        def get_ready_at(discord_id, guild_id, *, now):
-            observed.append((discord_id, guild_id, now))
-            if (discord_id, guild_id) == (1, TEST_GUILD_ID):
-                raise RuntimeError("broken subscriber")
-            return now + 100
+        def get_ready_times(discord_ids, guild_id, *, now):
+            ready_times = {}
+            for discord_id in discord_ids:
+                observed.append((discord_id, guild_id, now))
+                if (discord_id, guild_id) != (1, TEST_GUILD_ID):
+                    ready_times[discord_id] = now + 100
+            return ready_times
 
         async def fake_send(**_kwargs):
             await release_send.wait()
 
         monkeypatch.setattr(time, "time", lambda: now)
-        caplog.set_level(logging.ERROR, logger="cama_bot.reminder_service")
         for discord_id, guild_id in (
             (1, TEST_GUILD_ID),
             (2, TEST_GUILD_ID),
             (1, TEST_GUILD_ID_2),
         ):
             notification_repo.set_preference(discord_id, guild_id, "dig", True)
-        dig_service_mock.get_free_dig_ready_at.side_effect = get_ready_at
+        dig_service_mock.get_free_dig_ready_times_bulk.side_effect = get_ready_times
 
         with patch.object(
             reminder_service_with_dig,
@@ -745,17 +789,13 @@ class TestDigReminder:
                 }
                 assert (2, TEST_GUILD_ID, "dig") in reminder_service_with_dig._tasks
                 assert (1, TEST_GUILD_ID_2, "dig") in reminder_service_with_dig._tasks
-                assert (
-                    "Failed to recover dig reminder for "
-                    f"discord_id=1 guild_id={TEST_GUILD_ID}"
-                ) in caplog.text
             finally:
                 for discord_id, guild_id, _ in observed:
                     reminder_service_with_dig.cancel_dig_reminder(discord_id, guild_id)
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_recovery_continues_after_type_query_failure(
+    async def test_recovery_continues_after_guild_subscriber_snapshot_failure(
         self,
         reminder_service,
         notification_repo,
@@ -765,12 +805,12 @@ class TestDigReminder:
         caplog,
     ):
         now = 1_000_000
-        original_get_subscribers = notification_repo.get_enabled_users_for_type
+        original_get_subscribers = notification_repo.get_enabled_users_by_type_bulk
 
-        def get_subscribers(guild_id, reminder_type):
-            if (guild_id, reminder_type) == (TEST_GUILD_ID, "wheel"):
-                raise RuntimeError("broken reminder type")
-            return original_get_subscribers(guild_id, reminder_type)
+        def get_subscribers(guild_id, reminder_types):
+            if guild_id == TEST_GUILD_ID:
+                raise RuntimeError("broken guild snapshot")
+            return original_get_subscribers(guild_id, reminder_types)
 
         monkeypatch.setattr(time, "time", lambda: now)
         caplog.set_level(logging.ERROR, logger="cama_bot.reminder_service")
@@ -781,7 +821,7 @@ class TestDigReminder:
 
         with patch.object(
             notification_repo,
-            "get_enabled_users_for_type",
+            "get_enabled_users_by_type_bulk",
             side_effect=get_subscribers,
         ):
             await reminder_service.reschedule_all(
@@ -791,13 +831,11 @@ class TestDigReminder:
 
         tasks = list(reminder_service._tasks.values())
         try:
-            assert (1, TEST_GUILD_ID, "trivia") in reminder_service._tasks
+            assert (1, TEST_GUILD_ID, "trivia") not in reminder_service._tasks
             assert (2, TEST_GUILD_ID_2, "wheel") in reminder_service._tasks
             assert (
-                "Failed to load wheel reminder subscribers for "
-                f"guild_id={TEST_GUILD_ID}"
+                f"Failed to load reminder subscribers for guild_id={TEST_GUILD_ID}"
             ) in caplog.text
         finally:
-            reminder_service._cancel_task(1, TEST_GUILD_ID, "trivia")
             reminder_service._cancel_task(2, TEST_GUILD_ID_2, "wheel")
             await asyncio.gather(*tasks, return_exceptions=True)

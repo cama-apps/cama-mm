@@ -320,7 +320,14 @@ class DigCommands(commands.Cog):
     # Dig flavor helper
     # ------------------------------------------------------------------
 
-    async def _run_dig(self, user_id: int, guild_id: int | None, paid: bool = False):
+    async def _run_dig(
+        self,
+        user_id: int,
+        guild_id: int | None,
+        paid: bool = False,
+        *,
+        player_verified: bool = False,
+    ):
         """Run a deterministic dig, then layer LLM flavor on top.
 
         Mechanics are decided by ``DigService.dig`` and persisted before
@@ -328,10 +335,16 @@ class DigCommands(commands.Cog):
         narrative/NPC fields and (rarely) a small JC delta. On any flavor
         failure, the raw result is returned unchanged.
         """
+        dig_kwargs = {"paid": paid}
+        if player_verified:
+            dig_kwargs["player_verified"] = True
         raw = await asyncio.to_thread(
-            self.dig_service.dig, user_id, guild_id, paid=paid,
+            self.dig_service.dig,
+            user_id,
+            guild_id,
+            **dig_kwargs,
         )
-        if isinstance(raw, dict) and raw.get("success", False):
+        if isinstance(raw, dict) and raw.get("success", False) and "relic_trim_notice" not in raw:
             try:
                 if await asyncio.to_thread(
                     self.dig_service.pop_relic_trim_notice, user_id, guild_id,
@@ -350,15 +363,30 @@ class DigCommands(commands.Cog):
                 logger.debug("dig flavor failed", exc_info=True)
         return _wrap(raw)
 
-    async def _schedule_dig_reminder(self, user_id: int, guild_id: int | None) -> None:
+    async def _schedule_dig_reminder(
+        self,
+        user_id: int,
+        guild_id: int | None,
+        ready_at: int | None = None,
+    ) -> None:
         """Best-effort reconciliation against the persisted dig cooldown."""
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is None:
             return
         try:
-            await reminder_svc.reconcile_dig_reminder(
-                self.bot, user_id, guild_id,
-            )
+            if ready_at is None:
+                await reminder_svc.reconcile_dig_reminder(
+                    self.bot,
+                    user_id,
+                    guild_id,
+                )
+            else:
+                await reminder_svc.reconcile_dig_reminder(
+                    self.bot,
+                    user_id,
+                    guild_id,
+                    ready_at=ready_at,
+                )
         except Exception:
             logger.warning(
                 "dig reminder scheduling failed for user %s in guild %s",
@@ -481,7 +509,11 @@ class DigCommands(commands.Cog):
         await safe_defer(interaction)
 
         try:
-            result = await self._run_dig(interaction.user.id, guild_id)
+            result = await self._run_dig(
+                interaction.user.id,
+                guild_id,
+                player_verified=True,
+            )
         except Exception as e:
             logger.error("Dig error: %s", e, exc_info=True)
             await safe_followup(interaction, content="The earth resists. Try again in a moment.", ephemeral=True)
@@ -497,7 +529,11 @@ class DigCommands(commands.Cog):
             return
 
         if getattr(result, "success", False):
-            await self._schedule_dig_reminder(interaction.user.id, guild_id)
+            await self._schedule_dig_reminder(
+                interaction.user.id,
+                guild_id,
+                getattr(result, "next_free_dig_at", None),
+            )
 
         # Witch's Curse: roll on successful dig outcomes only — skip the first-dig welcome
         # and the paid_dig_available cooldown prompt (no actual dig happened on those paths).
@@ -692,7 +728,10 @@ class DigCommands(commands.Cog):
         )
         try:
             paid_result = await self._run_dig(
-                interaction.user.id, guild_id, paid=True,
+                interaction.user.id,
+                guild_id,
+                paid=True,
+                player_verified=True,
             )
         except Exception as e:
             logger.error("Paid dig error: %s", e)
@@ -702,8 +741,14 @@ class DigCommands(commands.Cog):
             err = getattr(paid_result, "error", "Paid dig failed.")
             await msg.edit(content=err, embed=None, view=None)
             return
-        await self._schedule_dig_reminder(interaction.user.id, guild_id)
-        paid_embed, paid_layer_name, paid_pick_tier, paid_items_ids = _build_dig_embed(paid_result, interaction.user)
+        await self._schedule_dig_reminder(
+            interaction.user.id,
+            guild_id,
+            getattr(paid_result, "next_free_dig_at", None),
+        )
+        paid_embed, paid_layer_name, paid_pick_tier, paid_items_ids = _build_dig_embed(
+            paid_result, interaction.user
+        )
         paid_layer_file = await _attach_layer_thumbnail(paid_embed, paid_layer_name)
         paid_pick_file = await _attach_pickaxe_footer(paid_embed, paid_pick_tier)
         paid_items_strip = await _attach_items_strip(paid_embed, paid_items_ids)

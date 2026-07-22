@@ -328,6 +328,9 @@ def test_cave_in_scales_combined_positive_reward_once(
     )
     player_repository.update_balance(player_id, guild_id, 100)
     service = DigService(DigRepository(repo_db_path), player_repository)
+    # Weather is unrelated to reward scaling; a random Mudslide would cap the
+    # block loss and therefore change Gambler's Charm's authored gross bonus.
+    monkeypatch.setattr(service, "_get_weather_effects", lambda *_args: {})
     service.dig(player_id, guild_id)
     service.dig_repo.update_tunnel(
         player_id,

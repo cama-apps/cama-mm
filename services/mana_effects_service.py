@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from config import HOSTILE_LOSS_MIN_BALANCE
 from domain.models.mana_effects import ManaEffects
-from services.mana_service import get_today_pst
+from services.mana_service import LAND_COLORS, get_today_pst
 from utils.economy_scaling import (
     adjust_generated_jc_reward,
     scale_minigame_jc_delta,
@@ -54,20 +54,36 @@ class ManaEffectsService:
         manashop ultimate, returns default (no effects).
         """
         mana = self.mana_service.get_current_mana(discord_id, guild_id)
-        if mana is None:
-            return ManaEffects()
+        return self._effects_from_mana(mana, get_today_pst())
 
-        # Only apply effects if mana was assigned today
+    def get_effects_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+    ) -> dict[int, ManaEffects]:
+        """Resolve effects for many players from one guild mana snapshot."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        effects = {discord_id: ManaEffects() for discord_id in unique_ids}
+        if not unique_ids:
+            return effects
+
+        requested_ids = set(unique_ids)
         today = get_today_pst()
-        if mana.get("assigned_date") != today:
+        for mana in self.mana_repo.get_all_mana(guild_id):
+            discord_id = mana["discord_id"]
+            if discord_id in requested_ids:
+                effects[discord_id] = self._effects_from_mana(mana, today)
+        return effects
+
+    @staticmethod
+    def _effects_from_mana(mana: dict | None, today: str) -> ManaEffects:
+        if mana is None or mana.get("assigned_date") != today:
+            return ManaEffects()
+        if mana.get("consumed", mana.get("consumed_today", False)):
             return ManaEffects()
 
-        # Tap suppression: ultimates consume the day's color
-        if mana.get("consumed", False):
-            return ManaEffects()
-
-        color = mana.get("color")
-        land = mana.get("land")
+        land = mana.get("land", mana.get("current_land"))
+        color = mana.get("color", LAND_COLORS.get(land))
         return ManaEffects.for_color(color, land)
 
     def apply_bankrupt_stipend(

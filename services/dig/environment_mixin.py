@@ -82,7 +82,16 @@ class EnvironmentMixin:
             parts.append(f"+{dmg_bonus} boss dmg")
         return f"Luminosity: **{level} ({luminosity})** — {', '.join(parts)}"
 
-    def _apply_luminosity_drain(self, discord_id: int, guild_id, tunnel: dict, layer_name: str) -> dict:
+    def _apply_luminosity_drain(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        layer_name: str,
+        *,
+        equipped_gear: dict | None = None,
+        persist: bool = True,
+    ) -> dict:
         """Apply slow refill from last_lum_update_at, then drain for this dig.
 
         Refill rate is ``LUMINOSITY_REFILL_PER_DAY`` (default 20) per real-world
@@ -112,7 +121,12 @@ class EnvironmentMixin:
         before = luminosity
         drain = LUMINOSITY_DRAIN_PER_DIG.get(layer_name, 0)
         # Frostforged / Void-Touched pickaxe: -25% luminosity drain
-        pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
+        pickaxe_tier = self._get_active_pickaxe_tier(
+            discord_id,
+            guild_id,
+            tunnel,
+            equipped_gear=equipped_gear,
+        )
         if pickaxe_tier >= 6:  # Frostforged or better
             drain = max(0, drain - drain // 4)
         # Past the pinnacle the deep grows hungry — drain ramps linearly
@@ -126,12 +140,13 @@ class EnvironmentMixin:
 
         # Persist both luminosity and the timestamp so subsequent digs compute
         # refill from the correct anchor.
-        self.dig_repo.update_tunnel(
-            discord_id,
-            guild_id,
-            luminosity=luminosity,
-            last_lum_update_at=now,
-        )
+        if persist:
+            self.dig_repo.update_tunnel(
+                discord_id,
+                guild_id,
+                luminosity=luminosity,
+                last_lum_update_at=now,
+            )
         tunnel["luminosity"] = luminosity
         tunnel["last_lum_update_at"] = now
 
@@ -210,17 +225,29 @@ class EnvironmentMixin:
             return {}
         return buff.get("effect", {})
 
-    def _decrement_buff(self, discord_id: int, guild_id, tunnel: dict) -> None:
+    def _decrement_buff(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        *,
+        tunnel_updates: dict | None = None,
+    ) -> None:
         """Decrement active buff duration by 1 dig. Clear if expired."""
         buff = self._get_active_buff(tunnel)
         if not buff:
             return
         remaining = buff.get("digs_remaining", 0) - 1
         if remaining <= 0:
-            self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=None)
+            value = None
         else:
             buff["digs_remaining"] = remaining
-            self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=json.dumps(buff))
+            value = json.dumps(buff)
+        if tunnel_updates is None:
+            self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=value)
+        else:
+            tunnel_updates["temp_buffs"] = value
+            tunnel["temp_buffs"] = value
 
     def set_temp_buff(self, discord_id: int, guild_id, buff_data: dict) -> None:
         """Set a temp buff on the tunnel (replaces any existing buff)."""
@@ -266,17 +293,29 @@ class EnvironmentMixin:
             return 0.0
         return max(0.0, min(float(value), _FRACTIONAL_CURSE_EFFECT_CAPS[key]))
 
-    def _decrement_curse(self, discord_id: int, guild_id, tunnel: dict) -> None:
+    def _decrement_curse(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        *,
+        tunnel_updates: dict | None = None,
+    ) -> None:
         """Decrement active curse duration by 1 dig. Clear if expired."""
         curse = self._get_active_curse(tunnel)
         if not curse:
             return
         remaining = curse.get("digs_remaining", 0) - 1
         if remaining <= 0:
-            self.dig_repo.update_tunnel(discord_id, guild_id, temp_curses=None)
+            value = None
         else:
             curse["digs_remaining"] = remaining
-            self.dig_repo.update_tunnel(discord_id, guild_id, temp_curses=json.dumps(curse))
+            value = json.dumps(curse)
+        if tunnel_updates is None:
+            self.dig_repo.update_tunnel(discord_id, guild_id, temp_curses=value)
+        else:
+            tunnel_updates["temp_curses"] = value
+            tunnel["temp_curses"] = value
 
     def set_temp_curse(self, discord_id: int, guild_id, curse_data: dict) -> None:
         """Set a temp curse on the tunnel (replaces any existing curse)."""

@@ -613,17 +613,68 @@ class TestCooldown:
         )
         tunnel = dig_repo.get_tunnel(10001, guild_id)
 
-        assert dig_service._get_cooldown_remaining(
-            tunnel, now=last_dig_at + 3569,
-        ) == 1
-        assert dig_service._get_cooldown_remaining(
-            tunnel, now=last_dig_at + 3570,
-        ) == 0
-        assert dig_service.get_free_dig_ready_at(
-            10001, guild_id, now=last_dig_at + 3570,
-        ) is None
+        assert (
+            dig_service._get_cooldown_remaining(
+                tunnel,
+                now=last_dig_at + 3569,
+            )
+            == 1
+        )
+        assert (
+            dig_service._get_cooldown_remaining(
+                tunnel,
+                now=last_dig_at + 3570,
+            )
+            == 0
+        )
+        assert (
+            dig_service.get_free_dig_ready_at(
+                10001,
+                guild_id,
+                now=last_dig_at + 3570,
+            )
+            is None
+        )
 
-    def test_dig_cooldown_allows_paid_dig(self, dig_service, player_repository, guild_id, monkeypatch):
+    def test_bulk_ready_times_use_one_tunnel_snapshot(
+        self,
+        dig_service,
+        dig_repo,
+        guild_id,
+        monkeypatch,
+    ):
+        now = 1_000_000
+        for discord_id, last_dig_at in ((10001, now), (10002, now - 4000)):
+            dig_repo.create_tunnel(discord_id, guild_id, f"T{discord_id}")
+            dig_repo.update_tunnel(
+                discord_id,
+                guild_id,
+                total_digs=1,
+                last_dig_at=last_dig_at,
+            )
+
+        get_all_spy = MagicMock(wraps=dig_repo.get_all_tunnels)
+        get_one_spy = MagicMock(wraps=dig_repo.get_tunnel)
+        monkeypatch.setattr(dig_repo, "get_all_tunnels", get_all_spy)
+        monkeypatch.setattr(dig_repo, "get_tunnel", get_one_spy)
+
+        ready_times = dig_service.get_free_dig_ready_times_bulk(
+            [10001, 10002, 10003, 10001],
+            guild_id,
+            now=now,
+        )
+
+        assert ready_times == {
+            10001: now + FREE_DIG_COOLDOWN_SECONDS,
+            10002: None,
+            10003: None,
+        }
+        get_all_spy.assert_called_once_with(guild_id)
+        get_one_spy.assert_not_called()
+
+    def test_dig_cooldown_allows_paid_dig(
+        self, dig_service, player_repository, guild_id, monkeypatch
+    ):
         """Can paid dig during cooldown."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
