@@ -479,6 +479,25 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (region, discord_id, guild_id),
             )
 
+    def update_inferred_regions_bulk(
+        self, updates: list[tuple[int, int, str]]
+    ) -> None:
+        """Cache multiple inferred regions in one transaction."""
+        if not updates:
+            return
+        with self.connection() as conn:
+            conn.executemany(
+                """
+                UPDATE players
+                SET inferred_region = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                [
+                    (region, discord_id, self.normalize_guild_id(guild_id))
+                    for discord_id, guild_id, region in updates
+                ],
+            )
+
     def update_glicko_rating(
         self, discord_id: int, guild_id: int, rating: float, rd: float, volatility: float
     ) -> None:
@@ -3117,6 +3136,136 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     "UPDATE players SET steam_id = ?, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
                     (steam_id, discord_id),
                 )
+
+    def add_steam_ids_bulk(
+        self, steam_ids: list[tuple[int, int]]
+    ) -> list[dict[str, bool | str]]:
+        """Backfill Steam IDs in order using one atomic transaction.
+
+        Results align with ``steam_ids`` and report conflicts without aborting
+        unrelated successes. The first successful ID for a player is primary,
+        matching repeated ``get_steam_ids`` + ``add_steam_id`` calls.
+        """
+        if not steam_ids:
+            return []
+
+        import time
+
+        discord_ids = list(dict.fromkeys(discord_id for discord_id, _ in steam_ids))
+        candidate_ids = list(dict.fromkeys(steam_id for _, steam_id in steam_ids))
+        discord_placeholders = ",".join("?" for _ in discord_ids)
+        steam_placeholders = ",".join("?" for _ in candidate_ids)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                f"""
+                SELECT discord_id
+                FROM player_steam_ids
+                WHERE discord_id IN ({discord_placeholders})
+                """,
+                discord_ids,
+            )
+            players_with_ids = {int(row["discord_id"]) for row in cursor.fetchall()}
+            cursor.execute(
+                f"""
+                SELECT discord_id
+                FROM players
+                WHERE discord_id IN ({discord_placeholders})
+                  AND steam_id IS NOT NULL
+                """,
+                discord_ids,
+            )
+            players_with_ids.update(int(row["discord_id"]) for row in cursor.fetchall())
+
+            cursor.execute(
+                f"""
+                SELECT steam_id, discord_id
+                FROM player_steam_ids
+                WHERE steam_id IN ({steam_placeholders})
+                """,
+                candidate_ids,
+            )
+            junction_owners = {
+                int(row["steam_id"]): int(row["discord_id"])
+                for row in cursor.fetchall()
+            }
+            cursor.execute(
+                f"""
+                SELECT steam_id, discord_id
+                FROM players
+                WHERE steam_id IN ({steam_placeholders})
+                """,
+                candidate_ids,
+            )
+            legacy_owners: dict[int, set[int]] = {}
+            for row in cursor.fetchall():
+                legacy_owners.setdefault(int(row["steam_id"]), set()).add(
+                    int(row["discord_id"])
+                )
+
+            results: list[dict[str, bool | str]] = []
+            for discord_id, steam_id in steam_ids:
+                junction_owner = junction_owners.get(steam_id)
+                legacy_conflict = any(
+                    owner != discord_id
+                    for owner in legacy_owners.get(steam_id, set())
+                )
+                if (
+                    junction_owner is not None
+                    and junction_owner != discord_id
+                ) or legacy_conflict:
+                    results.append({
+                        "success": False,
+                        "is_primary": False,
+                        "error": (
+                            f"Steam ID {steam_id} is already linked to another player"
+                        ),
+                    })
+                    continue
+
+                is_primary = discord_id not in players_with_ids
+                if is_primary:
+                    cursor.execute(
+                        "UPDATE player_steam_ids SET is_primary = 0 WHERE discord_id = ?",
+                        (discord_id,),
+                    )
+                cursor.execute(
+                    """
+                    INSERT INTO player_steam_ids
+                        (discord_id, steam_id, is_primary, added_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(discord_id, steam_id)
+                    DO UPDATE SET is_primary = excluded.is_primary
+                    """,
+                    (
+                        discord_id,
+                        steam_id,
+                        1 if is_primary else 0,
+                        int(time.time()),
+                    ),
+                )
+                if is_primary:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET steam_id = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                        """,
+                        (steam_id, discord_id),
+                    )
+
+                players_with_ids.add(discord_id)
+                junction_owners[steam_id] = discord_id
+                if is_primary:
+                    legacy_owners.setdefault(steam_id, set()).add(discord_id)
+                results.append({
+                    "success": True,
+                    "is_primary": is_primary,
+                })
+
+        return results
 
     def remove_steam_id(self, discord_id: int, steam_id: int) -> bool:
         """

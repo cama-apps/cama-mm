@@ -1,11 +1,12 @@
 """Region inference at registration + the startup backfill (PlayerService)."""
 
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
 from services.player_service import PlayerService
-from tests.conftest import TEST_GUILD_ID
+from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
 class FakeRepo:
@@ -13,6 +14,7 @@ class FakeRepo:
 
     def __init__(self):
         self.inferred_writes = []  # (discord_id, guild_id, region)
+        self.inferred_bulk_calls = []
         self.backfill_rows = []
 
     def get_by_id(self, _discord_id, _guild_id):
@@ -31,6 +33,10 @@ class FakeRepo:
 
     def update_inferred_region(self, discord_id, guild_id, region):
         self.inferred_writes.append((discord_id, guild_id, region))
+
+    def update_inferred_regions_bulk(self, updates):
+        self.inferred_bulk_calls.append(updates)
+        self.inferred_writes.extend(updates)
 
     def get_players_needing_region_backfill(self):
         return self.backfill_rows
@@ -131,6 +137,11 @@ class TestBackfill:
         assert (1, 100, "USW") in repo.inferred_writes
         assert (1, 200, "USW") in repo.inferred_writes
         assert (2, 100, "USW") in repo.inferred_writes
+        assert repo.inferred_bulk_calls == [[
+            (1, 100, "USW"),
+            (1, 200, "USW"),
+            (2, 100, "USW"),
+        ]]
 
     def test_skips_rows_when_counts_unavailable(self):
         """A None /counts (rate-limited) leaves the row NULL — not written, not counted."""
@@ -142,7 +153,48 @@ class TestBackfill:
 
         assert updated == 0
         assert repo.inferred_writes == []
+        assert repo.inferred_bulk_calls == []
         assert api.counts_calls == [99]  # attempted once
+
+    def test_real_repository_backfill_uses_two_connections(
+        self, player_repository, monkeypatch
+    ):
+        """One pending-row read and one bulk write replace per-row commits."""
+        registrations = [
+            (9101, TEST_GUILD_ID, 99),
+            (9101, TEST_GUILD_ID_SECONDARY, 99),
+            (9102, TEST_GUILD_ID, 77),
+        ]
+        for discord_id, guild_id, steam_id in registrations:
+            player_repository.add(
+                discord_id=discord_id,
+                discord_username=f"P{discord_id}",
+                guild_id=guild_id,
+                steam_id=steam_id,
+            )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository, "get_connection", counted_get_connection
+        )
+        api = DummyAPI(counts={"region": {"2": {"games": 4}}})
+
+        assert PlayerService(player_repository).backfill_inferred_regions(api=api) == 3
+        assert api.counts_calls == [99, 77]
+        assert connection_count == 2
+
+        with sqlite3.connect(player_repository.db_path) as conn:
+            regions = conn.execute(
+                "SELECT inferred_region FROM players WHERE discord_id IN (9101, 9102)"
+            ).fetchall()
+        assert regions == [("USE",), ("USE",), ("USE",)]
 
 
 class RegionRepo:

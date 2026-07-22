@@ -432,35 +432,46 @@ class MatchEnrichmentService:
         """
         players = self.player_repo.get_all_with_dotabuff_no_steam_id()
         updated = 0
-        failed = []
+        failed_by_index: dict[int, int] = {}
+        extracted: list[tuple[int, int, int]] = []
 
-        for player in players:
+        for index, player in enumerate(players):
             discord_id = player["discord_id"]
             dotabuff_url = player["dotabuff_url"]
 
             steam_id = self.opendota_api.extract_player_id_from_dotabuff(dotabuff_url)
             if steam_id:
-                try:
-                    # Check if player already has steam_ids linked
-                    existing_ids = self.player_repo.get_steam_ids(discord_id)
-                    is_first = len(existing_ids) == 0
-
-                    # Add to junction table (set as primary only if first)
-                    self.player_repo.add_steam_id(discord_id, steam_id, is_primary=is_first)
-                    updated += 1
-                    logger.info(
-                        f"Backfilled steam_id {steam_id} for discord {discord_id} "
-                        f"(primary={is_first})"
-                    )
-                except ValueError as e:
-                    # steam_id already linked to another player
-                    failed.append(discord_id)
-                    logger.warning(f"Could not backfill {steam_id} for discord {discord_id}: {e}")
+                extracted.append((index, discord_id, steam_id))
             else:
-                failed.append(discord_id)
+                failed_by_index[index] = discord_id
                 logger.warning(
                     f"Could not extract steam_id from {dotabuff_url} for discord {discord_id}"
                 )
 
-        return {"players_updated": updated, "players_failed": failed}
+        if extracted:
+            outcomes = self.player_repo.add_steam_ids_bulk([
+                (discord_id, steam_id)
+                for _index, discord_id, steam_id in extracted
+            ])
+            for (index, discord_id, steam_id), outcome in zip(
+                extracted, outcomes, strict=True
+            ):
+                if outcome["success"]:
+                    updated += 1
+                    logger.info(
+                        f"Backfilled steam_id {steam_id} for discord {discord_id} "
+                        f"(primary={outcome['is_primary']})"
+                    )
+                    continue
+                failed_by_index[index] = discord_id
+                logger.warning(
+                    f"Could not backfill {steam_id} for discord {discord_id}: "
+                    f"{outcome.get('error', 'unknown error')}"
+                )
 
+        failed = [
+            failed_by_index[index]
+            for index in range(len(players))
+            if index in failed_by_index
+        ]
+        return {"players_updated": updated, "players_failed": failed}
