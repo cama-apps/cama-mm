@@ -10,6 +10,7 @@ Uses OpenDota API to find matches by correlating:
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from config import ENRICHMENT_DISCOVERY_TIME_WINDOW, ENRICHMENT_MIN_PLAYER_MATCH
@@ -23,6 +24,13 @@ MIN_PLAYERS_FOR_DISCOVERY = 5
 
 # For discovery phase, we require all 10 players by default (from config)
 # But we can still try discovery with fewer if we have at least MIN_PLAYERS_FOR_DISCOVERY
+
+
+@dataclass(slots=True)
+class _DiscoveryRequestStats:
+    """Track whether one match-discovery attempt used the OpenDota API."""
+
+    made_history_request: bool = False
 
 
 class MatchDiscoveryService:
@@ -79,12 +87,14 @@ class MatchDiscoveryService:
 
         for match in unenriched:
             match_id = match["match_id"]
+            request_stats = _DiscoveryRequestStats()
             try:
                 result = self._discover_single_match(
                     match_id,
                     normalized_guild,
                     dry_run,
                     player_matches_cache=player_matches_cache,
+                    request_stats=request_stats,
                 )
                 results["details"].append(result)
 
@@ -108,8 +118,10 @@ class MatchDiscoveryService:
                     }
                 )
 
-            # Small delay to be nice to OpenDota API
-            time.sleep(0.5)
+            if request_stats.made_history_request:
+                # Pace matches that performed network I/O without penalizing
+                # later matches served entirely from the request-local cache.
+                time.sleep(0.5)
 
         logger.info(
             f"Discovery complete: {results['discovered']} discovered, "
@@ -128,6 +140,7 @@ class MatchDiscoveryService:
         dry_run: bool,
         *,
         player_matches_cache: dict[int, list[dict]] | None = None,
+        request_stats: _DiscoveryRequestStats | None = None,
     ) -> dict:
         """
         Attempt to discover the Dota 2 match ID for a single internal match.
@@ -186,6 +199,8 @@ class MatchDiscoveryService:
                 if cache_hit:
                     recent_matches = player_matches_cache[steam_id]
                 else:
+                    if request_stats is not None:
+                        request_stats.made_history_request = True
                     recent_matches = self.opendota_api.get_player_matches(
                         steam_id, limit=100
                     )
