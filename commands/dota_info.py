@@ -4,16 +4,18 @@ Dota 2 information commands using dotabase: /hero, /ability
 
 import logging
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from sqlalchemy.orm import joinedload
 
-from dotabase_integration import Ability, Hero, dotabase_session
 from utils.embed_safety import truncate_field
 from utils.hero_lookup import get_hero_image_url
 from utils.interaction_safety import safe_defer, safe_followup
+
+if TYPE_CHECKING:
+    from dotabase_integration import Ability, Hero
 
 logger = logging.getLogger("cama_bot.commands.dota_info")
 
@@ -29,6 +31,8 @@ ATTR_DISPLAY = {
 @lru_cache(maxsize=1)
 def _get_all_heroes() -> list[tuple[str, int]]:
     """Get all hero names and IDs (cached)."""
+    from dotabase_integration import Hero, dotabase_session
+
     session = dotabase_session()
     heroes = session.query(Hero).all()
     return [(h.localized_name, h.id) for h in heroes]
@@ -37,6 +41,8 @@ def _get_all_heroes() -> list[tuple[str, int]]:
 @lru_cache(maxsize=1)
 def _get_all_abilities() -> list[tuple[str, int]]:
     """Get all ability names and IDs (cached)."""
+    from dotabase_integration import Ability, dotabase_session
+
     session = dotabase_session()
     abilities = session.query(Ability).all()
     # Filter in Python since is_talent is a computed property
@@ -56,8 +62,12 @@ def _get_all_abilities() -> list[tuple[str, int]]:
     return result
 
 
-def _get_hero_by_name(name: str) -> Hero | None:
+def _get_hero_by_name(name: str) -> "Hero | None":
     """Find a hero by localized name (case-insensitive)."""
+    from sqlalchemy.orm import joinedload
+
+    from dotabase_integration import Hero, dotabase_session
+
     session = dotabase_session()
     # Eagerly load relationships to avoid DetachedInstanceError
     hero = (
@@ -80,8 +90,10 @@ def _get_hero_by_name(name: str) -> Hero | None:
     return None
 
 
-def _get_ability_by_name(name: str) -> Ability | None:
+def _get_ability_by_name(name: str) -> "Ability | None":
     """Find an ability by localized name (case-insensitive)."""
+    from dotabase_integration import Ability, dotabase_session
+
     session = dotabase_session()
     # Filter by name first via SQL, then check is_talent in Python
     abilities = session.query(Ability).filter(Ability.localized_name.ilike(name)).all()
@@ -91,9 +103,7 @@ def _get_ability_by_name(name: str) -> Ability | None:
     return None
 
 
-
-
-def _format_ability_values(ability: Ability) -> str:
+def _format_ability_values(ability: "Ability") -> str:
     """Format ability special values (scalable values by level)."""
     if not ability.ability_special:
         return ""
