@@ -114,19 +114,34 @@ async def bet_action(
 
     # Unified betting through BettingService (works for both shuffle and draft modes)
     lev = leverage.value if leverage else 1
+    mana_effects_service = getattr(cog.bot, "mana_effects_service", None)
+    mana_effects = None
+    mana_effects_resolved = False
+
+    async def _resolve_bet_mana_effects(*, log_failure: bool = False):
+        nonlocal mana_effects, mana_effects_resolved
+        if mana_effects_resolved:
+            return mana_effects
+        mana_effects_resolved = True
+        if mana_effects_service is None:
+            return None
+        try:
+            mana_effects = await asyncio.to_thread(
+                mana_effects_service.get_effects, user_id, guild_id
+            )
+        except Exception:
+            if log_failure:
+                logger.debug("Mana steady bonus on bet placement failed", exc_info=True)
+        return mana_effects
 
     # Red mana: unlock 10x leverage
     if lev == 10:
-        _mana_fx = getattr(cog.bot, "mana_effects_service", None)
-        _has_10x = False
-        if _mana_fx:
-            try:
-                from domain.models.mana_effects import ManaEffects as _MEBet
-                _bet_effects = await asyncio.to_thread(_mana_fx.get_effects, user_id, guild_id)
-                if isinstance(_bet_effects, _MEBet):
-                    _has_10x = _bet_effects.red_10x_leverage
-            except Exception:
-                pass
+        from domain.models.mana_effects import ManaEffects as _MEBet
+
+        _bet_effects = await _resolve_bet_mana_effects()
+        _has_10x = (
+            isinstance(_bet_effects, _MEBet) and _bet_effects.red_10x_leverage
+        )
         if not _has_10x:
             await interaction.followup.send(
                 "❌ 10x leverage is exclusive to **Red mana (Mountain)** players!", ephemeral=True
@@ -147,10 +162,9 @@ async def bet_action(
         return
 
     # Green steady bonus on bet placement (silent — no embed callout).
-    _mana_fx_bet = getattr(cog.bot, "mana_effects_service", None)
-    if _mana_fx_bet is not None:
+    _bet_fx = await _resolve_bet_mana_effects(log_failure=True)
+    if _bet_fx is not None:
         try:
-            _bet_fx = await asyncio.to_thread(_mana_fx_bet.get_effects, user_id, guild_id)
             if _bet_fx.match_bet_steady_bonus > 0:
                 steady_bonus = scale_minigame_jc_delta(
                     _bet_fx.match_bet_steady_bonus
@@ -199,8 +213,9 @@ async def bet_action(
     # Include match ID note if there's a pending_match_id
     match_note = f" (Match #{pending_match_id})" if pending_match_id else ""
 
-    from utils.mana_display import resolve_mana_badge
-    _bet_badge = await resolve_mana_badge(cog.bot, user_id, guild_id)
+    from utils.mana_display import format_mana_badge
+
+    _bet_badge = format_mana_badge(_bet_fx)
     _bet_prefix = f"{_bet_badge} " if _bet_badge else ""
 
     if lev > 1:

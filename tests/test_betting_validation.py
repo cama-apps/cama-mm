@@ -79,6 +79,71 @@ async def test_green_bet_reward_scales_before_daily_event(monkeypatch):
         reason="scaled Green mana bet-placement reward",
         metadata={"base_reward": 1, "adjusted_reward": 2},
     )
+    bot.mana_effects_service.get_effects.assert_called_once_with(
+        user_id, TEST_GUILD_ID
+    )
+    assert interaction.followup.send.await_args.args[0].startswith("🌲 Bet placed")
+
+
+@pytest.mark.asyncio
+async def test_red_10x_bet_reuses_mana_effects_for_gate_and_badge(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from commands.betting_helpers.bet_actions import bet_action
+    from domain.models.mana_effects import ManaEffects
+
+    monkeypatch.setattr(
+        "commands.betting_helpers.bet_actions.safe_defer",
+        AsyncMock(return_value=True),
+    )
+    user_id = 987655
+    pending = SimpleNamespace(pending_match_id=78, betting_mode="house")
+    bot = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = ManaEffects.for_color(
+        "Red", "Mountain"
+    )
+    cog = SimpleNamespace(
+        bot=bot,
+        betting_service=MagicMock(),
+        player_service=MagicMock(),
+        match_service=SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_all_pending_matches=MagicMock(return_value=[pending])
+            )
+        ),
+        _update_shuffle_message_wagers=AsyncMock(),
+        _get_neon_service=MagicMock(return_value=None),
+    )
+    interaction = MagicMock()
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID)
+    interaction.user = SimpleNamespace(id=user_id)
+    interaction.response = AsyncMock()
+    interaction.followup = SimpleNamespace(send=AsyncMock())
+
+    await bet_action(
+        cog,
+        interaction,
+        SimpleNamespace(value="dire", name="Dire"),
+        amount=5,
+        leverage=SimpleNamespace(value=10),
+        match=None,
+    )
+
+    bot.mana_effects_service.get_effects.assert_called_once_with(
+        user_id, TEST_GUILD_ID
+    )
+    cog.betting_service.place_bet.assert_called_once_with(
+        TEST_GUILD_ID,
+        user_id,
+        "dire",
+        5,
+        pending,
+        leverage=10,
+    )
+    response = interaction.followup.send.await_args.args[0]
+    assert response.startswith("⛰️ Bet placed (Match #78)")
+    assert "at 10x leverage (effective: 50" in response
 
 
 @pytest.fixture
