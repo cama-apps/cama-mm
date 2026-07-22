@@ -1022,18 +1022,23 @@ class ProfileCommands(commands.Cog):
 
         files = []
 
-        # Get role distribution for chart - wrap in try/except for API errors
-        role_dist = None
+        # Fetch the shared match sample once for both role and full-stat views.
+        dota_tab_stats = None
         try:
-            role_dist = await asyncio.to_thread(
-                functools.partial(
-                    opendota_service.get_hero_role_distribution,
-                    target_discord_id,
-                    match_limit=50,
-                )
+            dota_tab_stats = await asyncio.to_thread(
+                opendota_service.get_dota_tab_stats,
+                target_discord_id,
+                match_limit=50,
+                steam_id=steam_id,
             )
         except Exception as e:
-            logger.warning(f"Failed to fetch role distribution from OpenDota: {e}")
+            logger.warning(f"Failed to fetch Dota tab stats from OpenDota: {e}")
+
+        role_dist = (
+            dota_tab_stats.get("role_distribution")
+            if dota_tab_stats
+            else None
+        )
 
         if role_dist:
             try:
@@ -1046,14 +1051,7 @@ class ProfileCommands(commands.Cog):
             except Exception as e:
                 logger.debug(f"Could not generate role graph: {e}")
 
-        # Get full stats for additional info - wrap in try/except for API errors
-        full_stats = None
-        try:
-            full_stats = await asyncio.to_thread(
-                functools.partial(opendota_service.get_full_stats, target_discord_id, match_limit=50)
-            )
-        except Exception as e:
-            logger.warning(f"Failed to fetch full stats from OpenDota: {e}")
+        full_stats = dota_tab_stats.get("full_stats") if dota_tab_stats else None
 
         if full_stats:
             # Generate lane distribution chart

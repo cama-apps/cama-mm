@@ -451,3 +451,88 @@ class TestDistributionCalculations:
         assert result["lane_distribution"]["Safe Lane"] == 50.0
         assert result["lane_parsed_count"] == 2
         assert len(result["top_heroes"]) == 1
+
+    def test_get_dota_tab_stats_reuses_matches_for_roles_and_lanes(
+        self, mock_player_repo
+    ):
+        service = OpenDotaPlayerService(mock_player_repo)
+        steam_id = 12345
+        matches = [
+            {"hero_id": 1, "lane_role": 1, "player_slot": 0, "radiant_win": True},
+            {"hero_id": 1, "lane_role": 1, "player_slot": 0, "radiant_win": False},
+            {"hero_id": 5, "lane_role": 2, "player_slot": 128, "radiant_win": False},
+        ]
+
+        with (
+            patch.object(
+                service,
+                "_fetch_matches_for_stats",
+                return_value=matches,
+            ) as fetch_matches,
+            patch.object(
+                service,
+                "_fetch_profile",
+                return_value={"wins": 20, "losses": 10, "win_rate": 66.7},
+            ),
+            patch.object(
+                service,
+                "_get_hero_roles",
+                return_value={
+                    1: {"Carry": 3, "Escape": 1},
+                    5: {"Support": 2},
+                },
+            ),
+            patch.object(
+                service,
+                "_get_hero_attributes",
+                return_value={1: "agi", 5: "int"},
+            ),
+        ):
+            result = service.get_dota_tab_stats(
+                discord_id=100,
+                match_limit=50,
+                steam_id=steam_id,
+            )
+
+        mock_player_repo.get_steam_id.assert_not_called()
+        fetch_matches.assert_called_once_with(steam_id, limit=50)
+        assert result["role_distribution"] == {
+            "Carry": 60.0,
+            "Escape": 20.0,
+            "Support": 20.0,
+        }
+        assert result["full_stats"]["lane_distribution"]["Safe Lane"] == 66.7
+        assert result["full_stats"]["lane_distribution"]["Mid"] == 33.3
+        assert result["full_stats"]["lane_parsed_count"] == 3
+
+    def test_get_dota_tab_stats_preserves_roles_when_profile_is_unavailable(
+        self, mock_player_repo
+    ):
+        mock_player_repo.get_steam_id.return_value = 12345
+        service = OpenDotaPlayerService(mock_player_repo)
+        matches = [
+            {"hero_id": 5, "lane_role": 1},
+            {"hero_id": 5, "lane_role": 2},
+        ]
+
+        with (
+            patch.object(
+                service,
+                "_fetch_matches_for_stats",
+                return_value=matches,
+            ) as fetch_matches,
+            patch.object(service, "_fetch_profile", return_value=None),
+            patch.object(
+                service,
+                "_get_hero_roles",
+                return_value={5: {"Support": 3, "Nuker": 1}},
+            ),
+        ):
+            result = service.get_dota_tab_stats(discord_id=100, match_limit=50)
+
+        mock_player_repo.get_steam_id.assert_called_once_with(100)
+        fetch_matches.assert_called_once_with(12345, limit=50)
+        assert result == {
+            "role_distribution": {"Support": 75.0, "Nuker": 25.0},
+            "full_stats": None,
+        }
