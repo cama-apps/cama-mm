@@ -213,10 +213,7 @@ class TestGetPersonalSummaryWrapped:
             "losses": 6,
         }
 
-        # Rating changes
-        wrapped_repo.get_month_rating_changes.return_value = [
-            {"discord_id": 111, "rating_change": 75},
-        ]
+        wrapped_repo.get_player_rating_change.return_value = 75
 
         # Match stats for percentile + kills/deaths/assists
         wrapped_repo.get_month_match_stats.return_value = [
@@ -263,6 +260,36 @@ class TestGetPersonalSummaryWrapped:
         assert isinstance(result.total_kda_percentile, float)
         assert isinstance(result.flavor_text, str)
         assert len(result.flavor_text) > 0
+        start_ts, end_ts = svc._get_year_timestamps(2026)
+        wrapped_repo.get_player_rating_change.assert_called_once_with(
+            111, 0, start_ts, end_ts
+        )
+        wrapped_repo.get_month_rating_changes.assert_not_called()
+
+
+# ===========================================================================
+# get_player_wrapped() rating lookup regression
+# ===========================================================================
+
+
+def test_player_wrapped_uses_player_scoped_rating_change():
+    svc, wrapped_repo, player_repo = _build_service()
+    player_repo.get_by_id.return_value = SimpleNamespace(name="TestPlayer")
+    wrapped_repo.get_month_player_match_details.return_value = {
+        "games_played": 2,
+        "wins": 1,
+        "losses": 1,
+    }
+    wrapped_repo.get_player_rating_change.return_value = 42
+    wrapped_repo.get_month_player_heroes.return_value = []
+    wrapped_repo.get_month_betting_stats.return_value = []
+
+    result = svc.get_player_wrapped(111, 2026, guild_id=0)
+
+    assert result is not None
+    assert result.rating_change == 42
+    wrapped_repo.get_player_rating_change.assert_called_once()
+    wrapped_repo.get_month_rating_changes.assert_not_called()
 
 
 # ===========================================================================
