@@ -707,6 +707,33 @@ class TestMatchRepository:
         assert ratings[999999] == {"team1": [], "team2": []}
         assert match_repository.get_os_ratings_for_matches([], TEST_GUILD_ID) == {}
 
+    def test_get_os_ratings_for_matches_chunks_on_one_connection(
+        self, match_repository, monkeypatch
+    ):
+        match_ids = list(range(1, 1002))
+        connection_count = 0
+        original_get_connection = match_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            match_repository, "get_connection", counted_get_connection
+        )
+
+        ratings = match_repository.get_os_ratings_for_matches(
+            match_ids, TEST_GUILD_ID
+        )
+
+        assert len(ratings) == len(match_ids)
+        assert all(
+            value == {"team1": [], "team2": []}
+            for value in ratings.values()
+        )
+        assert connection_count == 1
+
     def test_match_summary_reads_do_not_load_enrichment_data(
         self, match_repository, monkeypatch
     ):
