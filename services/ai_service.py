@@ -10,13 +10,12 @@ import asyncio
 import json
 import logging
 import re
+import sys
 import time
 import warnings
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
-
-import litellm
-from litellm import acompletion
 
 from services.monitoring_service import get_global_usage_monitor
 
@@ -47,6 +46,38 @@ _suppress_litellm_pydantic_warnings()
 # into LLM prompts so a hostile display name can't end the prompt block early
 # or smuggle in a fake instruction line.
 _PROMPT_UNSAFE_CHARS = re.compile(r"[\x00-\x1f\x7f`]")
+
+
+@lru_cache(maxsize=1)
+def _get_litellm() -> Any:
+    """Import and configure LiteLLM on the first actual provider call."""
+    import litellm
+
+    # Disable LiteLLM's automatic retries - callers in this service fail fast.
+    litellm.num_retries = 0
+    return litellm
+
+
+def acompletion(**kwargs: Any) -> Any:
+    """Return LiteLLM's completion coroutine while preserving the test seam.
+
+    This wrapper is deliberately synchronous: evaluating it imports LiteLLM
+    before the returned coroutine is handed to ``asyncio.wait_for``, so the
+    one-time import does not consume the provider's hard timeout budget.
+    """
+    return _get_litellm().acompletion(**kwargs)
+
+
+def _litellm_error_kind(exc: Exception) -> str | None:
+    """Classify provider errors without importing LiteLLM just to inspect one."""
+    litellm_module = sys.modules.get("litellm")
+    if litellm_module is None:
+        return None
+    if isinstance(exc, litellm_module.RateLimitError):
+        return "rate_limit"
+    if isinstance(exc, litellm_module.Timeout):
+        return "timeout"
+    return None
 
 
 def _sanitize_for_prompt(value: str | None, *, fallback: str = "Unknown", max_len: int = 64) -> str:
@@ -184,9 +215,6 @@ class AIService:
             provider_model = model
         self.provider_model = provider_model
         self._is_groq = model.startswith("groq/")
-
-        # Disable LiteLLM's automatic retries - we want to fail fast
-        litellm.num_retries = 0
 
         logger.info("AIService initialized with model: %s", model)
 
@@ -334,14 +362,14 @@ class AIService:
         except TimeoutError:
             logger.warning(f"AI hard timeout after {self.timeout}s (failing fast)")
             return None
-        except litellm.RateLimitError as e:
-            logger.warning(f"AI rate limited (failing fast): {e}")
-            return None
-        except litellm.Timeout as e:
-            logger.warning(f"AI timeout (failing fast): {e}")
-            return None
         except Exception as e:
-            logger.error(f"AI completion failed: {e}")
+            error_kind = _litellm_error_kind(e)
+            if error_kind == "rate_limit":
+                logger.warning(f"AI rate limited (failing fast): {e}")
+            elif error_kind == "timeout":
+                logger.warning(f"AI timeout (failing fast): {e}")
+            else:
+                logger.error(f"AI completion failed: {e}")
             return None
 
     async def call_with_tools(
@@ -417,22 +445,14 @@ class AIService:
                 tool_args={},
                 content=None,
             )
-        except litellm.RateLimitError as e:
-            logger.warning(f"AI rate limited (failing fast): {e}")
-            return ToolCallResult(
-                tool_name=None,
-                tool_args={},
-                content=None,
-            )
-        except litellm.Timeout as e:
-            logger.warning(f"AI timeout (failing fast): {e}")
-            return ToolCallResult(
-                tool_name=None,
-                tool_args={},
-                content=None,
-            )
         except Exception as e:
-            logger.error(f"AI tool call failed: {e}")
+            error_kind = _litellm_error_kind(e)
+            if error_kind == "rate_limit":
+                logger.warning(f"AI rate limited (failing fast): {e}")
+            elif error_kind == "timeout":
+                logger.warning(f"AI timeout (failing fast): {e}")
+            else:
+                logger.error(f"AI tool call failed: {e}")
             return ToolCallResult(
                 tool_name=None,
                 tool_args={},
