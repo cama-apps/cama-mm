@@ -164,6 +164,44 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return players
 
+    def get_shuffle_inputs(
+        self, discord_ids: list[int], guild_id: int | None
+    ) -> tuple[list[Player], dict[int, str | None], dict[int, int]]:
+        """Load ordered players, last-match dates, and exclusions together."""
+        if not discord_ids:
+            return [], {}, {}
+
+        guild_id = self.normalize_guild_id(guild_id)
+        unique_ids = list(dict.fromkeys(discord_ids))
+        placeholders = ",".join("?" * len(unique_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT *
+                FROM players
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
+                """,
+                (guild_id, *unique_ids),
+            )
+            rows_by_id = {
+                row["discord_id"]: row for row in cursor.fetchall()
+            }
+
+        players: list[Player] = []
+        last_match_dates: dict[int, str | None] = {}
+        exclusion_counts: dict[int, int] = {}
+        for discord_id in discord_ids:
+            row = rows_by_id.get(discord_id)
+            if row is None:
+                logger.warning(f"Player not found: discord_id={discord_id}")
+                continue
+            players.append(self._row_to_player(row))
+            last_match_dates[discord_id] = row["last_match_date"]
+            exclusion_counts[discord_id] = int(row["exclusion_count"] or 0)
+
+        return players, last_match_dates, exclusion_counts
+
     def get_by_username(self, username: str, guild_id: int) -> list[dict]:
         """
         Find players whose Discord username matches the provided value (case-insensitive, partial match).

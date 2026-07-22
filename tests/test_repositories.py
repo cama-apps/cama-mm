@@ -262,6 +262,72 @@ class TestPlayerRepository:
         assert len(players) == 5
         assert [p.name for p in players] == ["Player3", "Player1", "Player4", "Player0", "Player2"]
 
+    def test_get_shuffle_inputs_batches_ordered_players_and_metadata(
+        self, player_repository, monkeypatch
+    ):
+        player_ids = [10101, 10102]
+        for pid in player_ids:
+            player_repository.add(
+                discord_id=pid,
+                discord_username=f"ShufflePlayer{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+        player_repository.add(
+            discord_id=player_ids[0],
+            discord_username="OtherGuildShufflePlayer",
+            guild_id=TEST_GUILD_ID_SECONDARY,
+        )
+        with sqlite3.connect(player_repository.db_path) as connection:
+            connection.executemany(
+                """
+                UPDATE players
+                SET last_match_date = ?, exclusion_count = ?
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                [
+                    ("2026-07-20T12:00:00+00:00", 7, player_ids[0], TEST_GUILD_ID),
+                    (None, 11, player_ids[1], TEST_GUILD_ID),
+                    ("2099-01-01T00:00:00+00:00", 99, player_ids[0], TEST_GUILD_ID_SECONDARY),
+                ],
+            )
+
+        connection_count = 0
+        original_get_connection = player_repository.get_connection
+
+        def counted_get_connection():
+            nonlocal connection_count
+            connection_count += 1
+            return original_get_connection()
+
+        monkeypatch.setattr(
+            player_repository, "get_connection", counted_get_connection
+        )
+
+        players, last_match_dates, exclusion_counts = (
+            player_repository.get_shuffle_inputs(
+                [player_ids[1], 99999, player_ids[0], player_ids[1]],
+                TEST_GUILD_ID,
+            )
+        )
+
+        assert [player.discord_id for player in players] == [
+            player_ids[1],
+            player_ids[0],
+            player_ids[1],
+        ]
+        assert last_match_dates == {
+            player_ids[1]: None,
+            player_ids[0]: "2026-07-20T12:00:00+00:00",
+        }
+        assert exclusion_counts == {player_ids[1]: 11, player_ids[0]: 7}
+        assert connection_count == 1
+        assert player_repository.get_shuffle_inputs([], TEST_GUILD_ID) == (
+            [],
+            {},
+            {},
+        )
+        assert connection_count == 1
+
     def test_get_by_username_partial_case_insensitive(self, player_repository):
         """Test username lookup supports partial and case-insensitive matching."""
         player_repository.add(discord_id=2001, discord_username="AlphaUser", guild_id=TEST_GUILD_ID)

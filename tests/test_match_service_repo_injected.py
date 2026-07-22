@@ -52,6 +52,32 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     assert recorded["winning_team"] in (1, 2)
 
 
+def test_shuffle_uses_three_database_connections(repo_db_path, monkeypatch):
+    """Player data plus metadata should share one of the three shuffle reads."""
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 10)
+    connection_count = 0
+    original_get_connection = BaseRepository.get_connection
+
+    def counted_get_connection(repository):
+        nonlocal connection_count
+        connection_count += 1
+        return original_get_connection(repository)
+
+    monkeypatch.setattr(BaseRepository, "get_connection", counted_get_connection)
+
+    service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    assert connection_count == 3
+
+
 def test_record_match_uses_six_database_connections(repo_db_path, monkeypatch):
     """Guard the bulk rating/outcome read path against point-query regressions."""
     player_repo = PlayerRepository(repo_db_path)

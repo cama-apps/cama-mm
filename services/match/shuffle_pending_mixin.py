@@ -172,7 +172,11 @@ class ShufflePendingMixin:
         if shuffle_mode not in ("balanced", "region"):
             raise ValueError("shuffle_mode must be 'balanced' or 'region'")
         excluded_conditional_ids = list(excluded_conditional_ids or [])
-        players = self.player_repo.get_by_ids(player_ids, guild_id)
+        (
+            players,
+            last_match_dates,
+            exclusion_counts_by_id,
+        ) = self.player_repo.get_shuffle_inputs(player_ids, guild_id)
         if len(players) != len(player_ids):
             raise ValueError(
                 f"Could not load all players: expected {len(player_ids)}, got {len(players)}"
@@ -180,8 +184,7 @@ class ShufflePendingMixin:
 
         # Apply RD decay for shuffle priority calculation (not persisted).
         # This ensures returning players get appropriate priority boost.
-        # Safe to mutate: players are fetched fresh via get_by_ids() each call.
-        last_match_dates = self.player_repo.get_last_match_dates(player_ids, guild_id)
+        # Safe to mutate: players are fetched fresh via get_shuffle_inputs().
         now = datetime.now(UTC)
         for player in players:
             if player.discord_id and player.glicko_rd is not None:
@@ -204,7 +207,6 @@ class ShufflePendingMixin:
             players = players[:14]
             player_ids = player_ids[:14]
 
-        exclusion_counts_by_id = self.player_repo.get_exclusion_counts(player_ids, guild_id)
         # Shuffler expects name->count mapping; this is internal to shuffler only
         exclusion_counts = {
             pl.name: exclusion_counts_by_id.get(pid, 0) for pid, pl in zip(player_ids, players)
