@@ -1063,6 +1063,85 @@ def test_get_user_open_positions_returns_open_only(prediction_service, player_re
     assert positions[0]["prediction_id"] == pid_open
 
 
+def test_get_user_open_positions_includes_top_active_marks(
+    prediction_repo, player_repository
+):
+    _add_player(player_repository, 1)
+    prediction_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="marked position",
+        initial_fair=50,
+    )
+    prediction_repo.replace_levels(
+        prediction_id,
+        [
+            ("yes_bid", 43, 8),
+            ("yes_bid", 47, 3),
+            ("yes_bid", 99, 0),
+            ("yes_ask", 54, 6),
+            ("yes_ask", 60, 9),
+            ("yes_ask", 1, 0),
+        ],
+    )
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                 no_contracts, no_cost_basis_total)
+            VALUES (?, ?, 3, 150, 4, 200)
+            """,
+            (prediction_id, 1),
+        )
+
+    positions = prediction_repo.get_user_open_positions(1, TEST_GUILD_ID)
+
+    assert len(positions) == 1
+    assert positions[0]["yes_mark"] == 47
+    assert positions[0]["no_mark"] == 46
+
+
+@pytest.mark.parametrize(
+    ("levels", "expected_yes_mark", "expected_no_mark"),
+    [
+        ([("yes_ask", 61, 5), ("yes_bid", 44, 0)], None, 39),
+        ([("yes_bid", 44, 5), ("yes_ask", 61, 0)], 44, None),
+    ],
+)
+def test_get_user_open_positions_marks_missing_book_side_as_none(
+    prediction_repo,
+    player_repository,
+    levels,
+    expected_yes_mark,
+    expected_no_mark,
+):
+    _add_player(player_repository, 1)
+    prediction_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="one-sided book",
+        initial_fair=50,
+    )
+    prediction_repo.replace_levels(prediction_id, levels)
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                 no_contracts, no_cost_basis_total)
+            VALUES (?, ?, 3, 150, 4, 200)
+            """,
+            (prediction_id, 1),
+        )
+
+    positions = prediction_repo.get_user_open_positions(1, TEST_GUILD_ID)
+
+    assert len(positions) == 1
+    assert positions[0]["yes_mark"] == expected_yes_mark
+    assert positions[0]["no_mark"] == expected_no_mark
+
+
 # --------------------------------------------------------------------------- #
 # Position mark helper
 # --------------------------------------------------------------------------- #

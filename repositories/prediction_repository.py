@@ -727,6 +727,20 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     p.question,
                     p.current_price,
                     p.status,
+                    (
+                        SELECT MAX(pl.price)
+                        FROM prediction_levels pl
+                        WHERE pl.prediction_id = pp.prediction_id
+                          AND pl.side = 'yes_bid'
+                          AND pl.remaining_size > 0
+                    ) AS yes_mark,
+                    (
+                        SELECT 100 - MIN(pl.price)
+                        FROM prediction_levels pl
+                        WHERE pl.prediction_id = pp.prediction_id
+                          AND pl.side = 'yes_ask'
+                          AND pl.remaining_size > 0
+                    ) AS no_mark,
                     pp.yes_contracts,
                     pp.yes_cost_basis_total,
                     pp.no_contracts,
