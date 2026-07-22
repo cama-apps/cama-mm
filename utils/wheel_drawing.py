@@ -4,6 +4,8 @@ import colorsys
 import io
 import math
 import random
+from dataclasses import dataclass
+from functools import lru_cache
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -916,6 +918,74 @@ def _create_wheel_face(
 _CACHED_SHELL_ICONS: dict[tuple[str, int], Image.Image] = {}
 
 
+@dataclass(frozen=True, slots=True)
+class _WedgeLabelLayout:
+    """Rotation-independent measurements for a wheel wedge label."""
+
+    text: str
+    shell_type: str | None
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont
+    text_height: int
+    icon_size: int
+    icon_gap: int
+    total_width: int
+
+
+@lru_cache(maxsize=64)
+def _get_wedge_label_layouts(
+    size: int,
+    wedges: tuple[tuple[str, int | str, str], ...],
+) -> tuple[_WedgeLabelLayout, ...]:
+    """Measure labels once for each bounded wheel configuration and size."""
+    radius = size // 2 - 30
+    angle_per_wedge = 360 / len(wedges)
+    base_font_size = max(12, size // 30)
+    text_radius_frac = 0.68
+    arc_width = 2 * math.pi * (radius * text_radius_frac) * (angle_per_wedge / 360)
+    max_label_width = arc_width * 0.85
+
+    # Match the RGBA draw context used by wheel frames so Pillow chooses the
+    # same font mask mode and produces identical measurements.
+    measurement_draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    layouts = []
+    for label, value, _color in wedges:
+        text = label if isinstance(value, str) or value <= 0 else str(value)
+        shell_type = value if isinstance(value, str) else None
+
+        font_size = base_font_size
+        font = _get_cached_font(font_size, "small", bold=True)
+        bbox = measurement_draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        icon_size = int(text_height * 1.8) if shell_type else 0
+        icon_gap = icon_size + 3 if shell_type else 0
+        total_width = text_width + icon_gap
+
+        while total_width > max_label_width and font_size > 8:
+            font_size -= 1
+            font = _get_cached_font(font_size, "small", bold=True)
+            bbox = measurement_draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            icon_size = int(text_height * 1.8) if shell_type else 0
+            icon_gap = icon_size + 3 if shell_type else 0
+            total_width = text_width + icon_gap
+
+        layouts.append(
+            _WedgeLabelLayout(
+                text=text,
+                shell_type=shell_type,
+                font=font,
+                text_height=text_height,
+                icon_size=icon_size,
+                icon_gap=icon_gap,
+                total_width=total_width,
+            )
+        )
+
+    return tuple(layouts)
+
+
 def _get_shell_icon(shell_type: str, icon_size: int) -> Image.Image:
     """Get a cached Mario Kart-style shell icon."""
     key = (shell_type, icon_size)
@@ -1114,46 +1184,12 @@ def _draw_wedge_labels(
     center = size // 2
     radius = size // 2 - 30
     wedges = wedges if wedges is not None else get_wheel_wedges(is_bankrupt, is_golden)
-    num_wedges = len(wedges)
+    wedge_layouts = _get_wedge_label_layouts(size, tuple(wedges))
+    num_wedges = len(wedge_layouts)
     angle_per_wedge = 360 / num_wedges
 
-    # Base font size and max arc width available at the text radius
-    base_font_size = max(12, size // 30)
     text_radius_frac = 0.68
-    arc_width = 2 * math.pi * (radius * text_radius_frac) * (angle_per_wedge / 360)
-    # Leave some padding inside the arc
-    max_label_width = arc_width * 0.85
-
-    for i, (label, value, _color) in enumerate(wedges):
-        # Determine display text
-        if isinstance(value, str) or value <= 0:
-            text = label
-        else:
-            text = str(value)
-
-        is_shell = isinstance(value, str)
-
-        # Dynamic font sizing: shrink if text + icon would exceed wedge arc
-        font_size = base_font_size
-        font = _get_cached_font(font_size, "small", bold=True)
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        icon_size = int(text_h * 1.8) if is_shell else 0
-        icon_gap = icon_size + 3 if is_shell else 0
-        total_w = text_w + icon_gap
-
-        # Shrink font until it fits (minimum 8px)
-        while total_w > max_label_width and font_size > 8:
-            font_size -= 1
-            font = _get_cached_font(font_size, "small", bold=True)
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-            icon_size = int(text_h * 1.8) if is_shell else 0
-            icon_gap = icon_size + 3 if is_shell else 0
-            total_w = text_w + icon_gap
-
+    for i, layout in enumerate(wedge_layouts):
         # Position along the rotated wedge radial
         mid_angle_deg = i * angle_per_wedge + rotation - 90 + angle_per_wedge / 2
         mid_angle_rad = math.radians(mid_angle_deg)
@@ -1161,20 +1197,25 @@ def _draw_wedge_labels(
         text_cx = center + text_radius * math.cos(mid_angle_rad)
         text_cy = center + text_radius * math.sin(mid_angle_rad)
 
-        tx = text_cx - total_w / 2
-        ty = text_cy - text_h / 2
+        tx = text_cx - layout.total_width / 2
+        ty = text_cy - layout.text_height / 2
 
-        if is_shell:
-            shell_icon = _get_shell_icon(value, icon_size)
+        if layout.shell_type is not None:
+            shell_icon = _get_shell_icon(layout.shell_type, layout.icon_size)
             icon_x = int(tx)
-            icon_y = int(text_cy - icon_size / 2)
+            icon_y = int(text_cy - layout.icon_size / 2)
             img.paste(shell_icon, (icon_x, icon_y), shell_icon)
 
         # Text shadow + main text
-        text_x = tx + icon_gap
+        text_x = tx + layout.icon_gap
         text_y = ty
-        draw.text((text_x + 1, text_y + 1), text, fill="#000000", font=font)
-        draw.text((text_x, text_y), text, fill="#ffffff", font=font)
+        draw.text(
+            (text_x + 1, text_y + 1),
+            layout.text,
+            fill="#000000",
+            font=layout.font,
+        )
+        draw.text((text_x, text_y), layout.text, fill="#ffffff", font=layout.font)
 
 
 
@@ -1532,14 +1573,19 @@ def create_wheel_gif(
 
         is_final = i == num_frames - 1
 
-        frame = create_wheel_frame_for_gif(
-            size, rotation, selected_idx=target_idx if is_final else None,
-            display_name=display_name, frame_idx=i, is_bankrupt=is_bankrupt, is_golden=is_golden,
-            wedges=wedges, wheel_face=wheel_face,
-        )
+        if i == 0:
+            # The palette seed is also the first animation frame. Reusing it
+            # avoids rendering and converting the exact same frame twice.
+            frame_rgb = first_frame_rgb
+        else:
+            frame = create_wheel_frame_for_gif(
+                size, rotation, selected_idx=target_idx if is_final else None,
+                display_name=display_name, frame_idx=i, is_bankrupt=is_bankrupt,
+                is_golden=is_golden, wedges=wedges, wheel_face=wheel_face,
+            )
+            frame_rgb = frame.convert("RGB")
 
         # Quantize against shared palette for consistent colors across frames
-        frame_rgb = frame.convert("RGB")
         frame_p = frame_rgb.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
         frames.append(frame_p)
 
