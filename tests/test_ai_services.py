@@ -4,7 +4,10 @@ Tests for AI services: AIService, SQLQueryService, FlavorTextService, AIQueryRep
 
 import json
 import sqlite3
+import subprocess
+import sys
 import warnings
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,6 +16,7 @@ from repositories.ai_query_repository import AIQueryRepository
 from services.ai_service import (
     SQL_TOOL,
     AIService,
+    _litellm_error_kind,
     _suppress_litellm_pydantic_warnings,
 )
 from services.flavor_text_service import FlavorEvent, FlavorTextService, PlayerContext
@@ -22,6 +26,114 @@ from services.sql_query_service import (
     UNSCOPED_TABLE_ALLOWLIST,
     SQLQueryService,
 )
+
+
+def test_ai_service_import_and_construction_do_not_load_litellm():
+    """Importing and configuring AI support must not load LiteLLM before first use."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script = """
+import sys
+
+import services.ai_service as ai_module
+
+ai_module.AIService(
+    model="cerebras/zai-glm-4.7",
+    api_key="test-api-key",
+    timeout=30.0,
+    max_tokens=500,
+)
+
+loaded = sorted(
+    name
+    for name in sys.modules
+    if name == "litellm" or name.startswith("litellm.")
+)
+assert not loaded, loaded
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, (
+        "Fresh AIService import or construction loaded LiteLLM:\n"
+        f"{completed.stderr or completed.stdout}"
+    )
+
+
+def test_acompletion_first_use_configures_and_delegates_to_litellm():
+    """The stable completion seam must configure and call LiteLLM on first use."""
+    repo_root = Path(__file__).resolve().parents[1]
+    script = """
+import asyncio
+import sys
+import types
+
+import services.ai_service as ai_module
+
+calls = []
+
+async def fake_acompletion(**kwargs):
+    calls.append(kwargs)
+    return "fake-response"
+
+fake_litellm = types.ModuleType("litellm")
+fake_litellm.acompletion = fake_acompletion
+fake_litellm.num_retries = 17
+sys.modules["litellm"] = fake_litellm
+
+kwargs = {
+    "model": "cerebras/zai-glm-4.7",
+    "messages": [{"role": "user", "content": "test"}],
+}
+result = asyncio.run(ai_module.acompletion(**kwargs))
+
+assert result == "fake-response"
+assert calls == [kwargs]
+assert fake_litellm.num_retries == 0
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, (
+        "AI completion lazy-import delegation failed:\n"
+        f"{completed.stderr or completed.stdout}"
+    )
+
+
+def test_litellm_error_classification_uses_only_loaded_module(monkeypatch):
+    """Provider errors are classified without importing LiteLLM for inspection."""
+
+    class FakeRateLimitError(Exception):
+        pass
+
+    class FakeTimeout(Exception):
+        pass
+
+    fake_litellm = MagicMock(
+        RateLimitError=FakeRateLimitError,
+        Timeout=FakeTimeout,
+    )
+    monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
+
+    assert _litellm_error_kind(FakeRateLimitError()) == "rate_limit"
+    assert _litellm_error_kind(FakeTimeout()) == "timeout"
+    assert _litellm_error_kind(RuntimeError()) is None
+
+    monkeypatch.delitem(sys.modules, "litellm")
+    assert _litellm_error_kind(RuntimeError()) is None
 
 
 class TestAIService:
