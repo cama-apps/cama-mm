@@ -538,6 +538,51 @@ def _validator_service(ai_query_repo=None):
     return SQLQueryService(ai_service=MagicMock(), ai_query_repo=ai_query_repo)
 
 
+def _build_schema_context_via_public_metadata_methods(ai_query_repo):
+    """Reproduce the pre-bulk schema builder for output-parity regression."""
+    service = SQLQueryService(ai_service=MagicMock(), ai_query_repo=ai_query_repo)
+    lines = ["## Available Tables\n"]
+    all_tables = ai_query_repo.get_all_tables()
+    blocked_lower = service._blocked_table_names()
+    allowed_tables = [
+        table for table in all_tables if table.lower() not in blocked_lower
+    ]
+    blocked_columns = {column.lower() for column in BLOCKED_COLUMNS}
+
+    for table_name in sorted(allowed_tables):
+        schema_info = ai_query_repo.get_table_schema(table_name)
+        if not schema_info:
+            continue
+        lines.append(f"### {table_name}")
+        col_lines = []
+        for column in schema_info:
+            if column["name"].lower() in blocked_columns:
+                continue
+            column_type = column["type"] or "ANY"
+            nullable = "" if column["notnull"] else " (nullable)"
+            primary_key = " PK" if column["pk"] else ""
+            col_lines.append(
+                f"  - {column['name']}: {column_type}{primary_key}{nullable}"
+            )
+        if col_lines:
+            lines.extend(col_lines)
+            lines.append("")
+
+    lines.append("## Relationships (use for JOINs, don't SELECT these ID columns)")
+    relationships = set()
+    for table_name in allowed_tables:
+        for foreign_key in ai_query_repo.get_foreign_keys(table_name):
+            referenced_table = foreign_key["table"]
+            if referenced_table.lower() not in blocked_lower:
+                relationships.add(
+                    f"- {table_name}.{foreign_key['from']} = "
+                    f"{referenced_table}.{foreign_key['to']}"
+                )
+    if relationships:
+        lines.extend(sorted(relationships))
+    return "\n".join(lines)
+
+
 class TestSQLQueryService:
     """Tests for SQLQueryService validation and query execution."""
 
@@ -788,6 +833,56 @@ class TestSQLQueryService:
         is_valid, error = service._validate_sql("SELECT discord_username FROM players")
         assert is_valid, f"Guild-scoped table must stay allowed: {error}"
 
+    def test_schema_context_bulk_metadata_preserves_output_and_cache(
+        self, repo_db_path
+    ):
+        repo = AIQueryRepository(repo_db_path)
+        expected = _build_schema_context_via_public_metadata_methods(repo)
+        service = SQLQueryService(ai_service=MagicMock(), ai_query_repo=repo)
+
+        with patch.object(
+            repo, "readonly_connection", wraps=repo.readonly_connection
+        ) as connection:
+            first = service._build_schema_context()
+            second = service._build_schema_context()
+
+        assert first == expected
+        assert second == first
+        assert connection.call_count == 1
+
+    def test_schema_context_bulk_metadata_blocks_unscoped_tables_fail_closed(self):
+        repo = MagicMock()
+        repo.get_schema_metadata.return_value = {
+            "players": {
+                "columns": [
+                    {"name": "guild_id", "type": "INTEGER", "notnull": 1, "pk": 1},
+                    {
+                        "name": "discord_username",
+                        "type": "TEXT",
+                        "notnull": 1,
+                        "pk": 0,
+                    },
+                ],
+                "foreign_keys": [],
+            },
+            "new_global_table": {
+                "columns": [
+                    {"name": "label", "type": "TEXT", "notnull": 0, "pk": 0}
+                ],
+                "foreign_keys": [],
+            },
+        }
+        service = SQLQueryService(ai_service=MagicMock(), ai_query_repo=repo)
+
+        context = service._build_schema_context()
+
+        assert "### players" in context
+        assert "new_global_table" not in context
+        assert "new_global_table" in service._blocked_table_names()
+        repo.get_schema_metadata.assert_called_once_with()
+        repo.get_table_schema.assert_not_called()
+        repo.get_foreign_keys.assert_not_called()
+
     def test_no_guild_id_tables_are_blocked_or_allowlisted(self, repo_db_path):
         """Every base table in the live schema without a guild_id column must be
         named in BLOCKED_TABLES or UNSCOPED_TABLE_ALLOWLIST.
@@ -1010,6 +1105,26 @@ class TestAIQueryRepository:
         assert "players" in scoped
         assert "matches" in scoped
         assert "player_steam_ids" not in scoped
+
+    def test_get_schema_metadata_uses_one_connection_and_preserves_pragma_order(
+        self, ai_query_repo
+    ):
+        with patch.object(
+            ai_query_repo,
+            "readonly_connection",
+            wraps=ai_query_repo.readonly_connection,
+        ) as connection:
+            metadata = ai_query_repo.get_schema_metadata()
+
+        assert connection.call_count == 1
+        assert list(metadata) == ai_query_repo.get_all_tables()
+        for table_name in ("players", "match_participants"):
+            assert metadata[table_name]["columns"] == ai_query_repo.get_table_schema(
+                table_name
+            )
+            assert metadata[table_name][
+                "foreign_keys"
+            ] == ai_query_repo.get_foreign_keys(table_name)
 
     def test_execute_readonly_guild_scoped_isolates_guilds(self, ai_query_repo):
         """Guild-isolation invariant: an AI query for one guild must never read

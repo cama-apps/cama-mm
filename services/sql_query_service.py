@@ -368,13 +368,24 @@ class SQLQueryService:
 
         lines = ["## Available Tables\n"]
 
-        # Get all tables from DB, filter out blocked ones (including tables
-        # blocked structurally for lacking a guild_id column)
+        # Load the full schema snapshot through one read-only connection, then
+        # apply the same static and structural blocklists used by validation.
         try:
-            all_tables = self.ai_query_repo.get_all_tables()
-            blocked_lower = self._blocked_table_names()
+            schema_metadata = self.ai_query_repo.get_schema_metadata()
+            all_tables = list(schema_metadata)
+            scoped_tables = {
+                table_name.lower()
+                for table_name, metadata in schema_metadata.items()
+                if any(
+                    column["name"].lower() == "guild_id"
+                    for column in metadata["columns"]
+                )
+            }
+            blocked_lower = self._classify_blocked_tables(all_tables, scoped_tables)
+            self._blocked_tables_cache = blocked_lower
         except Exception as e:
-            logger.error(f"Failed to get tables: {e}")
+            logger.error(f"Failed to load schema metadata: {e}")
+            schema_metadata = {}
             all_tables = []
             blocked_lower = {b.lower() for b in BLOCKED_TABLES}
 
@@ -382,7 +393,7 @@ class SQLQueryService:
 
         for table_name in sorted(allowed_tables):
             try:
-                schema_info = self.ai_query_repo.get_table_schema(table_name)
+                schema_info = schema_metadata[table_name]["columns"]
                 if not schema_info:
                     continue
 
@@ -412,7 +423,7 @@ class SQLQueryService:
         fk_relationships = set()
         for table_name in allowed_tables:
             try:
-                fks = self.ai_query_repo.get_foreign_keys(table_name)
+                fks = schema_metadata[table_name]["foreign_keys"]
                 for fk in fks:
                     ref_table = fk["table"]
                     from_col = fk["from"]
@@ -429,6 +440,17 @@ class SQLQueryService:
         self._schema_cache = "\n".join(lines)
         return self._schema_cache
 
+    @staticmethod
+    def _classify_blocked_tables(
+        all_tables: list[str] | set[str], scoped_tables: set[str]
+    ) -> set[str]:
+        """Combine static blocks with fail-closed guild-scope classification."""
+        all_lower = {table.lower() for table in all_tables}
+        scoped_lower = {table.lower() for table in scoped_tables}
+        allowed = {table.lower() for table in UNSCOPED_TABLE_ALLOWLIST}
+        blocked = {table.lower() for table in BLOCKED_TABLES}
+        return blocked | (all_lower - scoped_lower - allowed)
+
     def _blocked_table_names(self) -> set[str]:
         """Lowercased names of every table AI queries must not touch.
 
@@ -440,11 +462,11 @@ class SQLQueryService:
         this check is the enforcement). Cached: the schema is static at runtime.
         """
         if self._blocked_tables_cache is None:
-            all_tables = {t.lower() for t in self.ai_query_repo.get_all_tables()}
-            scoped = {t.lower() for t in self.ai_query_repo.get_guild_scoped_tables()}
-            allowed = {t.lower() for t in UNSCOPED_TABLE_ALLOWLIST}
-            blocked = {t.lower() for t in BLOCKED_TABLES}
-            self._blocked_tables_cache = blocked | (all_tables - scoped - allowed)
+            all_tables = self.ai_query_repo.get_all_tables()
+            scoped = self.ai_query_repo.get_guild_scoped_tables()
+            self._blocked_tables_cache = self._classify_blocked_tables(
+                all_tables, scoped
+            )
         return self._blocked_tables_cache
 
     def _validate_sql(self, sql: str) -> tuple[bool, str]:
