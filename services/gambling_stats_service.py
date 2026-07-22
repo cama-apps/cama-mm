@@ -2,6 +2,7 @@
 Service for gambling statistics and degen score calculation.
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypedDict
 
@@ -200,6 +201,15 @@ def _get_degen_tier(score: int) -> tuple[str, str, str]:
     return "Unknown", "???", "❓"
 
 
+def _leverage_distribution_from_history(history: list[dict]) -> dict[int, int]:
+    """Derive the repository's leverage distribution from loaded bet history."""
+    leverage_counts: Counter[int] = Counter()
+    for bet in history:
+        leverage = bet.get("leverage")
+        leverage_counts[1 if leverage is None else leverage] += 1
+    return dict(leverage_counts)
+
+
 def _compute_degen_score(
     *,
     leverage_dist: dict[int, int],
@@ -356,8 +366,9 @@ class GamblingStatsService:
         roi = net_pnl / total_wagered if total_wagered > 0 else 0
         avg_bet_size = total_wagered / total_bets if total_bets > 0 else 0
 
-        # Leverage distribution
-        leverage_distribution = self.bet_repo.get_player_leverage_distribution(discord_id, guild_id)
+        # Leverage is already included in the full history, so avoid repeating
+        # the same filtered scan with a separate aggregate query.
+        leverage_distribution = _leverage_distribution_from_history(history)
 
         # Streak analysis
         current_streak, best_streak, worst_streak = self._calculate_streaks(history)
@@ -403,16 +414,25 @@ class GamblingStatsService:
             matches_played=matches_played,
         )
 
-    def calculate_degen_score(self, discord_id: int, guild_id: int | None = None) -> DegenScoreBreakdown:
-        """Calculate the degen score with component breakdown."""
-        history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
-        leverage_dist = self.bet_repo.get_player_leverage_distribution(discord_id, guild_id)
+    def calculate_degen_score(
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+        *,
+        history: list[dict] | None = None,
+        leverage_distribution: dict[int, int] | None = None,
+    ) -> DegenScoreBreakdown:
+        """Calculate the degen score, optionally reusing already-fetched bet data."""
+        if history is None:
+            history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
+        if leverage_distribution is None:
+            leverage_distribution = _leverage_distribution_from_history(history)
 
         return self._calculate_degen_score_with_bet_data(
             discord_id,
             guild_id,
             history=history,
-            leverage_dist=leverage_dist,
+            leverage_dist=leverage_distribution,
         )
 
     def _calculate_degen_score_with_bet_data(

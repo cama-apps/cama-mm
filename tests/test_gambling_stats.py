@@ -18,6 +18,7 @@ from services.gambling_stats_service import (
     DegenScoreBreakdown,
     GamblingStatsService,
     Leaderboard,
+    _leverage_distribution_from_history,
 )
 
 
@@ -211,6 +212,30 @@ class TestBetHistory:
         assert bet_repo.get_player_bet_history(discord_id, guild_id=guild_b) == []
 
 
+@pytest.mark.parametrize(
+    ("history", "expected"),
+    [
+        ([], {}),
+        (
+            [
+                {},
+                {"leverage": None},
+                {"leverage": 1},
+                {"leverage": 2},
+                {"leverage": 5},
+                {"leverage": 5},
+            ],
+            {1: 3, 2: 1, 5: 2},
+        ),
+    ],
+)
+def test_leverage_distribution_from_history_matches_repository_semantics(
+    history, expected
+):
+    """Missing and NULL leverage use the repository's 1x fallback."""
+    assert _leverage_distribution_from_history(history) == expected
+
+
 class TestGambaStats:
     """Tests for gambling statistics."""
 
@@ -245,23 +270,40 @@ class TestGambaStats:
         assert stats.net_pnl == 10  # +10 +10 -10
         assert stats.total_wagered == 30
 
-    def test_get_player_stats_reuses_history_and_leverage_data(
+    def test_get_player_stats_derives_leverage_from_history(
         self, gambling_stats_service, repositories, monkeypatch
     ):
-        """Degen scoring must not repeat the two primary bet-data reads."""
+        """Loaded history replaces the leverage query without changing output."""
         bet_repo = repositories["bet_repo"]
         player_repo = repositories["player_repo"]
         match_repo = repositories["match_repo"]
-        discord_id = _setup_player(player_repo, balance=200)
-        _place_and_settle_bet(
-            bet_repo,
-            match_repo,
-            player_repo,
+        discord_id = _setup_player(player_repo, balance=500)
+        for leverage in (1, 2, 5):
+            _place_and_settle_bet(
+                bet_repo,
+                match_repo,
+                player_repo,
+                discord_id,
+                10,
+                "radiant",
+                "radiant",
+                leverage=leverage,
+            )
+
+        # Exercise the repository's historical NULL -> 1x compatibility path.
+        with bet_repo.connection() as conn:
+            conn.execute(
+                "UPDATE bets SET leverage = NULL WHERE discord_id = ? AND leverage = 1",
+                (discord_id,),
+            )
+
+        history = bet_repo.get_player_bet_history(discord_id, 0)
+        expected_distribution = bet_repo.get_player_leverage_distribution(discord_id, 0)
+        expected_degen = gambling_stats_service.calculate_degen_score(
             discord_id,
-            10,
-            "radiant",
-            "radiant",
-            leverage=2,
+            0,
+            history=history,
+            leverage_distribution=expected_distribution,
         )
 
         history_spy = MagicMock(wraps=bet_repo.get_player_bet_history)
@@ -276,8 +318,10 @@ class TestGambaStats:
         stats = gambling_stats_service.get_player_stats(discord_id, guild_id=0)
 
         assert stats is not None
+        assert stats.leverage_distribution == expected_distribution
+        assert stats.degen_score == expected_degen
         history_spy.assert_called_once_with(discord_id, 0)
-        leverage_spy.assert_called_once_with(discord_id, 0)
+        leverage_spy.assert_not_called()
 
     def test_streak_calculation(self, gambling_stats_service, repositories):
         """Test that streaks are calculated correctly."""
@@ -321,6 +365,65 @@ class TestDegenScore:
         assert isinstance(degen, DegenScoreBreakdown)
         assert 0 <= degen.total <= 100
         assert degen.title in ["Casual", "Recreational", "Committed", "Degenerate", "Menace", "Legendary Degen"]
+
+    def test_calculate_degen_score_derives_leverage_without_repository_query(
+        self, gambling_stats_service, repositories, monkeypatch
+    ):
+        """The public default path reads history once and derives leverage from it."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+        discord_id = _setup_player(player_repo, balance=200)
+        _place_and_settle_bet(
+            bet_repo,
+            match_repo,
+            player_repo,
+            discord_id,
+            10,
+            "radiant",
+            "radiant",
+            leverage=5,
+        )
+
+        history_spy = MagicMock(wraps=bet_repo.get_player_bet_history)
+        leverage_spy = MagicMock(wraps=bet_repo.get_player_leverage_distribution)
+        monkeypatch.setattr(bet_repo, "get_player_bet_history", history_spy)
+        monkeypatch.setattr(
+            bet_repo,
+            "get_player_leverage_distribution",
+            leverage_spy,
+        )
+
+        degen = gambling_stats_service.calculate_degen_score(discord_id, guild_id=0)
+
+        assert degen.max_leverage_score == 25
+        history_spy.assert_called_once_with(discord_id, 0)
+        leverage_spy.assert_not_called()
+
+    def test_calculate_degen_score_reuses_prefetched_empty_bet_data(
+        self, gambling_stats_service, repositories, monkeypatch
+    ):
+        """Explicit empty prefetches are data, not a signal to query again."""
+        bet_repo = repositories["bet_repo"]
+        history_spy = MagicMock(wraps=bet_repo.get_player_bet_history)
+        leverage_spy = MagicMock(wraps=bet_repo.get_player_leverage_distribution)
+        monkeypatch.setattr(bet_repo, "get_player_bet_history", history_spy)
+        monkeypatch.setattr(
+            bet_repo,
+            "get_player_leverage_distribution",
+            leverage_spy,
+        )
+
+        degen = gambling_stats_service.calculate_degen_score(
+            1001,
+            guild_id=0,
+            history=[],
+            leverage_distribution={},
+        )
+
+        assert degen.total == 0
+        history_spy.assert_not_called()
+        leverage_spy.assert_not_called()
 
     def test_high_leverage_increases_degen_score(self, gambling_stats_service, repositories):
         """Test that high leverage increases degen score."""
