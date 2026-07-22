@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from unittest.mock import Mock
 
 import pytest
 
@@ -235,6 +236,104 @@ class TestLobbyManager:
 
 class TestLobbyPersistence:
     """Test lobby state persistence across bot restarts."""
+
+    def test_fake_load_all_returns_full_shallow_copies(self):
+        repo = FakeLobbyRepo()
+        repo.save_lobby_state(
+            lobby_id=1,
+            guild_id=42,
+            players=[101, 102],
+            status="open",
+            created_by=1001,
+            created_at="2026-07-22T12:00:00+00:00",
+            message_id=2001,
+            channel_id=2002,
+            thread_id=2003,
+            embed_message_id=2004,
+            origin_channel_id=2005,
+            player_join_times={101: 100.5, 102: 200.5},
+        )
+
+        rows = repo.load_all_lobby_states()
+
+        assert rows == [repo.load_lobby_state(1, guild_id=42)]
+        rows[0]["status"] = "closed"
+        assert repo.load_lobby_state(1, guild_id=42)["status"] == "open"
+
+    def test_startup_bulk_rehydrates_all_guild_metadata_without_point_reads(self):
+        repo = FakeLobbyRepo()
+        states = {
+            42: {
+                "players": [101, 102],
+                "created_by": 1001,
+                "created_at": "2026-07-22T12:00:00+00:00",
+                "message_id": 2001,
+                "channel_id": 2002,
+                "thread_id": 2003,
+                "embed_message_id": 2004,
+                "origin_channel_id": 2005,
+                "player_join_times": {101: 100.5, 102: 200.5},
+            },
+            84: {
+                "players": [201, 202, 203],
+                "created_by": 3001,
+                "created_at": "2026-07-22T13:00:00+00:00",
+                "message_id": 4001,
+                "channel_id": 4002,
+                "thread_id": 4003,
+                "embed_message_id": 4004,
+                "origin_channel_id": 4005,
+                "player_join_times": {201: 300.5, 202: 400.5, 203: 500.5},
+            },
+        }
+        for guild_id, state in states.items():
+            repo.save_lobby_state(
+                lobby_id=1,
+                guild_id=guild_id,
+                players=state["players"],
+                status="open",
+                created_by=state["created_by"],
+                created_at=state["created_at"],
+                message_id=state["message_id"],
+                channel_id=state["channel_id"],
+                thread_id=state["thread_id"],
+                embed_message_id=state["embed_message_id"],
+                origin_channel_id=state["origin_channel_id"],
+                player_join_times=state["player_join_times"],
+            )
+
+        load_all = Mock(wraps=repo.load_all_lobby_states)
+        point_load = Mock(
+            side_effect=AssertionError("startup must hydrate from the bulk rows")
+        )
+        repo.load_all_lobby_states = load_all
+        repo.load_lobby_state = point_load
+
+        manager = LobbyManager(repo)
+
+        load_all.assert_called_once_with()
+        point_load.assert_not_called()
+        for guild_id, state in states.items():
+            lobby = manager.get_lobby(guild_id=guild_id)
+            assert lobby is not None
+            assert lobby.lobby_id == 1
+            assert lobby.guild_id == guild_id
+            assert lobby.players == set(state["players"])
+            assert lobby.status == "open"
+            assert lobby.created_by == state["created_by"]
+            assert lobby.created_at == datetime.fromisoformat(state["created_at"])
+            assert lobby.player_join_times == state["player_join_times"]
+            assert manager.get_lobby_message_id(guild_id) == state["message_id"]
+            assert manager.get_lobby_channel_id(guild_id) == state["channel_id"]
+            assert manager.get_lobby_thread_id(guild_id) == state["thread_id"]
+            assert (
+                manager.get_lobby_embed_message_id(guild_id)
+                == state["embed_message_id"]
+            )
+            assert (
+                manager.get_origin_channel_id(guild_id)
+                == state["origin_channel_id"]
+            )
 
     def test_startup_persists_sanitized_legacy_conditional_state(self, repo_db_path):
         guild_id = 42

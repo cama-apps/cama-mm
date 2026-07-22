@@ -393,7 +393,7 @@ class LobbyManagerService:
     def _load_state(self) -> None:
         """Rehydrate per-guild lobby state from the repository on startup.
 
-        Reads every persisted ``(lobby_id, guild_id)`` row via
+        Reads every persisted decoded lobby row via
         :meth:`ILobbyRepository.load_all_lobby_states` and populates the
         in-memory maps. A missing ``lobby_state`` table on a fresh install is
         tolerated (logged and treated as "no state"); any other failure
@@ -415,14 +415,8 @@ class LobbyManagerService:
             )
             return
 
-        for row in rows:
-            guild_id = int(row.get("guild_id") or 0)
-            data = self.lobby_repo.load_lobby_state(
-                row.get("lobby_id", self.DEFAULT_LOBBY_ID),
-                guild_id=guild_id,
-            )
-            if not data:
-                continue
+        for data in rows:
+            guild_id = int(data.get("guild_id") or 0)
             data.setdefault("guild_id", guild_id)
             lobby = Lobby.from_dict(data)
             self.lobbies[guild_id] = lobby

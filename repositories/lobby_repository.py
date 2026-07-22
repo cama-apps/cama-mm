@@ -77,50 +77,52 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
             row = cursor.fetchone()
             if not row:
                 return None
-            row_dict = dict(row)
-            lobby_id = row_dict["lobby_id"]
-            join_times = safe_json_loads(
-                row_dict.get("player_join_times"),
-                default={},
-                context=f"lobby_state.player_join_times lobby_id={lobby_id}",
-            )
-            return {
-                "lobby_id": lobby_id,
-                "guild_id": row_dict.get("guild_id", 0),
-                "players": safe_json_loads(
-                    row_dict.get("players"),
-                    default=[],
-                    context=f"lobby_state.players lobby_id={lobby_id}",
-                ),
-                "conditional_players": safe_json_loads(
-                    row_dict.get("conditional_players"),
-                    default=[],
-                    context=f"lobby_state.conditional_players lobby_id={lobby_id}",
-                ),
-                "player_join_times": {int(k): v for k, v in join_times.items()},
-                "status": row_dict["status"],
-                "created_by": row_dict["created_by"],
-                "created_at": row_dict["created_at"],
-                "message_id": row_dict.get("message_id"),
-                "channel_id": row_dict.get("channel_id"),
-                "thread_id": row_dict.get("thread_id"),
-                "embed_message_id": row_dict.get("embed_message_id"),
-                "origin_channel_id": row_dict.get("origin_channel_id"),
-            }
+            return self._deserialize_lobby_state(row)
+
+    @staticmethod
+    def _deserialize_lobby_state(row) -> dict:
+        """Decode one SQLite lobby row into the service-facing state shape."""
+        row_dict = dict(row)
+        lobby_id = row_dict["lobby_id"]
+        join_times = safe_json_loads(
+            row_dict.get("player_join_times"),
+            default={},
+            context=f"lobby_state.player_join_times lobby_id={lobby_id}",
+        )
+        return {
+            "lobby_id": lobby_id,
+            "guild_id": row_dict.get("guild_id", 0),
+            "players": safe_json_loads(
+                row_dict.get("players"),
+                default=[],
+                context=f"lobby_state.players lobby_id={lobby_id}",
+            ),
+            "conditional_players": safe_json_loads(
+                row_dict.get("conditional_players"),
+                default=[],
+                context=f"lobby_state.conditional_players lobby_id={lobby_id}",
+            ),
+            "player_join_times": {int(key): value for key, value in join_times.items()},
+            "status": row_dict["status"],
+            "created_by": row_dict["created_by"],
+            "created_at": row_dict["created_at"],
+            "message_id": row_dict.get("message_id"),
+            "channel_id": row_dict.get("channel_id"),
+            "thread_id": row_dict.get("thread_id"),
+            "embed_message_id": row_dict.get("embed_message_id"),
+            "origin_channel_id": row_dict.get("origin_channel_id"),
+        }
 
     def load_all_lobby_states(self) -> list[dict]:
-        """Return ``{"lobby_id", "guild_id"}`` for every persisted row.
+        """Return all decoded lobby states using one query and connection.
 
         Used on startup so the LobbyManagerService can rehydrate every guild's
         open lobby after a restart.
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT lobby_id, guild_id FROM lobby_state")
-            return [
-                {"lobby_id": row["lobby_id"], "guild_id": row["guild_id"]}
-                for row in cursor.fetchall()
-            ]
+            cursor.execute("SELECT * FROM lobby_state")
+            return [self._deserialize_lobby_state(row) for row in cursor.fetchall()]
 
     def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None:
         import logging

@@ -71,10 +71,8 @@ class FakeLobbyRepo(ILobbyRepository):
         return dict(row)
 
     def load_all_lobby_states(self) -> list[dict]:
-        return [
-            {"lobby_id": lobby_id, "guild_id": gid}
-            for (lobby_id, gid) in self._rows.keys()
-        ]
+        """Return decoded state rows without exposing the stored top-level dicts."""
+        return [dict(row) for row in self._rows.values()]
 
     def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None:
         normalized = _normalize_guild_id(guild_id)
