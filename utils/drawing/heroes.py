@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
 
 from PIL import Image, ImageDraw
 
@@ -592,8 +594,23 @@ def draw_hero_grid(
 # Hero Image Caching for Scout Report
 # -------------------------------------------------------------------------
 
-# Module-level cache for hero images
+# Original-size decoded images stay hot in memory, while the on-disk copy
+# survives process restarts and avoids repeat CDN requests after deploys.
 _hero_image_cache: dict[int, Image.Image] = {}
+_HERO_IMAGE_DISK_CACHE_DIR = Path(".cache/scout/heroes")
+_HERO_IMAGE_FETCH_WORKERS = 4
+
+
+def _hero_image_disk_path(hero_id: int) -> Path:
+    """Return the deterministic path for one original hero image."""
+    return _HERO_IMAGE_DISK_CACHE_DIR / f"{hero_id}.png"
+
+
+def _resized_hero_image(image: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """Return ``image`` at the requested size without mutating the cache."""
+    if image.size == size:
+        return image
+    return image.resize(size, Image.Resampling.LANCZOS)
 
 
 def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.Image | None:
@@ -611,14 +628,25 @@ def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.I
 
     from utils.hero_lookup import get_hero_image_url
 
-    # Check cache first
-    cache_key = hero_id
-    if cache_key in _hero_image_cache:
-        cached = _hero_image_cache[cache_key]
-        # Resize if needed
-        if cached.size != size:
-            return cached.resize(size, Image.Resampling.LANCZOS)
-        return cached
+    cached = _hero_image_cache.get(hero_id)
+    if cached is not None:
+        return _resized_hero_image(cached, size)
+
+    disk_path = _hero_image_disk_path(hero_id)
+    if disk_path.exists():
+        try:
+            with Image.open(disk_path) as source:
+                image = source.convert("RGBA")
+                image.load()
+            _hero_image_cache[hero_id] = image
+            return _resized_hero_image(image, size)
+        except Exception:
+            # A partial/corrupt file should fall through to a fresh CDN copy.
+            logger.debug(
+                "Failed to load cached hero image for hero_id=%s",
+                hero_id,
+                exc_info=True,
+            )
 
     # Fetch from CDN
     url = get_hero_image_url(hero_id)
@@ -628,12 +656,23 @@ def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.I
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()
-        img = Image.open(BytesIO(response.content)).convert("RGBA")
+        with Image.open(BytesIO(response.content)) as source:
+            img = source.convert("RGBA")
+            img.load()
         # Cache the original. Intentionally retained (not closed) for the
         # lifetime of the process so repeat lookups reuse the decoded image.
-        _hero_image_cache[cache_key] = img
-        # Return resized
-        return img.resize(size, Image.Resampling.LANCZOS)
+        _hero_image_cache[hero_id] = img
+        try:
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            disk_path.write_bytes(response.content)
+        except OSError:
+            # The memory cache is still useful in read-only deployments.
+            logger.debug(
+                "Failed to persist hero image for hero_id=%s",
+                hero_id,
+                exc_info=True,
+            )
+        return _resized_hero_image(img, size)
     except Exception:
         logger.debug("Failed to fetch hero image for hero_id=%s", hero_id, exc_info=True)
         return None
@@ -650,11 +689,26 @@ def _get_hero_images_batch(hero_ids: list[int], size: tuple[int, int] = (48, 27)
     Returns:
         Dict mapping hero_id -> PIL Image
     """
-    result = {}
-    for hero_id in hero_ids:
-        img = _fetch_hero_image(hero_id, size)
-        if img:
-            result[hero_id] = img
-    return result
+    unique_ids = list(dict.fromkeys(hero_ids))
+    resolved: dict[int, Image.Image] = {}
+    missing: list[int] = []
+    for hero_id in unique_ids:
+        cached = _hero_image_cache.get(hero_id)
+        if cached is None:
+            missing.append(hero_id)
+        else:
+            resolved[hero_id] = _resized_hero_image(cached, size)
 
+    if missing:
+        workers = min(_HERO_IMAGE_FETCH_WORKERS, len(missing))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            images = executor.map(
+                lambda hero_id: _fetch_hero_image(hero_id, size),
+                missing,
+            )
+            for hero_id, image in zip(missing, images, strict=True):
+                if image is not None:
+                    resolved[hero_id] = image
 
+    # Preserve the first-occurrence ordering of the old sequential path.
+    return {hero_id: resolved[hero_id] for hero_id in unique_ids if hero_id in resolved}
