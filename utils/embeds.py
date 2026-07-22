@@ -27,6 +27,40 @@ def _get_penalty_games(bankruptcy_repo, discord_id: int, guild_id: int | None) -
         return 0
 
 
+def _get_bulk_penalty_games(bankruptcy_repo, ids_by_guild) -> dict[int, int]:
+    """Load lobby bankruptcy penalties once per represented guild."""
+    if not bankruptcy_repo:
+        return {}
+
+    get_bulk_states = getattr(bankruptcy_repo, "get_bulk_states", None)
+    penalties: dict[int, int] = {}
+    for lookup_guild_id, discord_ids in ids_by_guild.items():
+        if callable(get_bulk_states):
+            try:
+                states = get_bulk_states(discord_ids, lookup_guild_id)
+                penalties.update(
+                    {
+                        discord_id: int(state.get("penalty_games_remaining") or 0)
+                        for discord_id, state in states.items()
+                    }
+                )
+                continue
+            except Exception:
+                pass
+
+        # Preserve compatibility with lightweight repository doubles and keep
+        # lobby rendering resilient if the bulk read fails.
+        penalties.update(
+            {
+                discord_id: _get_penalty_games(
+                    bankruptcy_repo, discord_id, lookup_guild_id
+                )
+                for discord_id in discord_ids
+            }
+        )
+    return penalties
+
+
 def format_player_list(
     players,
     player_ids,
@@ -69,6 +103,19 @@ def format_player_list(
         seen_ids.add(pid)
         unique_ids.append(pid)
 
+    penalty_ids_by_guild: dict[int | None, list[int]] = {}
+    for pid in unique_ids:
+        if pid is None or pid < 0:
+            continue
+        player = players_by_id.get(pid)
+        lookup_guild_id = (
+            guild_id if guild_id is not None else getattr(player, "guild_id", None)
+        )
+        penalty_ids_by_guild.setdefault(lookup_guild_id, []).append(pid)
+    penalty_games_by_id = _get_bulk_penalty_games(
+        bankruptcy_repo, penalty_ids_by_guild
+    )
+
     players_with_ratings = []
     for pid in unique_ids:
         player = players_by_id.get(pid)
@@ -91,8 +138,7 @@ def format_player_list(
 
         # Add tombstone if player has active bankruptcy penalty
         tombstone = ""
-        lookup_guild_id = guild_id if guild_id is not None else getattr(player, "guild_id", None)
-        if is_real_user and _get_penalty_games(bankruptcy_repo, pid, lookup_guild_id) > 0:
+        if is_real_user and penalty_games_by_id.get(pid, 0) > 0:
             tombstone = f"{TOMBSTONE_EMOJI} "
 
         if player is None:
