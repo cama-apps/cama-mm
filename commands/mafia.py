@@ -364,7 +364,7 @@ class MafiaCommands(commands.Cog):
         if channel is not None:
             if result.get("standings_message_id"):
                 try:
-                    board = await channel.fetch_message(result["standings_message_id"])
+                    board = channel.get_partial_message(result["standings_message_id"])
                     await board.unpin()
                 except discord.HTTPException:
                     pass
@@ -887,7 +887,7 @@ class MafiaCommands(commands.Cog):
         embed = await self._build_standings_embed(game)
         if game.standings_message_id:
             try:
-                msg = await channel.fetch_message(game.standings_message_id)
+                msg = channel.get_partial_message(game.standings_message_id)
                 await msg.edit(embed=embed)
                 return
             except discord.HTTPException:
@@ -1047,7 +1047,7 @@ class MafiaCommands(commands.Cog):
         # Unpin the standings board now that the game is over.
         if game.standings_message_id:
             try:
-                board = await channel.fetch_message(game.standings_message_id)
+                board = channel.get_partial_message(game.standings_message_id)
                 await board.unpin()
             except discord.HTTPException:
                 pass

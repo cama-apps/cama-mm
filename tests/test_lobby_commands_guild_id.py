@@ -46,6 +46,7 @@ class FakeMessage:
     def __init__(self):
         self.edits = []
         self.added_reactions = []
+        self.removed_reactions = []
         self.jump_url = "https://discord.com/channels/123/456/789"
         self.id = 789
 
@@ -53,7 +54,7 @@ class FakeMessage:
         self.edits.append({"embed": embed, "content": content})
 
     async def remove_reaction(self, emoji, user):
-        pass
+        self.removed_reactions.append((emoji, user))
 
     async def add_reaction(self, emoji):
         self.added_reactions.append(str(emoji))
@@ -75,13 +76,21 @@ class FakeThread:
         self.id = 999
         self.jump_url = "https://discord.com/channels/123/999"
         self.pinned_message = None
+        self.message = FakeMessage()
+        self.fetch_message_calls = []
+        self.partial_message_calls = []
 
     async def send(self, content=None, embed=None):
         msg = FakeMessage()
         return msg
 
     async def fetch_message(self, message_id):
-        return FakeMessage()
+        self.fetch_message_calls.append(message_id)
+        return self.message
+
+    def get_partial_message(self, message_id):
+        self.partial_message_calls.append(message_id)
+        return self.message
 
 
 class FakeChannel:
@@ -91,8 +100,15 @@ class FakeChannel:
         self.message = message or FakeMessage()
         self.sent_messages = []
         self.id = 456
+        self.fetch_message_calls = []
+        self.partial_message_calls = []
 
     async def fetch_message(self, message_id):
+        self.fetch_message_calls.append(message_id)
+        return self.message
+
+    def get_partial_message(self, message_id):
+        self.partial_message_calls.append(message_id)
         return self.message
 
     async def create_thread(self, name=None, message=None, auto_archive_duration=None):
@@ -398,8 +414,15 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
     _, lobby_service, player_service, _ = make_services()
 
     # Create lobby and set message IDs
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
-    lobby_service.set_lobby_message_id(message_id=12345, channel_id=100)
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    lobby_service.set_lobby_message_id(
+        message_id=12345,
+        channel_id=100,
+        guild_id=TEST_GUILD_ID,
+    )
 
     fake_channel = FakeChannel()
     bot = FakeBot(channel=fake_channel)
@@ -408,6 +431,118 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
 
     # This should not raise UnboundLocalError or TypeError
     await cog._sync_lobby_displays(lobby, guild_id=TEST_GUILD_ID)
+
+    assert fake_channel.fetch_message_calls == []
+    assert fake_channel.partial_message_calls == [12345]
+    assert len(fake_channel.message.edits) == 1
+
+
+@pytest.mark.asyncio
+async def test_remove_lobby_reaction_uses_partial_message_without_fetch():
+    """Removing a reaction should issue only the mutation request."""
+    _, lobby_service, player_service, _ = make_services()
+    lobby_service.get_or_create_lobby(creator_id=99, guild_id=TEST_GUILD_ID)
+    lobby_service.set_lobby_message_id(
+        message_id=12345,
+        channel_id=100,
+        guild_id=TEST_GUILD_ID,
+    )
+    fake_channel = FakeChannel()
+    cog = LobbyCommands(FakeBot(channel=fake_channel), lobby_service, player_service)
+    user = SimpleNamespace(id=42)
+
+    await cog._remove_user_lobby_reactions(user, guild_id=TEST_GUILD_ID)
+
+    assert fake_channel.fetch_message_calls == []
+    assert fake_channel.partial_message_calls == [12345]
+    assert fake_channel.message.removed_reactions == [("⚔️", user)]
+
+
+@pytest.mark.asyncio
+async def test_thread_embed_update_uses_partial_message_without_fetch():
+    """A trusted thread message ID does not require a preceding Discord GET."""
+    _, lobby_service, player_service, _ = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    lobby_service.set_lobby_message_id(
+        message_id=12345,
+        channel_id=100,
+        thread_id=999,
+        embed_message_id=54321,
+        guild_id=TEST_GUILD_ID,
+    )
+    fake_thread = FakeThread()
+    cog = LobbyCommands(FakeBot(channel=fake_thread), lobby_service, player_service)
+
+    await cog._update_thread_embed(lobby, guild_id=TEST_GUILD_ID)
+
+    assert fake_thread.fetch_message_calls == []
+    assert fake_thread.partial_message_calls == [54321]
+    assert len(fake_thread.message.edits) == 1
+
+
+@pytest.mark.asyncio
+async def test_existing_lobby_auto_join_edits_starter_once(monkeypatch_safe_defer):
+    """Successful auto-join must not refetch and re-edit the thread starter."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    message = FakeMessage()
+    channel = FakeChannel(message=message)
+    lobby_service.set_lobby_message_id(
+        message_id=message.id,
+        channel_id=channel.id,
+        thread_id=999,
+        embed_message_id=message.id,
+        guild_id=TEST_GUILD_ID,
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.channel = channel
+    cog = LobbyCommands(FakeBot(channel=channel), lobby_service, player_service)
+
+    await cog.lobby.callback(cog, interaction)
+
+    # One GET remains intentionally: it validates the persisted lobby message.
+    assert channel.fetch_message_calls == [message.id]
+    # _auto_join_lobby performs the sole mutation through a partial handle.
+    assert channel.partial_message_calls == [message.id]
+    assert len(message.edits) == 1
+    assert 1 in lobby_service.get_lobby(guild_id=TEST_GUILD_ID).players
+
+
+@pytest.mark.asyncio
+async def test_existing_member_keeps_single_repair_refresh(monkeypatch_safe_defer):
+    """An existing member still gets the explicit stale-display repair edit."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby.add_player(1)
+    message = FakeMessage()
+    channel = FakeChannel(message=message)
+    lobby_service.set_lobby_message_id(
+        message_id=message.id,
+        channel_id=channel.id,
+        thread_id=999,
+        embed_message_id=message.id,
+        guild_id=TEST_GUILD_ID,
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.channel = channel
+    cog = LobbyCommands(FakeBot(channel=channel), lobby_service, player_service)
+
+    await cog.lobby.callback(cog, interaction)
+
+    assert channel.fetch_message_calls == [message.id]
+    assert channel.partial_message_calls == [message.id]
+    assert len(message.edits) == 1
 
 
 @pytest.mark.asyncio

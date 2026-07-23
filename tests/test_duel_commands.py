@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import logging
 from dataclasses import replace
@@ -109,6 +110,7 @@ def interaction(message, recipient):
     channel = SimpleNamespace(
         id=CHANNEL_ID,
         fetch_message=AsyncMock(return_value=message),
+        get_partial_message=MagicMock(return_value=message),
         send=AsyncMock(return_value=message),
     )
     return SimpleNamespace(
@@ -468,7 +470,8 @@ async def test_recipient_button_and_command_share_handler(cog, interaction, duel
     duel_service.respond.reset_mock()
     interaction.response.defer.reset_mock()
     interaction.followup.send.reset_mock()
-    interaction.channel.fetch_message.reset_mock()
+    interaction.channel.get_partial_message.reset_mock()
+    interaction.channel.get_partial_message.return_value.edit.reset_mock()
     await DuelCommands.respond.callback(cog, interaction, "trial_by_combat")
 
     duel_service.respond.assert_called_once_with(GUILD_ID, RECIPIENT_ID, "trial_by_combat")
@@ -524,8 +527,9 @@ async def test_acceptance_edits_original_and_posts_approved_trial_detail(
 
     await cog.handle_response(interaction, 7, trial.value)
 
-    interaction.channel.fetch_message.assert_awaited_once_with(300)
-    original = await interaction.channel.fetch_message(300)
+    interaction.channel.get_partial_message.assert_called_once_with(300)
+    interaction.channel.fetch_message.assert_not_awaited()
+    original = interaction.channel.get_partial_message.return_value
     original.edit.assert_awaited_once()
     assert original.edit.await_args.kwargs["view"] is None
     assert _fields(original.edit.await_args.kwargs["embed"])["Status"] == "Accepted"
@@ -564,7 +568,9 @@ async def test_decline_edits_original_disables_buttons_and_posts_detail(
 
     await cog.handle_response(interaction, 7, "decline")
 
-    original = await interaction.channel.fetch_message(300)
+    interaction.channel.get_partial_message.assert_called_once_with(300)
+    interaction.channel.fetch_message.assert_not_awaited()
+    original = interaction.channel.get_partial_message.return_value
     original.edit.assert_awaited_once()
     assert original.edit.await_args.kwargs["view"] is None
     assert _fields(original.edit.await_args.kwargs["embed"])["Status"] == "Declined"
@@ -585,7 +591,9 @@ async def test_acceptance_funding_failure_voids_post_and_explains_refund(
 
     await cog.handle_response(interaction, 7, "trial_by_combat")
 
-    original = await interaction.channel.fetch_message(300)
+    interaction.channel.get_partial_message.assert_called_once_with(300)
+    interaction.channel.fetch_message.assert_not_awaited()
+    original = interaction.channel.get_partial_message.return_value
     original.edit.assert_awaited_once()
     edit = original.edit.await_args.kwargs
     assert edit["view"] is None
@@ -622,7 +630,7 @@ async def test_acceptance_funding_failure_still_announces_when_original_was_dele
         responded_at=1_700_000_100,
         next_reminder_at=None,
     )
-    interaction.channel.fetch_message.side_effect = discord.NotFound(
+    interaction.channel.get_partial_message.return_value.edit.side_effect = discord.NotFound(
         MagicMock(status=404),
         "message deleted",
     )
@@ -637,6 +645,8 @@ async def test_acceptance_funding_failure_still_announces_when_original_was_dele
     sent = interaction.followup.send.await_args
     assert "recipient could not fund the 500 JC wager" in sent.kwargs["content"]
     assert sent.kwargs["ephemeral"] is False
+    interaction.channel.get_partial_message.assert_called_once_with(300)
+    interaction.channel.fetch_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -893,7 +903,9 @@ async def test_due_expiry_edits_original_and_posts_without_mentions(
         ANY,
     )
     channel = bot.get_channel.return_value
-    message = await channel.fetch_message(challenge.message_id)
+    channel.get_partial_message.assert_called_once_with(challenge.message_id)
+    channel.fetch_message.assert_not_awaited()
+    message = channel.get_partial_message.return_value
     assert _fields(message.edit.await_args.kwargs["embed"])["Status"] == "Expired"
     assert message.edit.await_args.kwargs["view"] is None
     sent = channel.send.await_args
@@ -1052,7 +1064,9 @@ async def test_admin_resolve_supports_two_winners_and_void(
     await DuelCommands.resolve.callback(cog, interaction, 7, outcome)
 
     duel_service.resolve.assert_called_once_with(GUILD_ID, RECIPIENT_ID, 7, outcome)
-    original = await interaction.channel.fetch_message(300)
+    interaction.channel.get_partial_message.assert_called_once_with(300)
+    interaction.channel.fetch_message.assert_not_awaited()
+    original = interaction.channel.get_partial_message.return_value
     assert original.edit.await_args.kwargs["view"] is None
     assert _fields(original.edit.await_args.kwargs["embed"])["Status"] == status.value.title()
 
@@ -1076,6 +1090,103 @@ async def test_setup_restores_one_view_for_every_pending_challenge(
     message.edit.assert_awaited_once()
     assert isinstance(message.edit.await_args.kwargs["view"], DuelChallengeView)
     _assert_mentions_disabled(message.edit.await_args.kwargs["allowed_mentions"])
+    channel = bot.get_channel.return_value
+    channel.get_partial_message.assert_called_once_with(300)
+    channel.fetch_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_setup_caps_bound_recovery_and_registers_all_views_first(
+    bot, duel_service
+):
+    challenge_count = 12
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=index, message_id=300 + index)
+        for index in range(challenge_count)
+    ]
+
+    release_edits = asyncio.Event()
+    concurrency_reached = asyncio.Event()
+    active_edits = 0
+    peak_edits = 0
+    edit_count = 0
+    registered_counts: list[int] = []
+
+    async def edit(**_kwargs):
+        nonlocal active_edits, peak_edits, edit_count
+        registered_counts.append(bot.add_view.call_count)
+        active_edits += 1
+        edit_count += 1
+        peak_edits = max(peak_edits, active_edits)
+        if active_edits == duel_module._RECOVERY_EDIT_CONCURRENCY:
+            concurrency_reached.set()
+        await release_edits.wait()
+        active_edits -= 1
+
+    messages = {
+        challenge.message_id: SimpleNamespace(edit=AsyncMock(side_effect=edit))
+        for challenge in duel_service.list_pending_all.return_value
+    }
+    channel = bot.get_channel.return_value
+    channel.get_partial_message.side_effect = messages.__getitem__
+
+    setup_task = asyncio.create_task(setup(bot))
+    try:
+        await asyncio.wait_for(concurrency_reached.wait(), timeout=1)
+        assert bot.add_view.call_count == challenge_count
+        assert edit_count == duel_module._RECOVERY_EDIT_CONCURRENCY
+        assert peak_edits == duel_module._RECOVERY_EDIT_CONCURRENCY
+    finally:
+        release_edits.set()
+        await setup_task
+
+    assert edit_count == challenge_count
+    assert peak_edits <= duel_module._RECOVERY_EDIT_CONCURRENCY
+    assert registered_counts == [challenge_count] * challenge_count
+    channel.fetch_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_setup_deduplicates_cold_channel_resolution(bot, duel_service):
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=index, message_id=300 + index)
+        for index in range(3)
+    ]
+    messages = {
+        challenge.message_id: SimpleNamespace(edit=AsyncMock())
+        for challenge in duel_service.list_pending_all.return_value
+    }
+    channel = bot.fetch_channel.return_value
+    channel.get_partial_message.side_effect = messages.__getitem__
+    bot.get_channel.return_value = None
+
+    await setup(bot)
+
+    bot.fetch_channel.assert_awaited_once_with(CHANNEL_ID)
+    assert channel.get_partial_message.call_count == 3
+    channel.fetch_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_setup_isolates_bound_control_recovery_failures(bot, duel_service):
+    duel_service.list_pending_all.return_value = [
+        make_challenge(challenge_id=index, message_id=300 + index)
+        for index in range(3)
+    ]
+    messages = {
+        challenge.message_id: SimpleNamespace(edit=AsyncMock())
+        for challenge in duel_service.list_pending_all.return_value
+    }
+    messages[301].edit.side_effect = discord.DiscordException("edit failed")
+    channel = bot.get_channel.return_value
+    channel.get_partial_message.side_effect = messages.__getitem__
+
+    await setup(bot)
+
+    messages[300].edit.assert_awaited_once()
+    messages[301].edit.assert_awaited_once()
+    messages[302].edit.assert_awaited_once()
+    assert bot.add_view.call_count == 3
 
 
 @pytest.mark.asyncio

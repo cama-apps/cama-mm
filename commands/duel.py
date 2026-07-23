@@ -24,6 +24,8 @@ from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.duel")
 
+_RECOVERY_EDIT_CONCURRENCY = 5
+
 TRIAL_DETAILS = {
     DuelTrial.TRIAL_BY_COMBAT: (
         "Trial by Combat: best-of-three, one-versus-one Dota mid."
@@ -786,7 +788,7 @@ class DuelCommands(commands.Cog):
         if channel is None:
             return
         try:
-            message = await channel.fetch_message(challenge.message_id)
+            message = channel.get_partial_message(challenge.message_id)
             await message.edit(
                 embed=self.build_challenge_embed(challenge, flavor),
                 view=None,
@@ -914,24 +916,54 @@ async def setup(bot: commands.Bot) -> None:
     cog = DuelCommands(bot, duel_service, flavor_service)
     await bot.add_cog(cog)
     pending_challenges = await asyncio.to_thread(duel_service.list_pending_all)
+
+    bound_challenges: list[tuple[DuelChallenge, DuelChallengeView]] = []
+    unbound_challenges: list[DuelChallenge] = []
     for challenge in pending_challenges:
         if challenge.message_id is None:
-            await cog.restore_unbound_challenge(challenge)
+            unbound_challenges.append(challenge)
             continue
 
         view = DuelChallengeView(cog, challenge.challenge_id)
         bot.add_view(view, message_id=challenge.message_id)
-        channel = await cog._get_channel(challenge.channel_id)
-        if channel is None:
-            continue
+        bound_challenges.append((challenge, view))
+
+    channel_tasks: dict[int, asyncio.Task] = {}
+    edit_semaphore = asyncio.Semaphore(_RECOVERY_EDIT_CONCURRENCY)
+
+    def resolve_channel(channel_id: int) -> asyncio.Task:
+        task = channel_tasks.get(channel_id)
+        if task is None:
+            task = asyncio.create_task(cog._get_channel(channel_id))
+            channel_tasks[channel_id] = task
+        return task
+
+    async def restore_bound_controls(
+        challenge: DuelChallenge,
+        view: DuelChallengeView,
+    ) -> None:
         try:
-            message = await channel.fetch_message(challenge.message_id)
-            await message.edit(
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.DiscordException:
+            channel = await resolve_channel(challenge.channel_id)
+            if channel is None:
+                return
+            async with edit_semaphore:
+                message = channel.get_partial_message(challenge.message_id)
+                await message.edit(
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception:
             logger.exception(
                 "Unable to restore controls for duel challenge %s",
                 challenge.challenge_id,
             )
+
+    await asyncio.gather(
+        *(
+            restore_bound_controls(challenge, view)
+            for challenge, view in bound_challenges
+        )
+    )
+
+    for challenge in unbound_challenges:
+        await cog.restore_unbound_challenge(challenge)

@@ -1180,7 +1180,7 @@ async def on_raw_reaction_add(payload):
                             else None
                         )
                         if embed:
-                            message = await channel.fetch_message(payload.message_id)
+                            message = channel.get_partial_message(payload.message_id)
                             await message.edit(embed=embed)
                     except Exception as exc:
                         logger.error(
@@ -1216,7 +1216,7 @@ async def on_raw_reaction_add(payload):
                 channel = bot.get_channel(payload.channel_id)
                 if not channel:
                     channel = await bot.fetch_channel(payload.channel_id)
-                message = await channel.fetch_message(payload.message_id)
+                message = channel.get_partial_message(payload.message_id)
                 user = await bot.fetch_user(payload.user_id)
                 await message.remove_reaction("🔔", user)
             except Exception:
@@ -1239,7 +1239,7 @@ async def on_raw_reaction_add(payload):
             channel = bot.get_channel(payload.channel_id)
             if not channel:
                 channel = await bot.fetch_channel(payload.channel_id)
-            message = await channel.fetch_message(payload.message_id)
+            message = channel.get_partial_message(payload.message_id)
             await message.remove_reaction(
                 payload.emoji,
                 discord.Object(id=payload.user_id),
@@ -1442,7 +1442,7 @@ async def on_raw_reaction_remove(payload):
                         channel = bot.get_channel(payload.channel_id)
                         if not channel:
                             channel = await bot.fetch_channel(payload.channel_id)
-                        message = await channel.fetch_message(payload.message_id)
+                        message = channel.get_partial_message(payload.message_id)
                         await message.edit(embed=embed)
             except Exception as exc:
                 logger.error(f"Error handling readycheck reaction remove: {exc}", exc_info=True)

@@ -66,9 +66,14 @@ class FakeChannel:
     def __init__(self, message: FakeMessage):
         self.message = message
         self.fetched = []
+        self.partial = []
 
     async def fetch_message(self, message_id):
         self.fetched.append(message_id)
+        return self.message
+
+    def get_partial_message(self, message_id):
+        self.partial.append(message_id)
         return self.message
 
 
@@ -114,6 +119,8 @@ async def test_kick_removes_reaction_and_updates_message(monkeypatch):
 
     # Lobby message should be edited to reflect updated embed
     assert fake_message.edits, "Lobby embed should be refreshed after kick"
+    assert fake_channel.fetched == []
+    assert fake_channel.partial == [12345, 12345]
     # Confirmation message should be sent to the admin
     assert interaction.followup.messages
     assert "Kicked" in interaction.followup.messages[0]["content"]

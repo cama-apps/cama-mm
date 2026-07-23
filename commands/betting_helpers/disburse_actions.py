@@ -103,9 +103,8 @@ async def disburse_status(
         try:
             old_channel = cog.bot.get_channel(proposal.channel_id)
             if old_channel:
-                old_message = await old_channel.fetch_message(proposal.message_id)
-                if old_message:
-                    await old_message.delete()
+                old_message = old_channel.get_partial_message(proposal.message_id)
+                await old_message.delete()
         except discord.errors.NotFound:
             pass  # Message already deleted
         except Exception as e:
@@ -271,7 +270,7 @@ async def disburse_execute(
         if proposal.message_id and proposal.channel_id:
             channel = cog.bot.get_channel(proposal.channel_id)
             if channel:
-                msg = await channel.fetch_message(proposal.message_id)
+                msg = channel.get_partial_message(proposal.message_id)
                 disabled_view = discord.ui.View(timeout=None)
                 for method in cog.disburse_service.METHODS:
                     label = cog.disburse_service.METHOD_LABELS[method]
@@ -302,9 +301,7 @@ async def update_disburse_message(
         if not channel:
             return
 
-        message = await channel.fetch_message(proposal.message_id)
-        if not message:
-            return
+        message = channel.get_partial_message(proposal.message_id)
 
         embed = build_disburse_embed(proposal)
         await message.edit(embed=embed)

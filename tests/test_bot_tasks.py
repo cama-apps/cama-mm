@@ -330,7 +330,10 @@ async def test_retired_frogling_reaction_is_removed_from_active_lobby_message(
     lobby_service = MagicMock()
     lobby_service.get_lobby_message_id.return_value = 100
     message = SimpleNamespace(id=100, remove_reaction=AsyncMock())
-    channel = SimpleNamespace(fetch_message=AsyncMock(return_value=message))
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(return_value=message),
+    )
     bot_user = SimpleNamespace(id=999)
 
     with (
@@ -348,8 +351,53 @@ async def test_retired_frogling_reaction_is_removed_from_active_lobby_message(
     removed_emoji, removed_user = message.remove_reaction.await_args.args
     assert removed_emoji is payload.emoji
     assert removed_user.id == payload.user_id
+    channel.fetch_message.assert_not_awaited()
+    channel.get_partial_message.assert_called_once_with(payload.message_id)
     lobby_service.join_lobby.assert_not_called()
     lobby_service.join_lobby_conditional.assert_not_called()
+
+
+async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch(
+    bot_module,
+):
+    payload = SimpleNamespace(
+        user_id=123,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="🔔"),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = payload.message_id
+    message = SimpleNamespace(remove_reaction=AsyncMock())
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(return_value=message),
+    )
+    user = SimpleNamespace(id=payload.user_id)
+    cog = SimpleNamespace(
+        _execute_readycheck=AsyncMock(return_value=("error", {})),
+    )
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=cog),
+        patch.object(bot_module.bot, "get_guild", return_value=SimpleNamespace()),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(bot_module.bot, "fetch_user", AsyncMock(return_value=user)),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    channel.fetch_message.assert_not_awaited()
+    channel.get_partial_message.assert_called_once_with(payload.message_id)
+    message.remove_reaction.assert_awaited_once_with("🔔", user)
 
 
 async def test_lobby_ready_notification_recommends_readycheck_before_shuffle(
@@ -527,7 +575,8 @@ async def test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_c
     )
     readycheck_channel = SimpleNamespace(
         id=200,
-        fetch_message=AsyncMock(return_value=readycheck_message),
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(return_value=readycheck_message),
     )
     origin_channel = SimpleNamespace(id=300, send=AsyncMock())
     cog = LobbyCommands(bot_module.bot, lobby_service, MagicMock())
@@ -561,6 +610,9 @@ async def test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_c
     origin_channel.send.assert_awaited_once_with(
         "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
     )
+    readycheck_channel.fetch_message.assert_not_awaited()
+    assert readycheck_channel.get_partial_message.call_count == 4
+    readycheck_channel.get_partial_message.assert_called_with(payload.message_id)
 
 
 async def test_readycheck_completion_falls_back_when_origin_channel_fetch_fails(

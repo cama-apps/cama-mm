@@ -180,7 +180,7 @@ async def update_lobby_message_closed(
         channel = bot.get_channel(channel_id)
         if not channel:
             channel = await bot.fetch_channel(channel_id)
-        message = await channel.fetch_message(message_id)
+        message = channel.get_partial_message(message_id)
 
         import discord
         embed = discord.Embed(

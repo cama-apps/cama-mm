@@ -185,7 +185,7 @@ class DisburseVoteView(discord.ui.View):
                     if proposal.message_id and proposal.channel_id:
                         channel = self.cog.bot.get_channel(proposal.channel_id)
                         if channel:
-                            msg = await channel.fetch_message(proposal.message_id)
+                            msg = channel.get_partial_message(proposal.message_id)
                             # Create disabled view
                             disabled_view = discord.ui.View(timeout=None)
                             for item in self.children:
