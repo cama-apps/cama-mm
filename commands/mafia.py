@@ -49,6 +49,7 @@ ROLE_EMOJI = {
     MafiaRole.BOOKIE: "🎰",
 }
 GODFATHER_EMOJI = "👑"
+THREAD_MEMBER_CONCURRENCY = 4
 
 TWIST_LABEL = {
     MafiaTwist.BLOOD_MOON: "🌑 Blood Moon",
@@ -648,6 +649,40 @@ class MafiaCommands(commands.Cog):
     def _mark_announced(self, guild_id: int, game_date: str, phase: MafiaPhase) -> None:
         self._announced_phases.setdefault(guild_id, set()).add((game_date, phase.value))
 
+    async def _add_thread_members(
+        self,
+        thread: discord.Thread,
+        guild: discord.Guild,
+        players,
+        *,
+        member_kind: str,
+    ) -> None:
+        """Add cached guild members to a thread with bounded REST concurrency."""
+        semaphore = asyncio.Semaphore(THREAD_MEMBER_CONCURRENCY)
+
+        async def add_player(player) -> None:
+            member = guild.get_member(player.discord_id)
+            if member is None:
+                return
+
+            async with semaphore:
+                try:
+                    await thread.add_user(member)
+                except discord.HTTPException:
+                    logger.warning(
+                        "Could not add %s %s to thread",
+                        member_kind,
+                        player.discord_id,
+                    )
+
+        results = await asyncio.gather(
+            *(add_player(player) for player in players),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
     async def _post_setup(self, guild: discord.Guild, game) -> None:
         if self._was_announced(guild.id, game.game_date, MafiaPhase.SETUP):
             return
@@ -681,35 +716,36 @@ class MafiaCommands(commands.Cog):
             ),
             color=0x2C2F33,
         )
-        try:
-            msg = await channel.send(embed=embed)
-            await asyncio.to_thread(
-                self.mafia_service.repo.set_thread_ids,
-                game.game_id,
-                setup_message_id=msg.id,
-            )
-        except discord.HTTPException:
-            logger.exception("Failed to post mafia setup announcement")
+        mafia_players = [p for p in players if p.role == MafiaRole.MAFIA]
 
-        # Try to create a private mafia coordination thread.
-        try:
-            mafia_players = [p for p in players if p.role == MafiaRole.MAFIA]
-            if mafia_players:
+        async def post_public_announcement() -> None:
+            try:
+                msg = await channel.send(embed=embed)
+                await asyncio.to_thread(
+                    self.mafia_service.repo.set_thread_ids,
+                    game.game_id,
+                    setup_message_id=msg.id,
+                )
+            except discord.HTTPException:
+                logger.exception("Failed to post mafia setup announcement")
+
+        async def create_private_mafia_thread() -> None:
+            if not mafia_players:
+                return
+
+            try:
                 thread = await channel.create_thread(
                     name=f"Mafia #{game.game_id} — Mafia",
                     type=discord.ChannelType.private_thread,
                     auto_archive_duration=1440,
                     invitable=False,
                 )
-                for mp in mafia_players:
-                    member = guild.get_member(mp.discord_id)
-                    if member is not None:
-                        try:
-                            await thread.add_user(member)
-                        except discord.HTTPException:
-                            logger.warning(
-                                "Could not add mafia member %s to thread", mp.discord_id
-                            )
+                await self._add_thread_members(
+                    thread,
+                    guild,
+                    mafia_players,
+                    member_kind="mafia member",
+                )
                 gf_line = ""
                 gf = next((p for p in mafia_players if p.is_godfather), None)
                 if gf:
@@ -724,11 +760,23 @@ class MafiaCommands(commands.Cog):
                     game.game_id,
                     mafia_thread_id=thread.id,
                 )
-        except discord.HTTPException:
-            logger.warning(
-                "Could not create private mafia thread for guild %s; continuing without it",
-                guild.id,
-            )
+            except discord.HTTPException:
+                logger.warning(
+                    "Could not create private mafia thread for guild %s; "
+                    "continuing without it",
+                    guild.id,
+                )
+
+        # The announcement and private-thread route are independent. Await both
+        # so a failure cannot leave the other branch running after this returns.
+        setup_results = await asyncio.gather(
+            post_public_announcement(),
+            create_private_mafia_thread(),
+            return_exceptions=True,
+        )
+        for result in setup_results:
+            if isinstance(result, BaseException):
+                raise result
 
         self._mark_announced(guild.id, game.game_date, MafiaPhase.SETUP)
 
@@ -940,13 +988,12 @@ class MafiaCommands(commands.Cog):
             except discord.HTTPException:
                 logger.warning("Could not create graveyard thread")
                 return
-        for p in dead:
-            member = guild.get_member(p.discord_id)
-            if member is not None:
-                try:
-                    await thread.add_user(member)
-                except discord.HTTPException:
-                    pass
+        await self._add_thread_members(
+            thread,
+            guild,
+            dead,
+            member_kind="graveyard member",
+        )
 
     async def _post_resolution(self, guild: discord.Guild, game, summary: dict) -> None:
         if self._was_announced(guild.id, game.game_date, MafiaPhase.RESOLVED):
