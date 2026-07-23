@@ -7,6 +7,7 @@ extracted from interaction.guild.id.
 """
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -119,6 +120,20 @@ class FakeChannel:
         msg = FakeMessage()
         self.sent_messages.append(msg)
         return msg
+
+
+class _FixedMessageChannel(FakeChannel):
+    """Channel whose send returns the supplied controllable message."""
+
+    def __init__(self, message, trace=None):
+        super().__init__(message=message)
+        self.trace = trace
+
+    async def send(self, content=None, embed=None, view=None):
+        if self.trace is not None:
+            self.trace.append("message")
+        self.sent_messages.append(self.message)
+        return self.message
 
 
 class FakeResponse:
@@ -277,6 +292,208 @@ async def test_lobby_command_uses_guild_id(monkeypatch_safe_defer):
     reactions = interaction.channel.sent_messages[0].added_reactions
     assert "📋" in reactions
     assert all("frogling" not in reaction for reaction in reactions)
+
+
+@pytest.mark.asyncio
+async def test_new_lobby_publication_overlaps_decorations_with_thread_creation(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """Message precedes three bounded branches; reactions and persistence stay ordered."""
+    _, lobby_service, player_service, player_repo = make_services()
+    player_repo.add_player(1, TEST_GUILD_ID)
+    trace = []
+    started = set()
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+
+    def mark_started(branch):
+        started.add(branch)
+        if started == {"pin", "reactions", "thread"}:
+            all_started.set()
+
+    class PublicationMessage(FakeMessage):
+        def __init__(self):
+            super().__init__()
+            self.pin_finished = False
+            self.reactions_finished = False
+            self.thread_finished = False
+
+        async def pin(self, reason=None):
+            trace.append("pin:start")
+            mark_started("pin")
+            await release.wait()
+            self.pin_finished = True
+            trace.append("pin:end")
+
+        async def add_reaction(self, emoji):
+            rendered = str(emoji)
+            self.added_reactions.append(rendered)
+            trace.append(f"reaction:{rendered}")
+            if len(self.added_reactions) == 1:
+                mark_started("reactions")
+                await release.wait()
+            if len(self.added_reactions) == 4:
+                self.reactions_finished = True
+
+        async def create_thread(self, name=None, auto_archive_duration=None):
+            trace.append("thread:start")
+            mark_started("thread")
+            await release.wait()
+            self.thread_finished = True
+            trace.append("thread:end")
+            return FakeThread()
+
+    message = PublicationMessage()
+    channel = _FixedMessageChannel(message, trace)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.channel = channel
+    cog = LobbyCommands(
+        FakeBot(channel=channel),
+        lobby_service,
+        player_service,
+    )
+    monkeypatch.setattr(
+        cog,
+        "_auto_join_lobby",
+        AsyncMock(return_value=(False, None)),
+    )
+    original_persist = lobby_service.set_lobby_message_id
+
+    def persist_ids(**kwargs):
+        assert message.pin_finished
+        assert message.reactions_finished
+        assert message.thread_finished
+        trace.append("persist")
+        return original_persist(**kwargs)
+
+    monkeypatch.setattr(lobby_service, "set_lobby_message_id", persist_ids)
+
+    command = asyncio.create_task(cog.lobby.callback(cog, interaction))
+    try:
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        assert trace[0] == "message"
+        assert message.added_reactions == ["⚔️"]
+        assert not command.done()
+    finally:
+        release.set()
+    await command
+
+    assert message.added_reactions[0] == "⚔️"
+    assert "jopacoin" in message.added_reactions[1]
+    assert message.added_reactions[2:] == ["📋", "🔔"]
+    assert trace[-1] == "persist"
+    assert lobby_service.get_lobby_thread_id(guild_id=TEST_GUILD_ID) == 999
+
+
+@pytest.mark.asyncio
+async def test_new_lobby_optional_decoration_failures_remain_isolated(
+    monkeypatch,
+    monkeypatch_safe_defer,
+    caplog,
+):
+    """Pin/reaction failures retain their logging and do not mask thread success."""
+    _, lobby_service, player_service, player_repo = make_services()
+    player_repo.add_player(1, TEST_GUILD_ID)
+
+    class FailingDecorationMessage(FakeMessage):
+        async def pin(self, reason=None):
+            raise RuntimeError("pin failed")
+
+        async def add_reaction(self, emoji):
+            rendered = str(emoji)
+            self.added_reactions.append(rendered)
+            if len(self.added_reactions) == 2:
+                raise RuntimeError("reaction failed")
+
+    message = FailingDecorationMessage()
+    channel = _FixedMessageChannel(message)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.channel = channel
+    cog = LobbyCommands(
+        FakeBot(channel=channel),
+        lobby_service,
+        player_service,
+    )
+    monkeypatch.setattr(
+        cog,
+        "_auto_join_lobby",
+        AsyncMock(return_value=(False, None)),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="cama_bot.commands.lobby"):
+        await cog.lobby.callback(cog, interaction)
+
+    assert len(message.added_reactions) == 2
+    assert message.added_reactions[0] == "⚔️"
+    assert "jopacoin" in message.added_reactions[1]
+    assert lobby_service.get_lobby_thread_id(guild_id=TEST_GUILD_ID) == 999
+    assert "Lobby created!" in interaction.followup.messages[-1]["content"]
+    assert "Failed to pin lobby message: pin failed" in caplog.text
+    assert "Failed to add lobby reactions: reaction failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_new_lobby_thread_failure_awaits_decorations_before_cleanup(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """A required failure stays visible without leaving decoration tasks running."""
+    _, lobby_service, player_service, player_repo = make_services()
+    player_repo.add_player(1, TEST_GUILD_ID)
+    decorations_started = asyncio.Event()
+    release_decorations = asyncio.Event()
+
+    class FailingThreadMessage(FakeMessage):
+        def __init__(self):
+            super().__init__()
+            self.deleted = False
+            self.pin_finished = False
+            self.reactions_finished = False
+
+        async def pin(self, reason=None):
+            decorations_started.set()
+            await release_decorations.wait()
+            self.pin_finished = True
+
+        async def add_reaction(self, emoji):
+            self.added_reactions.append(str(emoji))
+            if len(self.added_reactions) == 4:
+                self.reactions_finished = True
+
+        async def create_thread(self, name=None, auto_archive_duration=None):
+            raise RuntimeError("thread failed")
+
+        async def delete(self):
+            self.deleted = True
+
+    message = FailingThreadMessage()
+    channel = _FixedMessageChannel(message)
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    interaction.channel = channel
+    cog = LobbyCommands(
+        FakeBot(channel=channel),
+        lobby_service,
+        player_service,
+    )
+    auto_join = AsyncMock(return_value=(False, None))
+    monkeypatch.setattr(cog, "_auto_join_lobby", auto_join)
+
+    command = asyncio.create_task(cog.lobby.callback(cog, interaction))
+    try:
+        await asyncio.wait_for(decorations_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert not command.done()
+    finally:
+        release_decorations.set()
+    await command
+
+    assert message.pin_finished
+    assert message.reactions_finished
+    assert message.deleted
+    assert lobby_service.get_lobby_thread_id(guild_id=TEST_GUILD_ID) is None
+    assert "Failed to create lobby thread" in interaction.followup.messages[-1]["content"]
+    auto_join.assert_not_awaited()
 
 
 @pytest.mark.asyncio

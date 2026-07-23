@@ -231,6 +231,49 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to pin lobby message: {exc}")
 
+    async def _add_lobby_reactions(self, message: discord.Message) -> None:
+        """Add lobby controls in their stable display order, best-effort."""
+        try:
+            await message.add_reaction("⚔️")
+            jopacoin_emoji = discord.PartialEmoji(
+                name="jopacoin",
+                id=JOPACOIN_EMOJI_ID,
+            )
+            await message.add_reaction(jopacoin_emoji)
+            await message.add_reaction("📋")
+            await message.add_reaction("🔔")
+        except Exception as exc:
+            logger.debug("Failed to add lobby reactions: %s", exc)
+
+    async def _create_lobby_thread_with_decorations(
+        self,
+        message: discord.Message,
+    ):
+        """Create the required thread while bounded optional decoration runs.
+
+        Pinning and the ordered reaction sequence are independent once the
+        starter message exists, so they run as two best-effort branches beside
+        thread creation. ``gather`` awaits every branch even when thread
+        creation fails; no publication work is detached from the command.
+        """
+
+        async def decorate_message() -> None:
+            await asyncio.gather(
+                self._safe_pin(message),
+                self._add_lobby_reactions(message),
+            )
+
+        thread_result, decoration_result = await asyncio.gather(
+            message.create_thread(name="🎮 Matchmaking Lobby"),
+            decorate_message(),
+            return_exceptions=True,
+        )
+        if isinstance(thread_result, BaseException):
+            raise thread_result
+        if isinstance(decoration_result, BaseException):
+            raise decoration_result
+        return thread_result
+
     async def _run_lobby_publication_wave(
         self,
         maintenance: list[tuple[str, Awaitable[object]]],
@@ -644,28 +687,11 @@ class LobbyCommands(commands.Cog):
             # Send channel message with embed
             channel_msg = await target_channel.send(embed=embed)
 
-            # Pin the lobby message for visibility
-            await self._safe_pin(channel_msg)
-
-            # Add reactions for joining, gamba notifications, rally alerts,
-            # and the readycheck shortcut.
-            try:
-                await channel_msg.add_reaction("⚔️")
-                # Add jopacoin emoji for subscribing to gamba notifications
-                jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
-                await channel_msg.add_reaction(jopacoin_emoji)
-                # Clipboard is a passive opt-in: subscribers are pinged when
-                # this lobby reaches the rally thresholds (8/10 and 9/10).
-                await channel_msg.add_reaction("📋")
-                # Bell triggers a ready check (equivalent to /readycheck)
-                await channel_msg.add_reaction("🔔")
-            except Exception as e:
-                logger.debug("Failed to add lobby reactions: %s", e)
-
             # Create thread from message (static name to avoid rate limits)
             try:
-                thread_name = "🎮 Matchmaking Lobby"
-                thread = await channel_msg.create_thread(name=thread_name)
+                thread = await self._create_lobby_thread_with_decorations(
+                    channel_msg,
+                )
 
                 # Store all IDs (embed is on channel_msg, which is also the thread starter)
                 # Also store origin_channel_id for rally notifications
