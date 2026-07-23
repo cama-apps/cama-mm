@@ -89,6 +89,7 @@ def test_bot_commands_registered(tmp_path):
                     "economy disburse",
                     "shop buy",
                     "shop pingedash",
+                    "shop pingedkevin",
                     "shop avoids",
                     "shop deals",
                     "shop mana",

@@ -2812,10 +2812,58 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         cooldown_seconds: int,
     ) -> dict[str, int | str | bool | None]:
         """Atomically charge for /shop pingedash and claim its persistent cooldown."""
+        return self._try_purchase_paid_ping(
+            discord_id,
+            guild_id,
+            cost=cost,
+            now=now,
+            cooldown_seconds=cooldown_seconds,
+            command_name="pingedash",
+        )
+
+    def try_purchase_pingedkevin(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        now: int,
+        cooldown_seconds: int,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically charge for /shop pingedkevin and claim its cooldown."""
+        return self._try_purchase_paid_ping(
+            discord_id,
+            guild_id,
+            cost=cost,
+            now=now,
+            cooldown_seconds=cooldown_seconds,
+            command_name="pingedkevin",
+        )
+
+    def _try_purchase_paid_ping(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        now: int,
+        cooldown_seconds: int,
+        command_name: str,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically charge and claim an independent paid-ping cooldown."""
+        command_config = {
+            "pingedash": ("last_pingedash", "Pingedash"),
+            "pingedkevin": ("last_pingedkevin", "PingedKevin"),
+        }
+        try:
+            cooldown_column, display_name = command_config[command_name]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported paid ping command: {command_name}") from exc
+
         if cost < 0:
-            raise ValueError("Pingedash cost cannot be negative")
+            raise ValueError(f"{display_name} cost cannot be negative")
         if cooldown_seconds < 0:
-            raise ValueError("Pingedash cooldown cannot be negative")
+            raise ValueError(f"{display_name} cooldown cannot be negative")
 
         guild_id = self.normalize_guild_id(guild_id)
         cooldown_cutoff = now - cooldown_seconds
@@ -2823,22 +2871,22 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor = conn.cursor()
             self._set_economy_ledger_context(
                 cursor,
-                source="pingedash",
+                source=command_name,
                 actor_id=discord_id,
                 related_type="command",
-                related_id="pingedash",
-                reason="pingedash purchase",
+                related_id=command_name,
+                reason=f"{command_name} purchase",
             )
             try:
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE players
                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
-                        last_pingedash = ?,
+                        {cooldown_column} = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                       AND COALESCE(jopacoin_balance, 0) >= ?
-                      AND (last_pingedash IS NULL OR last_pingedash <= ?)
+                      AND ({cooldown_column} IS NULL OR {cooldown_column} <= ?)
                     """,
                     (cost, now, discord_id, guild_id, cost, cooldown_cutoff),
                 )
@@ -2872,8 +2920,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 }
 
             row = cursor.execute(
-                """
-                SELECT jopacoin_balance, last_pingedash
+                f"""
+                SELECT jopacoin_balance, {cooldown_column} AS last_paid_ping
                 FROM players
                 WHERE discord_id = ? AND guild_id = ?
                 """,
@@ -2888,13 +2936,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 }
 
             balance = int(row["jopacoin_balance"] or 0)
-            last_pingedash = row["last_pingedash"]
-            if last_pingedash is not None and int(last_pingedash) > cooldown_cutoff:
+            last_paid_ping = row["last_paid_ping"]
+            if last_paid_ping is not None and int(last_paid_ping) > cooldown_cutoff:
                 return {
                     "success": False,
                     "reason": "on_cooldown",
                     "balance": balance,
-                    "cooldown_ends_at": int(last_pingedash) + cooldown_seconds,
+                    "cooldown_ends_at": int(last_paid_ping) + cooldown_seconds,
                 }
             return {
                 "success": False,
