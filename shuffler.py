@@ -76,6 +76,17 @@ class _RoleAssignmentMetrics:
     role_values: tuple[float, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _TeamRoleMetricsSummary:
+    """Role metrics and admissible bounds for one recurring five-player team."""
+
+    metrics: tuple[_RoleAssignmentMetrics, ...]
+    min_team_value: float
+    max_team_value: float
+    min_off_role_count: int
+    team_values_are_finite: bool
+
+
 @dataclass(slots=True)
 class _ShuffleScoringContext:
     """Request-local values and role metrics reused across candidate splits."""
@@ -84,6 +95,9 @@ class _ShuffleScoringContext:
     team_metrics: dict[
         tuple[tuple[int, ...], int], tuple[_RoleAssignmentMetrics, ...]
     ] = field(default_factory=dict)
+    team_metric_summaries: dict[tuple[int, ...], _TeamRoleMetricsSummary] = field(
+        default_factory=dict
+    )
     assigned_metrics: dict[
         tuple[tuple[int, ...], tuple[str, ...]], _RoleAssignmentMetrics
     ] = field(default_factory=dict)
@@ -632,6 +646,44 @@ class BalancedShuffler:
                 }
             )
         return metrics
+
+    def _team_role_metrics_summary(
+        self,
+        players: list[Player],
+        max_assignments: int,
+        scoring_context: _ShuffleScoringContext,
+    ) -> _TeamRoleMetricsSummary:
+        """Return cached metrics plus conservative bounds for split pruning."""
+        cache_key = (max_assignments, *map(id, players))
+        cached = scoring_context.team_metric_summaries.get(cache_key)
+        if cached is not None:
+            return cached
+
+        metrics = self._team_role_metrics(players, max_assignments, scoring_context)
+        team_values_are_finite = bool(metrics) and all(
+            math.isfinite(metric.team_value) for metric in metrics
+        )
+        if team_values_are_finite:
+            summary = _TeamRoleMetricsSummary(
+                metrics=metrics,
+                min_team_value=min(metric.team_value for metric in metrics),
+                max_team_value=max(metric.team_value for metric in metrics),
+                min_off_role_count=min(metric.off_role_count for metric in metrics),
+                team_values_are_finite=True,
+            )
+        else:
+            # Preserve non-finite/no-result scoring behavior by bypassing the
+            # stronger bound for this team.
+            summary = _TeamRoleMetricsSummary(
+                metrics=metrics,
+                min_team_value=0.0,
+                max_team_value=0.0,
+                min_off_role_count=0,
+                team_values_are_finite=False,
+            )
+
+        scoring_context.team_metric_summaries[cache_key] = summary
+        return summary
 
     def _assigned_role_metrics(
         self,
@@ -1458,15 +1510,60 @@ class BalancedShuffler:
         logger.info(f"Branch & bound: greedy upper bound = {best_score:.1f}")
 
         # Precompute player values for fast lower bound calculations
-        player_values = {
-            p.name: self._player_value(p, scoring_context)
-            for p in players
-        }
+        player_values = [
+            self._player_value(player, scoring_context) for player in players
+        ]
 
         # Track pruning statistics
         pruned_player_selections = 0
         pruned_team_splits = 0
         evaluated_matchups = 0
+
+        # Selection-wide bounds omit role and per-team constraint terms. They
+        # are admissible only while every omitted term is nonnegative.
+        base_score_terms_nonnegative = (
+            math.isfinite(self.off_role_flat_penalty)
+            and self.off_role_flat_penalty >= 0
+            and math.isfinite(self.role_matchup_delta_weight)
+            and self.role_matchup_delta_weight >= 0
+            and (
+                not avoids
+                or (
+                    math.isfinite(self.soft_avoid_penalty)
+                    and self.soft_avoid_penalty >= 0
+                )
+            )
+            and (
+                not deals
+                or (
+                    math.isfinite(self.package_deal_penalty)
+                    and self.package_deal_penalty >= 0
+                )
+            )
+        )
+        recent_score_term_nonnegative = (
+            math.isfinite(self.recent_match_penalty_weight)
+            and self.recent_match_penalty_weight >= 0
+        )
+        score_role_assignments = self._score_role_assignments_for_matchup
+        score_unconstrained_assignments = (
+            self._score_unconstrained_role_assignments
+        )
+        get_team_metrics_summary = self._team_role_metrics_summary
+
+        # On the unconstrained path, all remaining role-score components are
+        # nonnegative. This lets recurring five-player team summaries provide
+        # a tighter admissible bound before exploring assignment pairs.
+        use_split_role_bound = (
+            base_score_terms_nonnegative
+            and not avoids
+            and not deals
+            and (not self.region_split or self.region_split_penalty <= 0)
+            and getattr(score_role_assignments, "__func__", None)
+            is BalancedShuffler._score_role_assignments_for_matchup
+            and getattr(score_unconstrained_assignments, "__func__", None)
+            is BalancedShuffler._score_unconstrained_role_assignments
+        )
 
         # Step 2: Iterate through all ways to select 10 players from 14
         # C(14,10) = C(14,4) = 1001 combinations
@@ -1489,7 +1586,7 @@ class BalancedShuffler:
             )
 
             # Rating spread penalty: incentivize selecting players of closer skill
-            selected_value_list = [player_values[p.name] for p in selected_players]
+            selected_value_list = [player_values[i] for i in selected_indices]
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_value_list)
             lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_value_list)
             combo_penalty = (
@@ -1501,7 +1598,11 @@ class BalancedShuffler:
 
             # All remaining score components are nonnegative after accounting
             # for the combination-wide RD priority bonus.
-            if combo_lower_bound >= best_score:
+            if (
+                base_score_terms_nonnegative
+                and recent_score_term_nonnegative
+                and combo_lower_bound >= best_score
+            ):
                 pruned_player_selections += 1
                 continue
 
@@ -1512,28 +1613,81 @@ class BalancedShuffler:
             )
             lower_bound = recent_penalty + combo_lower_bound
 
+            # This bound is constant for all 126 splits in the selection. Avoid
+            # entering the inner loop when none can improve the incumbent.
+            if base_score_terms_nonnegative and lower_bound >= best_score:
+                pruned_team_splits += len(_UNIQUE_TEAM_SPLITS)
+                continue
+
             # Step 3: Iterate once through each unordered team split with pruning.
             for team1_indices, team2_indices in _UNIQUE_TEAM_SPLITS:
-                # Prune if lower bound >= best score
-                if lower_bound >= best_score:
-                    pruned_team_splits += 1
-                    continue
-
                 team1_players = [selected_players[i] for i in team1_indices]
                 team2_players = [selected_players[i] for i in team2_indices]
 
                 # Step 4: Full role optimization (only for promising splits)
-                evaluated_matchups += 1
-                team1_roles, team2_roles, base_score = self._score_role_assignments_for_matchup(
-                    team1_players,
-                    team2_players,
-                    max_assignments_per_team=3,
-                    avoids=avoids,
-                    deals=deals,
-                    _scoring_context=scoring_context,
-                    _rd_priority=rd_priority,
-                )
+                if use_split_role_bound:
+                    team1_summary = get_team_metrics_summary(
+                        team1_players, 3, scoring_context
+                    )
+                    team2_summary = get_team_metrics_summary(
+                        team2_players, 3, scoring_context
+                    )
 
+                    # Every assignment's value lies in its team's interval.
+                    # The distance between disjoint intervals is therefore a
+                    # lower bound on value_diff; overlapping intervals have a
+                    # zero lower bound. Minimum off-role counts are independent
+                    # lower bounds, and the omitted role-matchup term is
+                    # nonnegative on this guarded path.
+                    if (
+                        team1_summary.team_values_are_finite
+                        and team2_summary.team_values_are_finite
+                    ):
+                        min_value_diff = max(
+                            0.0,
+                            team1_summary.min_team_value
+                            - team2_summary.max_team_value,
+                            team2_summary.min_team_value
+                            - team1_summary.max_team_value,
+                        )
+                        min_off_role_penalty = (
+                            team1_summary.min_off_role_count
+                            + team2_summary.min_off_role_count
+                        ) * self.off_role_flat_penalty
+                        split_lower_bound = (
+                            min_value_diff + min_off_role_penalty - rd_priority
+                        )
+                        split_lower_bound += recent_penalty
+                        split_lower_bound += combo_penalty
+
+                        if (
+                            math.isfinite(split_lower_bound)
+                            and split_lower_bound >= best_score
+                        ):
+                            pruned_team_splits += 1
+                            continue
+
+                    team1_roles, team2_roles, base_score = (
+                        score_unconstrained_assignments(
+                            team1_summary.metrics,
+                            team2_summary.metrics,
+                            rd_priority,
+                        )
+                    )
+                else:
+                    team1_roles, team2_roles, base_score = (
+                        score_role_assignments(
+                            team1_players,
+                            team2_players,
+                            max_assignments_per_team=3,
+                            avoids=avoids,
+                            deals=deals,
+                            _scoring_context=scoring_context,
+                            _rd_priority=rd_priority,
+                        )
+                    )
+
+                evaluated_matchups += 1
                 total_score = base_score + recent_penalty + combo_penalty
 
                 if total_score < best_score:
