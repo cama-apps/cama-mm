@@ -566,6 +566,14 @@ class SchemaManager:
                 "add_dig_action_history_indexes",
                 self._migration_add_dig_action_history_indexes,
             ),
+            (
+                "add_tip_guild_lookup_indexes",
+                self._migration_add_tip_guild_lookup_indexes,
+            ),
+            (
+                "add_rating_history_chronology_indexes",
+                self._migration_add_rating_history_chronology_indexes,
+            ),
             # Persist the current or pending route through each Dig layer.
             (
                 "add_route_state_to_tunnels",
@@ -651,6 +659,36 @@ class SchemaManager:
         # action pay for two redundant index writes.
         cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_actor")
         cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_target")
+
+    def _migration_add_tip_guild_lookup_indexes(self, cursor) -> None:
+        """Cover guild-scoped tip histories and aggregate scans."""
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tip_transactions_guild_sender_time
+            ON tip_transactions(guild_id, sender_id, timestamp DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tip_transactions_guild_recipient_time
+            ON tip_transactions(guild_id, recipient_id, timestamp DESC)
+            """
+        )
+
+    def _migration_add_rating_history_chronology_indexes(self, cursor) -> None:
+        """Cover recent guild and player rating-history reads."""
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rating_history_guild_time
+            ON rating_history(guild_id, timestamp DESC)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_rating_history_guild_player_time
+            ON rating_history(guild_id, discord_id, timestamp DESC)
+            """
+        )
 
     def _migration_add_route_state_to_tunnels(self, cursor) -> None:
         """Persist the active or pending layer route offer."""

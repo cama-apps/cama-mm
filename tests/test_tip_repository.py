@@ -2,6 +2,8 @@
 Tests for TipRepository and tip_atomic() in PlayerRepository.
 """
 
+import sqlite3
+
 import pytest
 
 from repositories.player_repository import PlayerRepository
@@ -52,6 +54,31 @@ class TestTipRepository:
 
         assert tip_id is not None
         assert tip_id > 0
+
+    def test_guild_scoped_queries_have_composite_indexes(self, repo_db_path):
+        with sqlite3.connect(repo_db_path) as conn:
+            indexes = {
+                row[1]: [
+                    column[2]
+                    for column in conn.execute(
+                        f"PRAGMA index_info('{row[1]}')"
+                    ).fetchall()
+                ]
+                for row in conn.execute(
+                    "PRAGMA index_list('tip_transactions')"
+                ).fetchall()
+            }
+
+        assert indexes["idx_tip_transactions_guild_sender_time"] == [
+            "guild_id",
+            "sender_id",
+            "timestamp",
+        ]
+        assert indexes["idx_tip_transactions_guild_recipient_time"] == [
+            "guild_id",
+            "recipient_id",
+            "timestamp",
+        ]
 
     def test_log_tip_stores_correct_values(self, tip_repo, player_repo):
         """Test that log_tip stores the correct values."""

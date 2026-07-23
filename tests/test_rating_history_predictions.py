@@ -1,9 +1,42 @@
+import sqlite3
+
 import pytest
 
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
+
+
+def test_recent_rating_history_queries_use_chronology_indexes(repo_db_path):
+    with sqlite3.connect(repo_db_path) as conn:
+        guild_plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM rating_history
+            WHERE guild_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (TEST_GUILD_ID, 2000),
+        ).fetchall()
+        player_plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM rating_history
+            WHERE discord_id = ? AND guild_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (1, TEST_GUILD_ID, 50),
+        ).fetchall()
+
+    assert any("idx_rating_history_guild_time" in row[3] for row in guild_plan)
+    assert any(
+        "idx_rating_history_guild_player_time" in row[3] for row in player_plan
+    )
+    assert not any("TEMP B-TREE FOR ORDER BY" in row[3] for row in guild_plan)
+    assert not any("TEMP B-TREE FOR ORDER BY" in row[3] for row in player_plan)
 
 
 def test_record_match_stores_predictions_and_history(repo_db_path):
