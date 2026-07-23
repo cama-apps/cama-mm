@@ -13,6 +13,10 @@ import random
 import time
 
 import services.dig_service as dig_service
+from domain.models.boss_stingers import (
+    CURSE_HALVE_NEXT_WAGER,
+    CURSE_NO_SCOUT_NEXT_DIG,
+)
 from repositories.dig_repository import TunnelStateConflictError
 from services.dig._common import (
     _luminosity_combat_penalty,
@@ -63,6 +67,82 @@ class BossCombatMixin:
     Composed into :class:`~services.dig_service.DigService`; relies on the
     attributes and helpers that the other mixins and the constructor provide.
     """
+
+    @staticmethod
+    def _get_stinger_curses(tunnel: dict) -> dict:
+        curse_raw = tunnel.get("stinger_curse")
+        try:
+            curses = json.loads(curse_raw) if curse_raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return curses if isinstance(curses, dict) else {}
+
+    def _consume_stinger_curse(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        curse_id: str,
+    ) -> bool:
+        """Atomically consume one active boss stinger curse."""
+        curses = self._get_stinger_curses(tunnel)
+        if not curses.get(curse_id):
+            return False
+
+        curse_raw = tunnel.get("stinger_curse")
+        curses.pop(curse_id, None)
+        if not any(
+            key != "_boss_id" and bool(value)
+            for key, value in curses.items()
+        ):
+            curses.pop("_boss_id", None)
+        encoded = json.dumps(curses) if curses else None
+        self.dig_repo.atomic_tunnel_balance_update(
+            discord_id,
+            guild_id,
+            tunnel_updates={"stinger_curse": encoded},
+            require_tunnel_state={"stinger_curse": curse_raw},
+        )
+        tunnel["stinger_curse"] = encoded
+        return True
+
+    def _resolve_new_boss_wager(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        wager: int,
+    ) -> tuple[int, dict | None]:
+        """Apply the one-use wager curse, then validate the effective stake."""
+        wager_curse_applied = self._get_stinger_curses(tunnel).get(
+            CURSE_HALVE_NEXT_WAGER,
+            False,
+        )
+        effective_wager = (
+            max(1, math.ceil(wager / 2))
+            if wager_curse_applied
+            else wager
+        )
+        balance = self.player_repo.get_balance(discord_id, guild_id)
+        if balance < effective_wager:
+            return effective_wager, self._error(
+                f"You only have {balance} JC (wager: {effective_wager})."
+            )
+        if wager_curse_applied:
+            try:
+                self._consume_stinger_curse(
+                    discord_id,
+                    guild_id,
+                    tunnel,
+                    CURSE_HALVE_NEXT_WAGER,
+                )
+            except TunnelStateConflictError:
+                return effective_wager, self._boss_resolution_conflict_result(
+                    discord_id,
+                    guild_id,
+                )
+        return effective_wager, None
+
     def _activate_boss_prep(
         self,
         discord_id: int,
@@ -767,9 +847,14 @@ class BossCombatMixin:
                 )
             ):
                 return self._error("Boss wagers are only available on the final phase.")
-            balance = self.player_repo.get_balance(discord_id, guild_id)
-            if balance < wager:
-                return self._error(f"You only have {balance} JC (wager: {wager}).")
+            wager, wager_error = self._resolve_new_boss_wager(
+                discord_id,
+                guild_id,
+                tunnel,
+                wager,
+            )
+            if wager_error is not None:
+                return wager_error
 
         if has_stale_carry:
             self._clear_carried_wager(boss_progress, at_boss)
@@ -1581,9 +1666,14 @@ class BossCombatMixin:
                 )
             ):
                 return self._error("Boss wagers are only available on the final phase.")
-            balance = self.player_repo.get_balance(discord_id, guild_id)
-            if balance < wager:
-                return self._error(f"You only have {balance} JC (wager: {wager}).")
+            wager, wager_error = self._resolve_new_boss_wager(
+                discord_id,
+                guild_id,
+                tunnel,
+                wager,
+            )
+            if wager_error is not None:
+                return wager_error
 
         if has_stale_carry:
             self._clear_carried_wager(boss_progress, at_boss)
@@ -3224,6 +3314,20 @@ class BossCombatMixin:
         has_lantern = any(i.get("item_type") == "lantern" for i in inventory)
         if not (has_great_lantern or has_lantern):
             return self._error("You need a Lantern to scout the boss.")
+
+        try:
+            scout_blocked = self._consume_stinger_curse(
+                discord_id,
+                guild_id,
+                tunnel,
+                CURSE_NO_SCOUT_NEXT_DIG,
+            )
+        except TunnelStateConflictError:
+            return self._boss_resolution_conflict_result(discord_id, guild_id)
+        if scout_blocked:
+            return self._error(
+                "A boss curse clouds the path. Your Lantern was not consumed."
+            )
 
         enhanced = has_great_lantern
         if not enhanced:

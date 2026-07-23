@@ -411,8 +411,11 @@ class ProgressionMixin:
         return max(1, int(cost * multiplier))
 
     def _calculate_paid_dig_cost(self, tunnel: dict, paid_count: int) -> int:
-        cost_index = min(paid_count, len(PAID_DIG_COSTS) - 1)
-        paid_dig_cost = PAID_DIG_COSTS[cost_index]
+        if paid_count < len(PAID_DIG_COSTS):
+            paid_dig_cost = PAID_DIG_COSTS[paid_count]
+        else:
+            doublings = paid_count - len(PAID_DIG_COSTS) + 1
+            paid_dig_cost = PAID_DIG_COSTS[-1] * (2 ** doublings)
         prestige_lvl = tunnel.get("prestige_level", 0) or 0
         asc = self._get_ascension_effects(prestige_lvl)
         if asc.get("paid_dig_cost_multiplier"):
