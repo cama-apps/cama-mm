@@ -1166,6 +1166,7 @@ BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
 PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
 PLAYER_HIT_CEILING: float = 0.90                   # hard ceiling — luminosity already eats hit chance, so leave a wider cap
 BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
+BOSS_WAGER_MAX_JC: int = 1_000                     # hard cap for newly submitted boss wagers
 BOSS_ROUND_CAP: int = 20                           # safety valve against infinite loops
 WIN_CHANCE_CAP: float = 0.95                       # ceiling on displayed/computed win probability
 WIN_CHANCE_FLOOR: float = 0.05                     # floor on displayed/computed win probability ("miracle" chance)

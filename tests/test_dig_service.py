@@ -2943,6 +2943,38 @@ class TestBossErrors:
         assert result["success"] is False
         assert "won" not in result
 
+    @pytest.mark.parametrize("resolver_name", ["fight_boss", "start_boss_duel"])
+    @pytest.mark.parametrize(
+        ("wager", "expected_success"),
+        [(1_000, True), (1_001, False)],
+    )
+    def test_boss_wager_cap(
+        self,
+        resolver_name,
+        wager,
+        expected_success,
+        dig_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+        monkeypatch,
+    ):
+        """Both boss resolvers accept 1,000 JC and reject larger new wagers."""
+        _register_player(player_repository, balance=2_000)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        resolver = getattr(dig_service, resolver_name)
+        result = resolver(10001, guild_id, "bold", wager=wager)
+
+        assert result["success"] is expected_success
+        if not expected_success:
+            assert result["error"] == "Boss wagers cannot exceed 1,000 JC."
+            assert player_repository.get_balance(10001, guild_id) == balance_before
+
     def test_fight_boss_insufficient_balance_error(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Wager exceeding balance returns error, not a fight result."""
         _register_player(player_repository, balance=10)
@@ -3398,6 +3430,52 @@ def _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, *
     return p
 
 
+class TestMainDigAdvanceCap:
+    """The primary Dig result cannot exceed 20 blocks after bonuses."""
+
+    def test_direct_dig_caps_advance_after_all_bonuses(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        uid = 20090
+        _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        dig_service.set_temp_buff(uid, guild_id, {
+            "id": "power",
+            "name": "Power",
+            "duration_digs": 2,
+            "effect": {"advance_bonus": 50},
+        })
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
+
+        result = dig_service.dig(uid, guild_id)
+
+        assert result["success"], result
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
+
+    def test_advertised_advance_range_is_capped_after_all_bonuses(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        uid = 20091
+        _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id,
+        )
+        dig_service.set_temp_buff(uid, guild_id, {
+            "id": "power",
+            "name": "Power",
+            "duration_digs": 2,
+            "effect": {"advance_bonus": 50},
+        })
+
+        terminal, preconditions = dig_service.dig_with_preconditions(uid, guild_id)
+
+        assert terminal is None
+        assert preconditions["advance_min"] == 20
+        assert preconditions["advance_max"] == 20
+
+
 class TestApplyDigOutcomeSecondaryPaths:
     """Bug-catching tests for apply_dig_outcome (DM-decided path)."""
 
@@ -3433,6 +3511,22 @@ class TestApplyDigOutcomeSecondaryPaths:
         assert tunnel["max_depth"] == 15, (
             f"max_depth not updated: got {tunnel['max_depth']}"
         )
+
+    def test_dm_dig_caps_main_advance_at_20(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        uid = 20110
+        p = _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+
+        result = dig_service.apply_dig_outcome(
+            p,
+            {"advance": 50, "jc_earned": 0, "cave_in": False, "event_id": ""},
+        )
+
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
 
     def test_max_depth_does_not_regress_on_dm_cave_in(self, dig_service, dig_repo, player_repository, guild_id):
         """Finding 1: max_depth must not decrease when a cave-in knocks depth back."""
@@ -3634,6 +3728,22 @@ class TestExecuteDeterministicOutcomePaths:
         assert tunnel["max_depth"] >= 10, (
             f"max_depth not written by deterministic path: {tunnel['max_depth']}"
         )
+
+    def test_deterministic_dig_caps_advance_after_all_bonuses(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        uid = 20205
+        p = _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        p["buff_advance_bonus"] = 50
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
+
+        result = dig_service._execute_deterministic_outcome(p)
+
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
 
     def test_milestone_not_re_awarded_after_knockback_deterministic(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch

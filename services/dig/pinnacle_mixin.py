@@ -98,6 +98,9 @@ class PinnacleMixin:
 
         boss_progress = json.loads(tunnel.get("boss_progress") or "{}")
         entry = self._read_boss_progress_entry(boss_progress, PINNACLE_DEPTH)
+        carried = self._get_active_pinnacle_carried_wager(
+            tunnel, boss_progress, PINNACLE_DEPTH,
+        )
         last_outcome = entry.get("last_outcome")
         first_meet_seen = bool(entry.get("first_meet_seen", False))
 
@@ -137,6 +140,7 @@ class PinnacleMixin:
             "is_pinnacle": True,
             "phase": phase_idx,
             "phase_total": 3,
+            "carried_wager": carried[0] if carried else None,
             "luminosity_display": self._luminosity_combat_display(tunnel),
         }
 

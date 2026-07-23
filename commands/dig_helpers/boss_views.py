@@ -16,6 +16,7 @@ from commands.dig_helpers.route_views import (
     add_route_choice_fields,
     get_route_choice,
 )
+from services.dig_constants import BOSS_WAGER_MAX_JC
 from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -42,6 +43,23 @@ def _add_gear_broken_notice(embed: discord.Embed, result) -> None:
             "\n".join(f"• **{name}**" for name in gear_broken)
             + "\nThese items stay equipped with their effects disabled until repaired. "
             "Use **Repair All** in `/dig gear`."
+        ),
+        inline=False,
+    )
+
+
+def _add_carried_wager_notice(embed: discord.Embed, boss_info) -> None:
+    raw_amount = getattr(boss_info, "carried_wager", None)
+    try:
+        amount = int(raw_amount)
+    except (TypeError, ValueError):
+        return
+    if amount <= 0:
+        return
+    embed.add_field(
+        name="Carried Wager",
+        value=(
+            f"**{amount:,}** {JOPACOIN_EMOTE} is already riding on this phase."
         ),
         inline=False,
     )
@@ -108,8 +126,8 @@ class BossWagerModal(discord.ui.Modal):
     )
 
     wager = discord.ui.TextInput(
-        label="Wager Amount",
-        placeholder="e.g., 50",
+        label=f"Wager Amount (max {BOSS_WAGER_MAX_JC:,} JC)",
+        placeholder=f"0-{BOSS_WAGER_MAX_JC}",
         min_length=1,
         max_length=10,
         required=True,
@@ -499,6 +517,7 @@ async def _post_phase_transition_followup(
         description=getattr(next_info, "dialogue", ""),
         color=0xFF0000,
     )
+    _add_carried_wager_notice(encounter_embed, next_info)
     lum_line = getattr(next_info, "luminosity_display", None)
     if lum_line:
         encounter_embed.add_field(name="​", value=lum_line, inline=False)

@@ -39,6 +39,7 @@ from services.dig_constants import (
     BOSS_ROUND_CAP,
     BOSS_TIER_BONUS,
     BOSS_VICTORY_BASE_JC,
+    BOSS_WAGER_MAX_JC,
     CHEER_COOLDOWN_SECONDS,
     DIG_POSITIVE_JC_MULTIPLIER,
     PHASE_TRANSITION_EVENTS,
@@ -219,14 +220,19 @@ class BossCombatMixin:
         at_boss = self._at_boss_boundary(depth, boss_progress)
         if at_boss is None:
             return None
-        carried = self._get_carried_wager(boss_progress, at_boss)
-        if carried is None:
-            return None
-        if not self._is_pinnacle_depth(at_boss):
+        if (
+            not self._is_pinnacle_depth(at_boss)
+            and self._has_carried_wager_markers(boss_progress, at_boss)
+        ):
             self._clear_carried_wager(boss_progress, at_boss)
             self.dig_repo.update_tunnel(
                 discord_id, guild_id, boss_progress=json.dumps(boss_progress),
             )
+            return None
+        carried = self._get_active_pinnacle_carried_wager(
+            tunnel, boss_progress, at_boss,
+        )
+        if carried is None:
             return None
         wager, risk_tier = carried
         return {"wager": wager, "risk_tier": risk_tier, "boundary": at_boss}
@@ -319,6 +325,44 @@ class BossCombatMixin:
             return (int(cw), str(crt))
         except (TypeError, ValueError):
             return None
+
+    def _get_active_pinnacle_carried_wager(
+        self, tunnel: dict, boss_progress: dict, at_boss,
+    ) -> tuple[int, str] | None:
+        """Return a coherent phase-2/3 pinnacle carry, or None."""
+        if not self._is_pinnacle_depth(at_boss):
+            return None
+
+        try:
+            phase = int(tunnel.get("pinnacle_phase", 1) or 1)
+        except (TypeError, ValueError):
+            return None
+        expected_status = {
+            2: "phase1_defeated",
+            3: "phase2_defeated",
+        }.get(phase)
+        if expected_status is None:
+            return None
+
+        entry = boss_progress.get(str(at_boss))
+        if not isinstance(entry, dict) or entry.get("status") != expected_status:
+            return None
+
+        carried = self._get_carried_wager(boss_progress, at_boss)
+        if carried is None:
+            return None
+        wager, risk_tier = carried
+        if wager <= 0 or risk_tier not in ("cautious", "bold", "reckless"):
+            return None
+        return wager, risk_tier
+
+    @staticmethod
+    def _has_carried_wager_markers(boss_progress: dict, at_boss) -> bool:
+        """Return whether either persisted carry field is present."""
+        entry = boss_progress.get(str(at_boss))
+        return isinstance(entry, dict) and (
+            "carried_wager" in entry or "carried_risk_tier" in entry
+        )
 
     def _set_carried_wager(
         self, boss_progress: dict, at_boss, wager: int, risk_tier: str,
@@ -694,25 +738,25 @@ class BossCombatMixin:
 
         # Multi-phase carry: prior phase win locks original wager + risk on
         # the boss_progress entry — the next phase rides the same stake.
-        carried = self._get_carried_wager(boss_progress, at_boss)
-        if carried is not None and self._is_pinnacle_depth(at_boss):
+        carried = self._get_active_pinnacle_carried_wager(
+            tunnel, boss_progress, at_boss,
+        )
+        has_stale_carry = (
+            carried is None
+            and self._has_carried_wager_markers(boss_progress, at_boss)
+        )
+        if carried is not None:
             wager, risk_tier = carried
-        elif carried is not None:
-            self._clear_carried_wager(boss_progress, at_boss)
-            _encoded_progress = json.dumps(boss_progress)
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, boss_progress=_encoded_progress,
-            )
-            # Keep the local tunnel copy current — _ensure_boss_locked later
-            # re-parses it and must not resurrect the cleared markers.
-            tunnel["boss_progress"] = _encoded_progress
-            carried = None
-
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
 
         if wager < 0:
             return self._error("Wager must be non-negative.")
+
+        if wager > BOSS_WAGER_MAX_JC and carried is None:
+            return self._error(
+                f"Boss wagers cannot exceed {BOSS_WAGER_MAX_JC:,} JC."
+            )
 
         if wager > 0 and carried is None:
             prestige_level = tunnel.get("prestige_level", 0) or 0
@@ -726,6 +770,16 @@ class BossCombatMixin:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
+
+        if has_stale_carry:
+            self._clear_carried_wager(boss_progress, at_boss)
+            encoded_progress = json.dumps(boss_progress)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, boss_progress=encoded_progress,
+            )
+            # Keep the local tunnel copy current so _ensure_boss_locked later
+            # cannot resurrect the cleared markers.
+            tunnel["boss_progress"] = encoded_progress
 
         active_prep = self._activate_boss_prep(
             discord_id,
@@ -1501,23 +1555,23 @@ class BossCombatMixin:
         # Multi-phase carry: a prior phase win locks the original wager + risk
         # onto the boss_progress entry. The next phase fight rides the same
         # stake — caller args are ignored when a carry is present.
-        carried = self._get_carried_wager(boss_progress, at_boss)
-        if carried is not None and self._is_pinnacle_depth(at_boss):
+        carried = self._get_active_pinnacle_carried_wager(
+            tunnel, boss_progress, at_boss,
+        )
+        has_stale_carry = (
+            carried is None
+            and self._has_carried_wager_markers(boss_progress, at_boss)
+        )
+        if carried is not None:
             wager, risk_tier = carried
-        elif carried is not None:
-            self._clear_carried_wager(boss_progress, at_boss)
-            _encoded_progress = json.dumps(boss_progress)
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, boss_progress=_encoded_progress,
-            )
-            # Keep the local tunnel copy current — _ensure_boss_locked later
-            # re-parses it and must not resurrect the cleared markers.
-            tunnel["boss_progress"] = _encoded_progress
-            carried = None
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
         if wager < 0:
             return self._error("Wager must be non-negative.")
+        if wager > BOSS_WAGER_MAX_JC and carried is None:
+            return self._error(
+                f"Boss wagers cannot exceed {BOSS_WAGER_MAX_JC:,} JC."
+            )
         if wager > 0 and carried is None:
             prestige_level = tunnel.get("prestige_level", 0) or 0
             if (
@@ -1530,6 +1584,16 @@ class BossCombatMixin:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
+
+        if has_stale_carry:
+            self._clear_carried_wager(boss_progress, at_boss)
+            encoded_progress = json.dumps(boss_progress)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, boss_progress=encoded_progress,
+            )
+            # Keep the local tunnel copy current so _ensure_boss_locked later
+            # cannot resurrect the cleared markers.
+            tunnel["boss_progress"] = encoded_progress
 
         active_prep = self._activate_boss_prep(
             discord_id,
@@ -3092,9 +3156,11 @@ class BossCombatMixin:
         # Multi-phase carry: retreating from a phase-2/3 encounter forfeits
         # half of the carried wager. Pure phase-1 retreat (no carry) keeps
         # the existing behavior of "no JC at risk".
-        carried = self._get_carried_wager(boss_progress, at_boss)
+        carried = self._get_active_pinnacle_carried_wager(
+            tunnel, boss_progress, at_boss,
+        )
         carried_forfeit = 0
-        if carried is not None and self._is_pinnacle_depth(at_boss):
+        if carried is not None:
             carried_wager_amount, _ = carried
             carried_forfeit = carried_wager_amount // 2
 
