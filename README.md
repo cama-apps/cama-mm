@@ -464,7 +464,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 - `MAX_DEBT` - Maximum negative balance (default: 500)
 - `BET_LOCK_SECONDS` - Betting window duration (default: 900 / 15 min)
 - `AUTO_BLIND_ENABLED`, `AUTO_BLIND_THRESHOLD`, `AUTO_BLIND_PERCENTAGE` - Auto-liquidity settings
-- `AUTO_SPECTATOR_BET_ENABLED`, `AUTO_SPECTATOR_BET_COUNT`, `AUTO_SPECTATOR_BET_PERCENTAGE` (default 1% of balance) - Rich spectator auto-wager; shuffle spectators may also `/bet` both teams
+- `AUTO_SPECTATOR_BET_ENABLED`, `AUTO_SPECTATOR_BET_COUNT`, `AUTO_SPECTATOR_BET_PERCENTAGE` (default 1% of balance) - Rich spectator auto-wager; spectators may also `/bet` both teams
 
 **Economy:**
 - `LOAN_COOLDOWN_SECONDS`, `LOAN_MAX_AMOUNT`, `LOAN_FEE_RATE` - Loan system
