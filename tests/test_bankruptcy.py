@@ -167,6 +167,7 @@ class TestBankruptcyDeclaration:
         assert result.value.penalty_games == 5
         state = bankruptcy_service.get_state(pid, TEST_GUILD_ID)
         assert state.penalty_games_remaining == 5
+        assert state.bankruptcy_count == 1
 
 
 class TestBankruptcyPenalty:

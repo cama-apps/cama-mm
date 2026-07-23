@@ -29,6 +29,7 @@ class BankruptcyState:
     penalty_games_remaining: int
     is_on_cooldown: bool
     cooldown_ends_at: int | None  # Unix timestamp
+    bankruptcy_count: int = 0
 
 
 @dataclass
@@ -94,6 +95,7 @@ class BankruptcyService:
                 penalty_games_remaining=0,
                 is_on_cooldown=False,
                 cooldown_ends_at=None,
+                bankruptcy_count=0,
             )
 
         last_bankruptcy = state["last_bankruptcy_at"]
@@ -106,6 +108,7 @@ class BankruptcyService:
             penalty_games_remaining=state["penalty_games_remaining"],
             is_on_cooldown=is_on_cooldown,
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
+            bankruptcy_count=state.get("bankruptcy_count", 0),
         )
 
     def get_bulk_states(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, BankruptcyState]:
@@ -136,6 +139,7 @@ class BankruptcyService:
                     penalty_games_remaining=0,
                     is_on_cooldown=False,
                     cooldown_ends_at=None,
+                    bankruptcy_count=0,
                 )
             else:
                 last_bankruptcy = state["last_bankruptcy_at"]
@@ -147,6 +151,7 @@ class BankruptcyService:
                     penalty_games_remaining=state["penalty_games_remaining"],
                     is_on_cooldown=is_on_cooldown,
                     cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
+                    bankruptcy_count=state.get("bankruptcy_count", 0),
                 )
         return result
 

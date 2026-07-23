@@ -75,9 +75,49 @@ async def build_economy_embed(
         inline=False,
     )
 
-    if loan_service:
-        loan_state = await asyncio.to_thread(loan_service.get_state, target_discord_id, guild_id)
+    tip_service = cog._get_tip_service()
+    (
+        loan_state,
+        bankruptcy_state,
+        lowest_balance,
+        tip_stats,
+        balance_history,
+    ) = await asyncio.gather(
+        asyncio.to_thread(
+            loan_service.get_state,
+            target_discord_id,
+            guild_id,
+        )
+        if loan_service
+        else asyncio.sleep(0, result=None),
+        asyncio.to_thread(
+            bankruptcy_service.get_state,
+            target_discord_id,
+            guild_id,
+        )
+        if bankruptcy_service
+        else asyncio.sleep(0, result=None),
+        asyncio.to_thread(
+            player_repo.get_lowest_balance,
+            target_discord_id,
+            guild_id,
+        ),
+        asyncio.to_thread(
+            tip_service.get_user_tip_stats,
+            target_discord_id,
+            guild_id,
+        )
+        if tip_service
+        else asyncio.sleep(0, result=None),
+        _build_balance_history_chart(
+            cog,
+            target_user,
+            target_discord_id,
+            guild_id,
+        ),
+    )
 
+    if loan_service:
         loan_lines = [
             f"**Loans Taken:** {loan_state.total_loans_taken}",
             f"**Fees Paid:** {loan_state.total_fees_paid} {JOPACOIN_EMOTE}",
@@ -101,15 +141,10 @@ async def build_economy_embed(
         embed.add_field(name="🏦 Loans", value="\n".join(loan_lines), inline=True)
 
     if bankruptcy_service:
-        bankruptcy_repo = bankruptcy_service.bankruptcy_repo
-        state_data = await asyncio.to_thread(bankruptcy_repo.get_state, target_discord_id, guild_id)
-        bankruptcy_state = await asyncio.to_thread(
-            bankruptcy_service.get_state, target_discord_id, guild_id
-        )
-
         bankruptcy_lines = []
-        bankruptcy_count = state_data["bankruptcy_count"] if state_data else 0
-        bankruptcy_lines.append(f"**Declarations:** {bankruptcy_count}")
+        bankruptcy_lines.append(
+            f"**Declarations:** {bankruptcy_state.bankruptcy_count}"
+        )
 
         if bankruptcy_state.penalty_games_remaining > 0:
             penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
@@ -128,9 +163,6 @@ async def build_economy_embed(
             inline=True,
         )
 
-    lowest_balance = await asyncio.to_thread(
-        player_repo.get_lowest_balance, target_discord_id, guild_id
-    )
     if lowest_balance is not None and lowest_balance < 0:
         embed.add_field(
             name="📉 Lowest Balance",
@@ -138,66 +170,75 @@ async def build_economy_embed(
             inline=True,
         )
 
-    tip_service = cog._get_tip_service()
-    if tip_service:
-        tip_stats = await asyncio.to_thread(
-            tip_service.get_user_tip_stats, target_discord_id, guild_id
+    if tip_service and (
+        tip_stats["tips_sent_count"] > 0 or tip_stats["tips_received_count"] > 0
+    ):
+        tip_lines = []
+        if tip_stats["tips_sent_count"] > 0:
+            tip_lines.append(
+                f"**Sent:** {tip_stats['total_sent']} {JOPACOIN_EMOTE} ({tip_stats['tips_sent_count']} tips)"
+            )
+        if tip_stats["tips_received_count"] > 0:
+            tip_lines.append(
+                f"**Received:** {tip_stats['total_received']} {JOPACOIN_EMOTE} ({tip_stats['tips_received_count']} tips)"
+            )
+        if tip_stats["fees_paid"] > 0:
+            tip_lines.append(
+                f"**Fees Paid:** {tip_stats['fees_paid']} {JOPACOIN_EMOTE}"
+            )
+
+        embed.add_field(name="💝 Tipping", value="\n".join(tip_lines), inline=True)
+
+    chart_file = None
+    if balance_history is not None:
+        chart_file, per_source_totals = balance_history
+        embed.add_field(
+            name="📊 Balance History",
+            value=_format_breakdown(per_source_totals),
+            inline=False,
         )
-
-        if tip_stats["tips_sent_count"] > 0 or tip_stats["tips_received_count"] > 0:
-            tip_lines = []
-            if tip_stats["tips_sent_count"] > 0:
-                tip_lines.append(
-                    f"**Sent:** {tip_stats['total_sent']} {JOPACOIN_EMOTE} ({tip_stats['tips_sent_count']} tips)"
-                )
-            if tip_stats["tips_received_count"] > 0:
-                tip_lines.append(
-                    f"**Received:** {tip_stats['total_received']} {JOPACOIN_EMOTE} ({tip_stats['tips_received_count']} tips)"
-                )
-            if tip_stats["fees_paid"] > 0:
-                tip_lines.append(f"**Fees Paid:** {tip_stats['fees_paid']} {JOPACOIN_EMOTE}")
-
-            embed.add_field(name="💝 Tipping", value="\n".join(tip_lines), inline=True)
-
-    chart_file = await _attach_balance_history_chart(
-        embed, cog, target_user, target_discord_id, guild_id
-    )
+        if chart_file is not None:
+            embed.set_image(url="attachment://balance_history.png")
 
     embed.set_footer(text="Tip: Use /balance for a quick check, /economy loan to borrow")
 
     return embed, chart_file
 
 
-async def _attach_balance_history_chart(
-    embed: discord.Embed,
+async def _build_balance_history_chart(
     cog: ProfileCommands,
     target_user: discord.Member | discord.User,
     target_discord_id: int,
     guild_id: int | None,
-) -> discord.File | None:
-    """Generate + attach the per-source balance chart. Returns the ``File`` or ``None``."""
+) -> tuple[discord.File | None, dict[str, int]] | None:
+    """Build the per-source balance chart without mutating the shared embed."""
     balance_history_service = cog._get_balance_history_service()
     if balance_history_service is None:
         return None
 
     try:
-        series, per_source_totals = await asyncio.to_thread(
-            balance_history_service.get_balance_event_series,
-            target_discord_id,
-            guild_id,
+        async_loader = getattr(
+            balance_history_service,
+            "get_balance_event_series_async",
+            None,
         )
+        if async_loader is not None:
+            series, per_source_totals = await async_loader(
+                target_discord_id,
+                guild_id,
+            )
+        else:
+            series, per_source_totals = await asyncio.to_thread(
+                balance_history_service.get_balance_event_series,
+                target_discord_id,
+                guild_id,
+            )
     except Exception as e:  # defensive: underlying repos could raise
         logger.debug(f"Could not build balance history series: {e}")
         return None
 
     if not series or len(series) < 2:
         return None
-
-    embed.add_field(
-        name="📊 Balance History",
-        value=_format_breakdown(per_source_totals),
-        inline=False,
-    )
 
     try:
         chart_bytes = await asyncio.to_thread(
@@ -210,11 +251,10 @@ async def _attach_balance_history_chart(
         )
     except Exception as e:
         logger.debug(f"Could not generate balance history chart: {e}")
-        return None
+        return None, per_source_totals
 
     chart_file = discord.File(chart_bytes, filename="balance_history.png")
-    embed.set_image(url="attachment://balance_history.png")
-    return chart_file
+    return chart_file, per_source_totals
 
 
 def _format_breakdown(per_source_totals: dict[str, int]) -> str:

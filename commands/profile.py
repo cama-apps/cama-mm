@@ -305,15 +305,38 @@ class ProfileCommands(commands.Cog):
 
         player = stats["player"]
 
-        # Check for bankruptcy penalty
-        penalty_games = 0
-        if bankruptcy_service:
-            state = await asyncio.to_thread(bankruptcy_service.get_state, target_discord_id, guild_id)
-            penalty_games = state.penalty_games_remaining
-
-        # Mana emoji badge
         from utils.mana_display import resolve_mana_badge
-        mana_badge_str = await resolve_mana_badge(self.bot, target_discord_id, guild_id)
+
+        match_repo = self._get_match_repo()
+
+        async def load_hero_stats():
+            if not match_repo or not hasattr(match_repo, "get_player_hero_stats"):
+                return None
+            try:
+                return await asyncio.to_thread(
+                    match_repo.get_player_hero_stats,
+                    target_discord_id,
+                    guild_id,
+                )
+            except Exception as e:
+                logger.debug(f"Could not fetch hero stats: {e}")
+                return None
+
+        bankruptcy_state, mana_badge_str, hero_stats = await asyncio.gather(
+            asyncio.to_thread(
+                bankruptcy_service.get_state,
+                target_discord_id,
+                guild_id,
+            )
+            if bankruptcy_service
+            else asyncio.sleep(0, result=None),
+            resolve_mana_badge(self.bot, target_discord_id, guild_id),
+            load_hero_stats(),
+        )
+
+        penalty_games = (
+            bankruptcy_state.penalty_games_remaining if bankruptcy_state else 0
+        )
         mana_prefix = f"{mana_badge_str} " if mana_badge_str else ""
 
         # Title with tombstone if penalized
@@ -377,14 +400,10 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="Server", value="Not set", inline=True)
 
         # Hero stats from enriched matches
-        match_repo = self._get_match_repo()
-        if match_repo and hasattr(match_repo, "get_player_hero_stats"):
+        if hero_stats:
             try:
                 from utils.hero_lookup import get_hero_name
 
-                hero_stats = await asyncio.to_thread(
-                    match_repo.get_player_hero_stats, target_discord_id, guild_id
-                )
                 if isinstance(hero_stats, dict):
                     hero_lines = []
                     if hero_stats.get("last_hero_id"):
@@ -401,7 +420,7 @@ class ProfileCommands(commands.Cog):
                     if hero_lines:
                         embed.add_field(name="Heroes", value="\n".join(hero_lines), inline=False)
             except Exception as e:
-                logger.debug(f"Could not fetch hero stats: {e}")
+                logger.debug(f"Could not format hero stats: {e}")
 
         # Bankruptcy penalty warning
         if penalty_games > 0:
@@ -430,7 +449,11 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), None
 
-        player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
+        player = await asyncio.to_thread(
+            player_repo.get_by_id,
+            target_discord_id,
+            guild_id,
+        )
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -438,10 +461,9 @@ class ProfileCommands(commands.Cog):
                 color=COLOR_RED,
             ), None
 
-        # Get rating history — full for chart, recent slice for analytics
-        full_history = []
-        if match_repo and hasattr(match_repo, "get_player_rating_history_detailed"):
-            full_history = await asyncio.to_thread(
+        # Rating history and the guild population are independent snapshots.
+        full_history, all_players = await asyncio.gather(
+            asyncio.to_thread(
                 functools.partial(
                     match_repo.get_player_rating_history_detailed,
                     target_discord_id,
@@ -449,10 +471,14 @@ class ProfileCommands(commands.Cog):
                     limit=999,
                 )
             )
+            if match_repo
+            and hasattr(match_repo, "get_player_rating_history_detailed")
+            else asyncio.sleep(0, result=[]),
+            asyncio.to_thread(player_repo.get_all, guild_id),
+        )
         history = full_history[:50]
 
         # Calculate percentile (needs the guild's rated population)
-        all_players = await asyncio.to_thread(player_repo.get_all, guild_id)
         rated_players = [p for p in all_players if p.glicko_rating is not None]
 
         # Shared calibration computation (percentile, drift, performance, streak, ...)
@@ -546,18 +572,37 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="Trend", value=trend_text, inline=True)
 
         # Recent matches (last 5) with Glicko-2 and OpenSkill predictions
+        async def draw_rating_chart():
+            if len(full_history) < 2:
+                return None
+            try:
+                return await asyncio.to_thread(
+                    functools.partial(
+                        draw_rating_history_chart,
+                        username=target_user.display_name,
+                        history=full_history,
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Could not generate rating chart: {e}")
+                return None
+
+        chart_bytes = None
         if matches_with_predictions:
             os_system = CamaOpenSkillSystem()
             recent_lines = []
             recent_matches = matches_with_predictions[:5]
-            os_probabilities = await get_os_win_probabilities(
-                match_repo,
-                os_system,
-                [
-                    (match.get("match_id"), match.get("team_number"))
-                    for match in recent_matches
-                ],
-                guild_id,
+            os_probabilities, chart_bytes = await asyncio.gather(
+                get_os_win_probabilities(
+                    match_repo,
+                    os_system,
+                    [
+                        (match.get("match_id"), match.get("team_number"))
+                        for match in recent_matches
+                    ],
+                    guild_id,
+                ),
+                draw_rating_chart(),
             )
             for h, os_prob in zip(
                 recent_matches, os_probabilities, strict=True
@@ -582,6 +627,8 @@ class ProfileCommands(commands.Cog):
                 value="\n".join(recent_lines),
                 inline=True,
             )
+        else:
+            chart_bytes = await draw_rating_chart()
 
         # Highlights (biggest upset and choke)
         upsets = calibration.upsets
@@ -609,19 +656,9 @@ class ProfileCommands(commands.Cog):
         embed.set_footer(text="Tip: Use /calibration for full analysis | ✅=expected W | 🔥=upset | ❌=expected L | 💀=choke")
 
         chart_file = None
-        if full_history and len(full_history) >= 2:
-            try:
-                chart_bytes = await asyncio.to_thread(
-                    functools.partial(
-                        draw_rating_history_chart,
-                        username=target_user.display_name,
-                        history=full_history,
-                    )
-                )
-                chart_file = discord.File(chart_bytes, filename="rating_chart.png")
-                embed.set_image(url="attachment://rating_chart.png")
-            except Exception as e:
-                logger.debug(f"Could not generate rating chart: {e}")
+        if chart_bytes is not None:
+            chart_file = discord.File(chart_bytes, filename="rating_chart.png")
+            embed.set_image(url="attachment://rating_chart.png")
 
         return embed, chart_file
 
@@ -660,6 +697,52 @@ class ProfileCommands(commands.Cog):
                 color=COLOR_BLUE,
             ), None
 
+        async def draw_chart():
+            try:
+                pnl_series = await asyncio.to_thread(
+                    gambling_stats_service.get_cumulative_pnl_series,
+                    target_discord_id,
+                    guild_id,
+                )
+                if not pnl_series or len(pnl_series) < 2:
+                    return None
+                degen = stats.degen_score
+                return await asyncio.to_thread(
+                    functools.partial(
+                        draw_gamba_chart,
+                        username=target_user.display_name,
+                        degen_score=degen.total,
+                        degen_title=degen.title,
+                        degen_emoji=degen.emoji,
+                        pnl_series=pnl_series,
+                        stats={
+                            "total_bets": stats.total_bets,
+                            "win_rate": stats.win_rate,
+                            "net_pnl": stats.net_pnl,
+                            "roi": stats.roi,
+                        },
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Could not generate gamba chart: {e}")
+                return None
+
+        player, impact_stats, chart_bytes = await asyncio.gather(
+            asyncio.to_thread(
+                player_service.get_player,
+                target_discord_id,
+                guild_id,
+            )
+            if player_service
+            else asyncio.sleep(0, result=None),
+            asyncio.to_thread(
+                gambling_stats_service.get_betting_impact_stats,
+                target_discord_id,
+                guild_id,
+            ),
+            draw_chart(),
+        )
+
         # Color based on P&L
         color = COLOR_GREEN if stats.net_pnl >= 0 else COLOR_RED
 
@@ -681,11 +764,6 @@ class ProfileCommands(commands.Cog):
         roi_str = f"+{stats.roi:.1%}" if stats.roi >= 0 else f"{stats.roi:.1%}"
 
         # Get current balance
-        player = (
-            await asyncio.to_thread(player_service.get_player, target_discord_id, guild_id)
-            if player_service
-            else None
-        )
         balance = player.jopacoin_balance if player else 0
 
         embed.add_field(
@@ -789,9 +867,6 @@ class ProfileCommands(commands.Cog):
             )
 
         # Betting Impact section - how others bet on this player
-        impact_stats = await asyncio.to_thread(
-            gambling_stats_service.get_betting_impact_stats, target_discord_id, guild_id
-        )
         if impact_stats:
             embed.add_field(
                 name="\u200b",  # Separator
@@ -876,33 +951,10 @@ class ProfileCommands(commands.Cog):
                 inline=False,
             )
 
-        # Generate P&L chart
         chart_file = None
-        try:
-            pnl_series = await asyncio.to_thread(
-                gambling_stats_service.get_cumulative_pnl_series, target_discord_id, guild_id
-            )
-            if pnl_series and len(pnl_series) >= 2:
-                degen = stats.degen_score
-                chart_bytes = await asyncio.to_thread(
-                    functools.partial(draw_gamba_chart,
-                        username=target_user.display_name,
-                        degen_score=degen.total,
-                        degen_title=degen.title,
-                        degen_emoji=degen.emoji,
-                        pnl_series=pnl_series,
-                        stats={
-                            "total_bets": stats.total_bets,
-                            "win_rate": stats.win_rate,
-                            "net_pnl": stats.net_pnl,
-                            "roi": stats.roi,
-                        },
-                    )
-                )
-                chart_file = discord.File(chart_bytes, filename="gamba_chart.png")
-                embed.set_image(url="attachment://gamba_chart.png")
-        except Exception as e:
-            logger.debug(f"Could not generate gamba chart: {e}")
+        if chart_bytes is not None:
+            chart_file = discord.File(chart_bytes, filename="gamba_chart.png")
+            embed.set_image(url="attachment://gamba_chart.png")
 
         return embed, chart_file
 
@@ -920,11 +972,17 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Prediction service unavailable", color=COLOR_RED
             ), None
 
-        stats = await asyncio.to_thread(
-            prediction_service.get_user_orderbook_stats, target_discord_id, guild_id
-        )
-        positions = await asyncio.to_thread(
-            prediction_service.get_user_open_positions, target_discord_id, guild_id
+        stats, positions = await asyncio.gather(
+            asyncio.to_thread(
+                prediction_service.get_user_orderbook_stats,
+                target_discord_id,
+                guild_id,
+            ),
+            asyncio.to_thread(
+                prediction_service.get_user_open_positions,
+                target_discord_id,
+                guild_id,
+            ),
         )
 
         if not positions and stats["resolved_markets"] == 0:
@@ -998,7 +1056,14 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), []
 
-        player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
+        player, steam_id = await asyncio.gather(
+            asyncio.to_thread(
+                player_repo.get_by_id,
+                target_discord_id,
+                guild_id,
+            ),
+            asyncio.to_thread(player_repo.get_steam_id, target_discord_id),
+        )
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1006,8 +1071,6 @@ class ProfileCommands(commands.Cog):
                 color=COLOR_RED,
             ), []
 
-        # Get steam_id from repository (not a Player attribute)
-        steam_id = await asyncio.to_thread(player_repo.get_steam_id, target_discord_id)
         if not steam_id:
             return discord.Embed(
                 title=f"Profile: {target_user.display_name} > Dota Stats",
@@ -1047,28 +1110,54 @@ class ProfileCommands(commands.Cog):
             else None
         )
 
-        if role_dist:
+        full_stats = dota_tab_stats.get("full_stats") if dota_tab_stats else None
+        lane_dist = full_stats.get("lane_distribution", {}) if full_stats else {}
+        lane_dist_filtered = {key: value for key, value in lane_dist.items() if value > 0}
+
+        async def draw_role_chart():
+            if not role_dist:
+                return None
             try:
-                chart_bytes = await asyncio.to_thread(
-                    functools.partial(draw_role_graph, role_dist, title=f"Roles: {target_user.display_name}")
+                return await asyncio.to_thread(
+                    functools.partial(
+                        draw_role_graph,
+                        role_dist,
+                        title=f"Roles: {target_user.display_name}",
+                    )
                 )
-                role_file = discord.File(chart_bytes, filename="role_graph.png")
-                files.append(role_file)
-                embed.set_image(url="attachment://role_graph.png")
             except Exception as e:
                 logger.debug(f"Could not generate role graph: {e}")
+                return None
 
-        full_stats = dota_tab_stats.get("full_stats") if dota_tab_stats else None
+        async def draw_lane_chart():
+            if not lane_dist_filtered:
+                return None, False
+            try:
+                return (
+                    await asyncio.to_thread(
+                        draw_lane_distribution,
+                        lane_dist_filtered,
+                    ),
+                    False,
+                )
+            except Exception as e:
+                logger.debug(f"Could not generate lane graph: {e}")
+                return None, True
+
+        role_bytes, (lane_bytes, lane_chart_failed) = await asyncio.gather(
+            draw_role_chart(),
+            draw_lane_chart(),
+        )
+
+        if role_bytes is not None:
+            role_file = discord.File(role_bytes, filename="role_graph.png")
+            files.append(role_file)
+            embed.set_image(url="attachment://role_graph.png")
 
         if full_stats:
             # Generate lane distribution chart
-            lane_dist = full_stats.get("lane_distribution", {})
-            # Filter out lanes with 0% to reduce clutter
-            lane_dist_filtered = {k: v for k, v in lane_dist.items() if v > 0}
-
             if lane_dist_filtered:
-                try:
-                    lane_bytes = await asyncio.to_thread(draw_lane_distribution, lane_dist_filtered)
+                if lane_bytes is not None:
                     lane_file = discord.File(lane_bytes, filename="lane_graph.png")
                     files.append(lane_file)
                     # Add lane chart info to embed (image will appear as second attachment)
@@ -1078,8 +1167,7 @@ class ProfileCommands(commands.Cog):
                         value=f"Based on {lane_parsed} parsed matches\n*(see lane_graph.png below)*",
                         inline=True,
                     )
-                except Exception as e:
-                    logger.debug(f"Could not generate lane graph: {e}")
+                elif lane_chart_failed:
                     # Fall back to text display
                     lane_lines = []
                     for lane, pct in sorted(lane_dist.items(), key=lambda x: -x[1]):
@@ -1375,9 +1463,23 @@ class ProfileCommands(commands.Cog):
                 color=COLOR_RED,
             ), []
 
-        # Get enriched match count
-        enriched_count = await asyncio.to_thread(
-            match_repo.get_player_enriched_match_count, target_discord_id, guild_id
+        # The hero summary reads are independent. Start the detailed query while
+        # checking whether any enriched matches exist so the tab does not pay
+        # both SQLite round trips serially.
+        enriched_count, hero_stats = await asyncio.gather(
+            asyncio.to_thread(
+                match_repo.get_player_enriched_match_count,
+                target_discord_id,
+                guild_id,
+            ),
+            asyncio.to_thread(
+                functools.partial(
+                    match_repo.get_player_hero_detailed_stats,
+                    target_discord_id,
+                    guild_id,
+                    limit=20,
+                )
+            ),
         )
 
         if enriched_count == 0:
@@ -1396,32 +1498,95 @@ class ProfileCommands(commands.Cog):
             color=COLOR_BLUE,
         )
 
-        files = []
-
-        # Get hero stats for chart
-        hero_stats = await asyncio.to_thread(
-            functools.partial(
-                match_repo.get_player_hero_detailed_stats,
-                target_discord_id,
-                guild_id,
-                limit=20,
-            )
-        )
-
-        # Generate hero performance chart
-        if hero_stats:
+        async def draw_chart():
+            if not hero_stats:
+                return None
             try:
-                chart_bytes = await asyncio.to_thread(draw_hero_performance_chart, hero_stats, target_user.display_name)
-                chart_file = discord.File(chart_bytes, filename="hero_chart.png")
-                files.append(chart_file)
-                embed.set_image(url="attachment://hero_chart.png")
+                return await asyncio.to_thread(
+                    draw_hero_performance_chart,
+                    hero_stats,
+                    target_user.display_name,
+                )
             except Exception as e:
                 logger.debug(f"Could not generate hero chart: {e}")
+                return None
+
+        # These aggregates all read the same immutable match snapshot and have
+        # no ordering dependency. Run them alongside chart rendering instead of
+        # serializing eight database round trips behind the image work.
+        (
+            chart_bytes,
+            overall,
+            lane_stats,
+            ward_stats,
+            nemesis,
+            easy,
+            synergies,
+            hero_vs_hero,
+            hero_lane,
+        ) = await asyncio.gather(
+            draw_chart(),
+            asyncio.to_thread(
+                match_repo.get_player_overall_hero_stats,
+                target_discord_id,
+                guild_id,
+            ),
+            asyncio.to_thread(
+                match_repo.get_player_lane_stats,
+                target_discord_id,
+                guild_id,
+            ),
+            asyncio.to_thread(
+                match_repo.get_player_ward_stats_by_lane,
+                target_discord_id,
+                guild_id,
+            ),
+            asyncio.to_thread(
+                functools.partial(
+                    match_repo.get_player_nemesis_heroes,
+                    target_discord_id,
+                    guild_id,
+                    min_games=2,
+                )
+            ),
+            asyncio.to_thread(
+                functools.partial(
+                    match_repo.get_player_easiest_opponents,
+                    target_discord_id,
+                    guild_id,
+                    min_games=2,
+                )
+            ),
+            asyncio.to_thread(
+                functools.partial(
+                    match_repo.get_player_best_hero_synergies,
+                    target_discord_id,
+                    guild_id,
+                    min_games=2,
+                )
+            ),
+            asyncio.to_thread(
+                functools.partial(
+                    match_repo.get_player_hero_vs_opponent_heroes,
+                    target_discord_id,
+                    guild_id,
+                    min_games=2,
+                )
+            ),
+            asyncio.to_thread(
+                match_repo.get_player_hero_lane_performance,
+                target_discord_id,
+                guild_id,
+            ),
+        )
+
+        files = []
+        if chart_bytes is not None:
+            chart_file = discord.File(chart_bytes, filename="hero_chart.png")
+            files.append(chart_file)
+            embed.set_image(url="attachment://hero_chart.png")
 
         # Get overall stats for header
-        overall = await asyncio.to_thread(
-            match_repo.get_player_overall_hero_stats, target_discord_id, guild_id
-        )
         avg_kda = f"{overall['avg_kills']:.1f}/{overall['avg_deaths']:.1f}/{overall['avg_assists']:.1f}"
         embed.add_field(
             name="Overview",
@@ -1472,7 +1637,6 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Lane performance
-        lane_stats = await asyncio.to_thread(match_repo.get_player_lane_stats, target_discord_id, guild_id)
         if lane_stats:
             lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jungle"}
             lane_lines = []
@@ -1492,9 +1656,6 @@ class ProfileCommands(commands.Cog):
             )
 
         # Ward stats
-        ward_stats = await asyncio.to_thread(
-            match_repo.get_player_ward_stats_by_lane, target_discord_id, guild_id
-        )
         if ward_stats and overall["total_obs"] + overall["total_sens"] > 0:
             ward_lines = [f"**Totals:** {overall['total_obs']} obs | {overall['total_sens']} sens"]
             # Aggregate by role type (support lanes vs core lanes)
@@ -1527,9 +1688,6 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="━━━ **Hero Pairwise Stats** ━━━", inline=False)
 
         # Nemesis heroes (lose to)
-        nemesis = await asyncio.to_thread(
-            functools.partial(match_repo.get_player_nemesis_heroes, target_discord_id, guild_id, min_games=2)
-        )
         if nemesis:
             # Filter to actually high loss rate (>50%)
             nemesis_bad = [n for n in nemesis if n["loss_rate"] > 0.5][:3]
@@ -1545,9 +1703,6 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Easy prey (beat)
-        easy = await asyncio.to_thread(
-            functools.partial(match_repo.get_player_easiest_opponents, target_discord_id, guild_id, min_games=2)
-        )
         if easy:
             # Filter to actually high win rate (>50%)
             easy_good = [e for e in easy if e["win_rate"] > 0.5][:3]
@@ -1563,14 +1718,6 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Best ally heroes
-        synergies = await asyncio.to_thread(
-            functools.partial(
-                match_repo.get_player_best_hero_synergies,
-                target_discord_id,
-                guild_id,
-                min_games=2,
-            )
-        )
         if synergies:
             # Filter to high win rate
             synergies_good = [s for s in synergies if s["win_rate"] > 0.5][:3]
@@ -1587,14 +1734,6 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Hero vs opponent hero matchups
-        hero_vs_hero = await asyncio.to_thread(
-            functools.partial(
-                match_repo.get_player_hero_vs_opponent_heroes,
-                target_discord_id,
-                guild_id,
-                min_games=2,
-            )
-        )
         if hero_vs_hero:
             # Group by player's hero and find best/worst matchups
             by_my_hero: dict[int, list] = {}
@@ -1631,9 +1770,6 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Best heroes by lane
-        hero_lane = await asyncio.to_thread(
-            match_repo.get_player_hero_lane_performance, target_discord_id, guild_id
-        )
         if hero_lane:
             # Group by lane and find best hero for each
             by_lane: dict[int, list] = {}
