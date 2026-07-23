@@ -745,14 +745,24 @@ async def _reconcile_persisted_lobby_messages() -> None:
 
 async def notify_lobby_ready(channel, guild_id: int = 0):
     """Notify that lobby is ready to shuffle."""
-    async with _lobby_ready_lock:
-        now = time.time()
-        last_sent = _lobby_ready_cooldowns.get(guild_id, 0)
-        if now - last_sent < LOBBY_READY_COOLDOWN_SECONDS:
-            return
-        # Claim the cooldown slot immediately so a concurrent handler firing
-        # during the await-chain below can't also pass the check.
-        _lobby_ready_cooldowns[guild_id] = now
+    lobby_service = bot.lobby_service
+    if not lobby_service:
+        return
+    cooldown_claimed = False
+
+    lobby, lobby_message_id, lobby_channel_id = await asyncio.gather(
+        asyncio.to_thread(lobby_service.get_lobby, guild_id=guild_id),
+        asyncio.to_thread(lobby_service.get_lobby_message_id, guild_id=guild_id),
+        asyncio.to_thread(lobby_service.get_lobby_channel_id, guild_id=guild_id),
+    )
+    if (
+        not lobby
+        or lobby.status != "open"
+        or lobby.get_player_count() != lobby_service.ready_threshold
+        or not lobby_message_id
+    ):
+        return
+
     try:
         embed = discord.Embed(
             title="🎮 Lobby Ready!",
@@ -766,13 +776,6 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
         )
 
         # Add jump link to lobby embed
-        lobby_message_id = None
-        lobby_channel_id = None
-        if bot.lobby_service:
-            lobby_message_id, lobby_channel_id = await asyncio.gather(
-                asyncio.to_thread(bot.lobby_service.get_lobby_message_id, guild_id=guild_id),
-                asyncio.to_thread(bot.lobby_service.get_lobby_channel_id, guild_id=guild_id),
-            )
         if lobby_message_id and lobby_channel_id:
             jump_guild_id = channel.guild.id if channel.guild else guild_id
             jump_url = f"https://discord.com/channels/{jump_guild_id}/{lobby_channel_id}/{lobby_message_id}"
@@ -780,9 +783,7 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
         origin_channel_id = (
-            await asyncio.to_thread(bot.lobby_service.get_origin_channel_id, guild_id=guild_id)
-            if bot.lobby_service
-            else None
+            await asyncio.to_thread(lobby_service.get_origin_channel_id, guild_id=guild_id)
         )
         target_channel = channel  # Default to reaction channel
 
@@ -795,10 +796,37 @@ async def notify_lobby_ready(channel, guild_id: int = 0):
                 logger.warning(f"Could not fetch origin channel {origin_channel_id}: {exc}")
                 target_channel = channel  # Fallback
 
+        async with _lobby_ready_lock:
+            now = time.time()
+            last_sent = _lobby_ready_cooldowns.get(guild_id, 0)
+            if now - last_sent < LOBBY_READY_COOLDOWN_SECONDS:
+                return
+
+            current_lobby, current_message_id = await asyncio.gather(
+                asyncio.to_thread(lobby_service.get_lobby, guild_id=guild_id),
+                asyncio.to_thread(
+                    lobby_service.get_lobby_message_id,
+                    guild_id=guild_id,
+                ),
+            )
+            if (
+                not current_lobby
+                or current_lobby.status != "open"
+                or current_lobby.get_player_count() != lobby_service.ready_threshold
+                or current_message_id != lobby_message_id
+            ):
+                return
+
+            # Claim the cooldown slot before sending so concurrent handlers for
+            # the same lobby generation cannot both announce it.
+            _lobby_ready_cooldowns[guild_id] = now
+            cooldown_claimed = True
+
         await target_channel.send(embed=embed)
     except Exception as exc:
         # Send failed — release the cooldown slot we claimed so a retry can fire.
-        _lobby_ready_cooldowns.pop(guild_id, None)
+        if cooldown_claimed:
+            _lobby_ready_cooldowns.pop(guild_id, None)
         logger.error(f"Error notifying lobby ready: {exc}", exc_info=True)
 
 

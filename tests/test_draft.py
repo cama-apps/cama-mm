@@ -6,7 +6,7 @@ import asyncio
 import inspect
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1189,6 +1189,11 @@ class _FakeInteraction:
     def __init__(self, guild_id):
         self.guild = _FakeGuild(guild_id)
         self.guild_id = guild_id
+        self.user = SimpleNamespace(
+            id=444_001,
+            display_name="Draft Starter",
+            mention="<@444001>",
+        )
         self.channel = _FakeChannel()
         self.channel_id = self.channel.id
         self.followup = _FakeFollowup()
@@ -1331,6 +1336,7 @@ def _make_draft_cog(player_repo, *, bot=None, lobby_manager=None):
     if lobby_manager is None:
         lobby_manager = MagicMock()
         lobby_manager.get_origin_channel_id.return_value = None
+        lobby_manager.get_lobby_channel_id.return_value = None
     return DraftCommands(
         bot=bot or MagicMock(),
         player_repo=player_repo,
@@ -1426,6 +1432,7 @@ class TestExecuteDraft:
         assert "Radiant → 🔴 Dire" in embed.description
         assert "🟢 1400" in embed.description
         assert "🔴 1430" in embed.description
+        assert "Started by" not in (embed.footer.text or "")
 
     async def test_succeeds_with_sixteen_players(self, player_repository):
         """A full lobby needs no opt-ins and selects captains from the final pool."""
@@ -1465,16 +1472,21 @@ class TestExecuteDraft:
         assert draft_msg.view is not None
         assert state.draft_message_id == draft_msg.id
 
-    async def test_posts_captain_ping_then_embed_to_origin_channel(self, player_repository):
+    async def test_posts_captain_ping_then_opening_embed_to_lobby_channel(
+        self, player_repository
+    ):
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 10)
+        lobby_channel = _FakeChannel(channel_id=777_001)
         origin_channel = _FakeChannel(channel_id=777_000)
         lobby_manager = MagicMock()
+        lobby_manager.get_lobby_channel_id.return_value = lobby_channel.id
         lobby_manager.get_origin_channel_id.return_value = origin_channel.id
         bot = SimpleNamespace(
-            get_channel=lambda channel_id: (
-                origin_channel if channel_id == origin_channel.id else None
-            )
+            get_channel=lambda channel_id: {
+                lobby_channel.id: lobby_channel,
+                origin_channel.id: origin_channel,
+            }.get(channel_id)
         )
         cog = _make_draft_cog(
             player_repository,
@@ -1486,16 +1498,18 @@ class TestExecuteDraft:
         result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
 
         assert result is True
-        assert len(origin_channel.sent) == 2
-        ping_message, draft_message = origin_channel.sent
+        assert len(lobby_channel.sent) == 2
+        ping_message, draft_message = lobby_channel.sent
         state = cog.draft_state_manager.get_state(guild_id)
         assert state is not None
         assert ping_message.content == f"<@{state.captain1_id}> <@{state.captain2_id}> Draft starting!"
         assert draft_message.embed is not None
+        assert draft_message.embed.footer.text == "Started by Draft Starter"
         assert draft_message.view is not None
         assert state.captain_ping_message_id == ping_message.id
         assert state.draft_message_id == draft_message.id
-        assert state.draft_channel_id == origin_channel.id
+        assert state.draft_channel_id == lobby_channel.id
+        assert origin_channel.sent == []
         assert interaction.channel.sent == []
 
     async def test_captain_ping_failure_does_not_block_draft_embed(self, player_repository):
@@ -1510,6 +1524,7 @@ class TestExecuteDraft:
 
         origin_channel = _PingFailingChannel(channel_id=777_004)
         lobby_manager = MagicMock()
+        lobby_manager.get_lobby_channel_id.return_value = origin_channel.id
         lobby_manager.get_origin_channel_id.return_value = origin_channel.id
         bot = SimpleNamespace(get_channel=lambda _channel_id: origin_channel)
         cog = _make_draft_cog(
@@ -1529,13 +1544,14 @@ class TestExecuteDraft:
         assert origin_channel.sent[0].embed is not None
         assert state.draft_message_id == origin_channel.sent[0].id
 
-    async def test_unavailable_origin_channel_falls_back_to_interaction_channel(
+    async def test_unavailable_lobby_and_origin_channels_fall_back_to_interaction_channel(
         self, player_repository
     ):
         guild_id = TEST_GUILD_ID
         player_ids = _register_draft_players(player_repository, guild_id, 10)
         lobby_manager = MagicMock()
-        lobby_manager.get_origin_channel_id.return_value = 777_005
+        lobby_manager.get_lobby_channel_id.return_value = 777_005
+        lobby_manager.get_origin_channel_id.return_value = 777_006
 
         async def fail_fetch(_channel_id):
             raise RuntimeError("simulated origin channel fetch failure")
@@ -1560,6 +1576,43 @@ class TestExecuteDraft:
         assert len(interaction.channel.sent) == 2
         assert "Draft starting!" in interaction.channel.sent[0].content
         assert interaction.channel.sent[1].embed is not None
+
+    async def test_unavailable_lobby_channel_falls_back_to_origin_channel(
+        self, player_repository
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 10)
+        origin_channel = _FakeChannel(channel_id=777_007)
+        lobby_manager = MagicMock()
+        lobby_manager.get_lobby_channel_id.return_value = 777_008
+        lobby_manager.get_origin_channel_id.return_value = origin_channel.id
+
+        async def fetch_channel(channel_id):
+            if channel_id == origin_channel.id:
+                return origin_channel
+            raise RuntimeError("simulated lobby channel fetch failure")
+
+        bot = SimpleNamespace(
+            get_channel=lambda channel_id: (
+                origin_channel if channel_id == origin_channel.id else None
+            ),
+            fetch_channel=fetch_channel,
+        )
+        cog = _make_draft_cog(
+            player_repository,
+            bot=bot,
+            lobby_manager=lobby_manager,
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(interaction, guild_id, _make_lobby(player_ids))
+
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert result is True
+        assert state is not None
+        assert state.draft_channel_id == origin_channel.id
+        assert len(origin_channel.sent) == 2
+        assert interaction.channel.sent == []
 
     async def test_legacy_conditional_players_are_ignored(self, player_repository):
         guild_id = TEST_GUILD_ID
@@ -1763,7 +1816,7 @@ class TestHandlePlayerPick:
         assert match_service.message_info["channel_id"] == interaction.channel.id
         lobby_manager.reset_lobby.assert_called_once_with(guild_id)
 
-    async def test_final_pick_copies_completion_embed_to_lobby_channel(
+    async def test_final_pick_edits_lobby_draft_without_duplicate_and_copies_to_origin(
         self, player_repository
     ):
         guild_id = TEST_GUILD_ID
@@ -1771,24 +1824,33 @@ class TestHandlePlayerPick:
         captain1 = player_ids[0]
         final_pick = player_ids[9]
         lobby_channel = _FakeChannel(channel_id=777_002)
+        origin_channel = _FakeChannel(channel_id=777_001)
         stored_lobby_channel_id = {"value": lobby_channel.id}
+        stored_origin_channel_id = {"value": origin_channel.id}
         lobby_manager = MagicMock()
         lobby_manager.get_lobby_channel_id.side_effect = (
             lambda guild_id=None: stored_lobby_channel_id["value"]
         )
+        lobby_manager.get_origin_channel_id.side_effect = (
+            lambda guild_id=None: stored_origin_channel_id["value"]
+        )
         lobby_manager.reset_lobby.side_effect = (
-            lambda guild_id=None: stored_lobby_channel_id.update(value=None)
+            lambda guild_id=None: (
+                stored_lobby_channel_id.update(value=None),
+                stored_origin_channel_id.update(value=None),
+            )
         )
         match_service = _FakeDraftMatchService()
         bot = SimpleNamespace(
             betting_service=None,
             lobby_service=None,
             get_cog=lambda _name: None,
-            get_channel=lambda channel_id: (
-                lobby_channel if channel_id == lobby_channel.id else None
-            ),
+            get_channel=lambda channel_id: {
+                lobby_channel.id: lobby_channel,
+                origin_channel.id: origin_channel,
+            }.get(channel_id),
         )
-        cog, _ = _make_final_pick_scenario(
+        cog, state = _make_final_pick_scenario(
             player_repository,
             guild_id,
             player_ids,
@@ -1797,19 +1859,32 @@ class TestHandlePlayerPick:
             lobby_manager=lobby_manager,
         )
         interaction = _FakeComponentInteraction(guild_id, user_id=captain1)
+        interaction.channel = lobby_channel
+        interaction.channel_id = lobby_channel.id
+        interaction.message.channel = lobby_channel
+        interaction.message.jump_url = (
+            f"https://discord.test/channels/0/{lobby_channel.id}/{interaction.message.id}"
+        )
+        state.draft_channel_id = lobby_channel.id
+        state.draft_message_id = interaction.message.id
 
-        await cog.handle_player_pick(interaction, guild_id, final_pick)
+        with patch("bot.clear_lobby_rally_cooldowns") as clear_cooldowns:
+            await cog.handle_player_pick(interaction, guild_id, final_pick)
 
-        assert len(lobby_channel.sent) == 1
-        lobby_message = lobby_channel.sent[0]
-        assert lobby_message.embed is interaction.message.embed
-        assert match_service.message_info["message_id"] == lobby_message.id
+        assert lobby_channel.sent == []
+        assert len(origin_channel.sent) == 1
+        origin_message = origin_channel.sent[0]
+        assert origin_message.embed is interaction.message.embed
+        assert match_service.message_info["message_id"] == interaction.message.id
         assert match_service.message_info["channel_id"] == lobby_channel.id
-        assert match_service.message_info["jump_url"] == lobby_message.jump_url
-        assert match_service.message_info["cmd_message_id"] == interaction.message.id
-        assert match_service.message_info["cmd_channel_id"] == interaction.channel.id
+        assert match_service.message_info["jump_url"] == interaction.message.jump_url
+        assert match_service.message_info["origin_channel_id"] == origin_channel.id
+        assert match_service.message_info["cmd_message_id"] == origin_message.id
+        assert match_service.message_info["cmd_channel_id"] == origin_channel.id
+        assert match_service.state.origin_channel_id == origin_channel.id
         lobby_manager.get_lobby_channel_id.assert_called_once_with(guild_id=guild_id)
         lobby_manager.reset_lobby.assert_called_once_with(guild_id)
+        clear_cooldowns.assert_called_once_with(guild_id)
 
     async def test_lobby_channel_copy_failure_does_not_break_completion(
         self, player_repository
