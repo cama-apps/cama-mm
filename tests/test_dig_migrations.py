@@ -123,6 +123,12 @@ class TestDigActionHistoryIndexesMigration:
                     "target_id",
                     "created_at",
                 ],
+                "idx_dig_actions_guild_type_created_actor": [
+                    "guild_id",
+                    "action_type",
+                    "created_at",
+                    "actor_id",
+                ],
             }
             for index_name, columns in expected.items():
                 assert index_name in indexes
@@ -130,7 +136,10 @@ class TestDigActionHistoryIndexesMigration:
                     f"PRAGMA index_xinfo({index_name})"
                 ).fetchall()
                 assert [row[2] for row in index_info if row[5]] == columns
-                assert next(row[3] for row in index_info if row[2] == "created_at") == 1
+                assert (
+                    next(row[3] for row in index_info if row[2] == "created_at")
+                    == 1
+                )
 
             applied = {
                 row[0]
@@ -139,8 +148,77 @@ class TestDigActionHistoryIndexesMigration:
                 ).fetchall()
             }
             assert "add_dig_action_history_indexes" in applied
+            assert "add_dig_action_type_history_index" in applied
         finally:
             conn.close()
+
+    def test_upgrade_restores_action_type_history_index(self, repo_db_path):
+        manager = SchemaManager(repo_db_path)
+        with sqlite3.connect(repo_db_path) as conn:
+            conn.execute(
+                "DROP INDEX idx_dig_actions_guild_type_created_actor"
+            )
+            conn.execute(
+                "DELETE FROM schema_migrations WHERE name = ?",
+                ("add_dig_action_type_history_index",),
+            )
+
+        manager.initialize()
+
+        with sqlite3.connect(repo_db_path) as conn:
+            indexes = {
+                row[1]
+                for row in conn.execute("PRAGMA index_list(dig_actions)")
+            }
+            applied = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE name = ?",
+                ("add_dig_action_type_history_index",),
+            ).fetchone()
+
+        assert "idx_dig_actions_guild_type_created_actor" in indexes
+        assert applied is not None
+
+    def test_action_type_history_queries_use_composite_index(self, repo_db_path):
+        with sqlite3.connect(repo_db_path) as conn:
+            recent_diggers_plan = [
+                row[3]
+                for row in conn.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT DISTINCT actor_id
+                    FROM dig_actions
+                    WHERE guild_id = ?
+                      AND action_type = 'dig'
+                      AND created_at >= ?
+                    """,
+                    (12345, 0),
+                )
+            ]
+            boss_kills_plan = [
+                row[3]
+                for row in conn.execute(
+                    """
+                    EXPLAIN QUERY PLAN
+                    SELECT COUNT(*)
+                    FROM dig_actions
+                    WHERE guild_id = ?
+                      AND action_type = 'boss_fight'
+                      AND created_at >= ?
+                      AND detail LIKE '%"won": true%'
+                    """,
+                    (12345, 0),
+                )
+            ]
+
+        assert any(
+            "USING COVERING INDEX idx_dig_actions_guild_type_created_actor"
+            in detail
+            for detail in recent_diggers_plan
+        )
+        assert any(
+            "USING INDEX idx_dig_actions_guild_type_created_actor" in detail
+            for detail in boss_kills_plan
+        )
 
 
 class TestClearActiveBossIdsMigration:
