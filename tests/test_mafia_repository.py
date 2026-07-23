@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from domain.models.mafia import (
@@ -39,37 +37,6 @@ def _seed_registered_player(
     player_repo.update_balance(discord_id, guild_id, balance)
 
 
-def _seed_wheel_spin(
-    repo, *, discord_id: int, guild_id: int, ts: int, registered: bool = True
-) -> None:
-    if registered:
-        _seed_registered_player(repo, discord_id=discord_id, guild_id=guild_id)
-    with repo.connection() as conn:
-        conn.cursor().execute(
-            """
-            INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time, is_bankrupt, is_golden)
-            VALUES (?, ?, 0, ?, 0, 0)
-            """,
-            (guild_id, discord_id, ts),
-        )
-
-
-def _seed_dig_action(
-    repo, *, actor_id: int, guild_id: int, ts: int, registered: bool = True
-) -> None:
-    if registered:
-        _seed_registered_player(repo, discord_id=actor_id, guild_id=guild_id)
-    with repo.connection() as conn:
-        conn.cursor().execute(
-            """
-            INSERT INTO dig_actions (guild_id, actor_id, target_id, action_type,
-                depth_before, depth_after, jc_delta, detail, created_at)
-            VALUES (?, ?, NULL, 'dig', 0, 0, 0, NULL, ?)
-            """,
-            (guild_id, actor_id, ts),
-        )
-
-
 # ── Game CRUD ─────────────────────────────────────────────────────────────
 
 
@@ -93,6 +60,111 @@ def test_multiple_games_per_date_allowed(mafia_repo):
     g1 = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 1000, 5, None)
     g2 = mafia_repo.create_game(TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 2000, 5, None)
     assert g1 != g2
+
+
+def _create_game_from_pending_signups(
+    mafia_repo, discord_ids: list[int], *, started_at: int = 1000
+) -> int:
+    return mafia_repo.create_game_with_players_and_entry_fees(
+        guild_id=TEST_GUILD_ID,
+        game_date="2026-04-24",
+        phase=MafiaPhase.NIGHT,
+        started_at=started_at,
+        roster_size=len(discord_ids),
+        twist_event=None,
+        entry_fee=8,
+        players=[
+            MafiaPlayer(0, discord_id, TEST_GUILD_ID, MafiaRole.TOWNIE)
+            for discord_id in discord_ids
+        ],
+        max_debt=500,
+    )
+
+
+def test_atomic_game_start_consumes_selected_signups(mafia_repo):
+    discord_ids = list(range(100, 105))
+    for discord_id in discord_ids:
+        _seed_registered_player(
+            mafia_repo, discord_id=discord_id, guild_id=TEST_GUILD_ID
+        )
+        mafia_repo.add_signup(TEST_GUILD_ID, discord_id)
+
+    _create_game_from_pending_signups(mafia_repo, discord_ids)
+
+    assert mafia_repo.get_signups(TEST_GUILD_ID) == []
+
+
+def test_atomic_game_start_rejects_roster_invalidated_by_optout(mafia_repo):
+    discord_ids = list(range(100, 105))
+    player_repo = PlayerRepository(mafia_repo.db_path)
+    for discord_id in discord_ids:
+        _seed_registered_player(
+            mafia_repo, discord_id=discord_id, guild_id=TEST_GUILD_ID
+        )
+        mafia_repo.add_signup(TEST_GUILD_ID, discord_id)
+    mafia_repo.set_optout(TEST_GUILD_ID, discord_ids[-1], True)
+
+    with pytest.raises(ValueError, match="signup_claim_failed"):
+        _create_game_from_pending_signups(mafia_repo, discord_ids)
+
+    assert mafia_repo.get_active_game(TEST_GUILD_ID) is None
+    assert {
+        player_repo.get_balance(discord_id, TEST_GUILD_ID)
+        for discord_id in discord_ids
+    } == {100}
+
+
+def test_atomic_game_start_rejects_second_active_game_without_debit(mafia_repo):
+    discord_ids = list(range(100, 105))
+    player_repo = PlayerRepository(mafia_repo.db_path)
+    for discord_id in discord_ids:
+        _seed_registered_player(
+            mafia_repo, discord_id=discord_id, guild_id=TEST_GUILD_ID
+        )
+        mafia_repo.add_signup(TEST_GUILD_ID, discord_id)
+    existing_id = mafia_repo.create_game(
+        TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 999, 5, None
+    )
+
+    with pytest.raises(ValueError, match="game_already_active"):
+        _create_game_from_pending_signups(mafia_repo, discord_ids)
+
+    assert mafia_repo.get_active_game(TEST_GUILD_ID).game_id == existing_id
+    assert {
+        player_repo.get_balance(discord_id, TEST_GUILD_ID)
+        for discord_id in discord_ids
+    } == {100}
+
+
+def test_phase_reminder_claim_is_durable_and_releasable(mafia_repo):
+    game_id = mafia_repo.create_game(
+        TEST_GUILD_ID, "2026-04-24", MafiaPhase.NIGHT, 1000, 5, None
+    )
+    second_repo = MafiaRepository(mafia_repo.db_path)
+
+    assert (
+        mafia_repo.claim_phase_reminder(
+            TEST_GUILD_ID, game_id, 1, MafiaPhase.NIGHT
+        )
+        is True
+    )
+    assert (
+        second_repo.claim_phase_reminder(
+            TEST_GUILD_ID, game_id, 1, MafiaPhase.NIGHT
+        )
+        is False
+    )
+
+    mafia_repo.release_phase_reminder(
+        TEST_GUILD_ID, game_id, 1, MafiaPhase.NIGHT
+    )
+
+    assert (
+        second_repo.claim_phase_reminder(
+            TEST_GUILD_ID, game_id, 1, MafiaPhase.NIGHT
+        )
+        is True
+    )
 
 
 def test_get_active_game_excludes_resolved(mafia_repo):
@@ -223,66 +295,42 @@ def test_get_actions_filters_by_type_and_phase(mafia_repo):
 # ── Eligibility ───────────────────────────────────────────────────────────
 
 
-def test_eligibility_union_gamba_and_dig(mafia_repo):
-    now = int(time.time())
-    _seed_wheel_spin(mafia_repo, discord_id=100, guild_id=TEST_GUILD_ID, ts=now - 1000)
-    _seed_dig_action(mafia_repo, actor_id=200, guild_id=TEST_GUILD_ID, ts=now - 500)
-    # Out-of-window - should be excluded
-    _seed_wheel_spin(mafia_repo, discord_id=300, guild_id=TEST_GUILD_ID, ts=now - 86400 * 5)
-    # Other guild - should be excluded
-    _seed_dig_action(mafia_repo, actor_id=400, guild_id=TEST_GUILD_ID_SECONDARY, ts=now - 100)
+def test_eligible_signups_are_opt_in_only_and_guild_scoped(mafia_repo):
+    for discord_id in (100, 200, 300):
+        _seed_registered_player(
+            mafia_repo, discord_id=discord_id, guild_id=TEST_GUILD_ID
+        )
+    _seed_registered_player(
+        mafia_repo, discord_id=400, guild_id=TEST_GUILD_ID_SECONDARY
+    )
+    mafia_repo.add_signup(TEST_GUILD_ID, 100)
+    mafia_repo.add_signup(TEST_GUILD_ID, 200)
+    mafia_repo.add_signup(TEST_GUILD_ID_SECONDARY, 400)
 
-    ids = mafia_repo.get_eligible_player_ids(TEST_GUILD_ID, since=now - 86400)
-    assert set(ids) == {100, 200}
+    ids = mafia_repo.get_eligible_signups(
+        TEST_GUILD_ID, entry_fee=8, max_debt=500
+    )
+
+    assert ids == [100, 200]
 
 
-def test_eligibility_excludes_optout(mafia_repo):
-    now = int(time.time())
-    _seed_wheel_spin(mafia_repo, discord_id=100, guild_id=TEST_GUILD_ID, ts=now - 1000)
-    _seed_dig_action(mafia_repo, actor_id=200, guild_id=TEST_GUILD_ID, ts=now - 1000)
+def test_eligible_signups_exclude_unregistered_opted_out_and_over_debt(mafia_repo):
+    for discord_id in (100, 200):
+        _seed_registered_player(
+            mafia_repo, discord_id=discord_id, guild_id=TEST_GUILD_ID
+        )
+    _seed_registered_player(
+        mafia_repo, discord_id=300, guild_id=TEST_GUILD_ID, balance=-495
+    )
+    for discord_id in (100, 200, 300, 400):
+        mafia_repo.add_signup(TEST_GUILD_ID, discord_id)
     mafia_repo.set_optout(TEST_GUILD_ID, 200, True)
 
-    ids = mafia_repo.get_eligible_player_ids(TEST_GUILD_ID, since=now - 86400)
+    ids = mafia_repo.get_eligible_signups(
+        TEST_GUILD_ID, entry_fee=8, max_debt=500
+    )
+
     assert ids == [100]
-
-
-def test_eligibility_dedup_across_sources(mafia_repo):
-    now = int(time.time())
-    _seed_wheel_spin(mafia_repo, discord_id=100, guild_id=TEST_GUILD_ID, ts=now - 100)
-    _seed_dig_action(mafia_repo, actor_id=100, guild_id=TEST_GUILD_ID, ts=now - 200)
-
-    ids = mafia_repo.get_eligible_player_ids(TEST_GUILD_ID, since=now - 86400)
-    assert ids == [100]
-
-
-def test_eligibility_excludes_unregistered_activity(mafia_repo):
-    now = int(time.time())
-    _seed_dig_action(
-        mafia_repo,
-        actor_id=100,
-        guild_id=TEST_GUILD_ID,
-        ts=now - 100,
-        registered=False,
-    )
-
-    ids = mafia_repo.get_eligible_player_ids(TEST_GUILD_ID, since=now - 86400)
-    assert ids == []
-
-
-def test_eligibility_excludes_players_past_entry_fee_debt_floor(mafia_repo):
-    now = int(time.time())
-    _seed_dig_action(mafia_repo, actor_id=100, guild_id=TEST_GUILD_ID, ts=now - 100)
-    _seed_registered_player(
-        mafia_repo, discord_id=100, guild_id=TEST_GUILD_ID, balance=-480
-    )
-
-    ids = mafia_repo.get_eligible_player_ids(
-        TEST_GUILD_ID,
-        since=now - 86400,
-        entry_fee=30,
-        max_debt=500,
-    )
-    assert ids == []
 
 
 # ── Optout ────────────────────────────────────────────────────────────────
@@ -292,30 +340,27 @@ def test_optout_toggle(mafia_repo):
     assert mafia_repo.is_opted_out(TEST_GUILD_ID, 100) is False
     mafia_repo.set_optout(TEST_GUILD_ID, 100, True)
     assert mafia_repo.is_opted_out(TEST_GUILD_ID, 100) is True
+    assert mafia_repo.get_opted_out_player_ids(TEST_GUILD_ID) == {100}
     mafia_repo.set_optout(TEST_GUILD_ID, 100, False)
     assert mafia_repo.is_opted_out(TEST_GUILD_ID, 100) is False
+    assert mafia_repo.get_opted_out_player_ids(TEST_GUILD_ID) == set()
 
 
-# ── Participation history ─────────────────────────────────────────────────
+def test_optout_cancels_pending_signup(mafia_repo):
+    mafia_repo.add_signup(TEST_GUILD_ID, 100)
+
+    mafia_repo.set_optout(TEST_GUILD_ID, 100, True)
+
+    assert mafia_repo.get_signups(TEST_GUILD_ID) == []
 
 
-def test_recent_player_participation(mafia_repo):
-    for i, date in enumerate(["2026-04-21", "2026-04-22", "2026-04-23", "2026-04-24"]):
-        gid = mafia_repo.create_game(TEST_GUILD_ID, date, MafiaPhase.RESOLVED, i * 100, 5, None)
-        mafia_repo.add_players(
-            gid,
-            [
-                MafiaPlayer(
-                    gid, 100, TEST_GUILD_ID, MafiaRole.TOWNIE,
-                    acted=(i in (0, 3)),  # only first and last
-                ),
-            ],
-        )
-        mafia_repo.finalize_game(gid, MafiaWinner.TOWN, 40, mvp_id=None)
+def test_remove_signups_consumes_only_rostered_players(mafia_repo):
+    for discord_id in (100, 200, 300):
+        mafia_repo.add_signup(TEST_GUILD_ID, discord_id)
 
-    recent = mafia_repo.get_recent_player_participation(100, TEST_GUILD_ID, limit=3)
-    # Newest first → game_date 2026-04-24, 23, 22 → acted: True, False, False
-    assert recent == [True, False, False]
+    mafia_repo.remove_signups(TEST_GUILD_ID, [100, 200])
+
+    assert mafia_repo.get_signups(TEST_GUILD_ID) == [300]
 
 
 # ── Finalize / leaderboard / stats ────────────────────────────────────────

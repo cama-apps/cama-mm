@@ -138,6 +138,45 @@ class MafiaRepository(BaseRepository):
             )
             return cursor.lastrowid
 
+    def claim_phase_reminder(
+        self,
+        guild_id: int | None,
+        game_id: int,
+        day_number: int,
+        phase: MafiaPhase,
+    ) -> bool:
+        """Atomically claim the automatic reminder for one game cycle."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO mafia_phase_reminders (
+                    guild_id, game_id, day_number, phase, claimed_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (gid, game_id, day_number, phase.value, int(time.time())),
+            )
+            return cursor.rowcount == 1
+
+    def release_phase_reminder(
+        self,
+        guild_id: int | None,
+        game_id: int,
+        day_number: int,
+        phase: MafiaPhase,
+    ) -> None:
+        """Release a failed delivery so a later loop tick can retry it."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            conn.cursor().execute(
+                """
+                DELETE FROM mafia_phase_reminders
+                WHERE guild_id = ? AND game_id = ? AND day_number = ? AND phase = ?
+                """,
+                (gid, game_id, day_number, phase.value),
+            )
+
     def create_game_with_players_and_entry_fees(
         self,
         *,
@@ -151,13 +190,57 @@ class MafiaRepository(BaseRepository):
         players: list[MafiaPlayer],
         max_debt: int,
     ) -> int:
-        """Create a game, roster players, and collect entry fees atomically."""
+        """Claim signups, create a game, and collect entry fees atomically."""
         if not players:
             raise ValueError("no_players")
 
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT game_id
+                FROM mafia_games
+                WHERE guild_id = ? AND phase != ?
+                ORDER BY game_id DESC
+                LIMIT 1
+                """,
+                (gid, MafiaPhase.RESOLVED.value),
+            )
+            if cursor.fetchone() is not None:
+                raise ValueError("game_already_active")
+
+            player_ids = [p.discord_id for p in players]
+            if roster_size != len(player_ids) or len(set(player_ids)) != len(player_ids):
+                raise ValueError("invalid_roster")
+            placeholders = ",".join("?" for _ in player_ids)
+            cursor.execute(
+                f"""
+                SELECT s.discord_id
+                FROM mafia_signups s
+                JOIN players p
+                  ON p.discord_id = s.discord_id
+                 AND p.guild_id = s.guild_id
+                LEFT JOIN mafia_optout o
+                  ON o.discord_id = s.discord_id
+                 AND o.guild_id = s.guild_id
+                WHERE s.guild_id = ?
+                  AND s.week_start = ?
+                  AND s.discord_id IN ({placeholders})
+                  AND o.discord_id IS NULL
+                  AND COALESCE(p.jopacoin_balance, 0) - ? >= ?
+                """,
+                [
+                    gid,
+                    self._SIGNUP_BUCKET,
+                    *player_ids,
+                    entry_fee,
+                    -max_debt,
+                ],
+            )
+            if {row["discord_id"] for row in cursor.fetchall()} != set(player_ids):
+                raise ValueError("signup_claim_failed")
+
             cursor.execute(
                 """
                 INSERT INTO mafia_games (
@@ -229,8 +312,6 @@ class MafiaRepository(BaseRepository):
                     )
                     if cursor.rowcount != 1:
                         raise ValueError("entry_fee_debit_failed")
-                player_ids = [p.discord_id for p in players]
-                placeholders = ",".join("?" * len(player_ids))
                 cursor.execute(
                     f"""
                     UPDATE players
@@ -242,6 +323,18 @@ class MafiaRepository(BaseRepository):
                 )
             finally:
                 self._clear_economy_ledger_context(cursor)
+
+            cursor.execute(
+                f"""
+                DELETE FROM mafia_signups
+                WHERE guild_id = ?
+                  AND week_start = ?
+                  AND discord_id IN ({placeholders})
+                """,
+                [gid, self._SIGNUP_BUCKET, *player_ids],
+            )
+            if cursor.rowcount != len(player_ids):
+                raise ValueError("signup_claim_failed")
 
             return game_id
 
@@ -1003,67 +1096,6 @@ class MafiaRepository(BaseRepository):
 
     # ── Eligibility & opt-out ───────────────────────────────────────────────
 
-    def get_eligible_player_ids(
-        self,
-        guild_id: int | None,
-        since: int,
-        *,
-        entry_fee: int = 0,
-        max_debt: int | None = None,
-    ) -> list[int]:
-        """Distinct discord_ids active in /gamba or /dig within the last `since` window.
-
-        `since` is a unix timestamp lower-bound. Excludes opted-out players,
-        unregistered players, and players who cannot pay the entry fee without
-        exceeding the configured debt floor.
-        """
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            debt_clause = ""
-            params: list = [gid, since, gid, since, gid, gid]
-            if max_debt is not None:
-                debt_clause = "AND COALESCE(p.jopacoin_balance, 0) - ? >= ?"
-                params.extend([entry_fee, -max_debt])
-            cursor.execute(
-                f"""
-                SELECT DISTINCT recent.discord_id FROM (
-                    SELECT discord_id FROM wheel_spins
-                      WHERE guild_id = ? AND spin_time >= ?
-                    UNION
-                    SELECT actor_id AS discord_id FROM dig_actions
-                      WHERE guild_id = ? AND action_type = 'dig' AND created_at >= ?
-                ) AS recent
-                JOIN players p
-                  ON p.discord_id = recent.discord_id
-                 AND p.guild_id = ?
-                WHERE recent.discord_id NOT IN (
-                    SELECT discord_id FROM mafia_optout WHERE guild_id = ?
-                )
-                {debt_clause}
-                ORDER BY recent.discord_id
-                """,
-                params,
-            )
-            return [row["discord_id"] for row in cursor.fetchall()]
-
-    def get_recent_player_participation(
-        self, discord_id: int, guild_id: int | None, limit: int = 3
-    ) -> list[bool]:
-        """Most recent `limit` mafia_players.acted values, newest first."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT acted FROM mafia_players
-                WHERE discord_id = ? AND guild_id = ?
-                ORDER BY game_id DESC LIMIT ?
-                """,
-                (discord_id, gid, limit),
-            )
-            return [bool(row["acted"]) for row in cursor.fetchall()]
-
     def set_optout(self, guild_id: int | None, discord_id: int, opted_out: bool) -> None:
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -1072,6 +1104,13 @@ class MafiaRepository(BaseRepository):
                 cursor.execute(
                     "INSERT OR IGNORE INTO mafia_optout (discord_id, guild_id) VALUES (?, ?)",
                     (discord_id, gid),
+                )
+                cursor.execute(
+                    """
+                    DELETE FROM mafia_signups
+                    WHERE guild_id = ? AND week_start = ? AND discord_id = ?
+                    """,
+                    (gid, self._SIGNUP_BUCKET, discord_id),
                 )
             else:
                 cursor.execute(
@@ -1089,8 +1128,18 @@ class MafiaRepository(BaseRepository):
             )
             return cursor.fetchone() is not None
 
-    # Signups are a single pending bucket per guild (no calendar), consumed and
-    # cleared when the next game starts. The week_start column holds a sentinel.
+    def get_opted_out_player_ids(self, guild_id: int | None) -> set[int]:
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT discord_id FROM mafia_optout WHERE guild_id = ?",
+                (gid,),
+            )
+            return {row["discord_id"] for row in cursor.fetchall()}
+
+    # Signups are a single pending bucket per guild (no calendar). Only players
+    # selected for a roster are consumed; overflow remains queued for the next game.
     _SIGNUP_BUCKET = "pending"
 
     def add_signup(self, guild_id: int | None, discord_id: int) -> None:
@@ -1110,18 +1159,70 @@ class MafiaRepository(BaseRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT discord_id FROM mafia_signups WHERE guild_id = ? AND week_start = ?",
+                """
+                SELECT discord_id
+                FROM mafia_signups
+                WHERE guild_id = ? AND week_start = ?
+                ORDER BY created_at, discord_id
+                """,
                 (gid, self._SIGNUP_BUCKET),
             )
             return [row["discord_id"] for row in cursor.fetchall()]
 
-    def clear_signups(self, guild_id: int | None) -> None:
-        """Consume the pending signup bucket once a game has started."""
+    def get_eligible_signups(
+        self,
+        guild_id: int | None,
+        *,
+        entry_fee: int = 0,
+        max_debt: int | None = None,
+    ) -> list[int]:
+        """Registered, payable players who explicitly joined the pending roster."""
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
+            cursor = conn.cursor()
+            debt_clause = ""
+            params: list = [gid, self._SIGNUP_BUCKET]
+            if max_debt is not None:
+                debt_clause = "AND COALESCE(p.jopacoin_balance, 0) - ? >= ?"
+                params.extend([entry_fee, -max_debt])
+            cursor.execute(
+                f"""
+                SELECT s.discord_id
+                FROM mafia_signups s
+                JOIN players p
+                  ON p.discord_id = s.discord_id
+                 AND p.guild_id = s.guild_id
+                LEFT JOIN mafia_optout o
+                  ON o.discord_id = s.discord_id
+                 AND o.guild_id = s.guild_id
+                WHERE s.guild_id = ?
+                  AND s.week_start = ?
+                  AND o.discord_id IS NULL
+                  {debt_clause}
+                ORDER BY s.created_at, s.discord_id
+                """,
+                params,
+            )
+            return [row["discord_id"] for row in cursor.fetchall()]
+
+    def remove_signups(
+        self, guild_id: int | None, discord_ids: list[int] | tuple[int, ...]
+    ) -> None:
+        """Consume only the players selected for the newly created roster."""
+        player_ids = list(dict.fromkeys(discord_ids))
+        if not player_ids:
+            return
+        gid = self.normalize_guild_id(guild_id)
+        placeholders = ", ".join("?" for _ in player_ids)
+        with self.connection() as conn:
             conn.cursor().execute(
-                "DELETE FROM mafia_signups WHERE guild_id = ? AND week_start = ?",
-                (gid, self._SIGNUP_BUCKET),
+                f"""
+                DELETE FROM mafia_signups
+                WHERE guild_id = ?
+                  AND week_start = ?
+                  AND discord_id IN ({placeholders})
+                """,
+                [gid, self._SIGNUP_BUCKET, *player_ids],
             )
 
     # ── History, leaderboard, stats ─────────────────────────────────────────
