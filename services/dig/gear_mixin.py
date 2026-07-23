@@ -164,7 +164,7 @@ class GearMixin:
         return self._has_relic(discord_id, guild_id, "stormcaller")
 
     def _prism_heart_bonuses(
-        self, discord_id: int, guild_id
+        self, discord_id: int, guild_id, *, effects=None,
     ) -> dict:
         """Prism Heart relic — color-dispatched bonuses.
 
@@ -175,7 +175,9 @@ class GearMixin:
         zero = {"advance": 0, "jc_flat": 0, "lum_recovery": 0, "siphon_chance": 0.0}
         if not self._has_relic(discord_id, guild_id, "prism_heart"):
             return zero
-        effects = self._mana_effects_or_none(discord_id, guild_id)
+        effects = self._mana_effects_or_none(
+            discord_id, guild_id, effects=effects,
+        )
         if effects is None:
             return zero
         if effects.color == "Red":

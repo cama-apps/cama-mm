@@ -9,6 +9,7 @@ import json
 import random
 import time
 
+from domain.models.mana_effects import ManaEffects
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.dig._common import (
@@ -205,18 +206,33 @@ class DigService(
         )
         return info["penalized"], info["penalty_applied"]
 
-    def _mana_effects_or_none(self, discord_id: int, guild_id):
+    def _get_mana_effects_snapshot(self, discord_id: int, guild_id):
+        """Load one immutable mana-effects value for the current dig request."""
+        if self.mana_effects_service is None:
+            return None
+        try:
+            return self.mana_effects_service.get_effects(discord_id, guild_id)
+        except Exception:
+            # A failed lookup has always meant "no modifiers apply". Returning
+            # a concrete neutral value also prevents downstream helpers from
+            # retrying the same failed read throughout this request.
+            return ManaEffects()
+
+    def _mana_effects_or_none(self, discord_id: int, guild_id, *, effects=None):
         """Resolve the player's active mana effects, swallowing lookup errors.
 
         Returns ``None`` when there is no service wired, no active mana, or the
         lookup raised — callers should treat that as "no modifiers apply".
+        Callers that already loaded a request-local snapshot can supply it to
+        avoid another repository read.
         """
-        if self.mana_effects_service is None:
-            return None
-        try:
-            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
-        except Exception:
-            return None
+        if effects is None:
+            if self.mana_effects_service is None:
+                return None
+            try:
+                effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+            except Exception:
+                return None
         if effects.color is None:
             return None
         return effects
@@ -333,7 +349,14 @@ class DigService(
             tunnel["void_bait_digs"] = existing_vb + 3
 
     def _charge_paid_dig_or_block(
-        self, discord_id: int, guild_id, tunnel: dict, today: str, paid: bool,
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        today: str,
+        paid: bool,
+        *,
+        mana_effects=None,
     ) -> tuple[dict | None, int]:
         """Resolve the cooldown / paid-dig gate for a non-first dig.
 
@@ -344,7 +367,9 @@ class DigService(
         paid-day counter commit atomically here so a crash between the two
         writes can't charge JC without counting the dig.
         """
-        cooldown_remaining = self._get_cooldown_remaining(tunnel)
+        cooldown_remaining = self._get_cooldown_remaining(
+            tunnel, mana_effects=mana_effects,
+        )
         if cooldown_remaining <= 0:
             return None, 0
 
@@ -354,6 +379,7 @@ class DigService(
                 pc = 0
             preview_cost = self._apply_mana_paid_cost_modifier(
                 discord_id, guild_id, self._calculate_paid_dig_cost(tunnel, pc),
+                effects=mana_effects,
             )
             return {
                 "success": False,
@@ -368,6 +394,7 @@ class DigService(
             paid_count = 0
         paid_dig_cost = self._apply_mana_paid_cost_modifier(
             discord_id, guild_id, self._calculate_paid_dig_cost(tunnel, paid_count),
+            effects=mana_effects,
         )
         balance = self.player_repo.get_balance(discord_id, guild_id)
         if balance < paid_dig_cost:
@@ -466,9 +493,16 @@ class DigService(
         # 3. Cooldown / paid dig check — normal digs only, parked players
         #    short-circuited above.
         paid_dig_cost = 0
+        mana_effects = None
         if not is_first_dig:
+            mana_effects = self._get_mana_effects_snapshot(discord_id, guild_id)
             block, paid_dig_cost = self._charge_paid_dig_or_block(
-                discord_id, guild_id, tunnel, today, paid,
+                discord_id,
+                guild_id,
+                tunnel,
+                today,
+                paid,
+                mana_effects=mana_effects,
             )
             if block is not None:
                 return block
@@ -670,7 +704,9 @@ class DigService(
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
         magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
         # Prism Heart — color-dispatched bonuses (active only with mana)
-        prism = self._prism_heart_bonuses(discord_id, guild_id)
+        prism = self._prism_heart_bonuses(
+            discord_id, guild_id, effects=mana_effects,
+        )
         mole_claws_bonus += prism["advance"]
         magma_heart_bonus += prism["jc_flat"]
         miner_stats = self._get_miner_stats(tunnel)
@@ -720,7 +756,7 @@ class DigService(
 
         # Silent mana hazard modifier (Forest -, Mountain/Black +).
         cave_in_chance = self._apply_mana_hazard_modifier(
-            discord_id, guild_id, cave_in_chance
+            discord_id, guild_id, cave_in_chance, effects=mana_effects,
         )
         # Floor lives below the mana modifier so Forest can't zero out cave-in
         # entirely; thick_skin below intentionally bypasses this.
@@ -758,15 +794,19 @@ class DigService(
             # to soften the blow. Folded into the same atomic commit as the
             # cave-in balance delta below.
             blue_refund = 0
-            if paid_dig_cost > 0 and self.mana_effects_service is not None:
-                try:
-                    _bf = self.mana_effects_service.get_effects(discord_id, guild_id)
-                    if _bf.color is not None and _bf.dig_paid_refund_on_caveins > 0:
-                        blue_refund = max(
-                            1, int(paid_dig_cost * _bf.dig_paid_refund_on_caveins)
-                        )
-                except Exception:
-                    blue_refund = 0
+            if (
+                paid_dig_cost > 0
+                and mana_effects is not None
+                and mana_effects.color is not None
+                and mana_effects.dig_paid_refund_on_caveins > 0
+            ):
+                blue_refund = max(
+                    1,
+                    int(
+                        paid_dig_cost
+                        * mana_effects.dig_paid_refund_on_caveins
+                    ),
+                )
             band = cave_in_band(depth_before)
             block_min, block_max = CAVE_IN_BLOCK_LOSS_RANGES[band]
             block_loss = random.randint(block_min, block_max)
@@ -920,7 +960,9 @@ class DigService(
                 log_action_type="dig",
             )
             tunnel.update(cave_in_tunnel_updates)
-            next_free_dig_at = now + self._get_free_dig_cooldown_duration(tunnel)
+            next_free_dig_at = now + self._get_free_dig_cooldown_duration(
+                tunnel, mana_effects=mana_effects,
+            )
             if overgrowth_active:
                 try:
                     self.buff_service.consume_overgrowth_charge(discord_id, guild_id)
@@ -1040,6 +1082,7 @@ class DigService(
             try:
                 _wc = self.mana_effects_service.get_weather_combo_modifiers(
                     discord_id, guild_id, weather_code_now,
+                    effects=mana_effects,
                 )
                 weather_combo_yield = _wc["yield_mult"]
             except Exception:
@@ -1076,7 +1119,9 @@ class DigService(
 
         # Mana variance + steady bonus on base loot only — protects deterministic
         # milestone/streak from a Mountain "zero" roll.
-        jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
+        jc_earned = self._apply_mana_yield_variance(
+            discord_id, guild_id, jc_earned, effects=mana_effects,
+        )
 
         # Relic: Prospector's Streak — flat JC per consecutive cave-in-free dig
         # (capped). Folded into the non-streak total so it counts toward the base
@@ -1135,7 +1180,9 @@ class DigService(
         # Plains tithe / Blue tax apply to the scaled base, milestone, and
         # streak payout plus the fixed Overgrowth bonus.
         # (_apply_mana_yield_taxes also applies the daily economy event.)
-        jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
+        jc_earned = self._apply_mana_yield_taxes(
+            discord_id, guild_id, jc_earned, effects=mana_effects,
+        )
 
         # Helltide bell: a flat per-dig tax while the guild modifier is active.
         # Pure deflation — coins burn, not transferred.
@@ -1310,7 +1357,9 @@ class DigService(
             log_action_type="dig",
         )
         tunnel.update(final_tunnel_updates)
-        next_free_dig_at = now + self._get_free_dig_cooldown_duration(tunnel)
+        next_free_dig_at = now + self._get_free_dig_cooldown_duration(
+            tunnel, mana_effects=mana_effects,
+        )
         # Blood Pact: an active pact on this digger skims a share of the dig
         # payout to the pact holder. Dig is the primary earnings source, so this
         # is where the shop's advertised "skim of the target's earnings" mostly

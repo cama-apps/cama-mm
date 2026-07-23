@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from commands.dig import _append_sabotage_prediction_steal_line
+from domain.models.mana_effects import ManaEffects
 from repositories.dig_repository import DigRepository
 from repositories.prediction_repository import PredictionRepository
 from services.dig_constants import (
@@ -49,6 +50,7 @@ from services.dig_data.bosses import (
     BOSS_TIER_BONUS,
 )
 from services.dig_service import DigService, _prestige_cave_in_multiplier
+from services.mana_effects_service import ManaEffectsService
 from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
@@ -89,6 +91,30 @@ def _register_player(player_repository, discord_id=10001, guild_id=12345, balanc
     if balance != 3:  # default is 3
         player_repository.update_balance(discord_id, guild_id, balance)
     return discord_id
+
+
+class _CountingManaEffectsService:
+    """Minimal effects service that exposes request-level lookup counts."""
+
+    def __init__(self, effects: ManaEffects):
+        self.effects = effects
+        self.get_effects_calls = 0
+        self.loan_service = None
+
+    def get_effects(self, discord_id, guild_id):
+        self.get_effects_calls += 1
+        return self.effects
+
+    def get_weather_combo_modifiers(
+        self, discord_id, guild_id, weather, *, effects=None,
+    ):
+        return ManaEffectsService.get_weather_combo_modifiers(
+            self,
+            discord_id,
+            guild_id,
+            weather,
+            effects=effects,
+        )
 
 
 def test_sabotage_embed_mentions_prediction_contract_steal():
@@ -238,6 +264,107 @@ class TestCoreDig:
         assert result["success"]
         assert result["jc_earned"] >= 0
 
+    def test_dig_reuses_one_request_local_mana_effects_snapshot(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        guild_id,
+        monkeypatch,
+    ):
+        """A normal positive dig performs one effects lookup, not one per hook."""
+        _register_player(player_repository)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=10,
+            max_depth=10,
+            total_digs=1,
+            last_dig_at=0,
+        )
+        effects_service = _CountingManaEffectsService(
+            ManaEffects.for_color("White", "Plains"),
+        )
+        dig_service.mana_effects_service = effects_service
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        # Exercise the relic dispatch hook too; it previously triggered its
+        # own effects lookup when Prism Heart was equipped.
+        monkeypatch.setattr(
+            dig_service,
+            "_has_relic",
+            lambda did, gid, relic_id: relic_id == "prism_heart",
+        )
+
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"]
+        assert result["cave_in"] is False
+        assert result["jc_earned"] > 0
+        assert effects_service.get_effects_calls == 1
+
+    def test_mana_snapshot_preserves_standalone_modifier_outcomes(
+        self, dig_service, guild_id, monkeypatch,
+    ):
+        """Injected snapshots produce the same modifiers as standalone reads."""
+        active_effects = [ManaEffects()]
+        dig_service.mana_effects_service = SimpleNamespace(
+            get_effects=lambda discord_id, request_guild_id: active_effects[0],
+            loan_service=None,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+
+        red = ManaEffects.for_color("Red", "Mountain")
+        active_effects[0] = red
+        assert dig_service._apply_mana_yield_variance(
+            10001, guild_id, 10, effects=red,
+        ) == dig_service._apply_mana_yield_variance(10001, guild_id, 10)
+        assert dig_service._apply_mana_paid_cost_modifier(
+            10001, guild_id, 100, effects=red,
+        ) == dig_service._apply_mana_paid_cost_modifier(10001, guild_id, 100)
+
+        blue = ManaEffects.for_color("Blue", "Island")
+        active_effects[0] = blue
+        assert dig_service._apply_mana_yield_taxes(
+            10001, guild_id, 100, effects=blue,
+        ) == dig_service._apply_mana_yield_taxes(10001, guild_id, 100)
+
+        green = ManaEffects.for_color("Green", "Forest")
+        active_effects[0] = green
+        assert dig_service._apply_mana_hazard_modifier(
+            10001, guild_id, 0.20, effects=green,
+        ) == dig_service._apply_mana_hazard_modifier(10001, guild_id, 0.20)
+        assert dig_service._apply_mana_cooldown_reduction(
+            10001, guild_id, 3600, effects=green,
+        ) == dig_service._apply_mana_cooldown_reduction(
+            10001, guild_id, 3600,
+        )
+        cooldown_tunnel = {
+            "discord_id": 10001,
+            "guild_id": guild_id,
+            "last_dig_at": 100,
+        }
+        assert dig_service._get_cooldown_remaining(
+            cooldown_tunnel,
+            now=200,
+            mana_effects=green,
+        ) == dig_service._get_cooldown_remaining(
+            cooldown_tunnel,
+            now=200,
+        )
+
+        white = ManaEffects.for_color("White", "Plains")
+        active_effects[0] = white
+        monkeypatch.setattr(
+            dig_service,
+            "_has_relic",
+            lambda did, request_guild_id, relic_id: relic_id == "prism_heart",
+        )
+        assert dig_service._prism_heart_bonuses(
+            10001, guild_id, effects=white,
+        ) == dig_service._prism_heart_bonuses(10001, guild_id)
+
     def test_base_dig_payout_is_capped_at_20(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Normal dig base loot is capped before milestone and streak bonuses."""
         _register_player(player_repository)
@@ -245,7 +372,11 @@ class TestCoreDig:
         dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 25,
+        )
 
         result = dig_service.dig(10001, guild_id)
 
@@ -264,10 +395,14 @@ class TestCoreDig:
         dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 25,
+        )
         seen_tax_inputs = []
 
-        def capture_tax_input(did, gid, jc):
+        def capture_tax_input(did, gid, jc, **kwargs):
             seen_tax_inputs.append(jc)
             return jc
 
@@ -352,10 +487,14 @@ class TestCoreDig:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         dig_service.buff_service.grant_overgrowth(10001, guild_id)
         monkeypatch.setattr(random, "random", lambda: 0.99)
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 25,
+        )
         seen_tax_inputs = []
 
-        def capture_tax_input(did, gid, jc):
+        def capture_tax_input(did, gid, jc, **kwargs):
             seen_tax_inputs.append(jc)
             return jc
 
@@ -405,7 +544,9 @@ class TestCoreDig:
         # Base loot lands at 15 — under the cap on its own, so a +20 relic add
         # would blow past 20 unless it is folded into the capped non-streak total.
         monkeypatch.setattr(
-            dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 15,
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 15,
         )
 
         result = dig_service.dig(10001, guild_id)
@@ -427,7 +568,11 @@ class TestCoreDig:
         dig_repo.update_tunnel(10001, guild_id, depth=10, max_depth=10)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 1)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 1,
+        )
         monkeypatch.setattr(dig_service, "_calculate_daily_streak", lambda did, gid, tunnel, today: (30, False))
         monkeypatch.setattr(
             dig_service,
@@ -458,7 +603,11 @@ class TestCoreDig:
         monkeypatch.setattr(dig_service, "_relic_jc_yield_multiplier", lambda *a, **k: 1.0)
         monkeypatch.setattr(dig_service, "_luminosity_jc_multiplier", lambda lum: 1.0)
         monkeypatch.setattr(dig_service, "_post_pinnacle_decay_factor", lambda *a, **k: 1.0)
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: jc)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: jc,
+        )
 
         # Player A: no buff -> 12 rolled, under the 20 cap -> 12.
         _register_player(player_repository, discord_id=20001)
@@ -499,7 +648,11 @@ class TestCoreDig:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         # Force a pre-cap base far above any cap (overwrites the product).
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 100)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 100,
+        )
 
         _register_player(player_repository, discord_id=20003)
         dig_repo.create_tunnel(20003, guild_id, "C")
@@ -3634,7 +3787,7 @@ class TestApplyDigOutcomeSecondaryPaths:
         seen_tax_inputs = []
         monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
 
-        def capture_tax_input(did, gid, jc):
+        def capture_tax_input(did, gid, jc, **kwargs):
             seen_tax_inputs.append(jc)
             return jc
 
@@ -3653,7 +3806,11 @@ class TestApplyDigOutcomeSecondaryPaths:
 
     def test_base_dig_payout_cap_applies_on_dm_path(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         uid = 20105
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_taxes",
+            lambda did, gid, jc, **kwargs: jc,
+        )
         monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
         p = _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, depth=10, guild_id=guild_id)
         balance_before = player_repository.get_balance(uid, guild_id)
@@ -3678,7 +3835,7 @@ class TestApplyDigOutcomeSecondaryPaths:
         uid = 20109
         seen_tax_inputs = []
 
-        def capture_tax_input(did, gid, jc):
+        def capture_tax_input(did, gid, jc, **kwargs):
             seen_tax_inputs.append(jc)
             return jc
 
@@ -3723,7 +3880,11 @@ class TestApplyDigOutcomeSecondaryPaths:
         fake_mana = MagicMock()
         fake_mana.get_weather_combo_modifiers.return_value = {"yield_mult": 2.0}
         monkeypatch.setattr(dig_service, "mana_effects_service", fake_mana)
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_taxes",
+            lambda did, gid, jc, **kwargs: jc,
+        )
         monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
         balance_before = player_repository.get_balance(uid, guild_id)
 
@@ -3753,7 +3914,11 @@ class TestApplyDigOutcomeSecondaryPaths:
         fake_mana.get_weather_combo_modifiers.return_value = {"yield_mult": 2.0}
         monkeypatch.setattr(dig_service, "mana_effects_service", fake_mana)
         # Isolate the combo multiplier from taxes/penalties.
-        monkeypatch.setattr(dig_service, "_apply_mana_yield_taxes", lambda did, gid, jc: jc)
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_mana_yield_taxes",
+            lambda did, gid, jc, **kwargs: jc,
+        )
         monkeypatch.setattr(dig_service, "_helltide_tax", lambda gid: 0)
         balance_before = player_repository.get_balance(uid, guild_id)
         dig_service.apply_dig_outcome(p, {"advance": 1, "jc_earned": 10, "cave_in": False, "event_id": ""})
@@ -3841,7 +4006,7 @@ class TestExecuteDeterministicOutcomePaths:
         monkeypatch.setattr("random.random", lambda: 0.99)
         seen_tax_inputs = []
 
-        def capture_tax_input(did, gid, jc):
+        def capture_tax_input(did, gid, jc, **kwargs):
             seen_tax_inputs.append(jc)
             return jc
 
@@ -3855,7 +4020,9 @@ class TestExecuteDeterministicOutcomePaths:
         dig_service.buff_service.grant_overgrowth(uid, guild_id)
         p["overgrowth_active"] = True
         monkeypatch.setattr(
-            dig_service, "_apply_mana_yield_variance", lambda did, gid, jc: 25
+            dig_service,
+            "_apply_mana_yield_variance",
+            lambda did, gid, jc, **kwargs: 25,
         )
         balance_before = player_repository.get_balance(uid, guild_id)
 
