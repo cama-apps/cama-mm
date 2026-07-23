@@ -225,6 +225,10 @@ Spend jopacoin in the shop for special items.
 #### `/shop pingedash`
 Spend jopacoin to send the configured Pingedash. Has a 24-hour cooldown.
 
+#### `/shop pingedkevin`
+Spend jopacoin to ping the configured Kevin with the PingedKevin GIF. Has an
+independent 24-hour cooldown.
+
 #### `/shop avoids`
 View your active soft avoids.
 
@@ -471,6 +475,8 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 - `BANKRUPTCY_COOLDOWN_SECONDS`, `BANKRUPTCY_PENALTY_GAMES` - Bankruptcy settings
 - `TIP_FEE_RATE` - Tipping fee (default: 1%)
 - `DISBURSE_MIN_FUND`, `DISBURSE_QUORUM_PERCENTAGE` - Disbursement voting
+- `PINGEDASH_TARGET_USER_ID`, `PINGEDKEVIN_TARGET_USER_ID` - Discord user IDs
+  targeted by the paid `/shop pingedash` and `/shop pingedkevin` commands
 
 **Wheel of Fortune:**
 - `WHEEL_COOLDOWN_SECONDS` - Time between spins (default: 24 hours)
