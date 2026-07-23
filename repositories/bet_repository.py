@@ -16,16 +16,14 @@ logger = logging.getLogger("cama_bot.repositories.bet")
 from repositories.interfaces import IBetRepository
 
 
-def _allows_shuffle_spectator_dual_team(
+def _allows_spectator_dual_team(
     payload: dict,
     *,
     discord_id: int,
     radiant_ids: set[int] | None = None,
     dire_ids: set[int] | None = None,
 ) -> bool:
-    """Shuffle spectators (not on either team) may bet both Radiant and Dire."""
-    if payload.get("is_draft") is not False:
-        return False
+    """Spectators (not on either team) may bet both Radiant and Dire."""
     if radiant_ids is None:
         radiant_ids = set(payload.get("radiant_team_ids") or [])
     if dire_ids is None:
@@ -33,13 +31,9 @@ def _allows_shuffle_spectator_dual_team(
     return discord_id not in radiant_ids and discord_id not in dire_ids
 
 
-def _raise_one_side_bet_required(existing_team: str, payload: dict | None) -> None:
+def _raise_one_side_bet_required(existing_team: str) -> None:
     """Raise when a second team bet is not allowed."""
     side = existing_team.title()
-    if payload and payload.get("is_draft"):
-        raise ValueError(
-            f"You already have bets on {side}. Draft matches only allow bets on one team."
-        )
     raise ValueError(
         f"You already have bets on {side}. You can only add more bets on the same team."
     )
@@ -186,7 +180,7 @@ class BetRepository(BaseRepository, IBetRepository):
         effective_bet = amount * leverage
         normalized_guild = self.normalize_guild_id(guild_id)
 
-        # Reject opposite-team bets unless shuffle spectator dual-team is allowed
+        # Reject opposite-team bets unless spectator dual-team is allowed
         payload: dict | None = None
         if pending_match_id is not None:
             cursor.execute(
@@ -227,11 +221,11 @@ class BetRepository(BaseRepository, IBetRepository):
         if existing_bets:
             existing_team = existing_bets[0]["team_bet_on"]
             if existing_team != team:
-                allow_dual = payload is not None and _allows_shuffle_spectator_dual_team(
+                allow_dual = payload is not None and _allows_spectator_dual_team(
                     payload, discord_id=discord_id
                 )
                 if not allow_dual:
-                    _raise_one_side_bet_required(existing_team, payload)
+                    _raise_one_side_bet_required(existing_team)
 
         cursor.execute(
             "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
@@ -335,7 +329,7 @@ class BetRepository(BaseRepository, IBetRepository):
         - there is an active pending match
         - betting is still open (bet_lock_until)
         - participants may only bet on their own team
-        - shuffle spectators may bet both teams; draft/participants one team per match
+        - spectators may bet both teams; participants may only bet on their own team
         - per-match-window duplicate-bet prevention (pending_match_id)
         - sufficient balance or debt limit, then debits + inserts bet in the same transaction
 
@@ -414,7 +408,7 @@ class BetRepository(BaseRepository, IBetRepository):
             if discord_id in dire_ids and team != "dire":
                 raise ValueError("Participants on Dire can only bet on Dire.")
 
-            # Reject opposite-team bets unless shuffle spectator dual-team is allowed
+            # Reject opposite-team bets unless spectator dual-team is allowed
             cursor.execute(
                 """
                 SELECT team_bet_on
@@ -428,11 +422,11 @@ class BetRepository(BaseRepository, IBetRepository):
             if existing_bets:
                 existing_team = existing_bets[0]["team_bet_on"]
                 if existing_team != team:
-                    allow_dual = _allows_shuffle_spectator_dual_team(
+                    allow_dual = _allows_spectator_dual_team(
                         payload, discord_id=discord_id, radiant_ids=radiant_ids, dire_ids=dire_ids
                     )
                     if not allow_dual:
-                        _raise_one_side_bet_required(existing_team, payload)
+                        _raise_one_side_bet_required(existing_team)
 
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
@@ -1111,6 +1105,11 @@ class BetRepository(BaseRepository, IBetRepository):
             a = agg.setdefault(w["discord_id"], {"payout": 0, "stake": 0})
             a["payout"] += int(w.get("payout", 0))
             a["stake"] += int(w.get("effective_bet", w.get("amount", 0)))
+        for loser in distributions.get("losers", []):
+            if loser["discord_id"] in agg:
+                agg[loser["discord_id"]]["stake"] += int(
+                    loser.get("effective_bet", loser.get("amount", 0))
+                )
 
         penalties: dict[int, int] = {}
         for discord_id, a in agg.items():

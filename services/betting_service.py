@@ -343,9 +343,17 @@ class BettingService:
                     + int(w.get("payout", 0))
                     - int(w.get("effective_bet", w.get("amount", 0)))
                 )
+            for loser in distributions.get("losers", []):
+                pid = loser["discord_id"]
+                if pid in profits:
+                    profits[pid] -= int(
+                        loser.get("effective_bet", loser.get("amount", 0))
+                    )
             pact_targets = self._get_blood_pact_targets(list(profits), guild_id)
             for pid, profit in profits.items():
                 net_profit = profit - int(penalties.get(pid, 0))
+                if net_profit <= 0:
+                    continue
                 skimmed = 0
                 if pid in pact_targets:
                     skimmed = self._apply_blood_pact_skim(
