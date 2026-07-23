@@ -1481,7 +1481,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 FROM bets b
                 JOIN matches m ON b.match_id = m.match_id
                 WHERE b.discord_id = ? AND b.guild_id = ? AND b.match_id IS NOT NULL
-                ORDER BY b.bet_time ASC
+                ORDER BY b.bet_time ASC, b.bet_id ASC
                 """,
                 (discord_id, normalized_guild_id),
             )
@@ -1615,6 +1615,126 @@ class BetRepository(BaseRepository, IBetRepository):
                 ).fetchall()
                 streaks.update({int(row["discord_id"]): int(row["streak"]) for row in rows})
         return streaks
+
+    def get_bulk_gambling_metrics(
+        self,
+        guild_id: int | None,
+        discord_ids: list[int] | None = None,
+    ) -> dict[int, dict]:
+        """Return leaderboard and degen inputs from one pass over settled bets.
+
+        ``discord_ids=None`` aggregates every bettor in the guild. An explicit
+        list scopes the scan to those players; missing players simply have no
+        result row. The window ordering includes ``bet_id`` so loss-chasing
+        sequences are deterministic when several bets share a timestamp.
+        """
+        unique_ids = (
+            None if discord_ids is None else list(dict.fromkeys(discord_ids))
+        )
+        if unique_ids == []:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        chunks: list[list[int] | None]
+        if unique_ids is None:
+            chunks = [None]
+        else:
+            # Keep each statement below SQLite's traditional 999-parameter
+            # ceiling. Players belong to exactly one chunk, so aggregate rows
+            # can be merged without another reduction pass.
+            chunks = [
+                unique_ids[offset : offset + 900]
+                for offset in range(0, len(unique_ids), 900)
+            ]
+
+        metrics: dict[int, dict] = {}
+        with self.connection() as conn:
+            for chunk in chunks:
+                player_clause = ""
+                params: list[int] = [normalized_guild]
+                if chunk is not None:
+                    placeholders = ",".join("?" for _ in chunk)
+                    player_clause = f"AND b.discord_id IN ({placeholders})"
+                    params.extend(chunk)
+
+                rows = conn.execute(
+                    f"""
+                    WITH base AS (
+                        SELECT
+                            b.discord_id,
+                            b.bet_id,
+                            b.match_id,
+                            b.bet_time,
+                            b.amount * COALESCE(b.leverage, 1) AS effective_bet,
+                            COALESCE(b.leverage, 1) AS leverage,
+                            b.payout,
+                            CASE
+                                WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                                  OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+                                THEN 1 ELSE 0
+                            END AS won
+                        FROM bets b
+                        JOIN matches m ON b.match_id = m.match_id
+                        WHERE b.guild_id = ?
+                          AND b.match_id IS NOT NULL
+                          {player_clause}
+                    ),
+                    ordered AS (
+                        SELECT
+                            *,
+                            LAG(won) OVER (
+                                PARTITION BY discord_id
+                                ORDER BY bet_time ASC, bet_id ASC
+                            ) AS previous_won,
+                            LAG(effective_bet) OVER (
+                                PARTITION BY discord_id
+                                ORDER BY bet_time ASC, bet_id ASC
+                            ) AS previous_effective_bet
+                        FROM base
+                    )
+                    SELECT
+                        discord_id,
+                        COUNT(*) AS total_bets,
+                        SUM(won) AS wins,
+                        SUM(1 - won) AS losses,
+                        SUM(effective_bet) AS total_wagered,
+                        AVG(leverage) AS avg_leverage,
+                        SUM(
+                            CASE
+                                WHEN won = 1
+                                THEN COALESCE(payout, effective_bet * 2) - effective_bet
+                                ELSE -effective_bet
+                            END
+                        ) AS net_pnl,
+                        COUNT(DISTINCT match_id) AS unique_matches,
+                        SUM(CASE WHEN leverage = 5 THEN 1 ELSE 0 END) AS five_x_bets,
+                        SUM(
+                            CASE WHEN previous_won = 0 THEN 1 ELSE 0 END
+                        ) AS sequences_analyzed,
+                        SUM(
+                            CASE
+                                WHEN previous_won = 0
+                                 AND effective_bet > previous_effective_bet
+                                THEN 1 ELSE 0
+                            END
+                        ) AS times_increased_after_loss
+                    FROM ordered
+                    GROUP BY discord_id
+                    """,
+                    params,
+                ).fetchall()
+
+                for row in rows:
+                    data = dict(row)
+                    total_bets = int(data["total_bets"])
+                    total_wagered = int(data["total_wagered"])
+                    data["win_rate"] = data["wins"] / total_bets if total_bets else 0
+                    data["roi"] = (
+                        data["net_pnl"] / total_wagered if total_wagered else 0
+                    )
+                    metrics[int(data["discord_id"])] = data
+
+        return metrics
 
     def get_guild_gambling_summary(self, guild_id: int | None, min_bets: int = 3) -> list[dict]:
         """
@@ -1888,7 +2008,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 FROM bets b
                 JOIN matches m ON b.match_id = m.match_id
                 WHERE b.guild_id = ? AND b.match_id IS NOT NULL AND b.discord_id IN ({placeholders})
-                ORDER BY b.discord_id, b.bet_time ASC
+                ORDER BY b.discord_id, b.bet_time ASC, b.bet_id ASC
                 """,
                 (normalized_guild, *discord_ids),
             )
