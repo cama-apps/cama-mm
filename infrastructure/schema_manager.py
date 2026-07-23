@@ -559,6 +559,10 @@ class SchemaManager:
                 self._migration_add_prediction_positions_user_index,
             ),
             (
+                "add_prediction_trades_market_time_index",
+                self._migration_add_prediction_trades_market_time_index,
+            ),
+            (
                 "add_bets_recent_loss_index",
                 self._migration_add_bets_recent_loss_index,
             ),
@@ -630,6 +634,13 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_prediction_positions_user "
             "ON prediction_positions(discord_id, prediction_id)"
+        )
+
+    def _migration_add_prediction_trades_market_time_index(self, cursor) -> None:
+        """Cover market refresh-window volume queries."""
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pred_trades_pred_time "
+            "ON prediction_trades(prediction_id, trade_time)"
         )
 
     def _migration_add_bets_recent_loss_index(self, cursor) -> None:

@@ -318,26 +318,11 @@ class PredictionService:
 
         Returns: prediction row + book + recent trades + (optional) viewer position.
         """
-        pred = self.prediction_repo.get_prediction(prediction_id)
-        if not pred:
-            return None
-        book = self.prediction_repo.get_book(prediction_id)
-        recent = self.prediction_repo.get_recent_trades(prediction_id, limit=5)
-        position = (
-            self.prediction_repo.get_position(prediction_id, viewer_id)
-            if viewer_id is not None
-            else None
+        return self.prediction_repo.get_market_snapshot(
+            prediction_id,
+            viewer_id=viewer_id,
+            recent_limit=5,
         )
-        # Volume since last refresh window
-        since = pred.get("last_refresh_at") or 0
-        summary = self.prediction_repo.get_trade_summary_since(prediction_id, since)
-        return {
-            **pred,
-            "book": book,
-            "recent_trades": recent,
-            "viewer_position": position,
-            "volume_since_refresh": summary.get("total_volume", 0),
-        }
 
     def get_user_position(self, prediction_id: int, discord_id: int) -> dict | None:
         return self.prediction_repo.get_position(prediction_id, discord_id)

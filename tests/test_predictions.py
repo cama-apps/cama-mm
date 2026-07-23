@@ -8,6 +8,7 @@ admin gating, and position math.
 from __future__ import annotations
 
 import random
+import sqlite3
 import time
 
 import pytest
@@ -107,6 +108,41 @@ def test_prediction_positions_user_index_supports_direct_lookup(prediction_repo)
     assert columns == ["discord_id", "prediction_id"]
     assert any(
         "idx_prediction_positions_user" in row["detail"]
+        for row in plan
+    ), [row["detail"] for row in plan]
+
+
+def test_prediction_trade_time_index_supports_refresh_volume(prediction_repo):
+    """Refresh-window volume uses the market/time covering index."""
+    manager = SchemaManager(prediction_repo.db_path)
+    manager.initialize()
+    manager.initialize()
+
+    with prediction_repo.connection() as conn:
+        indexes = [
+            row["name"]
+            for row in conn.execute("PRAGMA index_list(prediction_trades)")
+        ]
+        columns = [
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA index_info('idx_pred_trades_pred_time')"
+            )
+        ]
+        plan = conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT COALESCE(SUM(contracts), 0)
+            FROM prediction_trades
+            WHERE prediction_id = ? AND trade_time >= ?
+            """,
+            (12345, 1000),
+        ).fetchall()
+
+    assert indexes.count("idx_pred_trades_pred_time") == 1
+    assert columns == ["prediction_id", "trade_time"]
+    assert any(
+        "idx_pred_trades_pred_time" in row["detail"]
         for row in plan
     ), [row["detail"] for row in plan]
 
@@ -232,6 +268,325 @@ def test_create_orderbook_prediction_populates_ladder(prediction_service, predic
 
     for _, size in asks + bids:
         assert size == PREDICTION_SIZE_PER_LEVEL
+
+
+def test_get_market_view_matches_point_reads_and_uses_one_connection(
+    prediction_service, prediction_repo, player_repository, monkeypatch
+):
+    viewer_id = 401
+    _add_player(player_repository, viewer_id)
+    market = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=viewer_id,
+        question="Will the snapshot stay compatible?",
+        initial_fair=50,
+    )
+    prediction_id = market["prediction_id"]
+    prediction_repo.replace_levels(
+        prediction_id,
+        [
+            ("yes_ask", 57, 4),
+            ("yes_bid", 42, 8),
+            ("yes_ask", 53, 6),
+            ("yes_bid", 48, 2),
+            ("yes_ask", 51, 0),
+            ("yes_bid", 49, 0),
+        ],
+    )
+
+    refresh_at = 1_000
+    trades = [
+        (prediction_id, viewer_id, "buy_yes", 101, 101, 5_100, 51, 999),
+        (prediction_id, viewer_id, "buy_no", 2, 2, 4_900, 51, refresh_at),
+        (prediction_id, viewer_id, "sell_yes", 3, -3, 5_200, 52, 1_500),
+        (prediction_id, viewer_id, "sell_no", 104, -104, 4_800, 52, 900),
+        (prediction_id, viewer_id, "buy_yes", 5, 5, 5_300, 53, 2_000),
+        (prediction_id, viewer_id, "buy_no", 6, 6, 4_700, 53, 1_100),
+        (prediction_id, viewer_id, "sell_yes", 107, -107, 5_400, 54, 800),
+    ]
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            """
+            UPDATE predictions
+            SET current_price = 53, last_refresh_at = ?
+            WHERE prediction_id = ?
+            """,
+            (refresh_at, prediction_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                 no_contracts, no_cost_basis_total)
+            VALUES (?, ?, 7, 31, 2, 9)
+            """,
+            (prediction_id, viewer_id),
+        )
+        conn.executemany(
+            """
+            INSERT INTO prediction_trades
+                (prediction_id, discord_id, action, contracts, jopacoins,
+                 vwap_x100, last_fill_price, trade_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            trades,
+        )
+
+    expected_prediction = prediction_repo.get_prediction(prediction_id)
+    expected_book = prediction_repo.get_book(prediction_id)
+    expected_recent = prediction_repo.get_recent_trades(prediction_id, limit=5)
+    expected_position = prediction_repo.get_position(prediction_id, viewer_id)
+    expected_volume = prediction_repo.get_trade_summary_since(
+        prediction_id, refresh_at
+    )["total_volume"]
+
+    limited = prediction_repo.get_market_snapshot(
+        prediction_id, viewer_id=viewer_id, recent_limit=3
+    )
+    assert [trade["contracts"] for trade in limited["recent_trades"]] == [107, 6, 5]
+
+    connection_count = 0
+    statements: list[str] = []
+    original_get_connection = prediction_repo.get_connection
+
+    def traced_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        conn = original_get_connection()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(prediction_repo, "get_connection", traced_get_connection)
+
+    view = prediction_service.get_market_view(prediction_id, viewer_id=viewer_id)
+
+    assert view is not None
+    assert {key: view[key] for key in expected_prediction} == expected_prediction
+    assert view["book"] == expected_book == {
+        "current_price": 53,
+        "yes_asks": [(53, 6), (57, 4)],
+        "yes_bids": [(48, 2), (42, 8)],
+    }
+    assert view["recent_trades"] == expected_recent
+    assert [trade["contracts"] for trade in view["recent_trades"]] == [
+        107,
+        6,
+        5,
+        104,
+        3,
+    ]
+    assert view["viewer_position"] == expected_position
+    assert view["volume_since_refresh"] == expected_volume == 16
+    assert view["guild_id"] == TEST_GUILD_ID
+    assert connection_count == 1
+    assert [" ".join(statement.split()).upper() for statement in statements].count(
+        "BEGIN"
+    ) == 1
+
+
+def test_get_market_view_handles_missing_and_market_scoped_viewers(
+    prediction_service, prediction_repo, player_repository
+):
+    viewer_id = 402
+    _add_player(player_repository, viewer_id)
+    player_repository.add(
+        discord_id=viewer_id,
+        discord_username=f"user{viewer_id}",
+        guild_id=TEST_GUILD_ID_SECONDARY,
+    )
+    primary_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=viewer_id,
+        question="Primary guild market?",
+        initial_fair=50,
+    )
+    secondary_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID_SECONDARY,
+        creator_id=viewer_id,
+        question="Secondary guild market?",
+        initial_fair=60,
+    )
+    with prediction_repo.connection() as conn:
+        conn.executemany(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                 no_contracts, no_cost_basis_total)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (primary_id, viewer_id, 0, 0, 0, 0),
+                (secondary_id, viewer_id, 0, 0, 4, 77),
+            ],
+        )
+
+    assert prediction_service.get_market_view(999_999, viewer_id=viewer_id) is None
+    assert (
+        prediction_service.get_market_view(primary_id)["viewer_position"] is None
+    )
+    assert (
+        prediction_service.get_market_view(primary_id, viewer_id=999_998)[
+            "viewer_position"
+        ]
+        is None
+    )
+    assert (
+        prediction_service.get_market_view(primary_id, viewer_id=viewer_id)[
+            "viewer_position"
+        ]
+        is None
+    )
+
+    secondary_view = prediction_service.get_market_view(
+        secondary_id, viewer_id=viewer_id
+    )
+    assert secondary_view["guild_id"] == TEST_GUILD_ID_SECONDARY
+    assert secondary_view["prediction_id"] == secondary_id
+    assert secondary_view["viewer_position"] == {
+        "prediction_id": secondary_id,
+        "discord_id": viewer_id,
+        "yes_contracts": 0,
+        "yes_cost_basis_total": 0,
+        "no_contracts": 4,
+        "no_cost_basis_total": 77,
+    }
+
+
+def test_get_market_view_reads_one_consistent_sqlite_snapshot(
+    prediction_service, prediction_repo, player_repository, monkeypatch
+):
+    viewer_id = 403
+    _add_player(player_repository, viewer_id)
+    prediction_id = prediction_repo.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=viewer_id,
+        question="Can a render mix two market states?",
+        initial_fair=50,
+    )
+    prediction_repo.replace_levels(
+        prediction_id,
+        [("yes_ask", 60, 3), ("yes_bid", 40, 4)],
+    )
+    with prediction_repo.connection() as conn:
+        conn.execute(
+            "UPDATE predictions SET last_refresh_at = 100 WHERE prediction_id = ?",
+            (prediction_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total)
+            VALUES (?, ?, 2, 10)
+            """,
+            (prediction_id, viewer_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO prediction_trades
+                (prediction_id, discord_id, action, contracts, jopacoins,
+                 vwap_x100, last_fill_price, trade_time)
+            VALUES (?, ?, 'buy_yes', 2, 10, 5000, 50, 100)
+            """,
+            (prediction_id, viewer_id),
+        )
+
+    original_get_connection = prediction_repo.get_connection
+    connection_count = 0
+    mutation_attempted = False
+    mutation_errors: list[Exception] = []
+
+    def interleaved_get_connection():
+        nonlocal connection_count
+        connection_count += 1
+        conn = original_get_connection()
+
+        def mutate_after_prediction_read(statement: str):
+            nonlocal mutation_attempted
+            normalized = " ".join(statement.split()).upper()
+            if mutation_attempted or not normalized.startswith(
+                "SELECT SIDE, PRICE, REMAINING_SIZE"
+            ):
+                return
+            mutation_attempted = True
+            try:
+                with sqlite3.connect(prediction_repo.db_path, timeout=5.0) as writer:
+                    writer.execute(
+                        """
+                        UPDATE predictions
+                        SET current_price = 90
+                        WHERE prediction_id = ?
+                        """,
+                        (prediction_id,),
+                    )
+                    writer.execute(
+                        "DELETE FROM prediction_levels WHERE prediction_id = ?",
+                        (prediction_id,),
+                    )
+                    writer.execute(
+                        """
+                        INSERT INTO prediction_levels
+                            (prediction_id, side, price, remaining_size, posted_at)
+                        VALUES (?, 'yes_ask', 95, 9, 200)
+                        """,
+                        (prediction_id,),
+                    )
+                    writer.execute(
+                        """
+                        UPDATE prediction_positions
+                        SET yes_contracts = 9, yes_cost_basis_total = 90
+                        WHERE prediction_id = ? AND discord_id = ?
+                        """,
+                        (prediction_id, viewer_id),
+                    )
+                    writer.execute(
+                        """
+                        INSERT INTO prediction_trades
+                            (prediction_id, discord_id, action, contracts, jopacoins,
+                             vwap_x100, last_fill_price, trade_time)
+                        VALUES (?, ?, 'buy_yes', 9, 90, 9000, 90, 200)
+                        """,
+                        (prediction_id, viewer_id),
+                    )
+            except Exception as exc:  # surfaced explicitly after the traced call
+                mutation_errors.append(exc)
+
+        conn.set_trace_callback(mutate_after_prediction_read)
+        return conn
+
+    monkeypatch.setattr(
+        prediction_repo, "get_connection", interleaved_get_connection
+    )
+
+    view = prediction_service.get_market_view(prediction_id, viewer_id=viewer_id)
+
+    assert mutation_attempted
+    assert mutation_errors == []
+    assert connection_count == 1
+    assert view["current_price"] == 50
+    assert view["book"] == {
+        "current_price": 50,
+        "yes_asks": [(60, 3)],
+        "yes_bids": [(40, 4)],
+    }
+    assert view["viewer_position"]["yes_contracts"] == 2
+    assert [trade["contracts"] for trade in view["recent_trades"]] == [2]
+    assert view["volume_since_refresh"] == 2
+
+    with original_get_connection() as conn:
+        committed = conn.execute(
+            "SELECT current_price FROM predictions WHERE prediction_id = ?",
+            (prediction_id,),
+        ).fetchone()
+        committed_levels = conn.execute(
+            """
+            SELECT side, price, remaining_size
+            FROM prediction_levels
+            WHERE prediction_id = ?
+            """,
+            (prediction_id,),
+        ).fetchall()
+    assert committed["current_price"] == 90
+    assert [tuple(row) for row in committed_levels] == [("yes_ask", 95, 9)]
 
 
 def test_open_orderbook_listing_includes_book_and_recent_volume(
