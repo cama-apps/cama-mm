@@ -361,8 +361,13 @@ async def test_lobby_ready_notification_recommends_readycheck_before_shuffle(
         send=AsyncMock(),
     )
     lobby_service = MagicMock()
-    lobby_service.get_lobby_message_id.return_value = None
-    lobby_service.get_lobby_channel_id.return_value = None
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby.return_value = SimpleNamespace(
+        status="open",
+        get_player_count=lambda: 10,
+    )
+    lobby_service.get_lobby_message_id.return_value = 123
+    lobby_service.get_lobby_channel_id.return_value = 200
     lobby_service.get_origin_channel_id.return_value = None
 
     with (
@@ -376,6 +381,118 @@ async def test_lobby_ready_notification_recommends_readycheck_before_shuffle(
     assert next_step.value == (
         "Run `/readycheck` before `/shuffle` to confirm everyone is ready."
     )
+
+
+async def test_lobby_ready_notification_skips_lobbies_above_threshold(bot_module):
+    channel = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=42),
+        send=AsyncMock(),
+    )
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby.return_value = SimpleNamespace(
+        status="open",
+        get_player_count=lambda: 11,
+    )
+    lobby_service.get_lobby_message_id.return_value = 123
+    lobby_service.get_lobby_channel_id.return_value = 200
+    lobby_service.get_origin_channel_id.return_value = None
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module, "_lobby_ready_cooldowns", {}),
+    ):
+        await bot_module.notify_lobby_ready(channel, guild_id=42)
+
+    channel.send.assert_not_awaited()
+
+
+async def test_lobby_ready_notification_skips_replaced_lobby_generation(bot_module):
+    channel = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=42),
+        send=AsyncMock(),
+    )
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby.return_value = SimpleNamespace(
+        status="open",
+        get_player_count=lambda: 10,
+    )
+    lobby_service.get_lobby_message_id.side_effect = [123, 999]
+    lobby_service.get_lobby_channel_id.return_value = 200
+    lobby_service.get_origin_channel_id.return_value = None
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module, "_lobby_ready_cooldowns", {}),
+    ):
+        await bot_module.notify_lobby_ready(channel, guild_id=42)
+
+    channel.send.assert_not_awaited()
+
+
+async def test_lobby_ready_notification_skips_if_lobby_grows_during_delivery(bot_module):
+    channel = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=42),
+        send=AsyncMock(),
+    )
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby.side_effect = [
+        SimpleNamespace(status="open", get_player_count=lambda: 10),
+        SimpleNamespace(status="open", get_player_count=lambda: 11),
+    ]
+    lobby_service.get_lobby_message_id.return_value = 123
+    lobby_service.get_lobby_channel_id.return_value = 200
+    lobby_service.get_origin_channel_id.return_value = None
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module, "_lobby_ready_cooldowns", {}),
+    ):
+        await bot_module.notify_lobby_ready(channel, guild_id=42)
+
+    channel.send.assert_not_awaited()
+
+
+async def test_concurrent_lobby_ready_notifications_send_once(bot_module):
+    first_send_started = asyncio.Event()
+    release_first_send = asyncio.Event()
+
+    async def send(*, embed):
+        first_send_started.set()
+        await release_first_send.wait()
+
+    channel = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=42),
+        send=AsyncMock(side_effect=send),
+    )
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby.return_value = SimpleNamespace(
+        status="open",
+        get_player_count=lambda: 10,
+    )
+    lobby_service.get_lobby_message_id.return_value = 123
+    lobby_service.get_lobby_channel_id.return_value = 200
+    lobby_service.get_origin_channel_id.return_value = None
+
+    with (
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module, "_lobby_ready_cooldowns", {}),
+    ):
+        first = asyncio.create_task(bot_module.notify_lobby_ready(channel, guild_id=42))
+        await first_send_started.wait()
+        second = asyncio.create_task(bot_module.notify_lobby_ready(channel, guild_id=42))
+        await second
+        release_first_send.set()
+        await first
+
+    assert channel.send.await_count == 1
 
 
 async def test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_channel(

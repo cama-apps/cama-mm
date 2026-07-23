@@ -740,14 +740,22 @@ class DraftCommands(commands.Cog):
             state.captain2_id = captain_pair.captain2_id
             state.captain1_rating = captain_pair.captain1_rating
             state.captain2_rating = captain_pair.captain2_rating
-            origin_channel_id = await asyncio.to_thread(
-                self.lobby_manager.get_origin_channel_id,
-                guild_id=guild_id,
+            lobby_channel_id, origin_channel_id = await asyncio.gather(
+                asyncio.to_thread(
+                    self.lobby_manager.get_lobby_channel_id,
+                    guild_id=guild_id,
+                ),
+                asyncio.to_thread(
+                    self.lobby_manager.get_origin_channel_id,
+                    guild_id=guild_id,
+                ),
             )
-            draft_channel = await self._resolve_channel(
-                origin_channel_id,
-                fallback=interaction.channel,
-            )
+            draft_channel = await self._resolve_channel(lobby_channel_id)
+            if not draft_channel:
+                draft_channel = await self._resolve_channel(
+                    origin_channel_id,
+                    fallback=interaction.channel,
+                )
             state.draft_channel_id = draft_channel.id
 
             # Cache player data for the pool (avoids repeated DB queries during pre-draft phases)
@@ -783,6 +791,7 @@ class DraftCommands(commands.Cog):
                 title="🎲 IMMORTAL DRAFT",
                 color=discord.Color.gold(),
             )
+            embed.set_footer(text=f"Started by {interaction.user.display_name}")
 
             embed.add_field(
                 name="👑 Captains",
@@ -824,7 +833,7 @@ class DraftCommands(commands.Cog):
                     inline=False,
                 )
 
-            # Send with winner choice buttons in the matchmaking channel. The
+            # Send with winner choice buttons in the lobby channel. The
             # captain ping is posted first so it renders above the draft embed.
             view = WinnerChoiceView(self, guild_id, coinflip_winner_id, draft_state=state)
             self._track_draft_view(guild_id, view)
@@ -1678,14 +1687,23 @@ class DraftCommands(commands.Cog):
                 if lobby_service
                 else None
             )
-            lobby_channel_id = await asyncio.to_thread(
-                self.lobby_manager.get_lobby_channel_id,
-                guild_id=guild_id,
+            lobby_channel_id, origin_channel_id = await asyncio.gather(
+                asyncio.to_thread(
+                    self.lobby_manager.get_lobby_channel_id,
+                    guild_id=guild_id,
+                ),
+                asyncio.to_thread(
+                    self.lobby_manager.get_origin_channel_id,
+                    guild_id=guild_id,
+                ),
             )
 
             # Create pending match for betting and recording
             pending_match_id = await self._create_pending_match(
-                guild_id, state, thread_id=thread_id
+                guild_id,
+                state,
+                thread_id=thread_id,
+                origin_channel_id=origin_channel_id,
             )
 
             if pending_match_id is None:
@@ -1773,23 +1791,42 @@ class DraftCommands(commands.Cog):
             # Reset lobby only after successful match creation
             await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
 
+            from bot import clear_lobby_rally_cooldowns
+
+            clear_lobby_rally_cooldowns(guild_id)
+
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
             draft_message = await self._edit_interaction_message(interaction, embed=embed, view=None)
-            lobby_message = await self._post_to_lobby_channel(embed, lobby_channel_id)
+            original_message = draft_message or getattr(interaction, "message", None)
+            if original_message is None:
+                with contextlib.suppress(Exception):
+                    original_message = await interaction.original_response()
+
+            original_channel = getattr(original_message, "channel", None)
+            original_channel_id = (
+                getattr(original_channel, "id", None) or state.draft_channel_id
+            )
+            lobby_message = (
+                original_message
+                if lobby_channel_id and original_channel_id == lobby_channel_id
+                else await self._post_completed_draft(embed, lobby_channel_id)
+            )
+            if origin_channel_id and origin_channel_id == lobby_channel_id:
+                origin_message = lobby_message
+            elif origin_channel_id and original_channel_id == origin_channel_id:
+                origin_message = original_message
+            else:
+                origin_message = await self._post_completed_draft(embed, origin_channel_id)
 
             # === NEW: Store message info for odds updates ===
             try:
-                original_message = draft_message or getattr(interaction, "message", None)
-                if original_message is None:
-                    with contextlib.suppress(Exception):
-                        original_message = await interaction.original_response()
                 primary_message = lobby_message or original_message
                 command_message = (
-                    original_message
-                    if lobby_message
-                    and original_message
-                    and getattr(original_message, "id", None)
-                    != getattr(lobby_message, "id", None)
+                    origin_message
+                    if primary_message
+                    and origin_message
+                    and getattr(origin_message, "id", None)
+                    != getattr(primary_message, "id", None)
                     else None
                 )
                 if primary_message:
@@ -1803,7 +1840,7 @@ class DraftCommands(commands.Cog):
                             or state.draft_message_id,
                             channel_id=getattr(message_channel, "id", None) or state.draft_channel_id,
                             jump_url=getattr(primary_message, "jump_url", None),
-                            origin_channel_id=state.draft_channel_id,
+                            origin_channel_id=origin_channel_id or state.draft_channel_id,
                             pending_match_id=pending_state.pending_match_id if pending_state else None,
                             cmd_message_id=getattr(command_message, "id", None),
                             cmd_channel_id=getattr(command_channel, "id", None),
@@ -1910,6 +1947,7 @@ class DraftCommands(commands.Cog):
         guild_id: int,
         state: DraftState,
         thread_id: int | None = None,
+        origin_channel_id: int | None = None,
     ) -> int | None:
         """
         Create a pending match from draft result for betting and recording.
@@ -1958,7 +1996,7 @@ class DraftCommands(commands.Cog):
             shuffle_message_jump_url=None,
             shuffle_message_id=state.draft_message_id,
             shuffle_channel_id=state.draft_channel_id,
-            origin_channel_id=state.draft_channel_id,  # For betting reminders
+            origin_channel_id=origin_channel_id or state.draft_channel_id,
             thread_shuffle_thread_id=thread_id,  # For /record and /abort thread finalization
             betting_mode="pool",  # Default to pool mode for drafts
             is_draft=True,  # Mark as draft for any special handling
@@ -2283,21 +2321,21 @@ class DraftCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post to match thread: {exc}")
 
-    async def _post_to_lobby_channel(
+    async def _post_completed_draft(
         self,
         embed: discord.Embed,
-        lobby_channel_id: int | None,
+        channel_id: int | None,
     ) -> discord.Message | None:
-        """Post the completed draft embed to the persisted lobby channel."""
-        if not lobby_channel_id:
+        """Post a completed-draft copy to a persisted channel."""
+        if not channel_id:
             return None
-        channel = await self._resolve_channel(lobby_channel_id)
+        channel = await self._resolve_channel(channel_id)
         if not channel:
             return None
         try:
             return await channel.send(embed=embed)
         except Exception as exc:
-            logger.warning("Failed to post completed draft to lobby channel: %s", exc)
+            logger.warning("Failed to post completed draft to channel %s: %s", channel_id, exc)
             return None
 
     async def _handle_draft_timeout(
