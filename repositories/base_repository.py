@@ -127,10 +127,13 @@ class BaseRepository(ABC):
             self.db_path,
             uri=self.db_path.startswith("file:"),
             check_same_thread=not self.db_path.startswith("file:"),
+            timeout=5.0,
         )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        # SchemaManager establishes WAL once before repositories open runtime
+        # connections. WAL is persistent for file databases, and ``timeout``
+        # configures the same per-connection busy handler without executing two
+        # setup statements on every repository call.
         return conn
 
     @contextmanager
