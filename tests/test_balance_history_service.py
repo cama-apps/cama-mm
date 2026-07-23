@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import MagicMock
 
+import pytest
+
+import services.balance_history_service as balance_history_module
 from services.balance_history_service import (
     SOURCE_BETS,
     SOURCE_BONUS,
@@ -57,6 +61,49 @@ def test_empty_history_returns_empty_series_and_totals():
     series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
     assert series == []
     assert totals == {}
+
+
+@pytest.mark.asyncio
+async def test_async_history_loads_all_sources_concurrently(monkeypatch):
+    svc, repos = _build_service()
+    repos["bet_repo"].get_player_bet_history.return_value = [
+        {
+            "bet_time": 2000,
+            "profit": 10,
+            "outcome": "won",
+            "amount": 5,
+            "leverage": 1,
+            "match_id": 1,
+        }
+    ]
+    repos["player_repo"].get_wheel_spin_history.return_value = [
+        {"spin_time": 1000, "result": 20}
+    ]
+    expected = svc.get_balance_event_series(discord_id=1, guild_id=123)
+
+    active = 0
+    peak = 0
+
+    async def tracked_to_thread(function, /, *args, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            active -= 1
+
+    monkeypatch.setattr(
+        balance_history_module.asyncio,
+        "to_thread",
+        tracked_to_thread,
+    )
+
+    result = await svc.get_balance_event_series_async(discord_id=1, guild_id=123)
+
+    assert peak == 8
+    assert result == expected
 
 
 def test_single_source_bet_only_series():

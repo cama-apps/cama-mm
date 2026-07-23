@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 
@@ -79,15 +80,46 @@ class BalanceHistoryService:
         ``per_source_totals``: ``{source: net_delta}`` for sources with a non-zero
         total. Matches are empty if the player has no recorded activity anywhere.
         """
-        events: list[_Event] = []
-        events.extend(self._bet_events(discord_id, guild_id))
-        events.extend(self._prediction_events(discord_id, guild_id))
-        events.extend(self._wheel_events(discord_id, guild_id))
-        events.extend(self._double_or_nothing_events(discord_id, guild_id))
-        events.extend(self._tip_events(discord_id, guild_id))
-        events.extend(self._disburse_events(discord_id, guild_id))
-        events.extend(self._bonus_events(discord_id, guild_id))
-        events.extend(self._dig_events(discord_id, guild_id))
+        events = [
+            event
+            for collector in self._event_collectors()
+            for event in collector(discord_id, guild_id)
+        ]
+        return self._merge_events(events)
+
+    async def get_balance_event_series_async(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> tuple[list[tuple[int, int, dict]], dict[str, int]]:
+        """Load independent balance sources concurrently for async callers."""
+        source_events = await asyncio.gather(
+            *(
+                asyncio.to_thread(collector, discord_id, guild_id)
+                for collector in self._event_collectors()
+            )
+        )
+        # ``gather`` retains collector order, so equal-timestamp events keep the
+        # same stable ordering as the synchronous implementation.
+        return self._merge_events(
+            [event for events in source_events for event in events]
+        )
+
+    def _event_collectors(self):
+        return (
+            self._bet_events,
+            self._prediction_events,
+            self._wheel_events,
+            self._double_or_nothing_events,
+            self._tip_events,
+            self._disburse_events,
+            self._bonus_events,
+            self._dig_events,
+        )
+
+    @staticmethod
+    def _merge_events(
+        events: list[_Event],
+    ) -> tuple[list[tuple[int, int, dict]], dict[str, int]]:
+        """Sort source events and build the cumulative chart representation."""
 
         if not events:
             return [], {}
