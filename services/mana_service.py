@@ -535,27 +535,44 @@ class ManaService:
         self, claimed_rows: list[dict], guild_id: int | None
     ) -> list[dict]:
         """Run post-claim Plains reconciliation for batch transaction winners."""
+        plains_ids = [
+            int(row["discord_id"])
+            for row in claimed_rows
+            if row["current_land"] == "Plains"
+        ]
+        refunds: dict[int, int | Exception] = {}
+        if plains_ids and self.protection_service is not None:
+            try:
+                refunds = self.protection_service.reconcile_guardians(
+                    plains_ids,
+                    guild_id,
+                    get_mana_day_start_timestamp(),
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Failed to reconcile White Guardian batch in guild %s",
+                    guild_id,
+                )
+                refunds = dict.fromkeys(plains_ids, exc)
+
         results: list[dict] = []
-        day_start: int | None = None
         for row in claimed_rows:
             discord_id = int(row["discord_id"])
             land = row["current_land"]
             retro_refund = 0
             guardian_remaining = int(row.get("white_shield_remaining", 0) or 0)
-            if land == "Plains" and self.protection_service is not None:
-                try:
-                    if day_start is None:
-                        day_start = get_mana_day_start_timestamp()
-                    retro_refund = self.protection_service.reconcile_guardian(
-                        discord_id, guild_id, day_start
-                    )
-                    guardian_remaining = max(0, guardian_remaining - retro_refund)
-                except Exception:
-                    logger.exception(
-                        "Failed to reconcile White Guardian losses for player %s in guild %s",
-                        discord_id,
-                        guild_id,
-                    )
+            refund = refunds.get(discord_id, 0)
+            if isinstance(refund, Exception):
+                logger.error(
+                    "Failed to reconcile White Guardian losses for player %s "
+                    "in guild %s: %s",
+                    discord_id,
+                    guild_id,
+                    refund,
+                )
+            else:
+                retro_refund = refund
+                guardian_remaining = max(0, guardian_remaining - retro_refund)
 
             results.append(
                 {

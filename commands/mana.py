@@ -202,18 +202,12 @@ def _apply_fresh_plains_stipends(
     guild_id: int,
 ) -> dict[int, int]:
     """Apply stipends for fresh Plains claims in one background-thread batch."""
-    paid_by_player: dict[int, int] = {}
-    for assignment in new_assignments:
-        if assignment.get("land") != "Plains":
-            continue
-        discord_id = int(assignment["discord_id"])
-        try:
-            paid_by_player[discord_id] = mana_effects_service.apply_bankrupt_stipend(
-                discord_id, guild_id, "Plains"
-            )
-        except Exception:
-            logger.exception("Failed to apply White stipend for player %s", discord_id)
-    return paid_by_player
+    plains_ids = [
+        int(assignment["discord_id"])
+        for assignment in new_assignments
+        if assignment.get("land") == "Plains"
+    ]
+    return mana_effects_service.apply_bankrupt_stipends(plains_ids, guild_id)
 
 
 def _build_all_pages(

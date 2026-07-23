@@ -9,7 +9,7 @@ Covers:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -137,7 +137,7 @@ class TestDoubleTapClaimRace:
 
 def test_fresh_plains_stipends_only_process_batch_claim_winners():
     effects = MagicMock()
-    effects.apply_bankrupt_stipend.side_effect = [5, 0]
+    effects.apply_bankrupt_stipends.return_value = {1: 5, 3: 0}
 
     paid = mana_commands._apply_fresh_plains_stipends(
         effects,
@@ -149,8 +149,5 @@ def test_fresh_plains_stipends_only_process_batch_claim_winners():
         GID,
     )
 
-    assert effects.apply_bankrupt_stipend.call_args_list == [
-        call(1, GID, "Plains"),
-        call(3, GID, "Plains"),
-    ]
+    effects.apply_bankrupt_stipends.assert_called_once_with([1, 3], GID)
     assert paid == {1: 5, 3: 0}

@@ -14,8 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from repositories.loan_repository import LoanRepository
 from repositories.mana_repository import ManaRepository
 from repositories.player_repository import PlayerRepository
+from services.loan_service import LoanService
 from services.mana_effects_service import ManaEffectsService
 from services.mana_service import ManaService, get_today_pst
 from tests.conftest import TEST_GUILD_ID
@@ -341,8 +343,9 @@ class TestWhiteStipendManaAll:
             )
         )
         mana_service.gambling_stats_service.get_player_bet_outcomes.return_value = []
-        loan_service = MagicMock()
-        loan_service.get_nonprofit_fund.return_value = 1000
+        loan_repo = LoanRepository(repo_db_path)
+        loan_service = LoanService(loan_repo, player_repo)
+        loan_repo.add_to_nonprofit_fund(GID, 1000)
         effects_service = ManaEffectsService(
             mana_service=mana_service,
             player_repo=player_repo,
@@ -391,7 +394,7 @@ class TestWhiteStipendManaAll:
             env["player_repo"].get_balance(81001, GID)
             == -500 + WHITE_BANKRUPT_STIPEND
         )
-        env["loan_service"].subtract_from_nonprofit_fund.assert_called_once()
+        assert env["loan_service"].get_nonprofit_fund(GID) == 995
 
         # Second /mana all: nothing freshly assigned → no re-pay.
         await cog.mana.callback(cog, interaction, None, True)
@@ -402,4 +405,4 @@ class TestWhiteStipendManaAll:
             env["player_repo"].get_balance(81001, GID)
             == -500 + WHITE_BANKRUPT_STIPEND
         )
-        env["loan_service"].subtract_from_nonprofit_fund.assert_called_once()
+        assert env["loan_service"].get_nonprofit_fund(GID) == 995

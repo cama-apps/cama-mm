@@ -502,7 +502,7 @@ class TestAssignAllDailyMana:
             3: _make_tip_stats(),
         }
         protection = MagicMock()
-        protection.reconcile_guardian.return_value = 5
+        protection.reconcile_guardians.return_value = {2: 5}
         service = ManaService(
             mana_repo,
             player_repo,
@@ -547,7 +547,10 @@ class TestAssignAllDailyMana:
         mana_repo.claim_mana_batch_atomic.assert_called_once_with(
             [(2, "Plains"), (3, "Forest")], TEST_GUILD_ID, today
         )
-        protection.reconcile_guardian.assert_called_once_with(2, TEST_GUILD_ID, 1_750_000_000)
+        protection.reconcile_guardians.assert_called_once_with(
+            [2], TEST_GUILD_ID, 1_750_000_000
+        )
+        protection.reconcile_guardian.assert_not_called()
         assert assignments == [
             {
                 "discord_id": 2,

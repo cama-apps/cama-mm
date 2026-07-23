@@ -157,6 +157,21 @@ class ProtectionService:
             now=int(time.time()),
         )
 
+    def reconcile_guardians(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        since_ts: int,
+    ) -> dict[int, int | Exception]:
+        """Reconcile an ordered Guardian batch under one repository txn."""
+        return self.protection_repo.reconcile_guardians(
+            discord_ids=discord_ids,
+            guild_id=guild_id,
+            since_ts=int(since_ts),
+            mana_date=get_today_pst(),
+            now=int(time.time()),
+        )
+
     def reconcile_purchased_pool(
         self,
         discord_id: int,

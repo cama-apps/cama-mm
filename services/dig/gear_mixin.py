@@ -648,9 +648,9 @@ class GearMixin:
             return self._error(
                 f"Total repair costs {total_cost} JC; you only have {balance}.",
             )
-        max_by_id = {int(r["id"]): piece.max_durability for r, piece in pieces}
-        for r in damaged:
-            self.dig_repo.repair_gear(int(r["id"]), max_by_id[int(r["id"])])
+        self.dig_repo.repair_gear_bulk(
+            [(int(row["id"]), piece.max_durability) for row, piece in pieces]
+        )
         return self._ok(repaired=len(damaged), cost=total_cost)
 
     def buy_gear(self, discord_id: int, guild_id, slot: str, tier: int) -> dict:

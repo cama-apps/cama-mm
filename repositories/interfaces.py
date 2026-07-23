@@ -1500,6 +1500,16 @@ class ILoanRepository(ABC):
     def get_nonprofit_fund(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
+    def distribute_nonprofit_stipends_atomic(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        max_stipend: int,
+    ) -> dict[int, int]:
+        """Fund and credit an ordered player batch in one transaction."""
+        ...
+
+    @abstractmethod
     def consume_next_match_pot(self, guild_id: int | None) -> int: ...
 
     @abstractmethod
@@ -1951,6 +1961,11 @@ class IDigRepository(ABC):
 
     @abstractmethod
     def repair_gear(self, gear_id: int, to_durability: int) -> None: ...
+
+    @abstractmethod
+    def repair_gear_bulk(self, repairs: list[tuple[int, int]]) -> int:
+        """Restore multiple gear pieces in one transaction."""
+        ...
 
     # Atomic Operations
     @abstractmethod

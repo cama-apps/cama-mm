@@ -427,6 +427,39 @@ class TestDigGearServiceRepair:
         assert result["cost"] == 2 + 5
         assert svc.player_repo.get_balance(player, 0) == bal_before - 7
 
+    def test_repair_all_batches_durability_updates(self, svc, player, monkeypatch):
+        gear_ids = [
+            svc.buy_gear(player, 0, slot, 1)["gear_id"]
+            for slot in ("armor", "boots", "amulet")
+        ]
+        for gear_id in gear_ids:
+            svc.dig_repo.repair_gear(gear_id, 1)
+
+        bulk_calls = []
+        original_bulk = svc.dig_repo.repair_gear_bulk
+
+        def tracked_bulk(repairs):
+            bulk_calls.append(repairs)
+            return original_bulk(repairs)
+
+        monkeypatch.setattr(svc.dig_repo, "repair_gear_bulk", tracked_bulk)
+        monkeypatch.setattr(
+            svc.dig_repo,
+            "repair_gear",
+            lambda *_args: pytest.fail("repair-all performed a point update"),
+        )
+
+        result = svc.repair_all_gear(player, 0)
+
+        assert result["success"]
+        assert len(bulk_calls) == 1
+        assert {gear_id for gear_id, _durability in bulk_calls[0]} == set(gear_ids)
+        assert all(
+            svc.dig_repo.get_gear_by_id(gear_id)["durability"]
+            == GEAR_MAX_DURABILITY
+            for gear_id in gear_ids
+        )
+
     def test_repair_all_with_nothing_damaged_errors(self, svc, player):
         svc.buy_gear(player, 0, "armor", 1)  # full durability
         result = svc.repair_all_gear(player, 0)
