@@ -5,7 +5,7 @@ import random
 from unittest.mock import patch
 
 import pytest
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 from utils import wheel_drawing
 
@@ -79,9 +79,10 @@ def _draw_wedge_labels_reference(
     ],
     ids=["normal", "bankrupt", "golden"],
 )
-def test_cached_wedge_label_layouts_are_pixel_identical(wedges, rotation):
+def test_cached_wedge_label_sprites_stay_within_visual_bound(wedges, rotation):
     wheel_drawing._get_wedge_label_layouts.cache_clear()
-    reference = Image.new("RGBA", (500, 500), (0, 0, 0, 0))
+    wheel_drawing._get_wedge_label_sprite.cache_clear()
+    reference = Image.new("RGBA", (500, 500), (30, 30, 35, 255))
     optimized = reference.copy()
 
     _draw_wedge_labels_reference(
@@ -100,11 +101,92 @@ def test_cached_wedge_label_layouts_are_pixel_identical(wedges, rotation):
     )
 
     difference = ImageChops.difference(reference, optimized).convert("RGB")
-    assert difference.getbbox() is None
+    difference_stats = ImageStat.Stat(difference)
+    mean_absolute_error = sum(difference_stats.mean) / 3
+    root_mean_square_error = (
+        sum(value * value for value in difference_stats.rms) / 3
+    ) ** 0.5
+    assert mean_absolute_error < 0.6
+    assert root_mean_square_error < 9.0
+
+
+def test_wedge_label_sprite_cache_stays_within_decoded_gif_visual_bound():
+    def draw_reference(
+        image,
+        draw,
+        size,
+        rotation,
+        is_bankrupt=False,
+        is_golden=False,
+        wedges=None,
+    ):
+        wedge_rows = (
+            wedges
+            if wedges is not None
+            else wheel_drawing.get_wheel_wedges(is_bankrupt, is_golden)
+        )
+        _draw_wedge_labels_reference(
+            image,
+            draw,
+            size,
+            rotation,
+            wedge_rows,
+        )
+
+    # Prime random rain-column data before resetting the matched render seed.
+    wheel_drawing._get_rain_columns(500)
+    random.seed(99602)
+    with patch.object(
+        wheel_drawing,
+        "_draw_wedge_labels",
+        side_effect=draw_reference,
+    ):
+        reference = wheel_drawing.create_wheel_gif(
+            target_idx=7,
+            size=500,
+            display_name="Visual Bound",
+        )
+
+    wheel_drawing._get_wedge_label_sprite.cache_clear()
+    random.seed(99602)
+    optimized = wheel_drawing.create_wheel_gif(
+        target_idx=7,
+        size=500,
+        display_name="Visual Bound",
+    )
+    assert len(optimized.getbuffer()) < 4 * 1024 * 1024
+
+    def decode(buffer):
+        with Image.open(buffer) as gif:
+            frames = []
+            durations = []
+            for frame_index in range(gif.n_frames):
+                gif.seek(frame_index)
+                frames.append(gif.convert("RGB"))
+                durations.append(gif.info["duration"])
+        return frames, durations
+
+    reference_frames, reference_durations = decode(reference)
+    optimized_frames, optimized_durations = decode(optimized)
+    assert optimized_durations == reference_durations
+    assert len(optimized_frames) == len(reference_frames) == 70
+
+    frame_errors = []
+    for reference_frame, optimized_frame in zip(
+        reference_frames,
+        optimized_frames,
+        strict=True,
+    ):
+        difference = ImageChops.difference(reference_frame, optimized_frame)
+        frame_errors.append(sum(ImageStat.Stat(difference).mean) / 3)
+
+    assert sum(frame_errors) / len(frame_errors) < 1.0
+    assert max(frame_errors) < 1.2
 
 
 def test_wedge_label_layout_is_measured_once_for_all_animation_frames():
     wheel_drawing._get_wedge_label_layouts.cache_clear()
+    wheel_drawing._get_wedge_label_sprite.cache_clear()
     img = Image.new("RGBA", (500, 500), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -121,6 +203,103 @@ def test_wedge_label_layout_is_measured_once_for_all_animation_frames():
     assert cache_info.misses == 1
     assert cache_info.hits == 69
     assert cache_info.maxsize == 64
+
+
+def test_wedge_label_sprite_cache_hits_for_repeated_positions():
+    wheel_drawing._get_wedge_label_sprite.cache_clear()
+    image = Image.new("RGBA", (500, 500), (30, 30, 35, 255))
+
+    wheel_drawing._draw_wedge_labels(
+        image,
+        ImageDraw.Draw(image),
+        500,
+        rotation=33.75,
+        wedges=wheel_drawing.WHEEL_WEDGES,
+    )
+    first = wheel_drawing._get_wedge_label_sprite.cache_info()
+    wheel_drawing._draw_wedge_labels(
+        image,
+        ImageDraw.Draw(image),
+        500,
+        rotation=33.75,
+        wedges=wheel_drawing.WHEEL_WEDGES,
+    )
+    second = wheel_drawing._get_wedge_label_sprite.cache_info()
+
+    assert first.misses > 0
+    assert second.misses == first.misses
+    assert second.hits - first.hits == len(wheel_drawing.WHEEL_WEDGES)
+    assert second.maxsize == wheel_drawing._WEDGE_LABEL_SPRITE_CACHE_SIZE
+
+
+def test_wedge_label_sprite_cache_is_custom_safe_and_bounded():
+    wheel_drawing._get_wedge_label_sprite.cache_clear()
+    custom_a = [("ALPHA", 0, "#123456"), ("BETA", 0, "#654321")]
+    custom_b = [("OMEGA", 0, "#123456"), ("BETA", 0, "#654321")]
+    first = Image.new("RGBA", (500, 500), (30, 30, 35, 255))
+    second = first.copy()
+
+    wheel_drawing._draw_wedge_labels(
+        first,
+        ImageDraw.Draw(first),
+        500,
+        rotation=0,
+        wedges=custom_a,
+    )
+    wheel_drawing._draw_wedge_labels(
+        second,
+        ImageDraw.Draw(second),
+        500,
+        rotation=0,
+        wedges=custom_b,
+    )
+
+    assert (
+        ImageChops.difference(first, second).convert("RGB").getbbox()
+        is not None
+    )
+    first_key = tuple(custom_a)
+    second_key = tuple(custom_b)
+    first_layout = wheel_drawing._get_wedge_label_layouts(500, first_key)[0]
+    second_layout = wheel_drawing._get_wedge_label_layouts(500, second_key)[0]
+    first_sprite = wheel_drawing._get_wedge_label_sprite(
+        500,
+        first_key,
+        first_layout,
+        0,
+        0,
+        wheel_drawing._WEDGE_LABEL_TEXT_STYLE,
+    )[0]
+    second_sprite = wheel_drawing._get_wedge_label_sprite(
+        500,
+        second_key,
+        second_layout,
+        0,
+        0,
+        wheel_drawing._WEDGE_LABEL_TEXT_STYLE,
+    )[0]
+    assert (first_sprite.size, first_sprite.tobytes()) != (
+        second_sprite.size,
+        second_sprite.tobytes(),
+    )
+
+    for custom_index in range(
+        wheel_drawing._WEDGE_LABEL_SPRITE_CACHE_SIZE + 32
+    ):
+        wedge_key = ((f"CUSTOM {custom_index}", 0, "#123456"),)
+        layout = wheel_drawing._get_wedge_label_layouts(500, wedge_key)[0]
+        wheel_drawing._get_wedge_label_sprite(
+            500,
+            wedge_key,
+            layout,
+            custom_index % wheel_drawing._WEDGE_LABEL_PHASE_STEPS,
+            (custom_index // wheel_drawing._WEDGE_LABEL_PHASE_STEPS)
+            % wheel_drawing._WEDGE_LABEL_PHASE_STEPS,
+            wheel_drawing._WEDGE_LABEL_TEXT_STYLE,
+        )
+
+    cache_info = wheel_drawing._get_wedge_label_sprite.cache_info()
+    assert cache_info.currsize == wheel_drawing._WEDGE_LABEL_SPRITE_CACHE_SIZE
 
 
 def test_wheel_gif_reuses_palette_seed_without_changing_timing():

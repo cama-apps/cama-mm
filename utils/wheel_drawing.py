@@ -921,6 +921,10 @@ def _create_wheel_face(
 
 
 _CACHED_SHELL_ICONS: dict[tuple[str, int], Image.Image] = {}
+_WEDGE_LABEL_PHASE_STEPS = 4
+_WEDGE_LABEL_SPRITE_CACHE_SIZE = 512
+_WEDGE_LABEL_TEXT_STYLE = ("#000000", "#ffffff", 1)
+_WEDGE_LABEL_SPRITE_PADDING = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -930,6 +934,7 @@ class _WedgeLabelLayout:
     text: str
     shell_type: str | None
     font: ImageFont.FreeTypeFont | ImageFont.ImageFont
+    text_bbox: tuple[int, int, int, int]
     text_height: int
     icon_size: int
     icon_gap: int
@@ -981,6 +986,7 @@ def _get_wedge_label_layouts(
                 text=text,
                 shell_type=shell_type,
                 font=font,
+                text_bbox=bbox,
                 text_height=text_height,
                 icon_size=icon_size,
                 icon_gap=icon_gap,
@@ -1172,6 +1178,59 @@ def _draw_shell_icon(shell_type: str, s: int) -> Image.Image:
     return img
 
 
+@lru_cache(maxsize=_WEDGE_LABEL_SPRITE_CACHE_SIZE)
+def _get_wedge_label_sprite(
+    size: int,
+    wedges: tuple[tuple[str, int | str, str], ...],
+    layout: _WedgeLabelLayout,
+    phase_x: int,
+    phase_y: int,
+    text_style: tuple[str, str, int] = _WEDGE_LABEL_TEXT_STYLE,
+) -> tuple[Image.Image, int, int]:
+    """Render one bounded-cache text sprite at a quarter-pixel phase."""
+    del size, wedges  # These fields make custom-wheel cache keys safe.
+    shadow_color, text_color, shadow_offset = text_style
+    bbox_left, bbox_top, bbox_right, bbox_bottom = layout.text_bbox
+    padding = _WEDGE_LABEL_SPRITE_PADDING
+    left_extra = max(0, -(bbox_left + min(0, shadow_offset)))
+    top_extra = max(0, -(bbox_top + min(0, shadow_offset)))
+    phase_offset_x = phase_x / _WEDGE_LABEL_PHASE_STEPS
+    phase_offset_y = phase_y / _WEDGE_LABEL_PHASE_STEPS
+    origin_x = padding + left_extra + phase_offset_x
+    origin_y = padding + top_extra + phase_offset_y
+    right = origin_x + bbox_right + max(0, shadow_offset)
+    bottom = origin_y + bbox_bottom + max(0, shadow_offset)
+
+    sprite = Image.new(
+        "RGBA",
+        (
+            max(1, math.ceil(right + padding)),
+            max(1, math.ceil(bottom + padding)),
+        ),
+        (0, 0, 0, 0),
+    )
+    sprite_draw = ImageDraw.Draw(sprite)
+    sprite_draw.text(
+        (origin_x + shadow_offset, origin_y + shadow_offset),
+        layout.text,
+        fill=shadow_color,
+        font=layout.font,
+    )
+    sprite_draw.text(
+        (origin_x, origin_y),
+        layout.text,
+        fill=text_color,
+        font=layout.font,
+    )
+    return sprite, -(padding + left_extra), -(padding + top_extra)
+
+
+def _wedge_label_phase(value: float) -> tuple[int, int]:
+    """Round a coordinate to the nearest bounded subpixel phase."""
+    phase_units = math.floor(value * _WEDGE_LABEL_PHASE_STEPS + 0.5)
+    return divmod(phase_units, _WEDGE_LABEL_PHASE_STEPS)
+
+
 def _draw_wedge_labels(
     img: Image.Image,
     draw: ImageDraw.Draw,
@@ -1189,7 +1248,8 @@ def _draw_wedge_labels(
     center = size // 2
     radius = size // 2 - 30
     wedges = wedges if wedges is not None else get_wheel_wedges(is_bankrupt, is_golden)
-    wedge_layouts = _get_wedge_label_layouts(size, tuple(wedges))
+    wedge_key = tuple(wedges)
+    wedge_layouts = _get_wedge_label_layouts(size, wedge_key)
     num_wedges = len(wedge_layouts)
     angle_per_wedge = 360 / num_wedges
 
@@ -1211,16 +1271,24 @@ def _draw_wedge_labels(
             icon_y = int(text_cy - layout.icon_size / 2)
             img.paste(shell_icon, (icon_x, icon_y), shell_icon)
 
-        # Text shadow + main text
+        # Text shadow + main text. Cache each bounded quarter-pixel phase so
+        # the same label does not invoke FreeType on every animation frame.
         text_x = tx + layout.icon_gap
         text_y = ty
-        draw.text(
-            (text_x + 1, text_y + 1),
-            layout.text,
-            fill="#000000",
-            font=layout.font,
+        anchor_x, phase_x = _wedge_label_phase(text_x)
+        anchor_y, phase_y = _wedge_label_phase(text_y)
+        sprite, offset_x, offset_y = _get_wedge_label_sprite(
+            size,
+            wedge_key,
+            layout,
+            phase_x,
+            phase_y,
+            _WEDGE_LABEL_TEXT_STYLE,
         )
-        draw.text((text_x, text_y), layout.text, fill="#ffffff", font=layout.font)
+        img.alpha_composite(
+            sprite,
+            (anchor_x + offset_x, anchor_y + offset_y),
+        )
 
 
 
