@@ -149,27 +149,43 @@ class MatchCommands(commands.Cog):
             if not thread:
                 thread = await self.bot.fetch_channel(thread_id)
 
-            # Update thread name to show shuffled state
-            try:
-                await thread.edit(name="🔒 Shuffled - Awaiting Results")
-            except discord.HTTPException:
-                pass  # Rate limit on thread name changes
+            async def rename_thread() -> None:
+                try:
+                    await thread.edit(name="🔒 Shuffled - Awaiting Results")
+                except discord.HTTPException:
+                    pass  # Rate limit on thread name changes
 
-            # Post shuffle embed to thread
-            if shuffle_embed:
-                thread_shuffle_msg = await thread.send(embed=shuffle_embed)
-            else:
-                thread_shuffle_msg = await thread.send(
-                    "🔀 **Teams have been shuffled!**\nUse `/record` to record the match result."
-                )
+            async def post_shuffle_results() -> None:
+                nonlocal thread_shuffle_msg
 
-            # Ping included players in thread (subscribes them to thread notifications)
-            if included_player_ids:
-                # Filter out fake users (negative IDs)
-                real_player_ids = [pid for pid in included_player_ids if pid > 0]
-                if real_player_ids:
-                    mentions = " ".join(f"<@{pid}>" for pid in real_player_ids)
-                    await thread.send(f"{mentions}\nPlayers, take your starting positions")
+                # The player ping must follow the embed so it renders beneath it.
+                if shuffle_embed:
+                    thread_shuffle_msg = await thread.send(embed=shuffle_embed)
+                else:
+                    thread_shuffle_msg = await thread.send(
+                        "🔀 **Teams have been shuffled!**\n"
+                        "Use `/record` to record the match result."
+                    )
+
+                if included_player_ids:
+                    # Filter out fake users (negative IDs)
+                    real_player_ids = [pid for pid in included_player_ids if pid > 0]
+                    if real_player_ids:
+                        mentions = " ".join(f"<@{pid}>" for pid in real_player_ids)
+                        await thread.send(
+                            f"{mentions}\nPlayers, take your starting positions"
+                        )
+
+            # Renaming is independent of the ordered embed -> player-ping branch.
+            # Wait for both before locking so no publication task is orphaned.
+            rename_result, post_result = await asyncio.gather(
+                rename_thread(),
+                post_shuffle_results(),
+                return_exceptions=True,
+            )
+            for result in (rename_result, post_result):
+                if isinstance(result, BaseException):
+                    raise result
 
             # Lock the thread so users can't post or use buttons
             try:
@@ -939,25 +955,51 @@ class MatchCommands(commands.Cog):
         lobby_channel_id = await asyncio.to_thread(
             self.lobby_service.get_lobby_channel_id, guild_id=guild_id
         )
-        message = None
-        if lobby_channel_id:
+
+        command_channel_id = interaction.channel.id if interaction.channel else None
+
+        async def post_to_lobby_channel():
+            channel = None
+            if not lobby_channel_id:
+                return None, channel
+
             try:
                 channel = self.bot.get_channel(lobby_channel_id)
                 if not channel:
                     channel = await self.bot.fetch_channel(lobby_channel_id)
-                message = await channel.send(embed=embed)
+                return await channel.send(embed=embed), channel
             except Exception as exc:
                 logger.warning(f"Failed to post shuffle to lobby channel: {exc}")
+                return None, channel
 
-        command_channel_id = interaction.channel.id if interaction.channel else None
-        cmd_message = None
-        if command_channel_id and command_channel_id != lobby_channel_id:
+        async def post_to_command_channel():
+            if not command_channel_id or command_channel_id == lobby_channel_id:
+                return None
+
             try:
-                cmd_message = await interaction.channel.send(embed=embed)
+                return await interaction.channel.send(embed=embed)
             except Exception as exc:
                 logger.warning(f"Failed to post shuffle to command channel: {exc}")
+                return None
 
-        await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
+        async def send_confirmation() -> None:
+            await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
+
+        # These sends target independent Discord routes. Await the whole group so
+        # a required confirmation failure cannot leave public sends orphaned.
+        lobby_result, cmd_message, confirmation_error = await asyncio.gather(
+            post_to_lobby_channel(),
+            post_to_command_channel(),
+            send_confirmation(),
+            return_exceptions=True,
+        )
+        for result in (lobby_result, cmd_message):
+            if isinstance(result, BaseException):
+                raise result
+        if isinstance(confirmation_error, BaseException):
+            raise confirmation_error
+
+        message, lobby_channel = lobby_result
 
         # Capture origin_channel_id before reset_lobby clears it (betting reminders need it).
         try:
@@ -991,25 +1033,42 @@ class MatchCommands(commands.Cog):
         included_ids = []
         if pending_state:
             included_ids = list(pending_state.radiant_team_ids) + list(pending_state.dire_team_ids)
-        await self._lock_lobby_thread(
-            guild_id,
-            shuffle_embed=embed,
-            included_player_ids=included_ids,
-            pending_match_id=pending_match_id,
-        )
 
-        lobby_channel = None
-        if lobby_channel_id:
-            try:
-                lobby_channel = self.bot.get_channel(lobby_channel_id)
-                if not lobby_channel:
-                    lobby_channel = await self.bot.fetch_channel(lobby_channel_id)
-            except Exception as e:
-                logger.debug("Failed to fetch lobby channel, falling back to interaction channel: %s", e)
-                lobby_channel = interaction.channel
-        else:
-            lobby_channel = interaction.channel
-        await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
+        async def clean_up_lobby_pins() -> None:
+            cleanup_channel = lobby_channel
+            if lobby_channel_id and cleanup_channel is None:
+                try:
+                    cleanup_channel = self.bot.get_channel(lobby_channel_id)
+                    if not cleanup_channel:
+                        cleanup_channel = await self.bot.fetch_channel(lobby_channel_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Failed to fetch lobby channel, falling back to interaction "
+                        "channel: %s",
+                        exc,
+                    )
+                    cleanup_channel = interaction.channel
+            elif not lobby_channel_id:
+                cleanup_channel = interaction.channel
+
+            await safe_unpin_all_bot_messages(cleanup_channel, self.bot.user)
+
+        # Thread publication and pin cleanup are independent maintenance paths.
+        # Await both before resetting the lobby so thread metadata is persisted.
+        maintenance_results = await asyncio.gather(
+            self._lock_lobby_thread(
+                guild_id,
+                shuffle_embed=embed,
+                included_player_ids=included_ids,
+                pending_match_id=pending_match_id,
+            ),
+            clean_up_lobby_pins(),
+            return_exceptions=True,
+        )
+        for result in maintenance_results:
+            if isinstance(result, BaseException):
+                raise result
+
         await asyncio.to_thread(self.lobby_service.reset_lobby, guild_id)
 
         from bot import clear_lobby_rally_cooldowns
