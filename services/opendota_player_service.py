@@ -39,6 +39,14 @@ _PROFILE_FETCH_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="opendota-profile",
 )
 
+# Profile assembly coordinates four component requests while the caller fetches
+# the projected match sample on its existing OpenDota worker. Keeping the
+# coordinator off the component pool avoids recursive executor starvation.
+_DOTA_TAB_PROFILE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="opendota-dota-tab",
+)
+
 
 class OpenDotaPlayerService:
     """
@@ -76,6 +84,7 @@ class OpenDotaPlayerService:
         *,
         steam_id: int | None = None,
         recent_matches: list[dict] | None = None,
+        recent_matches_future: Future[list[dict]] | None = None,
     ) -> dict | None:
         """
         Get comprehensive player profile from OpenDota.
@@ -84,6 +93,8 @@ class OpenDotaPlayerService:
             discord_id: Player's Discord ID
             force_refresh: Force API refresh, ignoring cache
             steam_id: Known Steam ID, avoiding another repository lookup
+            recent_matches: Known projected match sample to reuse
+            recent_matches_future: In-flight projected match sample to reuse
 
         Returns:
             Profile dict with stats, or None if unavailable
@@ -118,7 +129,10 @@ class OpenDotaPlayerService:
         # Fetch from API
         logger.info(f"Fetching OpenDota profile for steam_id {steam_id}")
         try:
-            profile = self._fetch_profile(steam_id, recent_matches=recent_matches)
+            fetch_kwargs = {"recent_matches": recent_matches}
+            if recent_matches_future is not None:
+                fetch_kwargs["recent_matches_future"] = recent_matches_future
+            profile = self._fetch_profile(steam_id, **fetch_kwargs)
             if profile:
                 with self._cache_lock:
                     self._memory_cache[discord_id] = {
@@ -159,6 +173,7 @@ class OpenDotaPlayerService:
         steam_id: int,
         *,
         recent_matches: list[dict] | None = None,
+        recent_matches_future: Future[list[dict]] | None = None,
     ) -> dict | None:
         """Fetch independent profile endpoints concurrently."""
         try:
@@ -176,6 +191,8 @@ class OpenDotaPlayerService:
             wl = futures["wl"].result()
             totals = futures["totals"].result()
             top_heroes = futures["heroes"].result()
+            if recent_matches_future is not None:
+                recent_matches = recent_matches_future.result()
             formatted_recent = (
                 self._format_recent_matches(recent_matches)
                 if recent_matches is not None
@@ -441,18 +458,28 @@ class OpenDotaPlayerService:
             if cached:
                 self._dota_tab_cache.pop(cache_key, None)
 
-        matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
+        matches_future: Future[list[dict]] = Future()
+        profile_future = _DOTA_TAB_PROFILE_EXECUTOR.submit(
+            self.get_player_profile,
+            discord_id,
+            steam_id=steam_id,
+            recent_matches_future=matches_future,
+        )
+        try:
+            matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
+        except BaseException as exc:
+            matches_future.set_exception(exc)
+            raise
+        else:
+            matches_future.set_result(matches)
+
         try:
             result["role_distribution"] = self._calc_hero_role_distribution(matches)
         except Exception as e:
             logger.error(f"Error calculating role distribution: {e}")
 
         try:
-            profile = self.get_player_profile(
-                discord_id,
-                steam_id=steam_id,
-                recent_matches=matches,
-            )
+            profile = profile_future.result()
             if profile:
                 result["full_stats"] = self._build_full_stats(steam_id, profile, matches)
         except Exception as e:
