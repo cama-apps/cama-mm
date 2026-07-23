@@ -6,6 +6,7 @@ catching UnboundLocalError issues that occur when guild_id is used before being
 extracted from interaction.guild.id.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -216,6 +217,24 @@ class FakeBot:
         return self._channel
 
 
+class _EventBarrier:
+    """Hold named async branches until every expected branch has entered."""
+
+    def __init__(self, *expected: str):
+        self.expected = set(expected)
+        self.entered: set[str] = set()
+        self.all_entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def enter(self, name: str, *, error: Exception | None = None) -> None:
+        self.entered.add(name)
+        if self.entered == self.expected:
+            self.all_entered.set()
+        await self.release.wait()
+        if error is not None:
+            raise error
+
+
 def make_services(player_repo=None):
     """Create lobby manager, lobby service, and player service."""
     lobby_manager = LobbyManager(FakeLobbyRepo())
@@ -406,6 +425,220 @@ async def test_auto_join_lobby_uses_guild_id(monkeypatch_safe_defer):
 
     # Should have attempted to join (may succeed or fail based on implementation)
     assert isinstance(joined, bool)
+
+
+@pytest.mark.asyncio
+async def test_join_fans_out_confirmation_and_isolates_maintenance_failure(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """Confirmation, display, and ordered thread work enter the same async wave."""
+    import bot as bot_module
+
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby_service.set_lobby_message_id(
+        message_id=789,
+        channel_id=456,
+        thread_id=999,
+        embed_message_id=789,
+        guild_id=TEST_GUILD_ID,
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+    barrier = _EventBarrier("followup", "display", "activity")
+    confirmation = {}
+
+    async def followup(_interaction, **kwargs):
+        confirmation.update(kwargs)
+        await barrier.enter("followup")
+
+    async def sync_displays(_lobby, _guild_id):
+        await barrier.enter("display", error=RuntimeError("display failed"))
+
+    async def post_activity(_thread_id, _user):
+        await barrier.enter("activity")
+
+    rally = AsyncMock(return_value=True)
+    monkeypatch.setattr("commands.lobby.safe_followup", followup)
+    monkeypatch.setattr(cog, "_sync_lobby_displays", sync_displays)
+    monkeypatch.setattr(cog, "_post_join_activity", post_activity)
+    monkeypatch.setattr(bot_module, "notify_lobby_rally", rally)
+    monkeypatch.setattr(bot_module, "notify_lobby_ready", AsyncMock())
+
+    command = asyncio.create_task(cog.join.callback(cog, interaction))
+    try:
+        await asyncio.wait_for(barrier.all_entered.wait(), timeout=1)
+        assert barrier.entered == barrier.expected
+        assert confirmation["content"] == "✅ Joined the lobby!"
+    finally:
+        barrier.release.set()
+    await command
+
+    rally.assert_awaited_once()
+    assert 1 in lobby_service.get_lobby(guild_id=TEST_GUILD_ID).players
+
+
+@pytest.mark.asyncio
+async def test_leave_fans_out_confirmation_and_isolates_maintenance_failure(
+    monkeypatch,
+    monkeypatch_safe_defer,
+):
+    """All leave maintenance starts with confirmation and failures stay local."""
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby.add_player(1)
+    lobby_service.set_lobby_message_id(
+        message_id=789,
+        channel_id=456,
+        thread_id=999,
+        embed_message_id=789,
+        guild_id=TEST_GUILD_ID,
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+    barrier = _EventBarrier("followup", "display", "reaction", "activity")
+    confirmation = {}
+
+    async def followup(_interaction, **kwargs):
+        confirmation.update(kwargs)
+        await barrier.enter("followup")
+
+    async def sync_displays(_lobby, _guild_id):
+        await barrier.enter("display")
+
+    async def remove_reaction(_user, *, guild_id):
+        assert guild_id == TEST_GUILD_ID
+        await barrier.enter("reaction", error=RuntimeError("reaction failed"))
+
+    async def post_activity(_thread_id, _user):
+        await barrier.enter("activity")
+
+    monkeypatch.setattr("commands.lobby.safe_followup", followup)
+    monkeypatch.setattr(cog, "_sync_lobby_displays", sync_displays)
+    monkeypatch.setattr(cog, "_remove_user_lobby_reactions", remove_reaction)
+    monkeypatch.setattr(cog, "_post_leave_activity", post_activity)
+
+    command = asyncio.create_task(cog.leave.callback(cog, interaction))
+    try:
+        await asyncio.wait_for(barrier.all_entered.wait(), timeout=1)
+        assert barrier.entered == barrier.expected
+        assert confirmation["content"] == "✅ Left the lobby."
+    finally:
+        barrier.release.set()
+    await command
+
+    assert 1 not in lobby_service.get_lobby(guild_id=TEST_GUILD_ID).players
+
+
+@pytest.mark.asyncio
+async def test_auto_join_runs_display_and_thread_publication_concurrently(
+    monkeypatch,
+):
+    """A failed display refresh does not delay or suppress join publication."""
+    import bot as bot_module
+
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby_service.set_lobby_message_id(
+        message_id=789,
+        channel_id=456,
+        thread_id=999,
+        embed_message_id=789,
+        guild_id=TEST_GUILD_ID,
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+    barrier = _EventBarrier("display", "activity")
+
+    async def sync_displays(_lobby, _guild_id):
+        await barrier.enter("display", error=RuntimeError("display failed"))
+
+    async def post_activity(_thread_id, _user):
+        await barrier.enter("activity")
+
+    rally = AsyncMock(return_value=True)
+    monkeypatch.setattr(cog, "_sync_lobby_displays", sync_displays)
+    monkeypatch.setattr(cog, "_post_join_activity", post_activity)
+    monkeypatch.setattr(bot_module, "notify_lobby_rally", rally)
+    monkeypatch.setattr(bot_module, "notify_lobby_ready", AsyncMock())
+
+    auto_join = asyncio.create_task(cog._auto_join_lobby(interaction, lobby))
+    try:
+        await asyncio.wait_for(barrier.all_entered.wait(), timeout=1)
+        assert barrier.entered == barrier.expected
+    finally:
+        barrier.release.set()
+    joined, warning = await auto_join
+
+    assert joined is True
+    assert warning is None
+    rally.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_auto_join_activity_finishes_before_rally_thread_send(monkeypatch):
+    """The ordered thread branch cannot publish rally before join activity."""
+    import bot as bot_module
+
+    _, lobby_service, player_service, player_repo = make_services()
+    lobby = lobby_service.get_or_create_lobby(
+        creator_id=99,
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_player(1, TEST_GUILD_ID)
+    lobby_service.set_lobby_message_id(
+        message_id=789,
+        channel_id=456,
+        thread_id=999,
+        embed_message_id=789,
+        guild_id=TEST_GUILD_ID,
+    )
+    interaction = FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    cog = LobbyCommands(FakeBot(), lobby_service, player_service)
+    activity_entered = asyncio.Event()
+    release_activity = asyncio.Event()
+    rally_thread_sent = asyncio.Event()
+
+    async def post_activity(_thread_id, _user):
+        activity_entered.set()
+        await release_activity.wait()
+
+    async def rally(_channel, thread, _lobby, _guild_id):
+        await thread.send("rally")
+        return True
+
+    async def thread_send(*_args, **_kwargs):
+        rally_thread_sent.set()
+
+    cog.bot._channel.send = thread_send
+    monkeypatch.setattr(cog, "_sync_lobby_displays", AsyncMock())
+    monkeypatch.setattr(cog, "_post_join_activity", post_activity)
+    monkeypatch.setattr(bot_module, "notify_lobby_rally", rally)
+    monkeypatch.setattr(bot_module, "notify_lobby_ready", AsyncMock())
+
+    auto_join = asyncio.create_task(cog._auto_join_lobby(interaction, lobby))
+    try:
+        await asyncio.wait_for(activity_entered.wait(), timeout=1)
+        assert not rally_thread_sent.is_set()
+    finally:
+        release_activity.set()
+    joined, _ = await auto_join
+
+    assert joined is True
+    assert rally_thread_sent.is_set()
 
 
 @pytest.mark.asyncio

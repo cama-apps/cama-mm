@@ -5,6 +5,7 @@ This feature allows lobby embeds to be posted to a dedicated channel while
 tracking the origin channel (where /lobby was run) for rally notifications.
 """
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -952,6 +953,119 @@ class TestNotifyLobbyRally:
         assert second is False
         reaction_channel.send.assert_awaited_once()
         thread.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rally_target_and_thread_sends_overlap(self):
+        """The primary channel and supplemental thread sends enter before release."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        target_entered = asyncio.Event()
+        thread_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def send_target(*_args, **_kwargs):
+            target_entered.set()
+            await release.wait()
+
+        async def send_thread(*_args, **_kwargs):
+            thread_entered.set()
+            await release.wait()
+
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.send = send_target
+        thread = MagicMock()
+        thread.send = send_thread
+        lobby = MagicMock(players=set())
+        lobby.get_total_count.return_value = 8
+
+        mock_bot = MagicMock()
+        mock_bot.lobby_service.get_lobby_message_id.return_value = None
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = None
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", {}),
+        ):
+            notification = asyncio.create_task(
+                notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(target_entered.wait(), thread_entered.wait()),
+                    timeout=1,
+                )
+                assert not notification.done()
+            finally:
+                release.set()
+                result = await notification
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_rally_target_failure_is_required_and_releases_cooldown(self):
+        """A primary send failure returns false even when the thread send succeeds."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.send = AsyncMock(side_effect=RuntimeError("target failed"))
+        thread = MagicMock(send=AsyncMock())
+        lobby = MagicMock(players=set())
+        lobby.get_total_count.return_value = 8
+        mock_bot = MagicMock()
+        mock_bot.lobby_service.get_lobby_message_id.return_value = None
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = None
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        cooldowns = {}
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", cooldowns),
+        ):
+            result = await notify_lobby_rally(
+                reaction_channel,
+                thread,
+                lobby,
+                guild_id=1,
+            )
+
+        assert result is False
+        thread.send.assert_awaited_once()
+        assert (1, 2) not in cooldowns
+
+    @pytest.mark.asyncio
+    async def test_rally_thread_failure_is_best_effort_and_keeps_cooldown(self):
+        """A supplemental thread failure does not invalidate a primary send."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.send = AsyncMock()
+        thread = MagicMock(send=AsyncMock(side_effect=RuntimeError("thread failed")))
+        lobby = MagicMock(players=set())
+        lobby.get_total_count.return_value = 8
+        mock_bot = MagicMock()
+        mock_bot.lobby_service.get_lobby_message_id.return_value = None
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = None
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        cooldowns = {}
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", cooldowns),
+        ):
+            result = await notify_lobby_rally(
+                reaction_channel,
+                thread,
+                lobby,
+                guild_id=1,
+            )
+
+        assert result is True
+        reaction_channel.send.assert_awaited_once()
+        assert (1, 2) in cooldowns
 
 
 class TestShuffleDedicatedChannel:

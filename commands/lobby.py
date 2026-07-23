@@ -8,6 +8,7 @@ import asyncio
 import functools
 import logging
 import time
+from collections.abc import Awaitable
 
 import discord
 from discord import app_commands
@@ -230,6 +231,44 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to pin lobby message: {exc}")
 
+    async def _run_lobby_publication_wave(
+        self,
+        maintenance: list[tuple[str, Awaitable[object]]],
+        *,
+        followup: Awaitable[object] | None = None,
+    ) -> None:
+        """Await a publication wave without hiding the user response.
+
+        Display, reaction, and thread upkeep is best-effort after the membership
+        mutation has committed. The ephemeral confirmation is different: if it
+        fails, let the command error path surface it after all sibling work has
+        finished so no gather-created task is left running.
+        """
+        operations: list[Awaitable[object]] = []
+        if followup is not None:
+            operations.append(followup)
+        operations.extend(operation for _, operation in maintenance)
+
+        results = await asyncio.gather(*operations, return_exceptions=True)
+        maintenance_results = results
+        followup_failure: BaseException | None = None
+        if followup is not None:
+            followup_result = results[0]
+            maintenance_results = results[1:]
+            if isinstance(followup_result, BaseException):
+                followup_failure = followup_result
+
+        for (label, _), result in zip(
+            maintenance, maintenance_results, strict=True
+        ):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                logger.warning("Lobby %s failed: %s", label, result)
+
+        if followup_failure is not None:
+            raise followup_failure
+
 
     async def _remove_user_lobby_reactions(
         self,
@@ -346,6 +385,73 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post leave activity: {exc}")
 
+    async def _publish_join_activity_and_notifications(
+        self,
+        lobby,
+        user: discord.User | discord.Member,
+        guild_id: int | None,
+        *,
+        auto_join: bool = False,
+    ) -> None:
+        """Publish ordered thread activity followed by rally/ready notices."""
+        from bot import notify_lobby_rally, notify_lobby_ready
+
+        metadata = await asyncio.gather(
+            asyncio.to_thread(
+                self.lobby_service.get_lobby_thread_id, guild_id=guild_id
+            ),
+            asyncio.to_thread(
+                self.lobby_service.get_lobby_channel_id, guild_id=guild_id
+            ),
+            return_exceptions=True,
+        )
+        for result in metadata:
+            if isinstance(result, BaseException):
+                raise result
+        thread_id, channel_id = metadata
+
+        # Both messages can target the lobby thread. Keep the subscription-
+        # creating join activity ahead of the rally notification.
+        if thread_id:
+            try:
+                await self._post_join_activity(thread_id, user)
+            except Exception as exc:
+                logger.warning("Failed to post join activity: %s", exc)
+
+        if not channel_id or not thread_id:
+            return
+
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+            thread = self.bot.get_channel(thread_id)
+            if not thread:
+                thread = await self.bot.fetch_channel(thread_id)
+
+            is_ready = await asyncio.to_thread(self.lobby_service.is_ready, lobby)
+            if not is_ready:
+                await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
+            else:
+                await notify_lobby_ready(channel, guild_id=guild_id or 0)
+        except Exception as exc:
+            context = " on auto-join" if auto_join else ""
+            logger.warning(
+                "Failed to send rally/ready notification%s: %s", context, exc
+            )
+
+    async def _publish_leave_activity(
+        self,
+        user: discord.User | discord.Member,
+        guild_id: int | None,
+    ) -> None:
+        """Load the lobby thread and publish a best-effort leave notice."""
+        thread_id = await asyncio.to_thread(
+            self.lobby_service.get_lobby_thread_id, guild_id=guild_id
+        )
+        if thread_id:
+            await self._post_leave_activity(thread_id, user)
+
     async def _update_channel_message_closed(
         self, reason: str = "Lobby Closed", guild_id: int | None = None
     ) -> None:
@@ -420,38 +526,23 @@ class LobbyCommands(commands.Cog):
         # Refresh lobby state
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
 
-        # Update displays
-        await self._sync_lobby_displays(lobby, guild_id)
-
-        # Post join activity in thread
-        thread_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_thread_id, guild_id=guild_id
+        await self._run_lobby_publication_wave(
+            [
+                (
+                    "display sync after auto-join",
+                    self._sync_lobby_displays(lobby, guild_id),
+                ),
+                (
+                    "thread publication after auto-join",
+                    self._publish_join_activity_and_notifications(
+                        lobby,
+                        interaction.user,
+                        guild_id,
+                        auto_join=True,
+                    ),
+                ),
+            ]
         )
-        if thread_id:
-            await self._post_join_activity(thread_id, interaction.user)
-
-        # Rally/ready notifications
-        from bot import notify_lobby_rally, notify_lobby_ready
-
-        channel_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_channel_id, guild_id=guild_id
-        )
-        if channel_id and thread_id:
-            try:
-                channel = self.bot.get_channel(channel_id)
-                if not channel:
-                    channel = await self.bot.fetch_channel(channel_id)
-                thread = self.bot.get_channel(thread_id)
-                if not thread:
-                    thread = await self.bot.fetch_channel(thread_id)
-
-                is_ready = await asyncio.to_thread(self.lobby_service.is_ready, lobby)
-                if not is_ready:
-                    await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
-                else:
-                    await notify_lobby_ready(channel, guild_id=guild_id or 0)
-            except Exception as exc:
-                logger.warning(f"Failed to send rally/ready notification on auto-join: {exc}")
 
         return True, None
 
@@ -757,38 +848,25 @@ class LobbyCommands(commands.Cog):
         # Refresh lobby state after join
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
 
-        # Update displays and post activity
-        await self._sync_lobby_displays(lobby, guild_id)
-        thread_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_thread_id, guild_id=guild_id
+        await self._run_lobby_publication_wave(
+            [
+                (
+                    "display sync after join",
+                    self._sync_lobby_displays(lobby, guild_id),
+                ),
+                (
+                    "thread publication after join",
+                    self._publish_join_activity_and_notifications(
+                        lobby, interaction.user, guild_id
+                    ),
+                ),
+            ],
+            followup=safe_followup(
+                interaction,
+                content="✅ Joined the lobby!",
+                ephemeral=True,
+            ),
         )
-        if thread_id:
-            await self._post_join_activity(thread_id, interaction.user)
-
-        # Rally/ready notifications
-        from bot import notify_lobby_rally, notify_lobby_ready
-
-        channel_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_channel_id, guild_id=guild_id
-        )
-        if channel_id and thread_id:
-            try:
-                channel = self.bot.get_channel(channel_id)
-                if not channel:
-                    channel = await self.bot.fetch_channel(channel_id)
-                thread = self.bot.get_channel(thread_id)
-                if not thread:
-                    thread = await self.bot.fetch_channel(thread_id)
-
-                is_ready = await asyncio.to_thread(self.lobby_service.is_ready, lobby)
-                if not is_ready:
-                    await notify_lobby_rally(channel, thread, lobby, guild_id)
-                else:
-                    await notify_lobby_ready(channel, guild_id=guild_id)
-            except Exception as exc:
-                logger.warning(f"Failed to send rally/ready notification: {exc}")
-
-        await safe_followup(interaction, content="✅ Joined the lobby!", ephemeral=True)
 
         # Neon Degen Terminal hook for lobby join
         try:
@@ -835,20 +913,29 @@ class LobbyCommands(commands.Cog):
         # Re-fetch lobby after removal so the embed reflects the current state.
         lobby = await asyncio.to_thread(self.lobby_service.get_lobby, guild_id=guild_id)
 
-        # Update displays
-        await self._sync_lobby_displays(lobby, guild_id)
-
-        # Remove user's reactions
-        await self._remove_user_lobby_reactions(interaction.user, guild_id=guild_id)
-
-        # Post leave activity in thread
-        thread_id = await asyncio.to_thread(
-            self.lobby_service.get_lobby_thread_id, guild_id=guild_id
+        await self._run_lobby_publication_wave(
+            [
+                (
+                    "display sync after leave",
+                    self._sync_lobby_displays(lobby, guild_id),
+                ),
+                (
+                    "reaction cleanup after leave",
+                    self._remove_user_lobby_reactions(
+                        interaction.user, guild_id=guild_id
+                    ),
+                ),
+                (
+                    "thread publication after leave",
+                    self._publish_leave_activity(interaction.user, guild_id),
+                ),
+            ],
+            followup=safe_followup(
+                interaction,
+                content="✅ Left the lobby.",
+                ephemeral=True,
+            ),
         )
-        if thread_id:
-            await self._post_leave_activity(thread_id, interaction.user)
-
-        await safe_followup(interaction, content="✅ Left the lobby.", ephemeral=True)
 
     @app_commands.command(
         name="resetlobby",
