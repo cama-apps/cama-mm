@@ -30,6 +30,11 @@ _CACHED_WHEEL_FACE: dict[int, Image.Image] = {}
 # Matrix rain column data: pre-computed once per size
 _CACHED_RAIN_COLUMNS: dict[int, list[dict]] = {}
 
+# Bound palette analysis independently of frame size/count. For a 500px,
+# 56-frame explosion this produces a 94x5,264 RGB contact sheet (~1.5 MB)
+# instead of duplicating all 42 MB of full-resolution RGB frame data.
+_EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET = 500_000
+
 # Jopacoin-themed glyphs for the matrix rain
 _RAIN_GLYPHS = list("JOPACOINDEGEN$01234567890+-=%<>")
 
@@ -1634,6 +1639,70 @@ def create_wheel_gif(
     return buffer
 
 
+def _explosion_palette_sample_size(
+    frame_size: tuple[int, int],
+    frame_count: int,
+) -> tuple[int, int]:
+    """Return per-frame sample dimensions under the palette pixel budget."""
+    frame_width, frame_height = frame_size
+    source_pixels = frame_width * frame_height * frame_count
+    sample_scale = max(
+        1.0,
+        math.sqrt(source_pixels / _EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET),
+    )
+    return (
+        max(1, int(frame_width / sample_scale)),
+        max(1, int(frame_height / sample_scale)),
+    )
+
+
+def _build_explosion_shared_palette(frames: list[Image.Image]) -> Image.Image:
+    """Build one representative palette from bounded samples of every phase."""
+    sample_width, sample_height = _explosion_palette_sample_size(
+        frames[0].size,
+        len(frames),
+    )
+    contact_sheet = Image.new(
+        "RGB",
+        (sample_width, sample_height * len(frames)),
+    )
+    for frame_index, frame in enumerate(frames):
+        sample = frame.resize(
+            (sample_width, sample_height),
+            Image.Resampling.NEAREST,
+        )
+        contact_sheet.paste(sample, (0, frame_index * sample_height))
+        sample.close()
+
+    quantized_sample = contact_sheet.quantize(
+        colors=256,
+        method=Image.Quantize.FASTOCTREE,
+        dither=Image.Dither.NONE,
+    )
+    contact_sheet.close()
+
+    # Retain only the palette, releasing the sampled sheet before full-size
+    # remapping starts.
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(quantized_sample.getpalette())
+    quantized_sample.close()
+    return palette
+
+
+def _quantize_explosion_frames(frames: list[Image.Image]) -> None:
+    """Remap explosion frames in place using one shared, non-dithered palette."""
+    palette = _build_explosion_shared_palette(frames)
+    try:
+        for frame_index, frame in enumerate(frames):
+            frames[frame_index] = frame.quantize(
+                palette=palette,
+                dither=Image.Dither.NONE,
+            )
+            frame.close()
+    finally:
+        palette.close()
+
+
 def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io.BytesIO:
     """
     Create an animated GIF of the wheel exploding.
@@ -1647,8 +1716,8 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
     Returns:
         BytesIO buffer containing the GIF data
     """
-    frames = []
-    durations = []
+    frames: list[Image.Image] = []
+    durations: list[int] = []
 
     center = size // 2
     scale = size / 400.0  # Scale factor for pixel values calibrated at 400px
@@ -1658,8 +1727,9 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
     for i in range(spin_frames):
         rotation = i * 35  # Fast spin (faster rotation per frame to maintain visual speed)
         frame = create_wheel_frame_for_gif(size, rotation, selected_idx=None, display_name=display_name, frame_idx=i)
-        frame_p = frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
-        frames.append(frame_p)
+        frame_rgb = frame.convert("RGB")
+        frame.close()
+        frames.append(frame_rgb)
         durations.append(50)
 
     # Phase 2: Wheel starts shaking/glitching (something's wrong...)
@@ -1679,10 +1749,14 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
 
         # Add warning red tint that intensifies
         red_overlay = Image.new("RGBA", (size, size), (255, 0, 0, int(20 + i * 8)))
-        shaken = Image.alpha_composite(shaken.convert("RGBA"), red_overlay)
+        tinted = Image.alpha_composite(shaken, red_overlay)
+        frame.close()
+        shaken.close()
+        red_overlay.close()
 
-        frame_p = shaken.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
-        frames.append(frame_p)
+        frame_rgb = tinted.convert("RGB")
+        tinted.close()
+        frames.append(frame_rgb)
         durations.append(60 + i * 10)  # Slowing down before explosion
 
     # Phase 3: THE EXPLOSION
@@ -1737,7 +1811,10 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         if frame_idx < 2:
             flash_alpha = 255 - frame_idx * 120
             flash = Image.new("RGBA", (size, size), (255, 255, 200, flash_alpha))
-            img = Image.alpha_composite(img, flash)
+            flashed = Image.alpha_composite(img, flash)
+            img.close()
+            flash.close()
+            img = flashed
             draw = ImageDraw.Draw(img)
 
         # Draw expanding shockwave rings
@@ -1813,8 +1890,9 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
                         fill=(80, 80, 80, smoke_alpha),
                     )
 
-        frame_p = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
-        frames.append(frame_p)
+        frame_rgb = img.convert("RGB")
+        img.close()
+        frames.append(frame_rgb)
         durations.append(60 if frame_idx < 4 else 80)
 
     # Phase 4: Aftermath with reward text and smoke clearing
@@ -1884,18 +1962,26 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         draw.text((sorry_x + 1, sorry_y + 1), sorry_text, fill=(0, 0, 0, text_alpha), font=small_font)
         draw.text((sorry_x, sorry_y), sorry_text, fill=(255, 255, 255, text_alpha), font=small_font)
 
-        frame_p = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
-        frames.append(frame_p)
+        frame_rgb = img.convert("RGB")
+        img.close()
+        frames.append(frame_rgb)
         durations.append(100 if frame_idx < aftermath_frames - 1 else 60000)  # Hold final
 
+    _quantize_explosion_frames(frames)
+
     buffer = io.BytesIO()
-    frames[0].save(
-        buffer,
-        format="GIF",
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=1,
-    )
+    try:
+        frames[0].save(
+            buffer,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=1,
+            optimize=False,
+        )
+    finally:
+        for frame in frames:
+            frame.close()
     buffer.seek(0)
     return buffer
