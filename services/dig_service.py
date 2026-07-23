@@ -45,6 +45,7 @@ from services.dig_constants import (
     LUMINOSITY_MAX,
     LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_EVENT_MULTIPLIER,
+    MAIN_DIG_ADVANCE_CAP,
     MILESTONES,
     PRESTIGE_HARD_CAP,
     STREAKS,
@@ -1001,6 +1002,7 @@ class DigService(
         # injury or negative perk can't shrink the advertised +5 / +10.
         advance += dynamite_bonus + depth_charge_bonus
         advance = max(1, advance)
+        advance = min(advance, MAIN_DIG_ADVANCE_CAP)
 
         # 12. Check boss boundary
         boss_progress = self._get_boss_progress(tunnel)
@@ -1771,6 +1773,8 @@ class DigService(
         ]
         cheer_advance_bonus = min(len(active_cheers), 3)
         advance_max += cheer_advance_bonus
+        advance_min = min(advance_min, MAIN_DIG_ADVANCE_CAP)
+        advance_max = min(advance_max, MAIN_DIG_ADVANCE_CAP)
 
         # Recent social actions (single DB call, last 24h)
         recent_social = self.dig_repo.get_recent_actions(

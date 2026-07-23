@@ -136,3 +136,34 @@ async def test_boss_encounter_receives_reminder_callback(monkeypatch):
     callback = captured["on_boss_resolved"]
     assert callback.__self__ is cog
     assert callback.__func__ is DigCommands._schedule_dig_reminder
+
+
+@pytest.mark.asyncio
+async def test_boss_encounter_embed_surfaces_carried_wager(monkeypatch):
+    monkeypatch.setattr(dig_module, "BossEncounterView", Mock())
+    bot = SimpleNamespace()
+    dig_service = SimpleNamespace(
+        has_scout_lantern=lambda user_id, guild_id: False,
+    )
+    cog = DigCommands(bot, dig_service)
+    cog._send_public_dig = AsyncMock(return_value=None)
+    interaction = SimpleNamespace(user=SimpleNamespace(id=10001))
+    result = SimpleNamespace(
+        boss_info=SimpleNamespace(
+            name="Test Boss",
+            dialogue="Test dialogue",
+            boundary=None,
+            luminosity_display=None,
+            carried_wager=1_500,
+        )
+    )
+
+    await cog._handle_boss_encounter(interaction, 12345, result)
+
+    embed = cog._send_public_dig.await_args.kwargs["embed"]
+    carried_field = next(
+        (field for field in embed.fields if field.name == "Carried Wager"),
+        None,
+    )
+    assert carried_field is not None
+    assert "**1,500**" in carried_field.value

@@ -242,6 +242,44 @@ def test_phase_transition_forwards_callback_to_replacement_encounter(monkeypatch
     asyncio.run(scenario())
 
 
+def test_phase_transition_encounter_surfaces_carried_wager(monkeypatch):
+    monkeypatch.setattr(bv, "BossEncounterView", MagicMock(return_value=MagicMock()))
+
+    async def scenario():
+        service = MagicMock()
+        service.build_next_boss_encounter.return_value = {
+            "name": "Next Form",
+            "dialogue": "Again.",
+            "carried_wager": 1_500,
+        }
+        service.has_scout_lantern.return_value = False
+        channel = SimpleNamespace(send=AsyncMock(return_value=MagicMock()))
+
+        await bv._post_phase_transition_followup(
+            channel,
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            result=SimpleNamespace(
+                phase2_name="Next Form",
+                phase2_title="Transformed",
+                dialogue="Again.",
+                boss_name="Test Boss",
+                wager=1_500,
+            ),
+        )
+
+        encounter_embed = channel.send.await_args_list[1].kwargs["embed"]
+        carried_field = next(
+            (field for field in encounter_embed.fields if field.name == "Carried Wager"),
+            None,
+        )
+        assert carried_field is not None
+        assert "**1,500**" in carried_field.value
+
+    asyncio.run(scenario())
+
+
 def test_pinnacle_phase_transition_uses_next_phase_title(monkeypatch):
     monkeypatch.setattr(bv, "BossEncounterView", MagicMock(return_value=MagicMock()))
 
@@ -548,6 +586,12 @@ def test_wager_validation_errors_do_not_notify():
         service.start_boss_duel.assert_not_called()
 
     asyncio.run(scenario())
+
+
+def test_wager_modal_surfaces_maximum():
+    wager_input = bv.BossWagerModal.wager._underlying
+    assert wager_input.label == "Wager Amount (max 1,000 JC)"
+    assert wager_input.placeholder == "0-1000"
 
 
 def test_risk_modal_forwards_callback_to_no_wager_resolution(monkeypatch):

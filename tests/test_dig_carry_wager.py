@@ -202,6 +202,166 @@ def _setup_pinnacle(dig_repo, player_repository, guild_id, *, discord_id=20001,
     return tunnel
 
 
+def _seed_pinnacle_carried_wager(
+    dig_repo,
+    player_repository,
+    guild_id,
+    *,
+    wager=1_500,
+    risk_tier="bold",
+    status="phase1_defeated",
+    pinnacle_phase=2,
+):
+    _setup_pinnacle(dig_repo, player_repository, guild_id)
+    boss_progress = {str(b): {"status": "defeated"} for b in BOSS_BOUNDARIES}
+    boss_progress[str(PINNACLE_DEPTH)] = {
+        "boss_id": "forgotten_king",
+        "status": status,
+        "carried_wager": wager,
+        "carried_risk_tier": risk_tier,
+    }
+    dig_repo.update_tunnel(
+        20001,
+        guild_id,
+        boss_progress=json.dumps(boss_progress),
+        pinnacle_boss_id="forgotten_king",
+        pinnacle_phase=pinnacle_phase,
+    )
+
+
+@pytest.mark.parametrize("resolver_name", ["fight_boss", "start_boss_duel"])
+def test_existing_carried_wager_above_new_cap_can_continue(
+    resolver_name,
+    dig_service,
+    dig_repo,
+    player_repository,
+    guild_id,
+    monkeypatch,
+):
+    """A pre-deploy pinnacle stake must not strand an encounter mid-fight."""
+    _seed_pinnacle_carried_wager(dig_repo, player_repository, guild_id)
+    captured = {}
+
+    def capture_pinnacle(
+        discord_id, resolved_guild_id, tunnel, risk_tier, wager,
+    ):
+        captured.update(risk_tier=risk_tier, wager=wager)
+        return {"success": True}
+
+    monkeypatch.setattr(dig_service, "_fight_pinnacle", capture_pinnacle)
+
+    resolver = getattr(dig_service, resolver_name)
+    result = resolver(20001, guild_id, "cautious", wager=0)
+
+    assert result["success"], result
+    assert captured == {"risk_tier": "bold", "wager": 1_500}
+
+
+@pytest.mark.parametrize("resolver_name", ["fight_boss", "start_boss_duel"])
+@pytest.mark.parametrize(
+    ("status", "pinnacle_phase", "carried_wager", "risk_tier"),
+    [
+        ("active", 1, 1_500, "bold"),
+        ("phase1_defeated", 3, 1_500, "bold"),
+        ("phase2_defeated", 2, 1_500, "bold"),
+        ("phase1_defeated", 2, -5, "bold"),
+        ("phase1_defeated", 2, 1_500, "wild"),
+        ("phase1_defeated", 2, "lots", "bold"),
+    ],
+)
+def test_invalid_pinnacle_carry_cannot_bypass_new_wager_cap(
+    resolver_name,
+    status,
+    pinnacle_phase,
+    carried_wager,
+    risk_tier,
+    dig_service,
+    dig_repo,
+    player_repository,
+    guild_id,
+    monkeypatch,
+):
+    _seed_pinnacle_carried_wager(
+        dig_repo,
+        player_repository,
+        guild_id,
+        wager=carried_wager,
+        risk_tier=risk_tier,
+        status=status,
+        pinnacle_phase=pinnacle_phase,
+    )
+    monkeypatch.setattr(
+        dig_service,
+        "_fight_pinnacle",
+        lambda *args, **kwargs: {"success": True},
+    )
+    tunnel_before = dict(dig_repo.get_tunnel(20001, guild_id))
+    balance_before = player_repository.get_balance(20001, guild_id)
+
+    resolver = getattr(dig_service, resolver_name)
+    result = resolver(20001, guild_id, "cautious", wager=1_001)
+
+    assert result == {
+        "success": False,
+        "error": "Boss wagers cannot exceed 1,000 JC.",
+    }
+    assert dict(dig_repo.get_tunnel(20001, guild_id)) == tunnel_before
+    assert player_repository.get_balance(20001, guild_id) == balance_before
+    assert dig_repo.get_active_duel(20001, guild_id) is None
+
+
+@pytest.mark.parametrize("resolver_name", ["fight_boss", "start_boss_duel"])
+def test_over_cap_rejection_does_not_clear_stale_regular_carry(
+    resolver_name,
+    dig_service,
+    dig_repo,
+    player_repository,
+    guild_id,
+):
+    _register(player_repository)
+    _seed_phase1_cleared(dig_repo, 10001, guild_id)
+    tunnel_before = dict(dig_repo.get_tunnel(10001, guild_id))
+    balance_before = player_repository.get_balance(10001, guild_id)
+
+    resolver = getattr(dig_service, resolver_name)
+    result = resolver(10001, guild_id, "bold", wager=1_001)
+
+    assert result == {
+        "success": False,
+        "error": "Boss wagers cannot exceed 1,000 JC.",
+    }
+    assert dict(dig_repo.get_tunnel(10001, guild_id)) == tunnel_before
+    assert player_repository.get_balance(10001, guild_id) == balance_before
+    assert dig_repo.get_active_duel(10001, guild_id) is None
+
+
+def test_stale_pinnacle_carry_is_hidden_from_encounter_ui(
+    dig_service, dig_repo, player_repository, guild_id,
+):
+    _seed_pinnacle_carried_wager(
+        dig_repo,
+        player_repository,
+        guild_id,
+        status="active",
+        pinnacle_phase=1,
+    )
+
+    assert dig_service.get_carried_wager(20001, guild_id) is None
+    info = dig_service.build_next_boss_encounter(20001, guild_id)
+    assert info["carried_wager"] is None
+
+
+def test_pinnacle_encounter_info_includes_carried_wager(
+    dig_service, dig_repo, player_repository, guild_id,
+):
+    """Reopened phase encounters expose the stake already riding forward."""
+    _seed_pinnacle_carried_wager(dig_repo, player_repository, guild_id)
+
+    info = dig_service.build_next_boss_encounter(20001, guild_id)
+
+    assert info["carried_wager"] == 1_500
+
+
 def _finalize_pinnacle(dig_service, guild_id, *, tunnel, discord_id=20001,
                        pinnacle_id="forgotten_king", phase_idx=3, won=True,
                        wager=0, risk_tier="bold", prestige_level=0,
@@ -240,7 +400,9 @@ class TestPinnacleRetreatForfeitsHalfOfCarry:
             "carried_risk_tier": "bold",
         }
         dig_repo.update_tunnel(
-            20001, guild_id, boss_progress=json.dumps(boss_progress),
+            20001, guild_id,
+            boss_progress=json.dumps(boss_progress),
+            pinnacle_phase=2,
         )
 
     def test_pinnacle_retreat_with_carried_wager_debits_half(
