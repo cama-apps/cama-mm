@@ -873,29 +873,20 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
 async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, needed: int) -> bool:
     """Send one claimed near-full notification and ping eligible 📋 subscribers."""
     try:
-        embed = discord.Embed(
-            title="📢 Almost Ready!",
-            description=f"The lobby has **{total}** players — just **+{needed}** more needed!",
-            color=discord.Color.orange(),
-        )
+        async def load_subscriber_mentions(
+            lobby_message_id: int | None,
+            lobby_channel_id: int | None,
+        ) -> list[str]:
+            if not lobby_message_id or not lobby_channel_id:
+                return []
 
-        # Add jump link to lobby embed
-        lobby_message_id = None
-        lobby_channel_id = None
-        if bot.lobby_service:
-            lobby_message_id, lobby_channel_id = await asyncio.gather(
-                asyncio.to_thread(bot.lobby_service.get_lobby_message_id, guild_id=guild_id),
-                asyncio.to_thread(bot.lobby_service.get_lobby_channel_id, guild_id=guild_id),
-            )
-        subscriber_mentions: list[str] = []
-        if lobby_message_id and lobby_channel_id:
-            jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
-            embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
-
-            # The reaction roster is the subscription store, so opt-ins survive
-            # restarts and disappear naturally with the lobby message.
+            mentions: list[str] = []
             try:
-                lobby_channel = channel if channel.id == lobby_channel_id else bot.get_channel(lobby_channel_id)
+                lobby_channel = (
+                    channel
+                    if channel.id == lobby_channel_id
+                    else bot.get_channel(lobby_channel_id)
+                )
                 if not lobby_channel:
                     lobby_channel = await bot.fetch_channel(lobby_channel_id)
                 lobby_message = await lobby_channel.fetch_message(lobby_message_id)
@@ -905,41 +896,86 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
                         continue
                     async for subscriber in reaction.users():
                         if not subscriber.bot and subscriber.id not in excluded_ids:
-                            subscriber_mentions.append(subscriber.mention)
+                            mentions.append(subscriber.mention)
                     break
             except Exception as exc:
                 logger.warning("Could not load clipboard lobby subscribers: %s", exc)
+            return mentions
 
-        # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
-        origin_channel_id = (
-            await asyncio.to_thread(bot.lobby_service.get_origin_channel_id, guild_id=guild_id)
-            if bot.lobby_service
-            else None
+        async def resolve_target_channel(origin_channel_id: int | None):
+            target_channel = channel
+            if origin_channel_id and origin_channel_id != channel.id:
+                try:
+                    target_channel = bot.get_channel(origin_channel_id)
+                    if not target_channel:
+                        target_channel = await bot.fetch_channel(origin_channel_id)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not fetch origin channel %s: %s",
+                        origin_channel_id,
+                        exc,
+                    )
+                    target_channel = channel
+            return target_channel
+
+        embed = discord.Embed(
+            title="📢 Almost Ready!",
+            description=f"The lobby has **{total}** players — just **+{needed}** more needed!",
+            color=discord.Color.orange(),
         )
-        target_channel = channel  # Default to reaction channel
 
-        if origin_channel_id and origin_channel_id != channel.id:
-            try:
-                target_channel = bot.get_channel(origin_channel_id)
-                if not target_channel:
-                    target_channel = await bot.fetch_channel(origin_channel_id)
-            except Exception as exc:
-                logger.warning(f"Could not fetch origin channel {origin_channel_id}: {exc}")
-                target_channel = channel  # Fallback
+        lobby_message_id = None
+        lobby_channel_id = None
+        origin_channel_id = None
+        if bot.lobby_service:
+            (
+                lobby_message_id,
+                lobby_channel_id,
+                origin_channel_id,
+            ) = await asyncio.gather(
+                asyncio.to_thread(bot.lobby_service.get_lobby_message_id, guild_id=guild_id),
+                asyncio.to_thread(bot.lobby_service.get_lobby_channel_id, guild_id=guild_id),
+                asyncio.to_thread(bot.lobby_service.get_origin_channel_id, guild_id=guild_id),
+            )
+
+        # Add jump link to lobby embed.
+        if lobby_message_id and lobby_channel_id:
+            jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
+            embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
+
+        # Subscriber discovery and origin-channel resolution are independent.
+        # The reaction roster remains the subscription store, so opt-ins
+        # survive restarts and disappear naturally with the lobby message.
+        subscriber_mentions, target_channel = await asyncio.gather(
+            load_subscriber_mentions(lobby_message_id, lobby_channel_id),
+            resolve_target_channel(origin_channel_id),
+        )
 
         # Send to origin channel (or reaction channel as fallback)
         content = " ".join(subscriber_mentions) or None
-        await target_channel.send(
+        target_send = target_channel.send(
             content=content,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(
                 everyone=False, roles=False, users=True, replied_user=False
             ),
         )
-
-        # Send to thread
         if thread:
-            await thread.send(f"📢 **+{needed}** more player{'s' if needed > 1 else ''} needed!")
+            target_result, thread_result = await asyncio.gather(
+                target_send,
+                thread.send(
+                    f"📢 **+{needed}** more player{'s' if needed > 1 else ''} needed!"
+                ),
+                return_exceptions=True,
+            )
+            if isinstance(target_result, BaseException):
+                raise target_result
+            if isinstance(thread_result, BaseException):
+                if not isinstance(thread_result, Exception):
+                    raise thread_result
+                logger.warning("Could not send lobby rally to thread: %s", thread_result)
+        else:
+            await target_send
 
         return True
     except Exception as exc:
