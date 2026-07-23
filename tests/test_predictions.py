@@ -7,6 +7,8 @@ admin gating, and position math.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import random
 import sqlite3
 import time
@@ -1728,6 +1730,11 @@ def _make_cog(prediction_service, thread=None) -> PredictionCommands:
     return PredictionCommands(bot, prediction_service, bot.player_service)
 
 
+async def _run_sync(func, *args, **kwargs):
+    """Deterministic stand-in for asyncio.to_thread in orchestration tests."""
+    return func(*args, **kwargs)
+
+
 @pytest.fixture
 def patched_cog_helpers(monkeypatch):
     """Bypass require_gamba_channel/safe_defer/safe_followup so the cog body runs."""
@@ -2357,6 +2364,243 @@ async def test_create_uses_max_auto_archive_and_persists_thread_ids(
     pred = prediction_service.get_prediction(opens[0]["prediction_id"])
     assert pred["thread_id"] == 555
     assert pred["embed_message_id"] == 777
+
+
+async def test_create_overlaps_initial_branches_and_preserves_publish_order(
+    prediction_service,
+    patched_cog_helpers,
+):
+    """Confirmation, announcement, and chart work overlap; dependent sends do not."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod.asyncio, "to_thread", _run_sync)
+
+    confirmation_started = asyncio.Event()
+    announcement_started = asyncio.Event()
+    chart_started = asyncio.Event()
+    thread_started = asyncio.Event()
+    persisted = asyncio.Event()
+    release_confirmation = asyncio.Event()
+    release_announcement = asyncio.Event()
+    release_chart = asyncio.Event()
+    release_thread = asyncio.Event()
+    order = []
+
+    async def send_confirmation(interaction, **kwargs):
+        order.append("confirmation_started")
+        confirmation_started.set()
+        await release_confirmation.wait()
+        order.append("confirmation_done")
+
+    patched_cog_helpers.setattr(pmod, "safe_followup", send_confirmation)
+
+    embed_msg = SimpleNamespace(id=777)
+
+    async def pin_embed():
+        order.append("pin")
+
+    embed_msg.pin = AsyncMock(side_effect=pin_embed)
+
+    async def send_embed(**kwargs):
+        order.append("embed")
+        return embed_msg
+
+    thread = SimpleNamespace(id=555, send=AsyncMock(side_effect=send_embed))
+
+    async def create_thread(**kwargs):
+        order.append("thread_started")
+        thread_started.set()
+        await release_thread.wait()
+        order.append("thread_created")
+        return thread
+
+    channel_msg = SimpleNamespace(
+        id=333,
+        create_thread=AsyncMock(side_effect=create_thread),
+    )
+
+    async def send_announcement(content):
+        order.append("announcement_started")
+        announcement_started.set()
+        await release_announcement.wait()
+        order.append("announcement_done")
+        return channel_msg
+
+    cog = _make_cog(prediction_service)
+
+    async def render_chart(view):
+        order.append("chart_started")
+        chart_started.set()
+        await release_chart.wait()
+        order.append("chart_done")
+        return None
+
+    cog.render_market_chart_file = AsyncMock(side_effect=render_chart)
+
+    original_update_ids = prediction_service.update_discord_ids
+    persisted_prediction_ids = []
+
+    def update_ids(**kwargs):
+        order.append("persist")
+        assert kwargs["thread_id"] == 555
+        assert kwargs["embed_message_id"] == 777
+        assert kwargs["channel_message_id"] == 333
+        persisted_prediction_ids.append(kwargs["prediction_id"])
+        original_update_ids(**kwargs)
+        persisted.set()
+
+    patched_cog_helpers.setattr(prediction_service, "update_discord_ids", update_ids)
+
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.channel.send = AsyncMock(side_effect=send_announcement)
+    interaction.channel_id = 11
+    interaction.user.mention = "<@999>"
+
+    create_task = asyncio.create_task(
+        cog.create.callback(cog, interaction, "Will branches overlap?", 50)
+    )
+    await asyncio.wait_for(
+        asyncio.gather(
+            confirmation_started.wait(),
+            announcement_started.wait(),
+            chart_started.wait(),
+        ),
+        timeout=1,
+    )
+
+    # All independent work began while each branch was still blocked.
+    channel_msg.create_thread.assert_not_awaited()
+    thread.send.assert_not_awaited()
+    assert not create_task.done()
+
+    release_announcement.set()
+    await asyncio.wait_for(thread_started.wait(), timeout=1)
+    thread.send.assert_not_awaited()
+
+    release_thread.set()
+    await asyncio.sleep(0)
+    thread.send.assert_not_awaited()
+
+    release_chart.set()
+    await asyncio.wait_for(persisted.wait(), timeout=1)
+
+    # Optional setup completed, but the required confirmation still gates return.
+    assert not create_task.done()
+    assert order.index("thread_created") < order.index("embed")
+    assert order.index("chart_done") < order.index("embed")
+    assert order.index("embed") < order.index("pin") < order.index("persist")
+
+    release_confirmation.set()
+    await create_task
+    assert len(persisted_prediction_ids) == 1
+
+
+async def test_create_confirmation_error_waits_for_setup_and_then_propagates(
+    prediction_service,
+    patched_cog_helpers,
+):
+    """A failed required reply cannot orphan an in-progress market setup."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod.asyncio, "to_thread", _run_sync)
+
+    async def fail_confirmation(interaction, **kwargs):
+        raise RuntimeError("confirmation failed")
+
+    patched_cog_helpers.setattr(pmod, "safe_followup", fail_confirmation)
+
+    release_embed = asyncio.Event()
+    embed_started = asyncio.Event()
+    embed_msg = SimpleNamespace(id=777, pin=AsyncMock())
+
+    async def send_embed(**kwargs):
+        embed_started.set()
+        await release_embed.wait()
+        return embed_msg
+
+    thread = SimpleNamespace(id=555, send=AsyncMock(side_effect=send_embed))
+    channel_msg = SimpleNamespace(
+        id=333,
+        create_thread=AsyncMock(return_value=thread),
+    )
+    cog = _make_cog(prediction_service)
+    cog.render_market_chart_file = AsyncMock(return_value=None)
+
+    original_update_ids = prediction_service.update_discord_ids
+    update_ids = MagicMock(side_effect=original_update_ids)
+    patched_cog_helpers.setattr(prediction_service, "update_discord_ids", update_ids)
+
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.channel.send = AsyncMock(return_value=channel_msg)
+    interaction.channel_id = 11
+    interaction.user.mention = "<@999>"
+
+    create_task = asyncio.create_task(
+        cog.create.callback(cog, interaction, "Will setup finish?", 50)
+    )
+    await asyncio.wait_for(embed_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not create_task.done()
+    update_ids.assert_not_called()
+
+    release_embed.set()
+    with pytest.raises(RuntimeError, match="confirmation failed"):
+        await create_task
+
+    embed_msg.pin.assert_awaited_once()
+    update_ids.assert_called_once()
+    prediction_id = update_ids.call_args.kwargs["prediction_id"]
+    pred = prediction_service.get_prediction(prediction_id)
+    assert pred["thread_id"] == 555
+    assert pred["embed_message_id"] == 777
+
+
+async def test_create_optional_failure_waits_for_chart_and_does_not_persist_fake_ids(
+    prediction_service,
+    patched_cog_helpers,
+    caplog,
+):
+    """Optional setup stays best-effort and settles its chart sibling before return."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+    patched_cog_helpers.setattr(pmod.asyncio, "to_thread", _run_sync)
+    patched_cog_helpers.setattr(pmod, "safe_followup", AsyncMock())
+
+    chart_started = asyncio.Event()
+    release_chart = asyncio.Event()
+    cog = _make_cog(prediction_service)
+
+    async def render_chart(view):
+        chart_started.set()
+        await release_chart.wait()
+        return None
+
+    cog.render_market_chart_file = AsyncMock(side_effect=render_chart)
+    update_ids = MagicMock()
+    patched_cog_helpers.setattr(prediction_service, "update_discord_ids", update_ids)
+
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    interaction.channel.send = AsyncMock(side_effect=RuntimeError("announcement failed"))
+    interaction.channel_id = 11
+    interaction.user.mention = "<@999>"
+    caplog.set_level(logging.ERROR, logger="cama_bot.commands.predictions")
+
+    create_task = asyncio.create_task(
+        cog.create.callback(cog, interaction, "Will optional failure stay safe?", 50)
+    )
+    await asyncio.wait_for(chart_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert not create_task.done()
+    release_chart.set()
+    await create_task
+
+    update_ids.assert_not_called()
+    assert "Failed to set up market thread: announcement failed" in caplog.text
 
 
 # --------------------------------------------------------------------------- #

@@ -1033,43 +1033,70 @@ class PredictionCommands(commands.Cog):
             return
 
         prediction_id = result["prediction_id"]
-        await safe_followup(
-            interaction,
-            content=f"✅ Market #{prediction_id} created at YES {initial_fair}%.",
-            ephemeral=True,
-        )
 
-        # Channel announcement + thread
-        try:
-            channel_msg = await interaction.channel.send(
-                f"📈 **New market #{prediction_id}** opened by {interaction.user.mention}\n"
-                f'"{question}" — starting at YES {initial_fair}%',
-            )
-            thread_name = f"Market #{prediction_id}: {question[:60]}"
-            # Widest auto-archive window: trade confirmations are ephemeral,
-            # so Discord sees no thread activity and archives on the channel
-            # default (as low as 60 minutes). Quiet markets can still archive
-            # after 7 days — ensure_thread_writable is what keeps refreshes
-            # working; this just makes revival rare.
-            thread = await channel_msg.create_thread(
-                name=thread_name, auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES
+        async def send_creation_confirmation() -> None:
+            await safe_followup(
+                interaction,
+                content=f"✅ Market #{prediction_id} created at YES {initial_fair}%.",
+                ephemeral=True,
             )
 
-            view_data = await asyncio.to_thread(
-                self.prediction_service.get_market_view, prediction_id
+        async def set_up_market_thread() -> None:
+            async def announce_and_create_thread():
+                channel_msg = await interaction.channel.send(
+                    f"📈 **New market #{prediction_id}** opened by "
+                    f"{interaction.user.mention}\n"
+                    f'"{question}" — starting at YES {initial_fair}%',
+                )
+                thread_name = f"Market #{prediction_id}: {question[:60]}"
+                # Widest auto-archive window: trade confirmations are ephemeral,
+                # so Discord sees no thread activity and archives on the channel
+                # default (as low as 60 minutes). Quiet markets can still archive
+                # after 7 days — ensure_thread_writable is what keeps refreshes
+                # working; this just makes revival rare.
+                thread = await channel_msg.create_thread(
+                    name=thread_name,
+                    auto_archive_duration=THREAD_AUTO_ARCHIVE_MINUTES,
+                )
+                return channel_msg, thread
+
+            async def prepare_market_embed():
+                view_data = await asyncio.to_thread(
+                    self.prediction_service.get_market_view, prediction_id
+                )
+                chart_file = await self.render_market_chart_file(view_data)
+                chart_filename = chart_file.filename if chart_file else None
+                embed = self._build_market_embed(
+                    view_data,
+                    chart_filename=chart_filename,
+                )
+                return embed, chart_file
+
+            # Chart work is independent of Discord's ordered announcement ->
+            # thread route. Await both branches even if one fails.
+            discord_result, render_result = await asyncio.gather(
+                announce_and_create_thread(),
+                prepare_market_embed(),
+                return_exceptions=True,
             )
-            chart_file = await self.render_market_chart_file(view_data)
-            chart_filename = chart_file.filename if chart_file else None
-            embed = self._build_market_embed(view_data, chart_filename=chart_filename)
+            for branch_result in (discord_result, render_result):
+                if isinstance(branch_result, BaseException):
+                    raise branch_result
+
+            channel_msg, thread = discord_result
+            embed, chart_file = render_result
             view = PersistentMarketView(self)
             embed_msg = await thread.send(
-                embed=embed, view=view, file=chart_file or discord.utils.MISSING
+                embed=embed,
+                view=view,
+                file=chart_file or discord.utils.MISSING,
             )
             try:
                 await embed_msg.pin()
             except discord.Forbidden:
                 pass
 
+            # All three Discord objects are real before their IDs are persisted.
             await asyncio.to_thread(
                 functools.partial(
                     self.prediction_service.update_discord_ids,
@@ -1079,8 +1106,24 @@ class PredictionCommands(commands.Cog):
                     channel_message_id=channel_msg.id,
                 )
             )
-        except Exception as e:
-            logger.exception(f"Failed to set up market thread: {e}")
+
+        async def set_up_market_thread_best_effort() -> None:
+            try:
+                await set_up_market_thread()
+            except Exception as exc:
+                logger.exception(f"Failed to set up market thread: {exc}")
+
+        # The required confirmation and optional setup pipeline are independent.
+        # Fully settle both before surfacing a confirmation error.
+        confirmation_result, setup_result = await asyncio.gather(
+            send_creation_confirmation(),
+            set_up_market_thread_best_effort(),
+            return_exceptions=True,
+        )
+        if isinstance(setup_result, BaseException):
+            raise setup_result
+        if isinstance(confirmation_result, BaseException):
+            raise confirmation_result
 
     async def _guild_owns_market(
         self, interaction: discord.Interaction, prediction_id: int
