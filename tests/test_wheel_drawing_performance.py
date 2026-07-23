@@ -125,10 +125,16 @@ def test_wedge_label_layout_is_measured_once_for_all_animation_frames():
 
 def test_wheel_gif_reuses_palette_seed_without_changing_timing():
     rendered_frame_indices = []
+    quantize_options = []
+    original_quantize = Image.Image.quantize
 
     def fake_frame(*_args, frame_idx=0, **_kwargs):
         rendered_frame_indices.append(frame_idx)
         return Image.new("RGBA", (16, 16), (frame_idx, frame_idx, frame_idx, 255))
+
+    def recording_quantize(image, *args, **kwargs):
+        quantize_options.append((kwargs.get("palette"), kwargs.get("dither")))
+        return original_quantize(image, *args, **kwargs)
 
     random.seed(20260722)
     with (
@@ -137,14 +143,22 @@ def test_wheel_gif_reuses_palette_seed_without_changing_timing():
             "create_wheel_frame_for_gif",
             side_effect=fake_frame,
         ),
+        patch.object(Image.Image, "quantize", new=recording_quantize),
         patch.object(Image.Image, "save") as save_mock,
     ):
         wheel_drawing.create_wheel_gif(target_idx=0, size=16)
 
     assert rendered_frame_indices == list(range(70))
+    assert len(quantize_options) == 70
+    assert len({id(palette) for palette, _dither in quantize_options}) == 1
+    assert all(
+        dither == Image.Dither.NONE
+        for _palette, dither in quantize_options
+    )
     save_kwargs = save_mock.call_args.kwargs
     assert len(save_kwargs["append_images"]) == 69
     assert len(save_kwargs["duration"]) == 70
     assert save_kwargs["duration"][:14] == [30] * 14
     assert save_kwargs["duration"][-1] == 60_000
     assert save_kwargs["loop"] == 1
+    assert save_kwargs["optimize"] is False

@@ -1585,8 +1585,10 @@ def create_wheel_gif(
             )
             frame_rgb = frame.convert("RGB")
 
-        # Quantize against shared palette for consistent colors across frames
-        frame_p = frame_rgb.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
+        # Quantize against the shared palette without dithering. Floyd-Steinberg
+        # is expensive across 70 full-size frames and adds little visible detail
+        # to the wheel's flat-color artwork.
+        frame_p = frame_rgb.quantize(palette=palette_image, dither=Image.Dither.NONE)
         frames.append(frame_p)
 
         # Timing: variable animation duration (adjusted for 70 frames)
@@ -1626,6 +1628,7 @@ def create_wheel_gif(
         append_images=frames[1:],
         duration=durations,
         loop=1,  # Play once, hold on final frame
+        optimize=False,
     )
     buffer.seek(0)
     return buffer
