@@ -304,11 +304,11 @@ WHEEL_BANANA_PEEL_EST_EV = _parse_float("WHEEL_BANANA_PEEL_EST_EV", -22.0)
 WHEEL_BANANA_PEEL_LOSS_MIN = _parse_int("WHEEL_BANANA_PEEL_LOSS_MIN", 15)
 WHEEL_BANANA_PEEL_LOSS_MAX = _parse_int("WHEEL_BANANA_PEEL_LOSS_MAX", 29)
 
-# GREEN_SHELL: spinner atomically steals 15-25 JC from a random other positive-balance
+# GREEN_SHELL: spinner atomically steals 15-30 JC from a random other positive-balance
 # player. Zero-sum transfer → total economic impact = 0.
 WHEEL_GREEN_SHELL_EST_EV = _parse_float("WHEEL_GREEN_SHELL_EST_EV", 0.0)
 WHEEL_GREEN_SHELL_STEAL_MIN = _parse_int("WHEEL_GREEN_SHELL_STEAL_MIN", 15)
-WHEEL_GREEN_SHELL_STEAL_MAX = _parse_int("WHEEL_GREEN_SHELL_STEAL_MAX", 25)
+WHEEL_GREEN_SHELL_STEAL_MAX = _parse_int("WHEEL_GREEN_SHELL_STEAL_MAX", 30)
 
 # BOMB_OMB: 3 random other positive-balance players each take a 10-23 JC burn.
 # Spinner unchanged. Heavy global deflation per spin → total economic impact ≈ -49.5.

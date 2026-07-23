@@ -964,9 +964,9 @@ async def test_wheel_red_shell_steals_from_player_above():
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.get_player_above = MagicMock(return_value=player_above)
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 3,
-        "thief_new_balance": 53,
-        "victim_new_balance": 97,
+        "amount": 12,
+        "thief_new_balance": 62,
+        "victim_new_balance": 88,
     })
 
     message = MagicMock()
@@ -989,12 +989,17 @@ async def test_wheel_red_shell_steals_from_player_above():
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
-            # First call: wedge selection, second call: flat amount (2)
-            mock_randint.side_effect = [red_shell_idx, 2]
-            with patch("commands.betting.random.uniform", return_value=0.03):  # 3% of 100 = 3 JC
+            # First call: wedge selection, second call: raised flat upper bound.
+            mock_randint.side_effect = [red_shell_idx, 12]
+            with patch(
+                "commands.betting.random.uniform", return_value=0.084
+            ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await commands.gamba.callback(commands, interaction)
+
+    assert mock_randint.call_args_list[-1].args == (2, 12)
+    mock_uniform.assert_called_once_with(0.02, 0.084)
 
     # Should call get_player_above
     player_service.get_player_above.assert_called_once_with(
@@ -1003,13 +1008,13 @@ async def test_wheel_red_shell_steals_from_player_above():
         min_balance=HOSTILE_LOSS_MIN_BALANCE,
     )
 
-    # Neutral scaling preserves max(pct=3, flat=2) at 3 JC.
+    # Neutral scaling preserves max(pct=8, flat=12) at 12 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1010,
         victim_discord_id=2001,
         guild_id=123,
-        amount=3,
+        amount=12,
     )
 
 
@@ -1101,9 +1106,9 @@ async def test_wheel_blue_shell_steals_from_richest():
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.get_leaderboard = MagicMock(return_value=[richest])
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 5,
-        "thief_new_balance": 55,
-        "victim_new_balance": 495,
+        "amount": 42,
+        "thief_new_balance": 92,
+        "victim_new_balance": 458,
     })
 
     message = MagicMock()
@@ -1126,23 +1131,28 @@ async def test_wheel_blue_shell_steals_from_richest():
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
-            # First call: wedge selection, second call: flat amount (4)
-            mock_randint.side_effect = [blue_shell_idx, 4]
-            with patch("commands.betting.random.uniform", return_value=0.01):  # 1% of 500 = 5 JC
+            # First call: wedge selection, second call: raised flat upper bound.
+            mock_randint.side_effect = [blue_shell_idx, 24]
+            with patch(
+                "commands.betting.random.uniform", return_value=0.084
+            ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await commands.gamba.callback(commands, interaction)
 
+    assert mock_randint.call_args_list[-1].args == (4, 24)
+    mock_uniform.assert_called_once_with(0.02, 0.084)
+
     # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
     player_service.get_leaderboard.assert_any_call(123, limit=1)
 
-    # Neutral scaling preserves max(pct=5, flat=4) at 5 JC.
+    # Neutral scaling preserves max(pct=42, flat=24) at 42 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
-        amount=5,
+        amount=42,
     )
 
 
@@ -1211,20 +1221,25 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
-            # First call: wedge selection, second call: flat amount (4)
-            mock_randint.side_effect = [blue_shell_idx, 4]
-            with patch("commands.betting.random.uniform", return_value=0.02):  # 2% of 500 = 10 JC
+            # Self-hits keep their original penalty ceiling; only steals are raised.
+            mock_randint.side_effect = [blue_shell_idx, 20]
+            with patch(
+                "commands.betting.random.uniform", return_value=0.07
+            ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await cmds.gamba.callback(cmds, interaction)
 
+    assert mock_randint.call_args_list[-1].args == (4, 20)
+    mock_uniform.assert_called_once_with(0.02, 0.07)
+
     # Self-hit uses adjust_balance (not steal_atomic since no victim)
-    # Neutral scaling preserves max(pct=10, flat=4) at a 10-JC loss.
-    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -10)
+    # Neutral scaling preserves max(pct=35, flat=20) at a 35-JC loss.
+    _assert_gamba_adjust_call(player_service.adjust_balance, 1013, 123, -35)
 
     # Should credit nonprofit fund with the loss
     loan_service.add_to_nonprofit_fund.assert_called_once()
-    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 10)
+    assert loan_service.add_to_nonprofit_fund.call_args.args == (123, 35)
     assert loan_service.add_to_nonprofit_fund.call_args.kwargs["source"] == "gamba"
 
 
@@ -2428,9 +2443,9 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
     # rejects them; the BOMB/GREEN victim filter doesn't need the spinner present.
     player_service.get_leaderboard = MagicMock(return_value=[victim])
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 20,
-        "thief_new_balance": 70,
-        "victim_new_balance": 80,
+        "amount": 30,
+        "thief_new_balance": 80,
+        "victim_new_balance": 70,
     })
 
     interaction = _make_wheel_interaction(spinner_id)
@@ -2439,19 +2454,22 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
     )
 
     green_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "GREEN_SHELL")
-    # side_effect: [wedge_idx, steal_roll] — pinning steal to 20 (within 15-25)
-    with patch("commands.betting.random.randint", side_effect=[green_idx, 20]):
+    # side_effect: [wedge_idx, steal_roll] — pinning the raised upper bound.
+    with patch(
+        "commands.betting.random.randint", side_effect=[green_idx, 30]
+    ) as mock_randint:
         with patch("commands.betting.random.random", return_value=1.0):
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
                     await cmds.gamba.callback(cmds, interaction)
 
+    assert mock_randint.call_args_list[-1].args == (15, 30)
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=spinner_id,
         victim_discord_id=8003,
         guild_id=123,
-        amount=20,
+        amount=30,
     )
     # steal_atomic handles both sides; adjust_balance must NOT be used here
     player_service.adjust_balance.assert_not_called()
