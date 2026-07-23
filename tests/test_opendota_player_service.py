@@ -595,7 +595,10 @@ class TestDistributionCalculations:
 
         mock_player_repo.get_steam_id.assert_not_called()
         fetch_matches.assert_called_once_with(steam_id, limit=50)
-        fetch_profile.assert_called_once_with(steam_id, recent_matches=matches)
+        fetch_profile.assert_called_once()
+        assert fetch_profile.call_args.args == (steam_id,)
+        matches_future = fetch_profile.call_args.kwargs["recent_matches_future"]
+        assert matches_future.result() is matches
         assert result["role_distribution"] == {
             "Carry": 60.0,
             "Escape": 20.0,
@@ -604,6 +607,69 @@ class TestDistributionCalculations:
         assert result["full_stats"]["lane_distribution"]["Safe Lane"] == 66.7
         assert result["full_stats"]["lane_distribution"]["Mid"] == 33.3
         assert result["full_stats"]["lane_parsed_count"] == 3
+
+    def test_get_dota_tab_stats_overlaps_profile_and_match_requests(
+        self, mock_player_repo
+    ):
+        service = OpenDotaPlayerService(mock_player_repo)
+        matches = [{"hero_id": 1, "lane_role": 1}]
+        all_started = threading.Barrier(5)
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def rendezvous():
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            all_started.wait(timeout=2)
+            with lock:
+                active -= 1
+
+        def fetch_component(component, _steam_id):
+            rendezvous()
+            return {
+                "player": {"profile": {"personaname": "Parallel"}},
+                "wl": {"win": 2, "lose": 1},
+                "totals": {"avg_kills": 7.5},
+                "heroes": [],
+            }[component]
+
+        def fetch_matches(_steam_id, *, limit):
+            assert limit == 50
+            rendezvous()
+            return matches
+
+        with (
+            patch.object(
+                service,
+                "_fetch_profile_component",
+                side_effect=fetch_component,
+            ),
+            patch.object(
+                service,
+                "_fetch_matches_for_stats",
+                side_effect=fetch_matches,
+            ),
+            patch.object(
+                service,
+                "_calc_hero_role_distribution",
+                return_value={"Carry": 100.0},
+            ),
+            patch.object(
+                service,
+                "_build_full_stats",
+                return_value={"matches_analyzed": 1},
+            ),
+        ):
+            result = service.get_dota_tab_stats(100, steam_id=12345)
+
+        assert max_active == 5
+        assert result == {
+            "role_distribution": {"Carry": 100.0},
+            "full_stats": {"matches_analyzed": 1},
+        }
 
     def test_get_dota_tab_stats_caches_complete_result(self, mock_player_repo):
         service = OpenDotaPlayerService(mock_player_repo)
