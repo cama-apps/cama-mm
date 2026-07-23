@@ -32,6 +32,7 @@ from services.dig_constants import (
     DIG_STREAK_JC_PAYOUT_CAP,
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
+    MAIN_DIG_ADVANCE_CAP,
     MILESTONES,
     STREAKS,
     cave_in_band,
@@ -876,6 +877,7 @@ class DigCoreMixin:
         # injury or negative perk can't shrink the advertised +5 / +10.
         advance += dynamite_bonus + depth_charge_bonus
         advance = max(1, advance)
+        advance = min(advance, MAIN_DIG_ADVANCE_CAP)
 
         # Boss boundary
         boss_progress = self._get_boss_progress(tunnel)
@@ -1325,7 +1327,10 @@ class DigCoreMixin:
             )
         else:
             # No cave-in — DM-decided advance + JC
-            advance = outcome.get("advance", 1)
+            advance = min(
+                outcome.get("advance", 1),
+                MAIN_DIG_ADVANCE_CAP,
+            )
 
             # Boss boundary cap (DM cannot skip bosses)
             boss_progress = self._get_boss_progress(tunnel)

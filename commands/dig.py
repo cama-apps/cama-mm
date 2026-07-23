@@ -45,6 +45,7 @@ from commands.dig_helpers.boss_views import (
     BossDuelView,
     BossEncounterView,
     BossWagerModal,
+    _add_carried_wager_notice,
     _build_boss_fight_result_embed,
 )
 from commands.dig_helpers.dig_views import (
@@ -713,6 +714,7 @@ class DigCommands(commands.Cog):
         elif hasattr(boss_info, "ascii_art"):
             embed.add_field(name="\u200b", value=f"```\n{boss_info.ascii_art}\n```", inline=False)
 
+        _add_carried_wager_notice(embed, boss_info)
         lum_line = getattr(boss_info, "luminosity_display", None)
         if lum_line:
             embed.add_field(name="\u200b", value=lum_line, inline=False)
