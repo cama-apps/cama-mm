@@ -132,6 +132,100 @@ class LoanRepository(BaseRepository, ILoanRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else 0
 
+    def distribute_nonprofit_stipends_atomic(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        max_stipend: int,
+    ) -> dict[int, int]:
+        """Pay eligible bankrupt players from the nonprofit fund in one txn."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        paid = dict.fromkeys(unique_ids, 0)
+        if not unique_ids or max_stipend <= 0:
+            return paid
+
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            )
+            row = cursor.fetchone()
+            remaining = max(0, int(row["total_collected"])) if row else 0
+            if remaining <= 0:
+                return paid
+
+            eligible_ids: set[int] = set()
+            for offset in range(0, len(unique_ids), 900):
+                chunk = unique_ids[offset : offset + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = cursor.execute(
+                    f"""
+                    SELECT discord_id
+                    FROM players
+                    WHERE guild_id = ?
+                      AND discord_id IN ({placeholders})
+                      AND COALESCE(jopacoin_balance, 0) <= 0
+                    """,
+                    (normalized_id, *chunk),
+                ).fetchall()
+                eligible_ids.update(int(player["discord_id"]) for player in rows)
+
+            for discord_id in unique_ids:
+                if discord_id not in eligible_ids or remaining <= 0:
+                    continue
+                amount = min(int(max_stipend), remaining)
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="mana",
+                    related_type="bankruptcy_stipend",
+                    related_id=discord_id,
+                    reason="white mana bankruptcy stipend reserve debit",
+                    metadata={"amount": amount, "land": "Plains"},
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE nonprofit_fund
+                        SET total_collected = total_collected - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ? AND total_collected >= ?
+                        """,
+                        (amount, normalized_id, amount),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("nonprofit stipend reserve changed unexpectedly")
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="mana",
+                    related_type="bankruptcy_stipend",
+                    reason="white mana bankruptcy stipend",
+                    metadata={"amount": amount, "land": "Plains"},
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                          AND COALESCE(jopacoin_balance, 0) <= 0
+                        """,
+                        (amount, discord_id, normalized_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise RuntimeError("stipend recipient changed unexpectedly")
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+                paid[discord_id] = amount
+                remaining -= amount
+
+        return paid
+
     def consume_next_match_pot(self, guild_id: int | None) -> int:
         """Atomically claim and clear the reserve allocation queued for a match."""
         normalized_id = self.normalize_guild_id(guild_id)

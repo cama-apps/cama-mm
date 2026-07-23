@@ -891,6 +891,18 @@ class DigRepository(BaseRepository, IDigRepository):
                 (to_durability, gear_id),
             )
 
+    def repair_gear_bulk(self, repairs: list[tuple[int, int]]) -> int:
+        """Restore multiple gear pieces in one transaction."""
+        if not repairs:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                "UPDATE dig_gear SET durability = ? WHERE id = ?",
+                [(to_durability, gear_id) for gear_id, to_durability in repairs],
+            )
+            return cursor.rowcount
+
     def has_artifact(self, discord_id: int, guild_id: int, artifact_id: str) -> bool:
         """Check if player has a specific artifact."""
         gid = self.normalize_guild_id(guild_id)

@@ -158,6 +158,30 @@ class ManaEffectsService:
             return 0
         return amount
 
+    def apply_bankrupt_stipends(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+    ) -> dict[int, int]:
+        """Apply White-mana stipends to a fresh assignment batch atomically."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        from config import WHITE_BANKRUPT_STIPEND
+
+        if WHITE_BANKRUPT_STIPEND <= 0:
+            return dict.fromkeys(unique_ids, 0)
+        try:
+            return self.loan_service.distribute_nonprofit_stipends(
+                unique_ids,
+                guild_id,
+                WHITE_BANKRUPT_STIPEND,
+            )
+        except Exception:
+            logger.exception("Failed to apply White stipend batch")
+            return dict.fromkeys(unique_ids, 0)
+
     def execute_siphon(self, discord_id: int, guild_id: int | None) -> dict | None:
         """Execute Swamp's parasitic siphon against a random eligible player.
 

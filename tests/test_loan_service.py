@@ -836,3 +836,42 @@ class TestTransferBalanceToNonprofit:
         assert total == 20
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 30
         assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 20
+
+
+class TestNonprofitStipendBatch:
+    def test_pays_eligible_players_once_in_input_order(
+        self, db_and_repos, loan_service
+    ):
+        player_repo = db_and_repos["player_repo"]
+        loan_repo = db_and_repos["loan_repo"]
+        first = create_test_player(player_repo, 88101, balance=0)
+        second = create_test_player(player_repo, 88102, balance=-10)
+        positive = create_test_player(player_repo, 88103, balance=1)
+        loan_repo.add_to_nonprofit_fund(TEST_GUILD_ID, 7)
+
+        paid = loan_service.distribute_nonprofit_stipends(
+            [first, second, first, positive],
+            TEST_GUILD_ID,
+            max_stipend=5,
+        )
+
+        assert paid == {first: 5, second: 2, positive: 0}
+        assert player_repo.get_balance(first, TEST_GUILD_ID) == 5
+        assert player_repo.get_balance(second, TEST_GUILD_ID) == -8
+        assert player_repo.get_balance(positive, TEST_GUILD_ID) == 1
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+    def test_empty_fund_skips_every_recipient(self, db_and_repos, loan_service):
+        player_repo = db_and_repos["player_repo"]
+        first = create_test_player(player_repo, 88104, balance=0)
+        second = create_test_player(player_repo, 88105, balance=-10)
+
+        paid = loan_service.distribute_nonprofit_stipends(
+            [first, second],
+            TEST_GUILD_ID,
+            max_stipend=5,
+        )
+
+        assert paid == {first: 0, second: 0}
+        assert player_repo.get_balance(first, TEST_GUILD_ID) == 0
+        assert player_repo.get_balance(second, TEST_GUILD_ID) == -10

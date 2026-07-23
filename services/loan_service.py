@@ -146,6 +146,19 @@ class LoanService:
         """Get the total collected in the nonprofit fund."""
         return self.loan_repo.get_nonprofit_fund(guild_id)
 
+    def distribute_nonprofit_stipends(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None,
+        max_stipend: int,
+    ) -> dict[int, int]:
+        """Pay an ordered batch of bankrupt players from the nonprofit fund."""
+        return self.loan_repo.distribute_nonprofit_stipends_atomic(
+            discord_ids,
+            guild_id,
+            max_stipend,
+        )
+
     def consume_next_match_pot(self, guild_id: int | None) -> int:
         """Claim a reserve allocation earmarked for the next betting match."""
         return self.loan_repo.consume_next_match_pot(guild_id)

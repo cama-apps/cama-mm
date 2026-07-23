@@ -676,6 +676,77 @@ class ProtectionRepository(BaseRepository):
             details={"event_key": event["event_key"]},
         )
 
+    def _reconcile_guardian_with_cursor(
+        self,
+        *,
+        cursor,
+        discord_id: int,
+        guild_id: int,
+        since_ts: int,
+        mana_date: str,
+        now: int,
+    ) -> int:
+        """Reconcile one Guardian pool using an existing write transaction."""
+        pool_key = f"guardian:{mana_date}"
+        mana = cursor.execute(
+            """
+            SELECT white_shield_remaining
+            FROM player_mana
+            WHERE discord_id = ? AND guild_id = ?
+              AND current_land = 'Plains' AND assigned_date = ?
+              AND consumed_today = 0
+            """,
+            (discord_id, guild_id, mana_date),
+        ).fetchone()
+        capacity = int(mana["white_shield_remaining"] or 0) if mana else 0
+        if capacity <= 0:
+            return 0
+
+        refunded = 0
+        for event in self._eligible_retro_events(
+            cursor,
+            victim_id=discord_id,
+            guild_id=guild_id,
+            since_ts=since_ts,
+            through_ts=now,
+            pool_key=pool_key,
+        ):
+            uncovered = int(event["applied"]) - int(event["retro_covered"])
+            amount = min(capacity, self._rate_absorption(uncovered, 0.5))
+            if amount <= 0:
+                continue
+            after = capacity - amount
+            detail = ProtectionDetail(
+                source="guardian",
+                absorbed=amount,
+                rate=0.5,
+                capacity_before=capacity,
+                capacity_after=after,
+                retroactive=True,
+            )
+            self._credit_retro_event(
+                cursor,
+                event=event,
+                guild_id=guild_id,
+                victim_id=discord_id,
+                amount=amount,
+                detail=detail,
+                pool_key=pool_key,
+                now=now,
+            )
+            capacity = after
+            refunded += amount
+            if capacity <= 0:
+                break
+
+        cursor.execute(
+            "UPDATE player_mana SET white_shield_remaining = ?, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE discord_id = ? AND guild_id = ?",
+            (capacity, discord_id, guild_id),
+        )
+        return refunded
+
     def reconcile_guardian(
         self,
         *,
@@ -687,67 +758,51 @@ class ProtectionRepository(BaseRepository):
     ) -> int:
         """Retroactively reimburse eligible losses from the current mana day."""
         gid = self.normalize_guild_id(guild_id)
-        pool_key = f"guardian:{mana_date}"
         with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-            mana = cursor.execute(
-                """
-                SELECT white_shield_remaining
-                FROM player_mana
-                WHERE discord_id = ? AND guild_id = ?
-                  AND current_land = 'Plains' AND assigned_date = ?
-                  AND consumed_today = 0
-                """,
-                (discord_id, gid, mana_date),
-            ).fetchone()
-            capacity = int(mana["white_shield_remaining"] or 0) if mana else 0
-            if capacity <= 0:
-                return 0
-
-            refunded = 0
-            for event in self._eligible_retro_events(
-                cursor,
-                victim_id=discord_id,
+            return self._reconcile_guardian_with_cursor(
+                cursor=conn.cursor(),
+                discord_id=discord_id,
                 guild_id=gid,
                 since_ts=since_ts,
-                through_ts=now,
-                pool_key=pool_key,
-            ):
-                uncovered = int(event["applied"]) - int(event["retro_covered"])
-                amount = min(capacity, self._rate_absorption(uncovered, 0.5))
-                if amount <= 0:
-                    continue
-                after = capacity - amount
-                detail = ProtectionDetail(
-                    source="guardian",
-                    absorbed=amount,
-                    rate=0.5,
-                    capacity_before=capacity,
-                    capacity_after=after,
-                    retroactive=True,
-                )
-                self._credit_retro_event(
-                    cursor,
-                    event=event,
-                    guild_id=gid,
-                    victim_id=discord_id,
-                    amount=amount,
-                    detail=detail,
-                    pool_key=pool_key,
-                    now=now,
-                )
-                capacity = after
-                refunded += amount
-                if capacity <= 0:
-                    break
-
-            cursor.execute(
-                "UPDATE player_mana SET white_shield_remaining = ?, "
-                "updated_at = CURRENT_TIMESTAMP "
-                "WHERE discord_id = ? AND guild_id = ?",
-                (capacity, discord_id, gid),
+                mana_date=mana_date,
+                now=now,
             )
-            return refunded
+
+    def reconcile_guardians(
+        self,
+        *,
+        discord_ids: list[int],
+        guild_id: int | None,
+        since_ts: int,
+        mana_date: str,
+        now: int,
+    ) -> dict[int, int | Exception]:
+        """Reconcile multiple Guardian pools under one write transaction."""
+        unique_ids = list(dict.fromkeys(discord_ids))
+        if not unique_ids:
+            return {}
+
+        gid = self.normalize_guild_id(guild_id)
+        results: dict[int, int | Exception] = {}
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            for discord_id in unique_ids:
+                cursor.execute("SAVEPOINT guardian_recipient")
+                try:
+                    results[discord_id] = self._reconcile_guardian_with_cursor(
+                        cursor=cursor,
+                        discord_id=discord_id,
+                        guild_id=gid,
+                        since_ts=since_ts,
+                        mana_date=mana_date,
+                        now=now,
+                    )
+                except Exception as exc:
+                    cursor.execute("ROLLBACK TO SAVEPOINT guardian_recipient")
+                    results[discord_id] = exc
+                finally:
+                    cursor.execute("RELEASE SAVEPOINT guardian_recipient")
+        return results
 
     def reconcile_purchased_pool(
         self,

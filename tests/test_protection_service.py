@@ -489,6 +489,36 @@ def test_guardian_retro_reimburses_once(protection_stack):
     ] == 10
 
 
+def test_guardian_retro_batch_reconciles_each_player_once(protection_stack):
+    service = protection_stack["service"]
+    players = protection_stack["players"]
+    mana = protection_stack["mana"]
+    now = int(time.time())
+    for discord_id in (10, 11):
+        _player(players, discord_id, 100)
+        service.apply_hostile_loss(
+            discord_id,
+            TEST_GUILD_ID,
+            20,
+            "wildfire",
+            actor_id=99,
+            event_key=f"wildfire:batch:{discord_id}",
+            occurred_at=now - 10,
+        )
+        mana.claim_mana_atomic(
+            discord_id, TEST_GUILD_ID, "Plains", get_today_pst()
+        )
+
+    result = service.reconcile_guardians(
+        [10, 11, 10], TEST_GUILD_ID, now - 60
+    )
+
+    assert result == {10: 10, 11: 10}
+    assert players.get_balance(10, TEST_GUILD_ID) == 90
+    assert players.get_balance(11, TEST_GUILD_ID) == 90
+    assert service.reconcile_guardians([], TEST_GUILD_ID, now - 60) == {}
+
+
 def test_reprieve_retro_uses_rolling_pool_and_is_idempotent(protection_stack):
     service = protection_stack["service"]
     players = protection_stack["players"]
