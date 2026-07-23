@@ -380,7 +380,7 @@ class DraftCommands(commands.Cog):
                 fallback=fallback_channel,
             )
             if channel:
-                msg = await channel.fetch_message(state.captain_ping_message_id)
+                msg = channel.get_partial_message(state.captain_ping_message_id)
                 await msg.delete()
         except Exception as e:
             logger.debug("Failed to delete captain ping message: %s", e)
@@ -1560,9 +1560,7 @@ class DraftCommands(commands.Cog):
             if not channel:
                 return
 
-            message = await channel.fetch_message(message_id)
-            if not message:
-                return
+            message = channel.get_partial_message(message_id)
 
             embed = await self._build_draft_embed(guild, state)
 
@@ -2374,7 +2372,7 @@ class DraftCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(state.draft_channel_id)
 
-                message = await channel.fetch_message(state.draft_message_id)
+                message = channel.get_partial_message(state.draft_message_id)
 
                 embed = discord.Embed(
                     title="⏰ Draft Timed Out",

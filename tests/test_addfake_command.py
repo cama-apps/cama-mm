@@ -63,8 +63,18 @@ class FakeFollowup:
 
 
 class FakeChannel:
+    def __init__(self):
+        self.message = SimpleNamespace(edit=AsyncMock())
+        self.fetch_message_calls = []
+        self.partial_message_calls = []
+
     async def fetch_message(self, message_id):
+        self.fetch_message_calls.append(message_id)
         raise Exception("message not found")
+
+    def get_partial_message(self, message_id):
+        self.partial_message_calls.append(message_id)
+        return self.message
 
 
 _fake_interaction_counter = 0
@@ -83,6 +93,10 @@ class FakeInteraction:
         self.guild = SimpleNamespace(id=guild_id)
         self.channel = FakeChannel()
         self.followup = FakeFollowup()
+        self.response = SimpleNamespace(
+            defer=AsyncMock(),
+            send_message=AsyncMock(),
+        )
 
 
 def make_services():
@@ -175,3 +189,60 @@ async def test_addfake_continues_numbering(monkeypatch):
     assert lobby.get_player_count() == 6
     assert -4 in lobby.players
     assert -6 in lobby.players
+
+
+@pytest.mark.asyncio
+async def test_addfake_refreshes_partial_lobby_message_without_fetch(monkeypatch):
+    """The admin lobby refresh should issue only the embed PATCH."""
+    lobby_service, player_service = make_services()
+    lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby_service.set_lobby_message_id(
+        message_id=987,
+        channel_id=654,
+        guild_id=123,
+    )
+    channel = FakeChannel()
+    bot = make_bot()
+    bot.get_channel = lambda _channel_id: channel
+    interaction = FakeInteraction(user_id=1)
+    monkeypatch.setattr("commands.admin.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _: True)
+    monkeypatch.setattr(
+        "commands.admin.GLOBAL_RATE_LIMITER.check",
+        lambda **kw: SimpleNamespace(allowed=True, retry_after_seconds=0),
+    )
+
+    await invoke_addfake(
+        AdminCommands(bot, lobby_service, player_service),
+        interaction,
+        1,
+    )
+
+    assert channel.fetch_message_calls == []
+    assert channel.partial_message_calls == [987]
+    channel.message.edit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_filllobby_refreshes_partial_lobby_message_without_fetch(monkeypatch):
+    """Filling the test lobby should not GET a known message before editing."""
+    lobby_service, player_service = make_services()
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby_service.set_lobby_message_id(
+        message_id=987,
+        channel_id=654,
+        guild_id=123,
+    )
+    channel = FakeChannel()
+    bot = make_bot()
+    bot.get_channel = lambda _channel_id: channel
+    interaction = FakeInteraction(user_id=1)
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _: True)
+
+    cog = AdminCommands(bot, lobby_service, player_service)
+    await cog.filllobbytest.callback(cog, interaction)
+
+    assert lobby.get_player_count() == lobby_service.ready_threshold
+    assert channel.fetch_message_calls == []
+    assert channel.partial_message_calls == [987]
+    channel.message.edit.assert_awaited_once()

@@ -250,7 +250,7 @@ class LobbyCommands(commands.Cog):
             channel = self.bot.get_channel(channel_id)
             if not channel:
                 channel = await self.bot.fetch_channel(channel_id)
-            message = await channel.fetch_message(message_id)
+            message = channel.get_partial_message(message_id)
             try:
                 await message.remove_reaction("⚔️", user)
             except Exception as e:
@@ -269,7 +269,7 @@ class LobbyCommands(commands.Cog):
             return
         try:
             channel = interaction.channel
-            message = await channel.fetch_message(message_id)
+            message = channel.get_partial_message(message_id)
             embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
             if embed:
                 await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
@@ -292,7 +292,7 @@ class LobbyCommands(commands.Cog):
                 channel = self.bot.get_channel(channel_id)
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
-                message = await channel.fetch_message(message_id)
+                message = channel.get_partial_message(message_id)
                 await message.edit(content=None, embed=embed)
                 logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
             except Exception as exc:
@@ -315,7 +315,7 @@ class LobbyCommands(commands.Cog):
             if not thread:
                 thread = await self.bot.fetch_channel(thread_id)
 
-            message = await thread.fetch_message(embed_message_id)
+            message = thread.get_partial_message(embed_message_id)
             if not embed:
                 embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
             if embed:
@@ -507,14 +507,19 @@ class LobbyCommands(commands.Cog):
                     # Auto-join the user if not already in lobby
                     joined, warning = await self._auto_join_lobby(interaction, lobby)
 
-                    # Refresh embed after potential join
-                    refreshed_lobby = await asyncio.to_thread(
-                        self.lobby_service.get_lobby, guild_id=guild_id
-                    )
-                    await self._update_thread_embed(
-                        refreshed_lobby,
-                        guild_id=guild_id,
-                    )
+                    # Auto-join already refreshed the channel message, which is
+                    # also the thread starter. Keep the explicit refresh only
+                    # for callers who were already in the lobby (or could not
+                    # join), so /lobby still repairs a stale display without
+                    # issuing a duplicate GET + PATCH after a successful join.
+                    if not joined:
+                        refreshed_lobby = await asyncio.to_thread(
+                            self.lobby_service.get_lobby, guild_id=guild_id
+                        )
+                        await self._update_thread_embed(
+                            refreshed_lobby,
+                            guild_id=guild_id,
+                        )
 
                     # Build response based on join result
                     if joined:

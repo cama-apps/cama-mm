@@ -229,7 +229,7 @@ class AdminCommands(commands.Cog):
                 channel = self.bot.get_channel(channel_id)
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
-                message = await channel.fetch_message(message_id)
+                message = channel.get_partial_message(message_id)
                 embed = await asyncio.to_thread(
                     self.lobby_service.build_lobby_embed, lobby, addfake_guild_id
                 )
@@ -349,7 +349,7 @@ class AdminCommands(commands.Cog):
                 channel = self.bot.get_channel(channel_id)
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
-                message = await channel.fetch_message(message_id)
+                message = channel.get_partial_message(message_id)
                 embed = await asyncio.to_thread(
                     self.lobby_service.build_lobby_embed, lobby, fill_guild_id
                 )

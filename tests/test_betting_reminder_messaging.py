@@ -330,7 +330,10 @@ async def test_final_warning_thread_reply_also_pings_scoped():
     thread_message = MagicMock()
     thread_message.reply = AsyncMock()
     thread = MagicMock()
-    thread.fetch_message = AsyncMock(return_value=thread_message)
+    thread.fetch_message = AsyncMock(
+        side_effect=AssertionError("thread replies must not fetch the parent message")
+    )
+    thread.get_partial_message = MagicMock(return_value=thread_message)
     cog.bot.get_channel = MagicMock(side_effect=lambda cid: thread if cid == 333 else channel)
 
     await send_betting_reminder(
@@ -339,6 +342,8 @@ async def test_final_warning_thread_reply_also_pings_scoped():
     )
 
     thread_message.reply.assert_awaited_once()
+    thread.get_partial_message.assert_called_once_with(222)
+    thread.fetch_message.assert_not_awaited()
     assert _scoped_user_ids(thread_message.reply) == {1001, 1002, 1003, 1004, 1005}
     assert "<@1001>" in thread_message.reply.call_args.args[0]
 

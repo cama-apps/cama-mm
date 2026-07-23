@@ -8,9 +8,13 @@ import pytest
 
 import commands.mafia as mafia_commands
 from commands.mafia import MafiaCommands
-from domain.models.mafia import MafiaPhase
+from domain.models.mafia import MafiaGame, MafiaPhase
 from repositories.mafia_repository import MafiaRepository
 from tests.conftest import TEST_GUILD_ID
+
+GUILD_ID = 100
+GAME_ID = 7
+STANDINGS_MESSAGE_ID = 300
 
 
 @pytest.fixture
@@ -223,3 +227,163 @@ async def test_info_uses_current_phase_durations(monkeypatch):
     embed = interaction.response.send_message.await_args.kwargs["embed"]
     assert "Night (24h)" in embed.description
     assert "Day (24h)" in embed.description
+@pytest.fixture
+def mafia_service():
+    repo = SimpleNamespace(
+        get_players=MagicMock(return_value=[]),
+        set_thread_ids=MagicMock(),
+    )
+    return SimpleNamespace(
+        repo=repo,
+        abort_game=MagicMock(),
+    )
+
+
+@pytest.fixture
+def flavor_service():
+    return SimpleNamespace(
+        no_lynch_narration=AsyncMock(return_value="No one was lynched."),
+        resolution_narration=AsyncMock(return_value="The town prevails."),
+    )
+
+
+@pytest.fixture
+def bot():
+    return SimpleNamespace(fetch_channel=AsyncMock())
+
+
+@pytest.fixture
+def cog(bot, mafia_service, flavor_service):
+    return MafiaCommands(bot, mafia_service, flavor_service)
+
+
+@pytest.fixture
+def game():
+    return MafiaGame(
+        game_id=GAME_ID,
+        guild_id=GUILD_ID,
+        game_date="2026-07-20",
+        phase=MafiaPhase.NIGHT,
+        started_at=1_700_000_000,
+        phase_started_at=1_700_000_000,
+        roster_size=5,
+        standings_message_id=STANDINGS_MESSAGE_ID,
+    )
+
+
+@pytest.fixture
+def board():
+    return SimpleNamespace(edit=AsyncMock(), unpin=AsyncMock())
+
+
+@pytest.fixture
+def replacement_board():
+    return SimpleNamespace(id=301, pin=AsyncMock())
+
+
+@pytest.fixture
+def channel(board, replacement_board):
+    return SimpleNamespace(
+        get_partial_message=MagicMock(return_value=board),
+        fetch_message=AsyncMock(),
+        send=AsyncMock(return_value=replacement_board),
+    )
+
+
+@pytest.fixture
+def guild():
+    return SimpleNamespace(id=GUILD_ID, get_thread=MagicMock(return_value=None))
+
+
+@pytest.mark.asyncio
+async def test_standings_update_uses_partial_message_without_fetch(
+    cog, game, guild, channel, board, monkeypatch
+):
+    monkeypatch.setattr(mafia_commands, "_mafia_post_channel", lambda _guild: channel)
+
+    await cog._update_standings_board(guild, game)
+
+    channel.get_partial_message.assert_called_once_with(STANDINGS_MESSAGE_ID)
+    channel.fetch_message.assert_not_awaited()
+    board.edit.assert_awaited_once()
+    channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_standings_update_reposts_when_partial_edit_fails(
+    cog,
+    game,
+    guild,
+    channel,
+    board,
+    replacement_board,
+    mafia_service,
+    monkeypatch,
+):
+    monkeypatch.setattr(mafia_commands, "_mafia_post_channel", lambda _guild: channel)
+    board.edit.side_effect = discord.HTTPException(
+        SimpleNamespace(status=500, reason="error"),
+        "edit failed",
+    )
+
+    await cog._update_standings_board(guild, game)
+
+    channel.get_partial_message.assert_called_once_with(STANDINGS_MESSAGE_ID)
+    channel.fetch_message.assert_not_awaited()
+    channel.send.assert_awaited_once()
+    replacement_board.pin.assert_awaited_once()
+    mafia_service.repo.set_thread_ids.assert_called_once_with(
+        GAME_ID,
+        standings_message_id=replacement_board.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_abort_unpins_partial_standings_message(
+    cog, guild, channel, board, mafia_service, monkeypatch
+):
+    monkeypatch.setattr(
+        mafia_commands,
+        "require_mafia_channel",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(mafia_commands, "has_admin_permission", lambda _interaction: True)
+    monkeypatch.setattr(mafia_commands, "_mafia_post_channel", lambda _guild: channel)
+    mafia_service.abort_game.return_value = {
+        "ok": True,
+        "standings_message_id": STANDINGS_MESSAGE_ID,
+        "refunded": {},
+    }
+    interaction = SimpleNamespace(
+        guild=guild,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+    await MafiaCommands.admin_abort.callback(cog, interaction)
+
+    channel.get_partial_message.assert_called_once_with(STANDINGS_MESSAGE_ID)
+    channel.fetch_message.assert_not_awaited()
+    board.unpin.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resolution_unpins_partial_standings_message(
+    cog, game, guild, channel, board, monkeypatch
+):
+    monkeypatch.setattr(mafia_commands, "_mafia_post_channel", lambda _guild: channel)
+    game.phase = MafiaPhase.RESOLVED
+
+    await cog._post_resolution(
+        guild,
+        game,
+        {
+            "winner": "TOWN",
+            "winning_ids": [],
+            "vote_breakdown": {},
+        },
+    )
+
+    channel.get_partial_message.assert_called_once_with(STANDINGS_MESSAGE_ID)
+    channel.fetch_message.assert_not_awaited()
+    board.unpin.assert_awaited_once()

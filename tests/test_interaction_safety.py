@@ -6,11 +6,17 @@ channel send), and ephemeral content must never leak into the public channel.
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
 
-from utils.interaction_safety import safe_defer, safe_followup, send_public_or_ephemeral
+from utils.interaction_safety import (
+    safe_defer,
+    safe_followup,
+    send_public_or_ephemeral,
+    update_lobby_message_closed,
+)
 
 
 def _http_error(status: int = 403, reason: str = "Forbidden", message: str = "Missing Permissions"):
@@ -189,3 +195,33 @@ async def test_channel_fallback_rewinds_and_forwards_attachment():
     assert result == "channel-msg"
     assert attachment.reset_called is True
     assert channel.calls[0]["file"] is attachment
+
+
+@pytest.mark.asyncio
+async def test_close_lobby_edits_partial_message_without_fetch():
+    """A persisted lobby message ID needs only the closing PATCH request."""
+    message = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(return_value=message),
+    )
+    bot = SimpleNamespace(
+        get_channel=MagicMock(return_value=channel),
+        fetch_channel=AsyncMock(),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = 123
+    lobby_service.get_lobby_channel_id.return_value = 456
+
+    await update_lobby_message_closed(
+        bot,
+        lobby_service,
+        reason="Lobby Reset",
+        guild_id=42,
+    )
+
+    channel.fetch_message.assert_not_awaited()
+    channel.get_partial_message.assert_called_once_with(123)
+    message.edit.assert_awaited_once()
+    assert message.edit.await_args.kwargs["embed"].title == "🚫 Lobby Reset"
+    assert message.edit.await_args.kwargs["view"] is None

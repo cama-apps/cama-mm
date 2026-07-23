@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -94,6 +94,7 @@ class _FakeDisburseService:
         self.voting_enabled = voting_enabled
         self.reset_called = False
         self.force_execute_called = False
+        self.set_message_calls: list[tuple[int | None, int, int]] = []
 
     def get_proposal(self, guild_id: int | None):
         return self.proposal
@@ -116,6 +117,14 @@ class _FakeDisburseService:
             "distributions": [],
             "message": "No funds were distributed.",
         }
+
+    def set_proposal_message(
+        self,
+        guild_id: int | None,
+        message_id: int,
+        channel_id: int,
+    ) -> None:
+        self.set_message_calls.append((guild_id, message_id, channel_id))
 
 
 class _FakeResponse:
@@ -151,8 +160,24 @@ class _FakeInteraction:
     def __init__(self, user_id: int = 999):
         self.user = SimpleNamespace(id=user_id, display_name="Tax Man")
         self.guild = SimpleNamespace(id=TEST_GUILD_ID)
+        self.channel_id = 456
         self.response = _FakeResponse()
         self.followup = _FakeFollowup()
+        self._original_message = SimpleNamespace(id=789)
+
+    async def original_response(self):
+        return self._original_message
+
+
+def _mutation_channel():
+    message = SimpleNamespace(delete=AsyncMock(), edit=AsyncMock())
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(
+            side_effect=AssertionError("message mutation must not issue a GET")
+        ),
+        get_partial_message=MagicMock(return_value=message),
+    )
+    return channel, message
 
 
 def _vote_rows(count: int) -> list[dict]:
@@ -258,16 +283,65 @@ async def test_disburse_reset_tax_man_can_reset(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_disburse_status_replaces_old_message_without_fetch():
+    proposal = _Proposal()
+    proposal.message_id = 321
+    proposal.channel_id = 456
+    service = _FakeDisburseService(proposal=proposal)
+    channel, old_message = _mutation_channel()
+    cog = SimpleNamespace(
+        disburse_service=service,
+        bot=SimpleNamespace(get_channel=lambda _channel_id: channel),
+    )
+    interaction = _FakeInteraction()
+
+    await actions.disburse_status(cog, interaction, TEST_GUILD_ID)
+
+    channel.get_partial_message.assert_called_once_with(proposal.message_id)
+    channel.fetch_message.assert_not_awaited()
+    old_message.delete.assert_awaited_once()
+    assert service.set_message_calls == [
+        (TEST_GUILD_ID, interaction._original_message.id, interaction.channel_id)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_disburse_message_edits_without_fetch():
+    proposal = _Proposal()
+    proposal.message_id = 321
+    proposal.channel_id = 456
+    service = _FakeDisburseService(proposal=proposal)
+    channel, message = _mutation_channel()
+    cog = SimpleNamespace(
+        disburse_service=service,
+        bot=SimpleNamespace(get_channel=lambda _channel_id: channel),
+    )
+
+    await actions.update_disburse_message(cog, TEST_GUILD_ID)
+
+    channel.get_partial_message.assert_called_once_with(proposal.message_id)
+    channel.fetch_message.assert_not_awaited()
+    message.edit.assert_awaited_once()
+    assert message.edit.await_args.kwargs["embed"].title == (
+        "🏛️ Jopacoin Reserve Allocation Vote"
+    )
+
+
+@pytest.mark.asyncio
 async def test_disburse_execute_tax_man_can_force_execute(monkeypatch):
     monkeypatch.setattr(actions, "has_tax_man_permission", lambda _: True)
     monkeypatch.setattr(actions, "safe_defer", AsyncMock(return_value=True))
+    proposal = _Proposal(votes={"even": 1})
+    proposal.message_id = 321
+    proposal.channel_id = 456
     service = _FakeDisburseService(
-        proposal=_Proposal(votes={"even": 1}),
+        proposal=proposal,
         individual_votes=_vote_rows(1),
     )
+    channel, message = _mutation_channel()
     cog = SimpleNamespace(
         disburse_service=service,
-        bot=SimpleNamespace(get_channel=lambda _channel_id: None),
+        bot=SimpleNamespace(get_channel=lambda _channel_id: channel),
     )
     interaction = _FakeInteraction()
 
@@ -277,6 +351,9 @@ async def test_disburse_execute_tax_man_can_force_execute(monkeypatch):
     assert interaction.followup.messages[0]["embed"].title == (
         "💝 Disbursement Complete (Tax Man)"
     )
+    channel.get_partial_message.assert_called_once_with(proposal.message_id)
+    channel.fetch_message.assert_not_awaited()
+    message.edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -311,3 +388,36 @@ async def test_vote_button_rejects_clearly_during_monetary_recovery():
     message = interaction.response.messages[0]
     assert "monetary recovery mode" in message["content"]
     assert message["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_quorum_vote_disables_original_message_without_fetch():
+    proposal = _Proposal(votes={"even": 10})
+    proposal.message_id = 321
+    proposal.channel_id = 456
+
+    class _QuorumService(_FakeDisburseService):
+        def add_vote(self, guild_id, user_id, method):
+            return {
+                "quorum_reached": True,
+                "total_votes": 10,
+                "quorum_required": 10,
+            }
+
+        def execute_disbursement(self, guild_id):
+            return {"cancelled": True, "message": "Cancelled by vote."}
+
+    service = _QuorumService(proposal=proposal)
+    channel, message = _mutation_channel()
+    cog = SimpleNamespace(
+        player_service=SimpleNamespace(get_player=lambda _user_id, _guild_id: object()),
+        bot=SimpleNamespace(get_channel=lambda _channel_id: channel),
+    )
+    view = DisburseVoteView(service, cog)
+    interaction = _FakeInteraction()
+
+    await view._handle_vote(interaction, "even", "Even Split")
+
+    channel.get_partial_message.assert_called_once_with(proposal.message_id)
+    channel.fetch_message.assert_not_awaited()
+    message.edit.assert_awaited_once()

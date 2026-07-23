@@ -1159,6 +1159,8 @@ class _FakeChannel:
     def __init__(self, channel_id=555_000):
         self.id = channel_id
         self.sent = []
+        self.fetch_message_calls = []
+        self.partial_message_calls = []
 
     async def send(self, content=None, **kwargs):
         msg = _FakeMessage(
@@ -1171,6 +1173,11 @@ class _FakeChannel:
         return msg
 
     async def fetch_message(self, message_id):
+        self.fetch_message_calls.append(message_id)
+        return next(message for message in self.sent if message.id == message_id)
+
+    def get_partial_message(self, message_id):
+        self.partial_message_calls.append(message_id)
         return next(message for message in self.sent if message.id == message_id)
 
 
@@ -2093,14 +2100,20 @@ class _FakeWinnerChoiceResponse:
 
 
 class _FakePingChannel:
-    """Channel whose fetch_message yields control, mimicking a network round-trip."""
+    """Channel whose partial-message delete yields like a Discord PATCH."""
 
     def __init__(self):
         self.id = 555_000
 
+    def get_partial_message(self, message_id):
+        class _YieldingPartialMessage:
+            async def delete(self):
+                await asyncio.sleep(0)
+
+        return _YieldingPartialMessage()
+
     async def fetch_message(self, message_id):
-        await asyncio.sleep(0)
-        return SimpleNamespace(delete=AsyncMock())
+        raise AssertionError("partial-message deletion must not fetch the message")
 
 
 class _FakeWinnerChoiceInteraction:
@@ -2122,7 +2135,7 @@ class TestPreDraftChoiceDoubleClick:
         state.captain1_id = winner_id
         state.captain2_id = winner_id + 1
         state.coinflip_winner_id = winner_id
-        # A ping message id makes _delete_captain_ping_message await a fetch (the yield).
+        # A ping message id makes _delete_captain_ping_message await a PATCH (the yield).
         state.captain_ping_message_id = 777_000
         return state
 
@@ -2130,7 +2143,7 @@ class TestPreDraftChoiceDoubleClick:
         """Two concurrent 'choose side' clicks must advance the phase exactly once.
 
         handle_winner_chose_side awaits _delete_captain_ping_message (a network
-        round-trip) between reading the phase and mutating it. A double-click
+        PATCH) between reading the phase and mutating it. A double-click
         lets both callbacks pass interaction_check and read phase WINNER_CHOICE;
         without a post-yield re-check both would mutate state. The second click
         must instead be rejected with an ephemeral 'already made' message.
@@ -2341,9 +2354,9 @@ class TestDraftCaptainPingCleanup:
         events = []
 
         class _OrderedOriginChannel(_FakeChannel):
-            async def fetch_message(self, message_id):
-                events.append("ping_fetch")
-                return await super().fetch_message(message_id)
+            def get_partial_message(self, message_id):
+                events.append("ping_partial")
+                return super().get_partial_message(message_id)
 
         class _OrderedResponse:
             async def send_message(self, *args, **kwargs):
@@ -2373,7 +2386,8 @@ class TestDraftCaptainPingCleanup:
         await cog.restartdraft.callback(cog, interaction)
 
         assert ping_message.deleted is True
-        assert events == ["response", "ping_fetch"]
+        assert events == ["response", "ping_partial"]
+        assert origin_channel.fetch_message_calls == []
         assert cog.draft_state_manager.get_state(guild_id) is None
 
     async def test_timeout_deletes_ping_from_persisted_draft_channel(self):
@@ -2397,6 +2411,30 @@ class TestDraftCaptainPingCleanup:
         assert ping_message.deleted is True
         assert cog.draft_state_manager.get_state(guild_id) is None
         assert draft_message.embed.title == "⏰ Draft Timed Out"
+        assert origin_channel.partial_message_calls == [ping_message.id, draft_message.id]
+        assert origin_channel.fetch_message_calls == []
+
+    async def test_live_draft_update_uses_partial_message(self):
+        guild_id = 123
+        origin_channel = _FakeChannel(channel_id=777_013)
+        draft_message = await origin_channel.send(embed=SimpleNamespace(title="Draft"))
+        bot = SimpleNamespace(get_channel=lambda _channel_id: origin_channel)
+        cog = self._make_cog(bot)
+        state = DraftState(guild_id=guild_id)
+        state.phase = DraftPhase.COMPLETE
+        updated_embed = SimpleNamespace(title="Updated Draft")
+        cog._build_draft_embed = AsyncMock(return_value=updated_embed)
+
+        await cog._update_draft_message(
+            _FakeGuild(guild_id),
+            origin_channel.id,
+            draft_message.id,
+            state,
+        )
+
+        assert draft_message.embed is updated_embed
+        assert origin_channel.partial_message_calls == [draft_message.id]
+        assert origin_channel.fetch_message_calls == []
 
 
 class TestDraftTimeoutOwnership:

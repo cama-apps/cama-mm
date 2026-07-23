@@ -244,9 +244,8 @@ async def send_betting_reminder(
             if thread is None:
                 thread = await cog.bot.fetch_channel(thread_id)
             if thread:
-                thread_message = await thread.fetch_message(thread_message_id)
-                if thread_message:
-                    await thread_message.reply(content, allowed_mentions=allowed_mentions)
+                thread_message = thread.get_partial_message(thread_message_id)
+                await thread_message.reply(content, allowed_mentions=allowed_mentions)
         except Exception as exc:
             logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
