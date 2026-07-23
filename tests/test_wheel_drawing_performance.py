@@ -162,3 +162,120 @@ def test_wheel_gif_reuses_palette_seed_without_changing_timing():
     assert save_kwargs["duration"][-1] == 60_000
     assert save_kwargs["loop"] == 1
     assert save_kwargs["optimize"] is False
+
+
+def test_explosion_palette_sampling_is_bounded_at_production_size():
+    sample_width, sample_height = wheel_drawing._explosion_palette_sample_size(
+        (500, 500),
+        56,
+    )
+
+    assert (sample_width, sample_height) == (94, 94)
+    assert (
+        sample_width * sample_height * 56
+        <= wheel_drawing._EXPLOSION_PALETTE_SAMPLE_PIXEL_BUDGET
+    )
+
+
+def test_explosion_gif_builds_one_shared_palette_without_changing_timing():
+    adaptive_builds = []
+    shared_remaps = []
+    closed_indexed_frame_ids = []
+    original_quantize = Image.Image.quantize
+    original_close = Image.Image.close
+
+    def fake_frame(size, *_args, frame_idx=0, **_kwargs):
+        return Image.new(
+            "RGBA",
+            (size, size),
+            (frame_idx, frame_idx * 2, frame_idx * 3, 255),
+        )
+
+    def recording_quantize(image, *args, **kwargs):
+        palette = kwargs.get("palette")
+        if palette is None:
+            adaptive_builds.append(
+                (
+                    image.size,
+                    kwargs.get("colors"),
+                    kwargs.get("method"),
+                    kwargs.get("dither"),
+                )
+            )
+        else:
+            shared_remaps.append((palette, kwargs.get("dither")))
+        return original_quantize(image, *args, **kwargs)
+
+    def recording_close(image):
+        if image.mode == "P" and image.size == (64, 64):
+            closed_indexed_frame_ids.append(id(image))
+        return original_close(image)
+
+    random.seed(20260722)
+    with (
+        patch.object(
+            wheel_drawing,
+            "create_wheel_frame_for_gif",
+            side_effect=fake_frame,
+        ),
+        patch.object(Image.Image, "quantize", new=recording_quantize),
+        patch.object(Image.Image, "close", new=recording_close),
+        patch.object(Image.Image, "save") as save_mock,
+    ):
+        wheel_drawing.create_explosion_gif(size=64, display_name="Palette Test")
+
+    assert adaptive_builds == [
+        (
+            (64, 64 * 56),
+            256,
+            Image.Quantize.FASTOCTREE,
+            Image.Dither.NONE,
+        )
+    ]
+    assert len(shared_remaps) == 56
+    assert len({id(palette) for palette, _dither in shared_remaps}) == 1
+    assert len(set(closed_indexed_frame_ids)) == 56
+    assert all(
+        dither == Image.Dither.NONE
+        for _palette, dither in shared_remaps
+    )
+
+    save_kwargs = save_mock.call_args.kwargs
+    expected_durations = (
+        [50] * 14
+        + list(range(60, 160, 10))
+        + [60] * 4
+        + [80] * 14
+        + [100] * 13
+        + [60_000]
+    )
+    assert len(save_kwargs["append_images"]) == 55
+    assert save_kwargs["duration"] == expected_durations
+    assert save_kwargs["loop"] == 1
+    assert save_kwargs["optimize"] is False
+
+
+@pytest.mark.parametrize("seed", [20260722, 20260723, 20260724])
+def test_explosion_gif_stays_under_discord_upload_limit(seed):
+    random.seed(seed)
+    output = wheel_drawing.create_explosion_gif(
+        size=500,
+        display_name="Upload Limit Test",
+    )
+
+    assert len(output.getbuffer()) < 4 * 1024 * 1024
+    with Image.open(output) as gif:
+        assert gif.n_frames == 56
+        durations = []
+        for frame_index in range(gif.n_frames):
+            gif.seek(frame_index)
+            durations.append(gif.info["duration"])
+
+    assert durations == (
+        [50] * 14
+        + list(range(60, 160, 10))
+        + [60] * 4
+        + [80] * 14
+        + [100] * 13
+        + [60_000]
+    )
