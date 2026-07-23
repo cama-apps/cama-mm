@@ -49,6 +49,12 @@ WITCH_BG = (8, 6, 12)
 WIDTH = 400
 HEIGHT = 300
 
+# Keep palette analysis bounded even as animation frame counts grow. At the
+# current 400x300 render size this samples roughly one sixteenth of the source
+# pixels for the longest Neon animation.
+_PALETTE_SAMPLE_PIXEL_BUDGET = 500_000
+
+
 def _get_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Get a cached monospace font."""
     return get_font(size, bold=bold, mono=True)
@@ -128,17 +134,80 @@ def _corrupt_text(text: str, intensity: float = 0.2) -> str:
 
 
 def _make_frame(img: Image.Image, apply_crt: bool = True, glitch: bool = False) -> Image.Image:
-    """Apply CRT effects and convert to palette mode for GIF."""
+    """Apply CRT effects, retaining RGB pixels for animation-wide quantization."""
     if apply_crt:
         img = _apply_scanlines(img)
         img = _apply_phosphor_glow(img)
     if glitch:
         img = _apply_glitch_lines(img, num_lines=random.randint(3, 10))
-    return img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+    return img.convert("RGB")
+
+
+def _build_shared_palette(frames: list[Image.Image]) -> Image.Image:
+    """Build one representative adaptive palette for an entire animation.
+
+    Each frame contributes a proportionally downsampled RGB image to a bounded
+    contact sheet. Running MEDIANCUT once over that sheet captures colors from
+    every animation phase without repeating the expensive adaptive-palette
+    search for every full-resolution frame.
+    """
+    frame_width, frame_height = frames[0].size
+    source_pixels = frame_width * frame_height * len(frames)
+    sample_scale = max(
+        1.0,
+        math.sqrt(source_pixels / _PALETTE_SAMPLE_PIXEL_BUDGET),
+    )
+    sample_width = max(1, int(frame_width / sample_scale))
+    sample_height = max(1, int(frame_height / sample_scale))
+
+    contact_sheet = Image.new(
+        "RGB",
+        (sample_width, sample_height * len(frames)),
+    )
+    for frame_index, frame in enumerate(frames):
+        sample = frame.resize(
+            (sample_width, sample_height),
+            Image.Resampling.NEAREST,
+        )
+        if sample.mode != "RGB":
+            rgb_sample = sample.convert("RGB")
+            sample.close()
+            sample = rgb_sample
+        contact_sheet.paste(sample, (0, frame_index * sample_height))
+        sample.close()
+
+    quantized_sample = contact_sheet.quantize(
+        colors=256,
+        method=Image.Quantize.MEDIANCUT,
+        dither=Image.Dither.NONE,
+    )
+    contact_sheet.close()
+
+    # Only the palette is needed for the full-size frames. Copy it onto a tiny
+    # image so the sampled contact sheet can be released before remapping them.
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(quantized_sample.getpalette())
+    quantized_sample.close()
+    return palette
+
+
+def _quantize_frames_with_shared_palette(frames: list[Image.Image]) -> None:
+    """Remap RGB frames in place using one animation-wide adaptive palette."""
+    palette = _build_shared_palette(frames)
+    try:
+        for frame_index, frame in enumerate(frames):
+            frames[frame_index] = frame.quantize(
+                palette=palette,
+                dither=Image.Dither.FLOYDSTEINBERG,
+            )
+            frame.close()
+    finally:
+        palette.close()
 
 
 def _save_gif(frames: list[Image.Image], durations: list[int]) -> io.BytesIO:
     """Save frames as GIF to BytesIO buffer."""
+    _quantize_frames_with_shared_palette(frames)
     buffer = io.BytesIO()
     frames[0].save(
         buffer,

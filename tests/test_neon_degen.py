@@ -5,6 +5,7 @@ import random
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from PIL import Image, ImageChops, ImageDraw, ImageStat
 
 from services.neon_degen_service import NeonDegenService, NeonResult
 from utils.neon_terminal import (
@@ -346,6 +347,81 @@ GIF_CASES = [
     ("create_market_crash_gif", (1000, "no", 5, 10)),
     ("create_witch_curse_gif", ("TestUser",)),
 ]
+
+
+def _make_palette_test_frames() -> list[Image.Image]:
+    """Create color-rich frames that exercise animation-wide quantization."""
+    frames = []
+    for phase in range(3):
+        frame = Image.new("RGB", (64, 48))
+        draw = ImageDraw.Draw(frame)
+        for x in range(frame.width):
+            progress = x / (frame.width - 1)
+            color = (
+                int(255 * progress) if phase != 1 else int(40 * progress),
+                int(255 * (1 - progress)) if phase != 2 else int(80 * progress),
+                int(255 * abs(0.5 - progress) * 2) if phase != 0 else int(60 * progress),
+            )
+            draw.line((x, 0, x, frame.height - 1), fill=color)
+        frames.append(frame)
+    return frames
+
+
+def test_neon_frames_share_one_adaptive_palette(monkeypatch):
+    """Palette search runs once; full frames only pay the cheaper remap."""
+    import utils.neon_drawing as nd
+
+    frames = _make_palette_test_frames()
+    reference_frames = [
+        frame.convert("P", palette=Image.ADAPTIVE, colors=256).convert("RGB")
+        for frame in frames
+    ]
+    quantize_palettes = []
+    original_quantize = Image.Image.quantize
+
+    def count_quantize(image, *args, **kwargs):
+        quantize_palettes.append(kwargs.get("palette"))
+        return original_quantize(image, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "quantize", count_quantize)
+    nd._quantize_frames_with_shared_palette(frames)
+
+    assert sum(palette is None for palette in quantize_palettes) == 1
+    assert sum(palette is not None for palette in quantize_palettes) == len(frames)
+    assert all(frame.mode == "P" for frame in frames)
+    shared_palette = frames[0].getpalette()
+    assert all(frame.getpalette() == shared_palette for frame in frames[1:])
+
+    # A shared animation palette may move colors slightly, but it should remain
+    # visually indistinguishable from the former per-frame adaptive palettes.
+    for reference, optimized in zip(reference_frames, frames, strict=True):
+        difference = ImageChops.difference(reference, optimized.convert("RGB"))
+        mean_channel_error = sum(ImageStat.Stat(difference).mean) / 3
+        assert mean_channel_error < 2.0
+
+
+def test_terminal_crash_gif_preserves_frame_timing_and_seekability():
+    """Shared quantization keeps the terminal animation's playback contract."""
+    import utils.neon_drawing as nd
+
+    random_state = random.getstate()
+    try:
+        random.seed(94831)
+        buffer = nd.create_terminal_crash_gif("TestUser", 5)
+    finally:
+        random.setstate(random_state)
+
+    with Image.open(buffer) as image:
+        assert image.n_frames == 58
+        durations = []
+        for frame_index in range(image.n_frames):
+            image.seek(frame_index)
+            image.load()
+            durations.append(image.info["duration"])
+
+    assert durations[:10] == [120] * 10
+    assert sum(durations) == 68_100
+    assert durations[-1] == 60_000
 
 
 @pytest.mark.parametrize("fn_name,args", GIF_CASES)
