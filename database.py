@@ -43,11 +43,12 @@ class Database:
             self.db_path,
             uri=self._use_uri,
             check_same_thread=not self._is_memory,
+            timeout=5.0,
         )
         conn.row_factory = sqlite3.Row
-        if not self._is_memory:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
+        # SchemaManager establishes persistent WAL mode before file-backed
+        # runtime connections are opened. ``timeout`` installs the equivalent
+        # five-second busy handler without issuing setup SQL per connection.
         return conn
 
     def get_connection(self) -> sqlite3.Connection:
