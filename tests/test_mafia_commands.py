@@ -1,20 +1,26 @@
 """Tests for the Mafia command cog's background behavior."""
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import discord
 import pytest
 
 import commands.mafia as mafia_commands
 from commands.mafia import MafiaCommands
-from domain.models.mafia import MafiaGame, MafiaPhase
+from domain.models.mafia import MafiaGame, MafiaPhase, MafiaPlayer, MafiaRole
 from repositories.mafia_repository import MafiaRepository
 from tests.conftest import TEST_GUILD_ID
 
 GUILD_ID = 100
 GAME_ID = 7
 STANDINGS_MESSAGE_ID = 300
+
+
+async def _run_sync(func, *args, **kwargs):
+    """Deterministic stand-in for asyncio.to_thread in orchestration tests."""
+    return func(*args, **kwargs)
 
 
 @pytest.fixture
@@ -227,6 +233,8 @@ async def test_info_uses_current_phase_durations(monkeypatch):
     embed = interaction.response.send_message.await_args.kwargs["embed"]
     assert "Night (24h)" in embed.description
     assert "Day (24h)" in embed.description
+
+
 @pytest.fixture
 def mafia_service():
     repo = SimpleNamespace(
@@ -387,3 +395,196 @@ async def test_resolution_unpins_partial_standings_message(
     channel.get_partial_message.assert_called_once_with(STANDINGS_MESSAGE_ID)
     channel.fetch_message.assert_not_awaited()
     board.unpin.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_setup_overlaps_routes_and_waits_for_bounded_member_adds(
+    cog,
+    game,
+    guild,
+    mafia_service,
+    flavor_service,
+    monkeypatch,
+):
+    route_release = asyncio.Event()
+    member_release = asyncio.Event()
+    announcement_started = asyncio.Event()
+    thread_create_started = asyncio.Event()
+    all_members_started = asyncio.Event()
+    order = []
+    active_adds = 0
+    peak_adds = 0
+    add_attempts = 0
+
+    players = [
+        MafiaPlayer(
+            game_id=GAME_ID,
+            discord_id=discord_id,
+            guild_id=GUILD_ID,
+            role=MafiaRole.MAFIA,
+            is_godfather=discord_id == 1,
+        )
+        for discord_id in range(1, 5)
+    ]
+    mafia_service.repo.get_players.return_value = players
+    flavor_service.setup_narration = AsyncMock(return_value="The town sleeps.")
+    game.roster_size = len(players)
+
+    async def add_user(member):
+        nonlocal active_adds, peak_adds, add_attempts
+        active_adds += 1
+        peak_adds = max(peak_adds, active_adds)
+        add_attempts += 1
+        order.append(f"member_started:{member.id}")
+        if add_attempts == len(players):
+            all_members_started.set()
+
+        try:
+            if member.id == 4:
+                raise discord.HTTPException(
+                    SimpleNamespace(status=500, reason="error"),
+                    "member add failed",
+                )
+            await member_release.wait()
+        finally:
+            order.append(f"member_done:{member.id}")
+            active_adds -= 1
+
+    async def send_intro(content):
+        order.append("intro")
+        assert sum(item.startswith("member_done:") for item in order) == len(players)
+
+    thread = SimpleNamespace(
+        id=700,
+        add_user=AsyncMock(side_effect=add_user),
+        send=AsyncMock(side_effect=send_intro),
+    )
+
+    async def send_announcement(*, embed):
+        order.append("announcement_started")
+        announcement_started.set()
+        await route_release.wait()
+        order.append("announcement_done")
+        return SimpleNamespace(id=600)
+
+    async def create_thread(**kwargs):
+        order.append("thread_create_started")
+        thread_create_started.set()
+        await route_release.wait()
+        order.append("thread_created")
+        return thread
+
+    post_channel = SimpleNamespace(
+        send=AsyncMock(side_effect=send_announcement),
+        create_thread=AsyncMock(side_effect=create_thread),
+    )
+    guild.get_member = MagicMock(
+        side_effect=lambda discord_id: SimpleNamespace(id=discord_id)
+    )
+    monkeypatch.setattr(
+        mafia_commands, "_mafia_post_channel", lambda _guild: post_channel
+    )
+    monkeypatch.setattr(mafia_commands.asyncio, "to_thread", _run_sync)
+
+    setup_task = asyncio.create_task(cog._post_setup(guild, game))
+    await asyncio.wait_for(
+        asyncio.gather(
+            announcement_started.wait(),
+            thread_create_started.wait(),
+        ),
+        timeout=1,
+    )
+
+    # The two independent channel routes started together.
+    assert not setup_task.done()
+    thread.add_user.assert_not_awaited()
+
+    route_release.set()
+    await asyncio.wait_for(all_members_started.wait(), timeout=1)
+
+    # All four adds are in flight, but the intro remains ordered behind them.
+    assert peak_adds == 4
+    thread.send.assert_not_awaited()
+    assert not setup_task.done()
+
+    member_release.set()
+    await setup_task
+
+    assert thread.add_user.await_count == len(players)
+    thread.send.assert_awaited_once()
+    assert order.index("intro") > max(
+        index for index, item in enumerate(order) if item.startswith("member_done:")
+    )
+    mafia_service.repo.set_thread_ids.assert_has_calls(
+        [
+            call(GAME_ID, setup_message_id=600),
+            call(GAME_ID, mafia_thread_id=700),
+        ],
+        any_order=True,
+    )
+    assert cog._was_announced(GUILD_ID, game.game_date, MafiaPhase.SETUP)
+
+
+@pytest.mark.asyncio
+async def test_graveyard_member_adds_are_bounded_to_four(
+    cog,
+    game,
+    guild,
+    mafia_service,
+    monkeypatch,
+):
+    member_release = asyncio.Event()
+    first_wave_started = asyncio.Event()
+    active_adds = 0
+    peak_adds = 0
+    add_attempts = 0
+    dead_players = [
+        MafiaPlayer(
+            game_id=GAME_ID,
+            discord_id=discord_id,
+            guild_id=GUILD_ID,
+            role=MafiaRole.TOWNIE,
+            is_alive=False,
+        )
+        for discord_id in range(1, 10)
+    ]
+    mafia_service.repo.get_players.return_value = dead_players
+    game.graveyard_thread_id = 800
+
+    async def add_user(member):
+        nonlocal active_adds, peak_adds, add_attempts
+        active_adds += 1
+        peak_adds = max(peak_adds, active_adds)
+        add_attempts += 1
+        if add_attempts == mafia_commands.THREAD_MEMBER_CONCURRENCY:
+            first_wave_started.set()
+        try:
+            await member_release.wait()
+        finally:
+            active_adds -= 1
+
+    thread = SimpleNamespace(add_user=AsyncMock(side_effect=add_user))
+    guild.get_thread.return_value = thread
+    guild.get_member = MagicMock(
+        side_effect=lambda discord_id: SimpleNamespace(id=discord_id)
+    )
+    monkeypatch.setattr(
+        mafia_commands,
+        "_mafia_post_channel",
+        lambda _guild: SimpleNamespace(),
+    )
+    monkeypatch.setattr(mafia_commands.asyncio, "to_thread", _run_sync)
+
+    sync_task = asyncio.create_task(cog._sync_graveyard(guild, game))
+    await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert thread.add_user.await_count == mafia_commands.THREAD_MEMBER_CONCURRENCY
+    assert peak_adds == mafia_commands.THREAD_MEMBER_CONCURRENCY
+    assert not sync_task.done()
+
+    member_release.set()
+    await sync_task
+
+    assert thread.add_user.await_count == len(dead_players)
+    assert peak_adds == mafia_commands.THREAD_MEMBER_CONCURRENCY
