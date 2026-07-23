@@ -1794,27 +1794,15 @@ class DraftCommands(commands.Cog):
             clear_lobby_rally_cooldowns(guild_id)
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
-            draft_message = await self._edit_interaction_message(interaction, embed=embed, view=None)
-            original_message = draft_message or getattr(interaction, "message", None)
-            if original_message is None:
-                with contextlib.suppress(Exception):
-                    original_message = await interaction.original_response()
-
-            original_channel = getattr(original_message, "channel", None)
-            original_channel_id = (
-                getattr(original_channel, "id", None) or state.draft_channel_id
+            original_message, lobby_message, origin_message = (
+                await self._publish_draft_completion(
+                    interaction,
+                    embed,
+                    lobby_channel_id,
+                    origin_channel_id,
+                    state.draft_channel_id,
+                )
             )
-            lobby_message = (
-                original_message
-                if lobby_channel_id and original_channel_id == lobby_channel_id
-                else await self._post_completed_draft(embed, lobby_channel_id)
-            )
-            if origin_channel_id and origin_channel_id == lobby_channel_id:
-                origin_message = lobby_message
-            elif origin_channel_id and original_channel_id == origin_channel_id:
-                origin_message = original_message
-            else:
-                origin_message = await self._post_completed_draft(embed, origin_channel_id)
 
             # === NEW: Store message info for odds updates ===
             try:
@@ -1881,6 +1869,64 @@ class DraftCommands(commands.Cog):
         finally:
             await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
             self._stop_tracked_draft_view(guild_id)
+
+    async def _publish_draft_completion(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+        lobby_channel_id: int | None,
+        origin_channel_id: int | None,
+        draft_channel_id: int | None,
+    ) -> tuple[
+        discord.Message | None,
+        discord.Message | None,
+        discord.Message | None,
+    ]:
+        """Update the draft UI, then publish distinct channel copies together."""
+        draft_message = await self._edit_interaction_message(
+            interaction, embed=embed, view=None
+        )
+
+        original_message = draft_message or getattr(interaction, "message", None)
+        if original_message is None:
+            with contextlib.suppress(Exception):
+                original_message = await interaction.original_response()
+
+        original_channel = getattr(original_message, "channel", None)
+        original_channel_id = (
+            getattr(original_channel, "id", None) or draft_channel_id
+        )
+        destination_ids = list(
+            dict.fromkeys(
+                channel_id
+                for channel_id in (lobby_channel_id, origin_channel_id)
+                if channel_id and channel_id != original_channel_id
+            )
+        )
+        results = await asyncio.gather(
+            *(
+                self._post_completed_draft(embed, channel_id)
+                for channel_id in destination_ids
+            ),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+        messages_by_channel = dict(zip(destination_ids, results, strict=True))
+        lobby_message = (
+            original_message
+            if lobby_channel_id and lobby_channel_id == original_channel_id
+            else messages_by_channel.get(lobby_channel_id)
+        )
+        if origin_channel_id and origin_channel_id == lobby_channel_id:
+            origin_message = lobby_message
+        elif origin_channel_id and origin_channel_id == original_channel_id:
+            origin_message = original_message
+        else:
+            origin_message = messages_by_channel.get(origin_channel_id)
+        return original_message, lobby_message, origin_message
 
     async def handle_side_preference(
         self,
@@ -2277,38 +2323,65 @@ class DraftCommands(commands.Cog):
             if not thread:
                 thread = await self.bot.fetch_channel(thread_id)
 
-            # Update thread name to show draft complete
-            try:
-                await thread.edit(name="🔒 Draft Complete - Awaiting Results")
-            except discord.HTTPException:
-                pass  # Rate limit on thread name changes
-
-            # Post the draft complete embed
-            thread_msg = await thread.send(embed=embed)
-
-            # Store the embed's message id (same as shuffle mode) so betting
-            # updates can refresh the wager field inside the thread.
-            if thread_msg and pending_match_id:
+            async def rename_thread() -> None:
                 try:
-                    await asyncio.to_thread(
-                        functools.partial(
-                            self.match_service.set_shuffle_message_info,
-                            state.guild_id,
-                            message_id=None,
-                            channel_id=None,
-                            thread_message_id=thread_msg.id,
-                            pending_match_id=pending_match_id,
-                        )
-                    )
-                except Exception:
-                    logger.warning("Failed to store draft thread message id", exc_info=True)
+                    await thread.edit(name="🔒 Draft Complete - Awaiting Results")
+                except discord.HTTPException:
+                    pass  # Rate limit on thread name changes
 
-            # Ping all drafted players (both teams)
-            all_player_ids = state.radiant_player_ids + state.dire_player_ids
-            real_player_ids = [pid for pid in all_player_ids if pid > 0]
-            if real_player_ids:
-                mentions = " ".join(f"<@{pid}>" for pid in real_player_ids)
-                await thread.send(f"{mentions}\nPlayers, please take your starting positions!")
+            async def post_draft_results() -> None:
+                thread_msg = await thread.send(embed=embed)
+
+                async def store_thread_message() -> None:
+                    # Store the embed's message id so betting updates can
+                    # refresh the wager field inside the thread.
+                    if thread_msg and pending_match_id:
+                        try:
+                            await asyncio.to_thread(
+                                functools.partial(
+                                    self.match_service.set_shuffle_message_info,
+                                    state.guild_id,
+                                    message_id=None,
+                                    channel_id=None,
+                                    thread_message_id=thread_msg.id,
+                                    pending_match_id=pending_match_id,
+                                )
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to store draft thread message id",
+                                exc_info=True,
+                            )
+
+                async def ping_players() -> None:
+                    all_player_ids = state.radiant_player_ids + state.dire_player_ids
+                    real_player_ids = [pid for pid in all_player_ids if pid > 0]
+                    if real_player_ids:
+                        mentions = " ".join(f"<@{pid}>" for pid in real_player_ids)
+                        await thread.send(
+                            f"{mentions}\nPlayers, please take your starting positions!"
+                        )
+
+                # The metadata write and player ping both depend on the embed,
+                # but not on each other. Fully await both before locking.
+                metadata_result, ping_result = await asyncio.gather(
+                    store_thread_message(),
+                    ping_players(),
+                    return_exceptions=True,
+                )
+                for result in (metadata_result, ping_result):
+                    if isinstance(result, BaseException):
+                        raise result
+
+            # Renaming is independent of the ordered embed -> player-ping path.
+            rename_result, post_result = await asyncio.gather(
+                rename_thread(),
+                post_draft_results(),
+                return_exceptions=True,
+            )
+            for result in (rename_result, post_result):
+                if isinstance(result, BaseException):
+                    raise result
 
             # Lock the thread
             try:
