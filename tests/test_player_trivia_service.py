@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import random
+import threading
 from collections import Counter
-from unittest.mock import Mock
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -19,6 +21,36 @@ class StableRng:
     @staticmethod
     def shuffle(_values):
         return None
+
+
+class ManualClock:
+    def __init__(self, now: float = 0.0):
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class CountingClock:
+    def __init__(self):
+        self.calls = 0
+        self._condition = threading.Condition()
+
+    def __call__(self) -> float:
+        with self._condition:
+            self.calls += 1
+            self._condition.notify_all()
+        return 0.0
+
+    def wait_for_calls(self, count: int, timeout: float) -> bool:
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: self.calls >= count,
+                timeout=timeout,
+            )
 
 
 def _players(count: int = 6, **overrides) -> list[dict]:
@@ -133,6 +165,157 @@ def _rich_snapshot() -> dict[str, list[dict]]:
         "tunnels": tunnels,
         "bankruptcies": bankruptcies,
     }
+
+
+def test_snapshot_cache_reuses_same_guild_load():
+    repo = Mock()
+    repo.load_snapshot.return_value = {"players": _players(4)}
+    repo.get_recent_question_keys.return_value = []
+    service = PlayerTriviaService(repo, rng=StableRng())
+
+    service.generate_questions(user_id=1, guild_id=7, count=1)
+    service.generate_questions(user_id=2, guild_id=7, count=1)
+
+    repo.load_snapshot.assert_called_once_with(7)
+    assert repo.get_recent_question_keys.call_count == 2
+
+
+def test_snapshot_cache_expires_using_monotonic_time():
+    clock = ManualClock(now=100.0)
+    repo = Mock()
+    repo.load_snapshot.return_value = {"players": _players(4)}
+    service = PlayerTriviaService(
+        repo,
+        snapshot_cache_ttl_seconds=45.0,
+        monotonic_clock=clock,
+    )
+
+    service._snapshot_for_generation(7)
+    clock.advance(44.999)
+    service._snapshot_for_generation(7)
+    clock.advance(0.001)
+    service._snapshot_for_generation(7)
+
+    assert repo.load_snapshot.call_args_list == [call(7), call(7)]
+
+
+def test_snapshot_cache_prunes_expired_inactive_guilds():
+    clock = ManualClock(now=100.0)
+    repo = Mock()
+    repo.load_snapshot.side_effect = lambda guild_id: {
+        "players": _players(4, username=f"Guild {guild_id}")
+    }
+    service = PlayerTriviaService(
+        repo,
+        snapshot_cache_ttl_seconds=45.0,
+        monotonic_clock=clock,
+    )
+
+    service._snapshot_for_generation(7)
+    assert set(service._snapshot_cache) == {7}
+
+    clock.advance(45.0)
+    service._snapshot_for_generation(8)
+
+    assert set(service._snapshot_cache) == {8}
+    assert repo.load_snapshot.call_args_list == [call(7), call(8)]
+
+
+def test_snapshot_cache_is_isolated_by_guild():
+    repo = Mock()
+    repo.load_snapshot.side_effect = lambda guild_id: {
+        "players": _players(4, username=f"Guild {guild_id}")
+    }
+    service = PlayerTriviaService(repo)
+
+    guild_seven = service._snapshot_for_generation(7)
+    guild_eight = service._snapshot_for_generation(8)
+    guild_seven_again = service._snapshot_for_generation(7)
+
+    assert guild_seven["players"][0]["username"] == "Guild 7"
+    assert guild_eight["players"][0]["username"] == "Guild 8"
+    assert guild_seven_again["players"][0]["username"] == "Guild 7"
+    assert repo.load_snapshot.call_args_list == [call(7), call(8)]
+
+
+def test_snapshot_cache_collapses_concurrent_same_guild_misses():
+    worker_count = 8
+    start = threading.Barrier(worker_count)
+    load_started = threading.Event()
+    release_load = threading.Event()
+    clock = CountingClock()
+    repo = Mock()
+
+    def load_snapshot(_guild_id):
+        load_started.set()
+        assert release_load.wait(timeout=5.0)
+        return {"players": _players(4)}
+
+    repo.load_snapshot.side_effect = load_snapshot
+    service = PlayerTriviaService(repo, monotonic_clock=clock)
+
+    def load_from_worker():
+        start.wait(timeout=5.0)
+        return service._snapshot_for_generation(7)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(load_from_worker) for _ in range(worker_count)]
+        try:
+            assert load_started.wait(timeout=5.0)
+            assert clock.wait_for_calls(worker_count, timeout=5.0)
+        finally:
+            release_load.set()
+        snapshots = [future.result(timeout=5.0) for future in futures]
+
+    repo.load_snapshot.assert_called_once_with(7)
+    assert all(snapshot["players"][0]["username"] == "P01" for snapshot in snapshots)
+    assert len({id(snapshot) for snapshot in snapshots}) == worker_count
+
+
+def test_snapshot_cache_returns_isolated_per_call_copies():
+    repo = Mock()
+    repo.load_snapshot.return_value = {
+        "players": _players(4),
+        "tips": [{"sender_id": 1, "recipient_id": 2, "amount": 10}],
+    }
+    service = PlayerTriviaService(repo)
+
+    first = service._snapshot_for_generation(7)
+    first["players"][0]["username"] = "Changed"
+    first["players"].append({"discord_id": 99, "username": "Added"})
+    first["tips"].clear()
+
+    second = service._snapshot_for_generation(7)
+    assert [row["username"] for row in second["players"]] == [
+        "P01",
+        "P02",
+        "P03",
+        "P04",
+    ]
+    assert second["tips"] == [{"sender_id": 1, "recipient_id": 2, "amount": 10}]
+
+    cached = service._get_raw_snapshot(7)
+    with pytest.raises(TypeError):
+        cached["players"][0]["username"] = "Changed"
+    with pytest.raises(TypeError):
+        cached["players"] = ()
+    repo.load_snapshot.assert_called_once_with(7)
+
+
+def test_snapshot_cache_does_not_cache_failed_loads():
+    repo = Mock()
+    repo.load_snapshot.side_effect = [
+        RuntimeError("snapshot unavailable"),
+        {"players": _players(4)},
+    ]
+    service = PlayerTriviaService(repo)
+
+    with pytest.raises(RuntimeError, match="snapshot unavailable"):
+        service._snapshot_for_generation(7)
+
+    snapshot = service._snapshot_for_generation(7)
+    assert len(snapshot["players"]) == 4
+    assert repo.load_snapshot.call_args_list == [call(7), call(7)]
 
 
 def test_question_record_and_persistence_delegates_use_immutable_snapshot_shape():

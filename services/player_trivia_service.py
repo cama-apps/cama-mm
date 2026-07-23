@@ -6,11 +6,13 @@ import logging
 import math
 import random
 import re
+import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 
 from config import CALIBRATION_RD_THRESHOLD, PREDICTION_CONTRACT_VALUE
@@ -29,6 +31,9 @@ _TOWN_MAFIA_ROLES = {"TOWNIE", "DOCTOR", "DETECTIVE", "VIGILANTE"}
 _MARKDOWN_RE = re.compile(r"[\\*_`~|>\[\]()]")
 _OPTION_MARKDOWN_RE = re.compile(r"[\\*_`~|>\[\]]")
 _DISCORD_MENTION_RE = re.compile(r"<@[1-9]\d*>")
+PLAYER_TRIVIA_SNAPSHOT_CACHE_TTL_SECONDS = 45.0
+
+_RawSnapshot = Mapping[Any, tuple[Mapping[str, Any], ...]]
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,29 @@ class _Context:
     names: dict[int, str]
     player_rows: dict[int, dict[str, Any]]
     candidates: list[_Candidate]
+
+
+@dataclass(frozen=True)
+class _SnapshotCacheEntry:
+    snapshot: _RawSnapshot
+    expires_at: float
+
+
+@dataclass
+class _SnapshotLoad:
+    event: threading.Event
+    snapshot: _RawSnapshot | None = None
+    error: BaseException | None = None
+
+
+def _freeze_snapshot(snapshot: Mapping[Any, Iterable[Mapping[str, Any]]]) -> _RawSnapshot:
+    """Detach and freeze the repository result before sharing it across calls."""
+    return MappingProxyType(
+        {
+            key: tuple(MappingProxyType(dict(row)) for row in (rows or ()))
+            for key, rows in snapshot.items()
+        }
+    )
 
 
 def _safe_name(value: Any) -> str:
@@ -150,9 +178,84 @@ def _humanize_code(value: Any) -> str:
 class PlayerTriviaService:
     """Build a varied question bank from a repository snapshot."""
 
-    def __init__(self, repo: Any, rng: random.Random | None = None):
+    def __init__(
+        self,
+        repo: Any,
+        rng: random.Random | None = None,
+        *,
+        snapshot_cache_ttl_seconds: float = PLAYER_TRIVIA_SNAPSHOT_CACHE_TTL_SECONDS,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ):
         self.repo = repo
         self.rng = rng or random.Random()
+        self._snapshot_cache_ttl_seconds = snapshot_cache_ttl_seconds
+        self._monotonic_clock = monotonic_clock
+        self._snapshot_cache: dict[int, _SnapshotCacheEntry] = {}
+        self._snapshot_loads: dict[int, _SnapshotLoad] = {}
+        self._snapshot_cache_lock = threading.Lock()
+
+    def _get_raw_snapshot(self, guild_id: int) -> _RawSnapshot:
+        """Return one immutable snapshot per guild and short cache window."""
+        with self._snapshot_cache_lock:
+            now = self._monotonic_clock()
+            expired_guild_ids = [
+                cached_guild_id
+                for cached_guild_id, entry in self._snapshot_cache.items()
+                if now >= entry.expires_at
+            ]
+            for expired_guild_id in expired_guild_ids:
+                del self._snapshot_cache[expired_guild_id]
+
+            cached = self._snapshot_cache.get(guild_id)
+            if cached is not None:
+                return cached.snapshot
+
+            load = self._snapshot_loads.get(guild_id)
+            if load is None:
+                load = _SnapshotLoad(event=threading.Event())
+                self._snapshot_loads[guild_id] = load
+                should_load = True
+            else:
+                should_load = False
+
+        if not should_load:
+            load.event.wait()
+            if load.error is not None:
+                raise load.error
+            if load.snapshot is None:
+                raise RuntimeError("Player-trivia snapshot load completed without a result.")
+            return load.snapshot
+
+        try:
+            raw_snapshot = self.repo.load_snapshot(guild_id) or {}
+            snapshot = _freeze_snapshot(raw_snapshot)
+            expires_at = self._monotonic_clock() + self._snapshot_cache_ttl_seconds
+        except BaseException as error:
+            with self._snapshot_cache_lock:
+                load.error = error
+                if self._snapshot_loads.get(guild_id) is load:
+                    del self._snapshot_loads[guild_id]
+                load.event.set()
+            raise
+
+        with self._snapshot_cache_lock:
+            self._snapshot_cache[guild_id] = _SnapshotCacheEntry(
+                snapshot=snapshot,
+                expires_at=expires_at,
+            )
+            load.snapshot = snapshot
+            if self._snapshot_loads.get(guild_id) is load:
+                del self._snapshot_loads[guild_id]
+            load.event.set()
+        return snapshot
+
+    def _snapshot_for_generation(self, guild_id: int) -> dict[str, list[dict[str, Any]]]:
+        """Return a mutable per-call copy while keeping the shared cache read-only."""
+        raw_snapshot = self._get_raw_snapshot(guild_id)
+        return {
+            str(key): [dict(row) for row in rows]
+            for key, rows in raw_snapshot.items()
+        }
 
     # ------------------------------------------------------------------
     # Session persistence delegates
@@ -227,10 +330,7 @@ class PlayerTriviaService:
         if count <= 0:
             return []
 
-        raw_snapshot = self.repo.load_snapshot(guild_id) or {}
-        snapshot = {
-            str(key): [dict(row) for row in (rows or [])] for key, rows in raw_snapshot.items()
-        }
+        snapshot = self._snapshot_for_generation(guild_id)
         allowed = (
             {_as_int(member_id) for member_id in current_member_ids}
             if current_member_ids is not None
