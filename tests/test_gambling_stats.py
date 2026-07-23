@@ -236,6 +236,184 @@ def test_leverage_distribution_from_history_matches_repository_semantics(
     assert _leverage_distribution_from_history(history) == expected
 
 
+def test_bulk_gambling_metrics_match_legacy_aggregates(repositories):
+    """One aggregate preserves the four legacy bet-history result sets."""
+    bet_repo = repositories["bet_repo"]
+    player_repo = repositories["player_repo"]
+    match_repo = repositories["match_repo"]
+    guild_id = 111
+    other_guild_id = 222
+    first_id = _setup_player(
+        player_repo,
+        discord_id=1001,
+        balance=1000,
+        guild_id=guild_id,
+    )
+    second_id = _setup_player(
+        player_repo,
+        discord_id=1002,
+        balance=1000,
+        guild_id=guild_id,
+    )
+    no_bets_id = _setup_player(
+        player_repo,
+        discord_id=1003,
+        balance=1000,
+        guild_id=guild_id,
+    )
+    _setup_player(
+        player_repo,
+        discord_id=first_id,
+        balance=1000,
+        guild_id=other_guild_id,
+    )
+
+    _place_and_settle_bet(
+        bet_repo,
+        match_repo,
+        player_repo,
+        first_id,
+        10,
+        "radiant",
+        "dire",
+        guild_id=guild_id,
+    )
+    _place_and_settle_bet(
+        bet_repo,
+        match_repo,
+        player_repo,
+        first_id,
+        5,
+        "radiant",
+        "radiant",
+        leverage=5,
+        guild_id=guild_id,
+    )
+    _place_and_settle_bet(
+        bet_repo,
+        match_repo,
+        player_repo,
+        first_id,
+        7,
+        "radiant",
+        "radiant",
+        guild_id=guild_id,
+    )
+    _place_and_settle_bet(
+        bet_repo,
+        match_repo,
+        player_repo,
+        second_id,
+        2,
+        "radiant",
+        "radiant",
+        leverage=10,
+        guild_id=guild_id,
+    )
+    _place_and_settle_bet(
+        bet_repo,
+        match_repo,
+        player_repo,
+        first_id,
+        50,
+        "radiant",
+        "dire",
+        guild_id=other_guild_id,
+    )
+
+    with bet_repo.connection() as conn:
+        first_bets = conn.execute(
+            """
+            SELECT bet_id
+            FROM bets
+            WHERE guild_id = ? AND discord_id = ?
+            ORDER BY bet_id
+            """,
+            (guild_id, first_id),
+        ).fetchall()
+        first_bet_ids = [row["bet_id"] for row in first_bets]
+        conn.execute(
+            """
+            UPDATE bets
+            SET bet_time = 123
+            WHERE guild_id = ? AND discord_id = ?
+            """,
+            (guild_id, first_id),
+        )
+        conn.execute(
+            "UPDATE bets SET leverage = NULL WHERE bet_id = ?",
+            (first_bet_ids[0],),
+        )
+        conn.execute(
+            "UPDATE bets SET payout = NULL WHERE bet_id = ?",
+            (first_bet_ids[1],),
+        )
+        conn.execute(
+            "UPDATE bets SET payout = 0 WHERE bet_id = ?",
+            (first_bet_ids[2],),
+        )
+
+    metrics = bet_repo.get_bulk_gambling_metrics(guild_id)
+    legacy_summaries = {
+        row["discord_id"]: row
+        for row in bet_repo.get_guild_gambling_summary(guild_id, min_bets=1)
+    }
+    player_ids = [first_id, second_id]
+    legacy_leverage = bet_repo.get_bulk_leverage_distribution(
+        guild_id,
+        player_ids,
+    )
+    legacy_loss_chasing = bet_repo.get_bulk_loss_chasing_data(
+        guild_id,
+        player_ids,
+    )
+    legacy_unique_matches = bet_repo.get_bulk_unique_matches_bet_on(
+        guild_id,
+        player_ids,
+    )
+
+    assert set(metrics) == {first_id, second_id}
+    for discord_id in player_ids:
+        aggregate = metrics[discord_id]
+        summary = legacy_summaries[discord_id]
+        for key in (
+            "total_bets",
+            "wins",
+            "losses",
+            "total_wagered",
+            "net_pnl",
+            "win_rate",
+            "roi",
+            "avg_leverage",
+        ):
+            assert aggregate[key] == pytest.approx(summary[key])
+        assert aggregate["five_x_bets"] == legacy_leverage[discord_id].get(5, 0)
+        assert (
+            aggregate["sequences_analyzed"]
+            == legacy_loss_chasing[discord_id]["sequences_analyzed"]
+        )
+        assert (
+            aggregate["times_increased_after_loss"]
+            == legacy_loss_chasing[discord_id]["times_increased_after_loss"]
+        )
+        assert aggregate["unique_matches"] == legacy_unique_matches[discord_id]
+
+    # The first player's three equal-time bets are ordered by bet_id:
+    # loss 10 -> win 25 is one increased-after-loss sequence. A stored zero
+    # payout on the final win remains zero rather than using the fallback.
+    assert metrics[first_id]["sequences_analyzed"] == 1
+    assert metrics[first_id]["times_increased_after_loss"] == 1
+    assert metrics[first_id]["net_pnl"] == 8
+
+    assert set(
+        bet_repo.get_bulk_gambling_metrics(
+            guild_id,
+            [first_id, first_id, no_bets_id, 9999],
+        )
+    ) == {first_id}
+    assert bet_repo.get_bulk_gambling_metrics(guild_id, []) == {}
+
+
 def test_bulk_current_streaks_and_degen_scores_match_point_paths(
     gambling_stats_service, repositories
 ):
@@ -274,6 +452,114 @@ def test_bulk_current_streaks_and_degen_scores_match_point_paths(
     bulk = gambling_stats_service.calculate_degen_scores_bulk([first_id, second_id], 0)
     assert bulk[first_id] == gambling_stats_service.calculate_degen_score(first_id, 0)
     assert bulk[second_id] == gambling_stats_service.calculate_degen_score(second_id, 0)
+
+
+def test_bulk_degen_scores_use_consolidated_gambling_metrics(
+    gambling_stats_service,
+    repositories,
+    monkeypatch,
+):
+    """Bulk scoring performs one scoped bet aggregate and no legacy scans."""
+    bet_repo = repositories["bet_repo"]
+    player_repo = repositories["player_repo"]
+    match_repo = repositories["match_repo"]
+    discord_id = _setup_player(player_repo, discord_id=1001, balance=500)
+    _place_and_settle_bet(
+        bet_repo,
+        match_repo,
+        player_repo,
+        discord_id,
+        10,
+        "radiant",
+        "radiant",
+        leverage=5,
+    )
+    expected = gambling_stats_service.calculate_degen_score(discord_id, 0)
+
+    calls = []
+    aggregate = bet_repo.get_bulk_gambling_metrics
+
+    def track_aggregate(guild_id, discord_ids=None):
+        calls.append((guild_id, discord_ids))
+        return aggregate(guild_id, discord_ids)
+
+    monkeypatch.setattr(
+        bet_repo,
+        "get_bulk_gambling_metrics",
+        track_aggregate,
+    )
+    for legacy_name in (
+        "get_guild_gambling_summary",
+        "get_bulk_leverage_distribution",
+        "get_bulk_loss_chasing_data",
+        "get_bulk_unique_matches_bet_on",
+    ):
+        monkeypatch.setattr(
+            bet_repo,
+            legacy_name,
+            MagicMock(side_effect=AssertionError(f"{legacy_name} was called")),
+        )
+
+    scores = gambling_stats_service.calculate_degen_scores_bulk(
+        [discord_id, discord_id, 9999],
+        0,
+    )
+
+    assert calls == [(0, [discord_id, 9999])]
+    assert scores[discord_id] == expected
+    assert scores[9999].total == 0
+
+
+def test_gambling_leaderboard_uses_consolidated_metrics(
+    gambling_stats_service,
+    repositories,
+    monkeypatch,
+):
+    """Leaderboard derives every bet metric from one guild aggregate."""
+    bet_repo = repositories["bet_repo"]
+    player_repo = repositories["player_repo"]
+    match_repo = repositories["match_repo"]
+    discord_id = _setup_player(player_repo, discord_id=1001, balance=500)
+    for _ in range(3):
+        _place_and_settle_bet(
+            bet_repo,
+            match_repo,
+            player_repo,
+            discord_id,
+            10,
+            "radiant",
+            "radiant",
+        )
+
+    calls = []
+    aggregate = bet_repo.get_bulk_gambling_metrics
+
+    def track_aggregate(guild_id, discord_ids=None):
+        calls.append((guild_id, discord_ids))
+        return aggregate(guild_id, discord_ids)
+
+    monkeypatch.setattr(
+        bet_repo,
+        "get_bulk_gambling_metrics",
+        track_aggregate,
+    )
+    for legacy_name in (
+        "get_guild_gambling_summary",
+        "get_bulk_leverage_distribution",
+        "get_bulk_loss_chasing_data",
+        "get_bulk_unique_matches_bet_on",
+    ):
+        monkeypatch.setattr(
+            bet_repo,
+            legacy_name,
+            MagicMock(side_effect=AssertionError(f"{legacy_name} was called")),
+        )
+
+    leaderboard = gambling_stats_service.get_leaderboard(0, min_bets=3)
+
+    assert calls == [(0, None)]
+    assert [entry.discord_id for entry in leaderboard.top_earners] == [discord_id]
+    assert leaderboard.server_stats["total_bets"] == 3
 
 
 class TestGambaStats:

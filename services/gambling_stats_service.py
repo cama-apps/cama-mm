@@ -443,15 +443,11 @@ class GamblingStatsService:
         if not unique_ids:
             return {}
 
-        summaries = {
-            summary["discord_id"]: summary
-            for summary in self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=1)
-            if summary["discord_id"] in unique_ids
-        }
-        bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, unique_ids)
-        bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, unique_ids)
+        gambling_metrics = self.bet_repo.get_bulk_gambling_metrics(
+            guild_id,
+            unique_ids,
+        )
         bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(unique_ids, guild_id)
-        bulk_unique_matches = self.bet_repo.get_bulk_unique_matches_bet_on(guild_id, unique_ids)
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
         lowest_balances = self.player_repo.get_lowest_balances_bulk(unique_ids, guild_id)
         negative_loans_by_id = (
@@ -460,23 +456,17 @@ class GamblingStatsService:
 
         scores: dict[int, DegenScoreBreakdown] = {}
         for discord_id in unique_ids:
-            summary = summaries.get(discord_id, {})
+            metrics = gambling_metrics.get(discord_id, {})
             scores[discord_id] = self._calculate_degen_score_from_batch(
-                leverage_dist=bulk_leverage.get(discord_id, {}),
-                loss_chase_data=bulk_loss_chase.get(
-                    discord_id,
-                    {
-                        "sequences_analyzed": 0,
-                        "times_increased_after_loss": 0,
-                    },
-                ),
+                five_x_bets=metrics.get("five_x_bets", 0),
+                loss_chase_data=metrics,
                 bankruptcy_count=bulk_bankruptcy.get(discord_id, 0),
                 total_matches=total_matches,
-                matches_bet_on=bulk_unique_matches.get(discord_id, 0),
+                matches_bet_on=metrics.get("unique_matches", 0),
                 lowest_balance=lowest_balances.get(discord_id),
                 negative_loans=negative_loans_by_id.get(discord_id, 0),
-                total_wagered=summary.get("total_wagered", 0),
-                total_bets=summary.get("total_bets", 0),
+                total_wagered=metrics.get("total_wagered", 0),
+                total_bets=metrics.get("total_bets", 0),
             )
         return scores
 
@@ -525,7 +515,8 @@ class GamblingStatsService:
         """
         # Server stats cover every settled bettor. The minimum only controls
         # eligibility for the ranked sections.
-        all_summaries = self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=1)
+        gambling_metrics = self.bet_repo.get_bulk_gambling_metrics(guild_id)
+        all_summaries = list(gambling_metrics.values())
         summaries = [s for s in all_summaries if s["total_bets"] >= min_bets]
 
         # Get discord_ids for leaderboard degen calculations and the wider set
@@ -533,13 +524,10 @@ class GamblingStatsService:
         discord_ids = [s["discord_id"] for s in summaries]
         all_discord_ids = [s["discord_id"] for s in all_summaries]
 
-        # Batch fetch all data needed for degen score calculation
-        bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, discord_ids)
-        bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, discord_ids)
+        # Fetch the remaining non-bet inputs needed for degen score calculation.
         bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(
             all_discord_ids, guild_id
         )
-        bulk_unique_matches = self.bet_repo.get_bulk_unique_matches_bet_on(guild_id, discord_ids)
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
         # Batch fetch lowest balances for all players
@@ -555,11 +543,11 @@ class GamblingStatsService:
         for s in summaries:
             discord_id = s["discord_id"]
             degen = self._calculate_degen_score_from_batch(
-                leverage_dist=bulk_leverage.get(discord_id, {}),
-                loss_chase_data=bulk_loss_chase.get(discord_id, {"sequences_analyzed": 0, "times_increased_after_loss": 0}),
+                five_x_bets=s["five_x_bets"],
+                loss_chase_data=s,
                 bankruptcy_count=bulk_bankruptcy.get(discord_id, 0),
                 total_matches=total_matches,
-                matches_bet_on=bulk_unique_matches.get(discord_id, 0),
+                matches_bet_on=s["unique_matches"],
                 lowest_balance=lowest_balances.get(discord_id),
                 negative_loans=negative_loans_by_id.get(discord_id, 0),
                 total_wagered=s["total_wagered"],
@@ -646,7 +634,7 @@ class GamblingStatsService:
 
     def _calculate_degen_score_from_batch(
         self,
-        leverage_dist: dict[int, int],
+        five_x_bets: int,
         loss_chase_data: dict,
         bankruptcy_count: int,
         total_matches: int,
@@ -657,6 +645,8 @@ class GamblingStatsService:
         total_bets: int,
     ) -> DegenScoreBreakdown:
         """Calculate degen score from pre-fetched batch data."""
+        non_five_x_bets = max(0, total_bets - five_x_bets)
+        leverage_dist = {5: five_x_bets, 1: non_five_x_bets}
         loss_sequences = loss_chase_data.get("sequences_analyzed", 0)
         times_increased = loss_chase_data.get("times_increased_after_loss", 0)
         loss_chase_rate = times_increased / loss_sequences if loss_sequences > 0 else 0.0
