@@ -1000,6 +1000,112 @@ def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 5
     ]
 
 
+def _shuffle_result_signature(
+    result: tuple[Team, Team, list[Player]],
+    *,
+    identity_only: bool = False,
+) -> tuple:
+    """Canonicalize teams, roles, and exclusions for differential checks."""
+
+    def player_key(player: Player) -> tuple:
+        if identity_only:
+            return (player.discord_id,)
+        return (player.name, player.discord_id)
+
+    def team_signature(team: Team) -> tuple:
+        return tuple(
+            sorted(
+                (
+                    player_key(player),
+                    role,
+                )
+                for player, role in zip(
+                    team.players,
+                    team.ensure_role_assignments(),
+                    strict=True,
+                )
+            )
+        )
+
+    team1, team2, excluded = result
+    teams = sorted((team_signature(team1), team_signature(team2)))
+    return (
+        teams[0],
+        teams[1],
+        tuple(sorted(player_key(player) for player in excluded)),
+    )
+
+
+def _seeded_14_player_pool(seed: int, prefix: str = "Seeded") -> list[Player]:
+    rng = random.Random(seed)
+    roles = ["1", "2", "3", "4", "5"]
+    return [
+        Player(
+            name=f"{prefix}{index}",
+            discord_id=index + 1,
+            glicko_rating=rng.uniform(850.0, 2750.0),
+            glicko_rd=None if index % 5 == 0 else rng.uniform(20.0, 350.0),
+            preferred_roles=rng.sample(roles, rng.randint(1, len(roles))),
+        )
+        for index in range(14)
+    ]
+
+
+def _give_shuffler_loose_upper_bound(
+    monkeypatch: pytest.MonkeyPatch, shuffler: BalancedShuffler
+) -> None:
+    """Force search beyond the greedy result while retaining its valid teams."""
+    original_greedy = shuffler._greedy_shuffle
+
+    def loose_greedy(*args, **kwargs):
+        team1, team2, excluded, _score = original_greedy(*args, **kwargs)
+        return team1, team2, excluded, float("inf")
+
+    monkeypatch.setattr(shuffler, "_greedy_shuffle", loose_greedy)
+
+
+def _disable_split_bound(
+    monkeypatch: pytest.MonkeyPatch, shuffler: BalancedShuffler
+) -> None:
+    """Retain the pre-optimization search path as a differential oracle."""
+    original_scorer = shuffler._score_role_assignments_for_matchup
+
+    def wrapped_scorer(*args, **kwargs):
+        return original_scorer(*args, **kwargs)
+
+    monkeypatch.setattr(
+        shuffler, "_score_role_assignments_for_matchup", wrapped_scorer
+    )
+
+
+def _assert_split_bound_matches_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    players: list[Player],
+    settings: dict,
+    *,
+    exclusion_counts: dict[str, int] | None = None,
+    recent_match_names: set[str] | None = None,
+    avoids: list | None = None,
+    deals: list | None = None,
+) -> None:
+    reference = BalancedShuffler(**settings)
+    optimized = BalancedShuffler(**settings)
+    for shuffler in (reference, optimized):
+        _give_shuffler_loose_upper_bound(monkeypatch, shuffler)
+    _disable_split_bound(monkeypatch, reference)
+    kwargs = {
+        "exclusion_counts": exclusion_counts,
+        "recent_match_names": recent_match_names,
+        "avoids": avoids,
+        "deals": deals,
+    }
+    expected = reference.shuffle_branch_bound(players, **kwargs)
+    actual = optimized.shuffle_branch_bound(players, **kwargs)
+    assert _shuffle_result_signature(actual) == _shuffle_result_signature(
+        expected
+    )
+
+
 class TestRoleAssignmentCommonPath:
     def test_common_path_skips_constraint_penalty_work(self, monkeypatch):
         players = _create_players_with_roles(10)
@@ -1115,6 +1221,222 @@ class TestRoleAssignmentCommonPath:
 
 class TestShuffler14Players:
     """Tests for 14-player pool shuffling (new max lobby size)."""
+
+    @pytest.mark.parametrize(
+        ("seed", "recent_count"),
+        [
+            (0x1401, 0),
+            (0x1402, 3),
+            (0x1403, 7),
+            (0x1404, 10),
+        ],
+    )
+    def test_split_bound_exactly_matches_reference_search_for_seeded_pools(
+        self, monkeypatch, seed, recent_count
+    ):
+        """Tighter split pruning must not change any selected player or role."""
+        players = _seeded_14_player_pool(seed)
+        rng = random.Random(seed ^ 0xB0A0D)
+        exclusion_counts = {
+            player.name: rng.randint(0, 5) for player in players
+        }
+        recent_names = {
+            player.name for player in rng.sample(players, recent_count)
+        }
+        settings = {
+            "off_role_multiplier": rng.uniform(0.55, 1.0),
+            "off_role_flat_penalty": rng.uniform(0.0, 220.0),
+            "role_matchup_delta_weight": rng.uniform(0.0, 1.25),
+            "exclusion_penalty_weight": rng.uniform(0.0, 100.0),
+            "rd_priority_weight": rng.uniform(0.0, 0.3),
+            "recent_match_penalty_weight": rng.uniform(0.0, 180.0),
+            "rating_spread_divisor": rng.uniform(5.0, 40.0),
+        }
+        _assert_split_bound_matches_reference(
+            monkeypatch,
+            players,
+            settings,
+            exclusion_counts=exclusion_counts,
+            recent_match_names=recent_names,
+        )
+
+    def test_duplicate_display_names_do_not_change_branch_bound_result(
+        self, monkeypatch
+    ):
+        """Selection bounds must cache ratings by identity, not display name."""
+        unique_players = _seeded_14_player_pool(0xD00D, "Identity")
+        duplicate_players = _seeded_14_player_pool(0xD00D, "Identity")
+        duplicate_players[-1].name = duplicate_players[0].name
+        unique_shuffler = BalancedShuffler()
+        duplicate_shuffler = BalancedShuffler()
+        _give_shuffler_loose_upper_bound(monkeypatch, unique_shuffler)
+        _give_shuffler_loose_upper_bound(monkeypatch, duplicate_shuffler)
+
+        unique_result = unique_shuffler.shuffle_branch_bound(unique_players)
+        duplicate_result = duplicate_shuffler.shuffle_branch_bound(
+            duplicate_players
+        )
+
+        assert _shuffle_result_signature(
+            duplicate_result, identity_only=True
+        ) == _shuffle_result_signature(unique_result, identity_only=True)
+
+    def test_split_bound_materially_prunes_zero_width_rating_intervals(
+        self, monkeypatch
+    ):
+        """Fixed team values should skip scorer work that cannot beat the best."""
+        players = [
+            Player(
+                name=f"Fixed{index}",
+                discord_id=index + 1,
+                glicko_rating=950.0 + index * 113.0 + index**2,
+                glicko_rd=0.0,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+            for index in range(14)
+        ]
+        settings = {
+            "off_role_multiplier": 1.0,
+            "off_role_flat_penalty": 0.0,
+            "role_matchup_delta_weight": 0.0,
+            "exclusion_penalty_weight": 0.0,
+            "rd_priority_weight": 0.0,
+            "recent_match_penalty_weight": 0.0,
+            "rating_spread_divisor": 1_000_000.0,
+        }
+        reference_shuffler = BalancedShuffler(**settings)
+        optimized_shuffler = BalancedShuffler(**settings)
+        _give_shuffler_loose_upper_bound(monkeypatch, reference_shuffler)
+        _give_shuffler_loose_upper_bound(monkeypatch, optimized_shuffler)
+        _disable_split_bound(monkeypatch, reference_shuffler)
+
+        scorer_calls = {
+            id(reference_shuffler): 0,
+            id(optimized_shuffler): 0,
+        }
+        original_scorer = (
+            BalancedShuffler._score_unconstrained_role_assignments
+        )
+
+        def counted_scorer(shuffler, *args, **kwargs):
+            scorer_calls[id(shuffler)] += 1
+            return original_scorer(shuffler, *args, **kwargs)
+
+        # Patch at class scope: the optimized method remains the class's
+        # canonical scorer, so its safety guard stays enabled.
+        monkeypatch.setattr(
+            BalancedShuffler,
+            "_score_unconstrained_role_assignments",
+            counted_scorer,
+        )
+
+        expected = reference_shuffler.shuffle_branch_bound(players)
+        actual = optimized_shuffler.shuffle_branch_bound(players)
+
+        assert _shuffle_result_signature(actual) == _shuffle_result_signature(
+            expected
+        )
+        reference_calls = scorer_calls[id(reference_shuffler)]
+        optimized_calls = scorer_calls[id(optimized_shuffler)]
+        assert optimized_calls * 2 < reference_calls, (
+            f"split bound only reduced scorer calls from "
+            f"{reference_calls} to {optimized_calls}"
+        )
+
+    @pytest.mark.parametrize(
+        "negative_term",
+        ["recent", "role", "avoid", "deal"],
+    )
+    def test_negative_penalty_terms_match_reference_search(
+        self, monkeypatch, negative_term
+    ):
+        """Coarse bounds must fall back when an omitted term can be negative."""
+        players = _seeded_14_player_pool(0x14CE, "Negative")
+        settings = {
+            "off_role_multiplier": 0.75,
+            "off_role_flat_penalty": 110.0,
+            "role_matchup_delta_weight": (
+                -0.6 if negative_term == "role" else 0.7
+            ),
+            "recent_match_penalty_weight": (
+                -450.0 if negative_term == "recent" else 125.0
+            ),
+            "soft_avoid_penalty": (
+                -900.0 if negative_term == "avoid" else 500.0
+            ),
+            "package_deal_penalty": (
+                -900.0 if negative_term == "deal" else 100.0
+            ),
+            "rd_priority_weight": 0.09,
+            "rating_spread_divisor": 20.0,
+        }
+        recent_names = (
+            {player.name for player in players[:8]}
+            if negative_term == "recent"
+            else set()
+        )
+        avoids = (
+            [
+                SimpleNamespace(
+                    avoider_discord_id=players[0].discord_id,
+                    avoided_discord_id=players[1].discord_id,
+                )
+            ]
+            if negative_term == "avoid"
+            else None
+        )
+        deals = (
+            [
+                SimpleNamespace(
+                    buyer_discord_id=players[2].discord_id,
+                    partner_discord_id=players[11].discord_id,
+                )
+            ]
+            if negative_term == "deal"
+            else None
+        )
+        _assert_split_bound_matches_reference(
+            monkeypatch,
+            players,
+            settings,
+            recent_match_names=recent_names,
+            avoids=avoids,
+            deals=deals,
+        )
+
+    def test_split_bound_preserves_empty_assignment_fallback(
+        self, monkeypatch
+    ):
+        """An empty assignment interval must retain the valid greedy fallback."""
+        players = _create_players_with_roles(14)
+        reference_shuffler = BalancedShuffler()
+        optimized_shuffler = BalancedShuffler()
+        monkeypatch.setattr(
+            reference_shuffler,
+            "_get_cached_role_assignments",
+            lambda _players: (),
+        )
+        monkeypatch.setattr(
+            optimized_shuffler,
+            "_get_cached_role_assignments",
+            lambda _players: (),
+        )
+        _disable_split_bound(monkeypatch, reference_shuffler)
+
+        expected = reference_shuffler.shuffle_branch_bound(players)
+        actual = optimized_shuffler.shuffle_branch_bound(players)
+
+        assert _shuffle_result_signature(actual) == _shuffle_result_signature(
+            expected
+        )
+        for team in actual[:2]:
+            assert set(team.ensure_role_assignments()) == {
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+            }
 
     def test_branch_bound_does_not_prune_negative_rd_score(self, monkeypatch):
         players = [
