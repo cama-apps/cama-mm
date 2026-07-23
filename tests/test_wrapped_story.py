@@ -268,6 +268,114 @@ class TestGetPersonalSummaryWrapped:
 
 
 # ===========================================================================
+# Shared wrapped story snapshot
+# ===========================================================================
+
+
+def test_wrapped_story_snapshot_reuses_queries_and_decoded_enrichment():
+    svc, wrapped_repo, player_repo = _build_service()
+    steam_id = 76561198000000001
+    player_repo.get_by_id.return_value = SimpleNamespace(name="TestPlayer")
+    player_repo.get_steam_ids.return_value = [steam_id]
+    wrapped_repo.get_player_rating_change.return_value = 0
+    wrapped_repo.get_month_match_stats.return_value = [
+        {
+            "discord_id": 111,
+            "games_played": 3,
+            "wins": 2,
+            "total_kills": 20,
+            "total_deaths": 10,
+            "total_assists": 30,
+        }
+    ]
+    wrapped_repo.get_month_player_heroes.return_value = [
+        {
+            "discord_id": 111,
+            "hero_id": 1,
+            "picks": 3,
+            "wins": 2,
+            "total_kills": 20,
+            "total_deaths": 10,
+            "total_assists": 30,
+        }
+    ]
+    rows = []
+    for match_id, lane_role, won in (
+        (1, 1, 1),
+        (2, 2, 0),
+        (3, 1, 1),
+    ):
+        rows.append(
+            {
+                "match_id": match_id,
+                "match_date": f"2026-01-0{match_id} 20:00:00",
+                "duration_seconds": 1800 + match_id,
+                "won": won,
+                "hero_id": 1,
+                "kills": match_id,
+                "deaths": 1,
+                "assists": 2,
+                "enrichment_data": json.dumps(
+                    {
+                        "players": [
+                            {
+                                "account_id": steam_id,
+                                "lane_role": lane_role,
+                                "actions_per_min": 100 + match_id,
+                            }
+                        ]
+                    }
+                ),
+            }
+        )
+    wrapped_repo.get_player_year_matches.return_value = rows
+
+    json_loads = MagicMock(wraps=json.loads)
+    json_adapter = SimpleNamespace(
+        loads=json_loads,
+        JSONDecodeError=json.JSONDecodeError,
+    )
+    with patch("services.wrapped_service.json", json_adapter):
+        snapshot = svc.build_wrapped_story_snapshot(111, 2026, guild_id=0)
+        summary = svc.get_personal_summary_wrapped(
+            111,
+            2026,
+            guild_id=0,
+            snapshot=snapshot,
+        )
+        records = svc.get_player_records_wrapped(
+            111,
+            2026,
+            guild_id=0,
+            snapshot=snapshot,
+        )
+        spotlight = svc.get_hero_spotlight_wrapped(
+            111,
+            2026,
+            guild_id=0,
+            snapshot=snapshot,
+        )
+        roles = svc.get_role_breakdown_wrapped(
+            111,
+            2026,
+            guild_id=0,
+            snapshot=snapshot,
+        )
+
+    assert summary is not None
+    assert records is not None
+    assert spotlight is not None
+    assert roles is not None
+    assert roles.lane_freq == {1: 2, 2: 1}
+    assert json_loads.call_count == len(rows)
+    wrapped_repo.get_month_match_stats.assert_called_once()
+    wrapped_repo.get_month_player_heroes.assert_called_once()
+    wrapped_repo.get_player_year_matches.assert_called_once()
+    wrapped_repo.get_month_player_match_details.assert_not_called()
+    player_repo.get_steam_ids.assert_called_once_with(111)
+
+
+# ===========================================================================
 # get_player_wrapped() rating lookup regression
 # ===========================================================================
 
@@ -1060,6 +1168,9 @@ class TestWrappedGamblingData:
             degen_score=embedded_degen,
         )
         pnl_series = [(1, -10), (2, -40)]
+        wrapped_service = MagicMock()
+        snapshot = object()
+        wrapped_service.build_wrapped_story_snapshot.return_value = snapshot
         gambling_stats = MagicMock()
         gambling_stats.get_cumulative_pnl_series.return_value = pnl_series
         gambling_stats.get_player_stats.return_value = player_stats
@@ -1069,7 +1180,7 @@ class TestWrappedGamblingData:
             emoji="❌",
         )
         bot = SimpleNamespace(
-            wrapped_service=MagicMock(),
+            wrapped_service=wrapped_service,
             gambling_stats_service=gambling_stats,
             match_repo=None,
         )
@@ -1090,6 +1201,18 @@ class TestWrappedGamblingData:
         )
         gambling_stats.get_player_stats.assert_called_once_with(111, 42)
         gambling_stats.calculate_degen_score.assert_not_called()
+        wrapped_service.build_wrapped_story_snapshot.assert_called_once_with(
+            111,
+            2026,
+            42,
+        )
+        assert wrapped_service.get_server_wrapped.call_args.kwargs == {"snapshot": snapshot}
+        assert wrapped_service.get_personal_summary_wrapped.call_args.kwargs == {
+            "snapshot": snapshot
+        }
+        assert wrapped_service.get_player_records_wrapped.call_args.kwargs == {"snapshot": snapshot}
+        assert wrapped_service.get_hero_spotlight_wrapped.call_args.kwargs == {"snapshot": snapshot}
+        assert wrapped_service.get_role_breakdown_wrapped.call_args.kwargs == {"snapshot": snapshot}
 
 
 class TestDrawAwardsGrid:
