@@ -978,6 +978,7 @@ class TestSQLQueryService:
         assert "pending_matches" in BLOCKED_TABLES
         assert "guild_config" in BLOCKED_TABLES
         assert "llm_request_attempts" in BLOCKED_TABLES
+        assert "match_bans" in BLOCKED_TABLES
         assert "player_trivia_questions" in BLOCKED_TABLES
         assert "player_trivia_sessions" in BLOCKED_TABLES
 

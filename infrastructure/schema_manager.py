@@ -7,6 +7,8 @@ import logging
 import sqlite3
 import time
 
+from utils.match_bans import extract_match_bans
+
 logger = logging.getLogger("cama_bot.schema")
 
 
@@ -587,6 +589,12 @@ class SchemaManager:
                 "add_route_state_to_tunnels",
                 self._migration_add_route_state_to_tunnels,
             ),
+            # Scout reads normalized bans instead of repeatedly materializing
+            # and decoding the full OpenDota match payload for every player.
+            (
+                "create_match_bans_for_scout",
+                self._migration_create_match_bans_for_scout,
+            ),
         ]
 
     # --- Migrations ---
@@ -717,6 +725,62 @@ class SchemaManager:
     def _migration_add_route_state_to_tunnels(self, cursor) -> None:
         """Persist the active or pending layer route offer."""
         self._add_column_if_not_exists(cursor, "tunnels", "route_state", "TEXT")
+
+    def _migration_create_match_bans_for_scout(self, cursor) -> None:
+        """Normalize OpenDota bans used by the Scout report."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_bans (
+                match_id   INTEGER NOT NULL,
+                ban_index  INTEGER NOT NULL,
+                team       INTEGER NOT NULL CHECK(team IN (0, 1)),
+                hero_id    INTEGER NOT NULL CHECK(hero_id > 0),
+                PRIMARY KEY (match_id, ban_index),
+                FOREIGN KEY (match_id) REFERENCES matches(match_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_match_bans_match_team_hero
+            ON match_bans(match_id, team, hero_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_match_participants_scout
+            ON match_participants(
+                guild_id, discord_id, match_id, team_number
+            )
+            """
+        )
+
+        # Stream the one-time backfill so database size, rather than available
+        # process memory, determines how much history can be migrated.
+        rows = cursor.connection.execute(
+            """
+            SELECT match_id, enrichment_data
+            FROM matches
+            WHERE enrichment_data IS NOT NULL
+            """
+        )
+        for row in rows:
+            bans = extract_match_bans(row["enrichment_data"])
+            if not bans:
+                continue
+            cursor.executemany(
+                """
+                INSERT OR REPLACE INTO match_bans (
+                    match_id, ban_index, team, hero_id
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (row["match_id"], ban_index, team, hero_id)
+                    for ban_index, team, hero_id in bans
+                ],
+            )
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
         """Idempotency claim for the post-core bonus credits.
