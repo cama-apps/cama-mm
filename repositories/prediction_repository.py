@@ -323,6 +323,97 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 "yes_bids": bids,
             }
 
+    def get_market_snapshot(
+        self,
+        prediction_id: int,
+        viewer_id: int | None = None,
+        recent_limit: int = 5,
+    ) -> dict | None:
+        """Read all data needed to render a market from one SQLite snapshot."""
+        with self.connection() as conn:
+            # Python's sqlite3 driver does not start a transaction for SELECTs.
+            # Begin one explicitly so every component reflects the same market
+            # state if a fill commits while the embed is being assembled.
+            cursor = conn.cursor()
+            cursor.execute("BEGIN")
+            cursor.execute(
+                "SELECT * FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            prediction_row = cursor.fetchone()
+            if prediction_row is None:
+                return None
+            prediction = dict(prediction_row)
+
+            cursor.execute(
+                """
+                SELECT side, price, remaining_size
+                FROM prediction_levels
+                WHERE prediction_id = ? AND remaining_size > 0
+                """,
+                (prediction_id,),
+            )
+            asks: list[tuple[int, int]] = []
+            bids: list[tuple[int, int]] = []
+            for row in cursor.fetchall():
+                level = (int(row["price"]), int(row["remaining_size"]))
+                if row["side"] == "yes_ask":
+                    asks.append(level)
+                elif row["side"] == "yes_bid":
+                    bids.append(level)
+            asks.sort(key=lambda level: level[0])
+            bids.sort(key=lambda level: level[0], reverse=True)
+
+            cursor.execute(
+                """
+                SELECT discord_id, action, contracts, jopacoins,
+                       vwap_x100, trade_time
+                FROM prediction_trades
+                WHERE prediction_id = ?
+                ORDER BY trade_id DESC
+                LIMIT ?
+                """,
+                (prediction_id, recent_limit),
+            )
+            recent_trades = [dict(row) for row in cursor.fetchall()]
+
+            viewer_position = None
+            if viewer_id is not None:
+                yes_c, yes_t, no_c, no_t = self._read_position(
+                    cursor, prediction_id, viewer_id
+                )
+                if yes_c != 0 or no_c != 0:
+                    viewer_position = {
+                        "prediction_id": prediction_id,
+                        "discord_id": viewer_id,
+                        "yes_contracts": yes_c,
+                        "yes_cost_basis_total": yes_t,
+                        "no_contracts": no_c,
+                        "no_cost_basis_total": no_t,
+                    }
+
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(contracts), 0) AS total_volume
+                FROM prediction_trades
+                WHERE prediction_id = ? AND trade_time >= ?
+                """,
+                (prediction_id, prediction.get("last_refresh_at") or 0),
+            )
+            total_volume = int(cursor.fetchone()["total_volume"])
+
+            return {
+                **prediction,
+                "book": {
+                    "current_price": prediction.get("current_price"),
+                    "yes_asks": asks,
+                    "yes_bids": bids,
+                },
+                "recent_trades": recent_trades,
+                "viewer_position": viewer_position,
+                "volume_since_refresh": total_volume,
+            }
+
     def buy_contracts_atomic(
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict:

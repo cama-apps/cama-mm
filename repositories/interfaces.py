@@ -985,6 +985,20 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
+    def get_market_snapshot(
+        self,
+        prediction_id: int,
+        viewer_id: int | None = None,
+        recent_limit: int = 5,
+    ) -> dict | None:
+        """Return the prediction, book, tape, viewer position, and current volume.
+
+        All components are read from one SQLite snapshot. ``viewer_position``
+        is ``None`` when no viewer is requested or both holdings are zero.
+        """
+        ...
+
+    @abstractmethod
     def buy_contracts_atomic(
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict:
