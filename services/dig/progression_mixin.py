@@ -51,7 +51,7 @@ class ProgressionMixin:
     attributes and helpers that the other mixins and the constructor provide.
     """
     def _apply_mana_yield_variance(
-        self, discord_id: int, guild_id, base_jc: int
+        self, discord_id: int, guild_id, base_jc: int, *, effects=None,
     ) -> int:
         """Apply Mountain variance + Forest steady bonus to a base loot roll.
 
@@ -61,7 +61,9 @@ class ProgressionMixin:
         """
         if base_jc <= 0:
             return base_jc
-        effects = self._mana_effects_or_none(discord_id, guild_id)
+        effects = self._mana_effects_or_none(
+            discord_id, guild_id, effects=effects,
+        )
         if effects is None:
             return base_jc
 
@@ -97,7 +99,7 @@ class ProgressionMixin:
         return 0
 
     def _apply_mana_yield_taxes(
-        self, discord_id: int, guild_id, total_jc: int
+        self, discord_id: int, guild_id, total_jc: int, *, effects=None,
     ) -> int:
         """Apply Plains tithe + Blue tax to the player's full dig payout.
 
@@ -111,7 +113,9 @@ class ProgressionMixin:
         if total_jc <= 0:
             return total_jc
         total_jc = self._apply_daily_economy_reward(guild_id, total_jc)
-        effects = self._mana_effects_or_none(discord_id, guild_id)
+        effects = self._mana_effects_or_none(
+            discord_id, guild_id, effects=effects,
+        )
         if effects is None:
             return total_jc
 
@@ -147,15 +151,18 @@ class ProgressionMixin:
         return max(0, modified)
 
     def _apply_mana_paid_cost_modifier(
-        self, discord_id: int, guild_id, base_cost: int
+        self, discord_id: int, guild_id, base_cost: int, *, effects=None,
     ) -> int:
         """Silently apply the player's mana paid-cost modifier (Mountain -5%)."""
-        if self.mana_effects_service is None or base_cost <= 0:
+        if base_cost <= 0:
             return base_cost
-        try:
-            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
-        except Exception:
-            return base_cost
+        if effects is None:
+            if self.mana_effects_service is None:
+                return base_cost
+            try:
+                effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+            except Exception:
+                return base_cost
         if effects.color is None or effects.dig_paid_cost_modifier_pct == 0:
             return base_cost
         adjusted = int(base_cost * (1.0 + effects.dig_paid_cost_modifier_pct))
@@ -170,9 +177,11 @@ class ProgressionMixin:
         effects=None,
     ) -> int:
         """Silently apply the player's mana cooldown reduction (Forest -30s)."""
-        if self.mana_effects_service is None or cooldown_seconds <= 0:
+        if cooldown_seconds <= 0:
             return cooldown_seconds
         if effects is None:
+            if self.mana_effects_service is None:
+                return cooldown_seconds
             try:
                 effects = self.mana_effects_service.get_effects(discord_id, guild_id)
             except Exception:
@@ -182,18 +191,19 @@ class ProgressionMixin:
         return max(0, cooldown_seconds - effects.dig_cooldown_reduction_seconds)
 
     def _apply_mana_hazard_modifier(
-        self, discord_id: int, guild_id, base_chance: float
+        self, discord_id: int, guild_id, base_chance: float, *, effects=None,
     ) -> float:
         """Silently shift cave-in probability by the player's mana modifier.
 
         Forest reduces, Mountain/Black raise. Clamped to [0, 1].
         """
-        if self.mana_effects_service is None:
-            return base_chance
-        try:
-            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
-        except Exception:
-            return base_chance
+        if effects is None:
+            if self.mana_effects_service is None:
+                return base_chance
+            try:
+                effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+            except Exception:
+                return base_chance
         if effects.color is None or effects.dig_hazard_modifier == 0:
             return base_chance
         return max(0.0, min(1.0, base_chance + effects.dig_hazard_modifier))

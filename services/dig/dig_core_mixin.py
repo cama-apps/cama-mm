@@ -85,13 +85,25 @@ class DigCoreMixin:
             effects=mana_effects,
         )
 
-    def _get_cooldown_remaining(self, tunnel: dict, *, now: int | None = None) -> int:
+    def _get_cooldown_remaining(
+        self,
+        tunnel: dict,
+        *,
+        now: int | None = None,
+        mana_effects=None,
+    ) -> int:
         """Return seconds remaining on the effective free-dig cooldown."""
         if tunnel.get("last_dig_at") is None:
             return 0
         current_time = int(time.time()) if now is None else int(now)
         elapsed = current_time - int(tunnel["last_dig_at"])
-        return max(0, self._get_free_dig_cooldown_duration(tunnel) - elapsed)
+        return max(
+            0,
+            self._get_free_dig_cooldown_duration(
+                tunnel, mana_effects=mana_effects,
+            )
+            - elapsed,
+        )
 
     def get_free_dig_ready_at(
         self, discord_id: int, guild_id, *, now: int | None = None,

@@ -207,6 +207,23 @@ def test_get_weather_combo_modifiers_sunny_white_yield(effects_service_factory):
     assert out["yield_mult"] == 1.10
 
 
+def test_get_weather_combo_modifiers_reuses_supplied_snapshot(
+    effects_service_factory, monkeypatch,
+):
+    svc = effects_service_factory("White", "Plains")
+    effects = svc.get_effects(1, 99)
+    expected = svc.get_weather_combo_modifiers(1, 99, "sunny")
+    monkeypatch.setattr(
+        svc,
+        "get_effects",
+        lambda *args, **kwargs: pytest.fail("snapshot path reloaded effects"),
+    )
+
+    assert svc.get_weather_combo_modifiers(
+        1, 99, "sunny", effects=effects,
+    ) == expected
+
+
 def test_get_weather_combo_modifiers_mismatch_no_op(effects_service_factory):
     """Storm + White: not Blue, so no combo applies."""
     svc = effects_service_factory("White", "Plains")

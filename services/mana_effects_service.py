@@ -434,7 +434,12 @@ class ManaEffectsService:
         }
 
     def get_weather_combo_modifiers(
-        self, discord_id: int, guild_id: int | None, weather: str | None
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        weather: str | None,
+        *,
+        effects: ManaEffects | None = None,
     ) -> dict:
         """Return any active weather × mana combo modifiers for ``weather``.
 
@@ -445,7 +450,8 @@ class ManaEffectsService:
         {cooldown_mult, yield_mult, hazard_mult, dynamite_extra_chains,
          recovery_mult, applied: bool}
         """
-        effects = self.get_effects(discord_id, guild_id)
+        if effects is None:
+            effects = self.get_effects(discord_id, guild_id)
         result = {
             "cooldown_mult": 1.0,
             "yield_mult": 1.0,
