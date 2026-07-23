@@ -571,6 +571,10 @@ class SchemaManager:
                 self._migration_add_dig_action_history_indexes,
             ),
             (
+                "add_dig_action_type_history_index",
+                self._migration_add_dig_action_type_history_index,
+            ),
+            (
                 "add_tip_guild_lookup_indexes",
                 self._migration_add_tip_guild_lookup_indexes,
             ),
@@ -670,6 +674,15 @@ class SchemaManager:
         # action pay for two redundant index writes.
         cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_actor")
         cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_target")
+
+    def _migration_add_dig_action_type_history_index(self, cursor) -> None:
+        """Cover guild action-type windows and their actor projections."""
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_actions_guild_type_created_actor
+            ON dig_actions(guild_id, action_type, created_at DESC, actor_id)
+            """
+        )
 
     def _migration_add_tip_guild_lookup_indexes(self, cursor) -> None:
         """Cover guild-scoped tip histories and aggregate scans."""
@@ -2941,6 +2954,7 @@ class SchemaManager:
             )
             """
         )
+        self._migration_add_dig_action_type_history_index(cursor)
         cursor.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_dig_actions_guild_actor
