@@ -410,6 +410,7 @@ class DigCoreMixin:
         depth_before: int,
         band: str,
         block_loss: int,
+        block_loss_cap: int | None = None,
         catastrophic: bool,
         balance: int,
         injury_bonus: int,
@@ -453,7 +454,12 @@ class DigCoreMixin:
                     ((max(0, depth_before - 1)) // CAVE_IN_CATASTROPHIC_MILESTONE_STEP)
                     * CAVE_IN_CATASTROPHIC_MILESTONE_STEP,
                 )
-                new_depth = milestone
+                capped_depth = (
+                    depth_before - max(0, int(block_loss_cap))
+                    if block_loss_cap is not None
+                    else milestone
+                )
+                new_depth = max(milestone, capped_depth)
                 tunnel_updates["depth"] = new_depth
             tunnel_updates["temp_buffs"] = None  # nukes any second_wind set above
 
@@ -679,20 +685,31 @@ class DigCoreMixin:
             block_min, block_max = CAVE_IN_BLOCK_LOSS_RANGES[band]
             block_loss = random.randint(block_min, block_max)
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
-            if weather_loss_cap is not None:
-                block_loss = min(block_loss, int(weather_loss_cap))
             block_loss += int(p["weather_fx"].get("cave_in_loss_bonus", 0))
             block_loss += int(p["mutation_fx"].get("cave_in_loss_bonus", 0))
+            block_loss = self._apply_route_cave_in_loss(
+                block_loss,
+                p.get("route_effects", {}),
+                weather_loss_cap,
+            )
             steady_hands_reduction = p.get("perk_fx", {}).get("cave_in_loss_reduction", 0.0)
             if steady_hands_reduction > 0:
                 block_loss = max(0, int(block_loss * (1.0 - steady_hands_reduction)))
             # Relic: Patient Stone — -30% depth lost
             if self._has_relic(discord_id, guild_id, "patient_stone"):
                 block_loss = max(0, int(block_loss * 0.7))
-            # Reinforcement: cap cave-in block_loss while the 48h window is active
+            # Reinforcement remains the final loss cap after player reductions.
             reinforced_until_for_cap = tunnel.get("reinforced_until") or 0
-            if now < int(reinforced_until_for_cap):
+            reinforcement_loss_cap = (
+                8 if now < int(reinforced_until_for_cap) else None
+            )
+            if reinforcement_loss_cap is not None:
                 block_loss = min(block_loss, 8)
+            catastrophic_loss_cap = self._effective_cave_in_loss_cap(
+                p.get("route_effects", {}),
+                weather_loss_cap,
+                reinforcement_loss_cap,
+            )
             block_loss_pre_save = block_loss
             grappling_hook_charges = int(p.get("grappling_hook_charges") or 0)
             grappling_absorbed = False
@@ -761,6 +778,7 @@ class DigCoreMixin:
                     depth_before=depth_before,
                     band=band,
                     block_loss=block_loss,
+                    block_loss_cap=catastrophic_loss_cap,
                     catastrophic=catastrophic,
                     balance=balance,
                     injury_bonus=injury_bonus,
@@ -824,6 +842,11 @@ class DigCoreMixin:
         base_max += int(stat_effects.get("advance_max_bonus", 0))
         if "the_endless" in p["perks"] and layer_name == "The Hollow" and base_max <= 1:
             base_max = 2
+        base_max = max(
+            base_min,
+            base_max
+            - int(p.get("route_effects", {}).get("advance_max_penalty", 0)),
+        )
         base_max = max(base_min, base_max - int(p["mutation_fx"].get("advance_max_penalty", 0)))
         if p["corruption"] and p["corruption"]["effects"].get("min_advance_roll"):
             roll1 = random.randint(base_min, base_max)
@@ -833,6 +856,7 @@ class DigCoreMixin:
             advance = random.randint(base_min, base_max)
 
         advance += p["pickaxe_advance_bonus"] + p["mole_claws_bonus"] + p["buff_advance_bonus"]
+        advance += int(p.get("route_effects", {}).get("advance_bonus", 0))
         # Relic: Pathfinder's Spur — +1 advance in the deep layers (depth 150+).
         if depth_before >= 150 and self._has_relic(discord_id, guild_id, "pathfinders_spur"):
             advance += 1
@@ -982,7 +1006,10 @@ class DigCoreMixin:
         if not (p["corruption"] and p["corruption"]["effects"].get("skip_artifact")):
             artifact = self.roll_artifact(
                 discord_id, guild_id, new_depth,
-                extra_rate_mod=p["weather_fx"].get("artifact_multiplier", 1.0),
+                extra_rate_mod=(
+                    p["weather_fx"].get("artifact_multiplier", 1.0)
+                    * p.get("route_effects", {}).get("artifact_multiplier", 1.0)
+                ),
             )
 
         # Event
@@ -1164,6 +1191,10 @@ class DigCoreMixin:
             # Enforce game-rule constraints
             grappling_hook_charges = int(p.get("grappling_hook_charges") or 0)
             grappling_absorbed = False
+            block_loss = self._apply_route_cave_in_loss(
+                block_loss,
+                p.get("route_effects", {}),
+            )
             if grappling_hook_charges > 0:
                 block_loss = 0
                 grappling_absorbed = True
@@ -1173,11 +1204,9 @@ class DigCoreMixin:
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
             if weather_loss_cap is not None:
                 block_loss = min(block_loss, int(weather_loss_cap))
-            # Reinforcement: cap cave-in block_loss while the 48h window is active
             reinforced_until_for_cap = tunnel.get("reinforced_until") or 0
             if now < int(reinforced_until_for_cap):
                 block_loss = min(block_loss, 8)
-
             new_depth = max(0, depth_before - block_loss)
 
             if p["thick_skin_saved"]:
@@ -1365,7 +1394,10 @@ class DigCoreMixin:
             if not (p["corruption"] and p["corruption"]["effects"].get("skip_artifact")):
                 artifact = self.roll_artifact(
                     discord_id, guild_id, new_depth,
-                    extra_rate_mod=p["weather_fx"].get("artifact_multiplier", 1.0),
+                    extra_rate_mod=(
+                        p["weather_fx"].get("artifact_multiplier", 1.0)
+                        * p.get("route_effects", {}).get("artifact_multiplier", 1.0)
+                    ),
                 )
 
             # Event from DM (Sonar Pulse skip can suppress it)

@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING
 import discord
 
 from commands.dig_helpers._shared import _wrap
+from commands.dig_helpers.route_views import (
+    RouteChoiceView,
+    add_route_choice_fields,
+    get_route_choice,
+)
 from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -288,6 +293,17 @@ class BossWagerModal(discord.ui.Modal):
                     inline=False,
                 )
 
+            route_choice = get_route_choice(self.result)
+            route_view = None
+            if route_choice is not None:
+                add_route_choice_fields(embed, route_choice)
+                route_view = RouteChoiceView(
+                    self.dig_service,
+                    self.user_id,
+                    self.guild_id,
+                    route_choice,
+                )
+
             # Try to load boss fight result art — prefer the locked boss_id,
             # fall back to the depth boundary for the grandfathered slug.
             boss_file = None
@@ -307,9 +323,26 @@ class BossWagerModal(discord.ui.Modal):
 
             if boss_file:
                 embed.set_image(url=f"attachment://{boss_file.filename}")
-                await interaction.followup.send(embed=embed, file=boss_file)
+                if route_view is not None:
+                    msg = await interaction.followup.send(
+                        embed=embed,
+                        file=boss_file,
+                        view=route_view,
+                        wait=True,
+                    )
+                    route_view.message = msg
+                else:
+                    await interaction.followup.send(embed=embed, file=boss_file)
             else:
-                await interaction.followup.send(embed=embed)
+                if route_view is not None:
+                    msg = await interaction.followup.send(
+                        embed=embed,
+                        view=route_view,
+                        wait=True,
+                    )
+                    route_view.message = msg
+                else:
+                    await interaction.followup.send(embed=embed)
 
             await _send_boss_victory_neon(
                 interaction, result=self.result, user_id=self.user_id, guild_id=self.guild_id
@@ -582,7 +615,23 @@ async def _resolve_phase_fight_without_modal(
         ),
         inline=False,
     )
-    await interaction.followup.send(embed=embed)
+    route_choice = get_route_choice(result)
+    if route_choice is not None:
+        add_route_choice_fields(embed, route_choice)
+        route_view = RouteChoiceView(
+            dig_service,
+            user_id,
+            guild_id,
+            route_choice,
+        )
+        msg = await interaction.followup.send(
+            embed=embed,
+            view=route_view,
+            wait=True,
+        )
+        route_view.message = msg
+    else:
+        await interaction.followup.send(embed=embed)
     await _send_boss_victory_neon(
         interaction, result=result, user_id=user_id, guild_id=guild_id
     )
@@ -827,6 +876,9 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
                     value="\n".join(f"• {s}" for s in (relic.get("stats") or [])) or "—",
                     inline=False,
                 )
+    route_choice = get_route_choice(result)
+    if route_choice is not None:
+        add_route_choice_fields(embed, route_choice)
     return embed
 
 
@@ -995,12 +1047,29 @@ class BossDuelView(discord.ui.View):
         embed = _build_boss_fight_result_embed(
             result=result, risk_tier=self.risk_tier, amount=self.wager,
         )
+        route_choice = get_route_choice(result)
+        route_view = (
+            RouteChoiceView(
+                self.dig_service,
+                self.user_id,
+                self.guild_id,
+                route_choice,
+            )
+            if route_choice is not None
+            else None
+        )
         boss_file = await _load_boss_result_art(result)
         if boss_file:
             embed.set_image(url=f"attachment://{boss_file.filename}")
-            await self._edit_message(embed=embed, view=None, attachments=[boss_file])
+            await self._edit_message(
+                embed=embed,
+                view=route_view,
+                attachments=[boss_file],
+            )
         else:
-            await self._edit_message(embed=embed, view=None)
+            await self._edit_message(embed=embed, view=route_view)
+        if route_view is not None:
+            route_view.message = self.message
         self.stop()
 
     async def _edit_message(self, **kwargs) -> None:

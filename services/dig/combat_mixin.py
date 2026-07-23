@@ -13,6 +13,7 @@ import random
 import time
 
 import services.dig_service as dig_service
+from repositories.dig_repository import TunnelStateConflictError
 from services.dig._common import (
     _luminosity_combat_penalty,
 )
@@ -569,11 +570,36 @@ class BossCombatMixin:
             merged = {"status": entry if isinstance(entry, str) else "active"}
         merged["boss_id"] = boss.boss_id
         progress[str(depth)] = merged
-        self.dig_repo.update_tunnel(
-            discord_id, guild_id,
-            boss_progress=json.dumps(progress),
-        )
-        tunnel["boss_progress"] = json.dumps(progress)
+        encoded_progress = json.dumps(progress)
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id,
+                guild_id,
+                tunnel_updates={"boss_progress": encoded_progress},
+                require_tunnel_state={"boss_progress": raw},
+            )
+        except TunnelStateConflictError:
+            current = self.dig_repo.get_tunnel(discord_id, guild_id)
+            if current is None:
+                raise
+            tunnel.clear()
+            tunnel.update(dict(current))
+            current_progress = self._get_boss_progress_entries(tunnel)
+            current_entry = current_progress.get(str(depth))
+            current_boss_id = (
+                current_entry.get("boss_id")
+                if isinstance(current_entry, dict)
+                else None
+            )
+            if current_boss_id in _BOSSES_BY_ID:
+                return _BOSSES_BY_ID[current_boss_id]
+            return self._ensure_boss_locked(
+                discord_id,
+                guild_id,
+                tunnel,
+                depth,
+            )
+        tunnel["boss_progress"] = encoded_progress
         return boss
 
     def _get_cheers(self, tunnel: dict) -> list[dict]:
@@ -990,17 +1016,27 @@ class BossCombatMixin:
             # ``random.random`` to extreme values.
             won = False
 
-        # Wear-and-tear: every equipped gear piece loses 1 durability per
-        # fight (win or lose). Anything that just hit zero gets reported
-        # back so the embed can announce it.
-        broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
         gear_broken_names: list[str] = []
-        if broken_ids:
-            name_by_id: dict[int, str] = {}
-            for piece in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet):
-                if piece is not None:
-                    name_by_id[piece.id] = piece.tier_def.name
-            gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+        gear_name_by_id: dict[int, str] = {}
+
+        def tick_fight_gear() -> None:
+            """Apply this fight's base wear exactly once."""
+            nonlocal gear_broken_names, gear_name_by_id
+            broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+            gear_name_by_id = {
+                piece.id: piece.tier_def.name
+                for piece in (
+                    loadout.weapon,
+                    loadout.armor,
+                    loadout.boots,
+                    loadout.amulet,
+                )
+                if piece is not None
+            }
+            gear_broken_names = [
+                gear_name_by_id.get(i, "a piece of gear")
+                for i in broken_ids
+            ]
 
         boss_name = BOSS_NAMES.get(at_boss, "Unknown Boss")
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
@@ -1034,6 +1070,31 @@ class BossCombatMixin:
             )
 
             if needs_phase2 or needs_phase3:
+                resolved_progress = boss_progress
+                phase_claim = self._load_boss_outcome_claim(
+                    discord_id,
+                    guild_id,
+                    at_boss,
+                    active_boss_id,
+                )
+                if phase_claim is None:
+                    return self._boss_resolution_conflict_result(discord_id, guild_id)
+                tunnel, fresh_progress, phase_guard = phase_claim
+                fresh_progress = self._preserve_consumed_phase_event(
+                    fresh_progress,
+                    resolved_progress,
+                    at_boss,
+                )
+                fresh_entry = fresh_progress.get(str(at_boss), "active")
+                fresh_status = (
+                    fresh_entry.get("status", "active")
+                    if isinstance(fresh_entry, dict)
+                    else fresh_entry
+                )
+                if fresh_status != current_status:
+                    return self._boss_resolution_conflict_result(discord_id, guild_id)
+                boss_progress = fresh_progress
+                current_entry = fresh_entry
                 # Phase transition — boss transforms, fight again. Tunnel
                 # update + audit log commit together via atomic helper.
                 next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
@@ -1060,21 +1121,30 @@ class BossCombatMixin:
                         "status": next_status,
                         "pending_phase_event_id": phase_event.id,
                     }
-                self.dig_repo.atomic_tunnel_balance_update(
-                    discord_id, guild_id,
-                    tunnel_updates={
-                        "boss_progress": json.dumps(boss_progress),
-                        "boss_attempts": attempts,
-                        "last_dig_at": now,
-                    },
-                    log_detail={
-                        "boundary": at_boss, "won": True, "risk": risk_tier,
-                        "phase": next_phase_num - 1, "wager": wager, "rounds": round_log,
-                    },
-                    log_action_type="boss_fight",
-                )
+                try:
+                    self.dig_repo.atomic_tunnel_balance_update(
+                        discord_id, guild_id,
+                        tunnel_updates={
+                            "boss_progress": json.dumps(boss_progress),
+                            "boss_attempts": attempts,
+                            "last_dig_at": now,
+                        },
+                        require_tunnel_state=phase_guard,
+                        log_detail={
+                            "boundary": at_boss, "won": True, "risk": risk_tier,
+                            "phase": next_phase_num - 1, "wager": wager,
+                            "rounds": round_log,
+                        },
+                        log_action_type="boss_fight",
+                    )
+                except TunnelStateConflictError:
+                    return self._boss_resolution_conflict_result(
+                        discord_id,
+                        guild_id,
+                    )
 
                 p_dialogue = phase_def.dialogue[min(attempts - 1, len(phase_def.dialogue) - 1)]
+                tick_fight_gear()
 
                 return self._ok(
                     won=True,
@@ -1101,6 +1171,27 @@ class BossCombatMixin:
                 )
 
             # Full victory (or phase 2 already cleared)
+            resolved_progress = boss_progress
+            victory_claim = self._load_boss_outcome_claim(
+                discord_id,
+                guild_id,
+                at_boss,
+                active_boss_id,
+            )
+            if victory_claim is None:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
+            tunnel, boss_progress, boss_victory_guard = victory_claim
+            boss_progress = self._preserve_consumed_phase_event(
+                boss_progress,
+                resolved_progress,
+                at_boss,
+            )
+            current_entry = boss_progress.get(str(at_boss), "active")
+            current_status = (
+                current_entry.get("status", "active")
+                if isinstance(current_entry, dict)
+                else current_entry
+            )
             new_depth = at_boss
             # Persist outcome for future dialogue picks. close_win signals when
             # the player just barely won — the boss responds differently.
@@ -1128,6 +1219,14 @@ class BossCombatMixin:
                 "cheer_data": None,  # Clear cheers
                 "last_dig_at": now,
             }
+            route_offer = self._build_route_offer_state(tunnel, at_boss)
+            route_choice = None
+            if route_offer is not None:
+                encoded_route_offer = self._serialize_route_state(route_offer)
+                tunnel_updates["route_state"] = encoded_route_offer
+                route_choice = self._route_status_from_tunnel({
+                    "route_state": encoded_route_offer,
+                })
             stat_award_updates = self._boss_stat_point_award_updates(tunnel, at_boss)
             stat_point_awarded = stat_award_updates is not None
             if stat_award_updates is not None:
@@ -1158,28 +1257,33 @@ class BossCombatMixin:
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
             # without clearing the boss (or vice versa).
-            self.dig_repo.atomic_boss_full_victory(
-                discord_id=discord_id,
-                guild_id=guild_id,
-                jc_delta=payout_delta,
-                tunnel_updates=tunnel_updates,
-                boss_echo_boss_id=active_boss_id,
-                boss_echo_depth=at_boss,
-                boss_echo_window_seconds=24 * 3600,
-                log_detail={
-                    "boundary": at_boss, "won": True, "risk": risk_tier,
-                    "wager": wager, "jc_delta": payout_delta,
-                    "gross_jc": gross_base_reward,
-                    "gross_payout": gross_payout,
-                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
-                    "scaled_base_jc": scaled_base_reward,
-                    "wager_profit": wager_profit,
-                    "stat_point_awarded": stat_point_awarded,
-                    "echo_applied": echo_applied,
-                    "rounds": round_log,
-                },
-            )
+            try:
+                self.dig_repo.atomic_boss_full_victory(
+                    discord_id=discord_id,
+                    guild_id=guild_id,
+                    jc_delta=payout_delta,
+                    tunnel_updates=tunnel_updates,
+                    require_tunnel_state=boss_victory_guard,
+                    boss_echo_boss_id=active_boss_id,
+                    boss_echo_depth=at_boss,
+                    boss_echo_window_seconds=24 * 3600,
+                    log_detail={
+                        "boundary": at_boss, "won": True, "risk": risk_tier,
+                        "wager": wager, "jc_delta": payout_delta,
+                        "gross_jc": gross_base_reward,
+                        "gross_payout": gross_payout,
+                        "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                        "scaled_base_jc": scaled_base_reward,
+                        "wager_profit": wager_profit,
+                        "stat_point_awarded": stat_point_awarded,
+                        "echo_applied": echo_applied,
+                        "rounds": round_log,
+                    },
+                )
+            except TunnelStateConflictError:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
 
+            tick_fight_gear()
             defeat_msg = self._pick_boss_outcome_line(
                 boundary=at_boss, boss_name=boss_name, won=True,
             )
@@ -1216,8 +1320,45 @@ class BossCombatMixin:
                 gear_drop=gear_drop,
                 prestige_relic_drop=prestige_relic_drop,
                 luminosity_display=self._luminosity_combat_display(tunnel),
+                route_choice=route_choice,
             )
         else:
+            resolved_progress = boss_progress
+            expected_entry = boss_progress.get(str(at_boss), "active")
+            expected_status = (
+                expected_entry.get("status", "active")
+                if isinstance(expected_entry, dict)
+                else expected_entry
+            )
+            loss_claim = self._load_boss_outcome_claim(
+                discord_id,
+                guild_id,
+                at_boss,
+                active_boss_id,
+            )
+            if loss_claim is None:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
+            tunnel, fresh_progress, loss_guard = loss_claim
+            fresh_progress = self._preserve_consumed_phase_event(
+                fresh_progress,
+                resolved_progress,
+                at_boss,
+            )
+            fresh_entry = fresh_progress.get(str(at_boss), "active")
+            fresh_status = (
+                fresh_entry.get("status", "active")
+                if isinstance(fresh_entry, dict)
+                else fresh_entry
+            )
+            if fresh_status != expected_status:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
+            boss_progress = fresh_progress
+            depth = int(tunnel.get("depth") or 0)
+            active_prep = (
+                fresh_entry.get("active_prep")
+                if isinstance(fresh_entry, dict)
+                else None
+            )
             knockback = random.randint(BOSS_LOSS_KNOCKBACK_MIN, BOSS_LOSS_KNOCKBACK_MAX)
             knockback, rescue_line_used = self._apply_boss_prep_loss(
                 knockback,
@@ -1235,16 +1376,6 @@ class BossCombatMixin:
 
             # Loss is harsher on gear — an extra durability tick beyond the
             # per-fight tick above.
-            name_by_id = {
-                p.id: p.tier_def.name
-                for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
-                if p is not None
-            }
-            if not rescue_line_used:
-                for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
-                    for i in self.dig_repo.tick_gear_durability(discord_id, guild_id):
-                        gear_broken_names.append(name_by_id.get(i, "a piece of gear"))
-
             # Persist post-fight boss HP so soften-and-retreat strategies work.
             # Mutates boss_progress in place to a dict with hp_remaining/last_engaged_at.
             self._persist_boss_hp_after_fight(
@@ -1260,23 +1391,39 @@ class BossCombatMixin:
             # Tunnel knockback + wager forfeit + audit log commit together.
             # The old flow could forfeit the wager without recording the
             # knockback (or vice versa) on a crash.
-            self.dig_repo.atomic_tunnel_balance_update(
-                discord_id, guild_id,
-                balance_delta=jc_delta,
-                tunnel_updates={
-                    "depth": new_depth,
-                    "boss_progress": json.dumps(boss_progress),
-                    "boss_attempts": attempts,
-                    "cheer_data": None,     # clear cheers on defeat
-                    "last_dig_at": now + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS,
-                },
-                log_detail={
-                    "boundary": at_boss, "won": False, "risk": risk_tier,
-                    "wager": wager, "knockback": knockback,
-                    "rounds": round_log, "boss_hp_remaining": max(0, boss_hp),
-                },
-                log_action_type="boss_fight",
-            )
+            try:
+                self.dig_repo.atomic_tunnel_balance_update(
+                    discord_id, guild_id,
+                    balance_delta=jc_delta,
+                    tunnel_updates={
+                        "depth": new_depth,
+                        "boss_progress": json.dumps(boss_progress),
+                        "boss_attempts": attempts,
+                        "cheer_data": None,     # clear cheers on defeat
+                        "last_dig_at": now + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS,
+                    },
+                    require_tunnel_state=loss_guard,
+                    log_detail={
+                        "boundary": at_boss, "won": False, "risk": risk_tier,
+                        "wager": wager, "knockback": knockback,
+                        "rounds": round_log,
+                        "boss_hp_remaining": max(0, boss_hp),
+                    },
+                    log_action_type="boss_fight",
+                )
+            except TunnelStateConflictError:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
+
+            tick_fight_gear()
+            if not rescue_line_used:
+                for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+                    for gear_id in self.dig_repo.tick_gear_durability(
+                        discord_id,
+                        guild_id,
+                    ):
+                        gear_broken_names.append(
+                            gear_name_by_id.get(gear_id, "a piece of gear")
+                        )
 
             soften_line = None
             chipped = starting_boss_hp - max(0, int(boss_hp))
@@ -2242,18 +2389,102 @@ class BossCombatMixin:
         canonical.update(stored)
         return canonical
 
+    def _load_boss_outcome_claim(
+        self,
+        discord_id: int,
+        guild_id,
+        boundary: int,
+        expected_boss_id: str | None = None,
+    ) -> tuple[dict, dict, dict] | None:
+        """Load the exact unfinished boss state one outcome may claim."""
+        current = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if current is None:
+            return None
+        tunnel = dict(current)
+        boss_progress = self._get_boss_progress_entries(tunnel)
+        entry = boss_progress.get(str(boundary))
+        persisted_boss_id = (
+            entry.get("boss_id") if isinstance(entry, dict) else None
+        )
+        if expected_boss_id and persisted_boss_id != expected_boss_id:
+            return None
+        if self._at_boss_boundary(
+            int(tunnel.get("depth") or 0),
+            boss_progress,
+        ) != boundary:
+            return None
+        return (
+            tunnel,
+            boss_progress,
+            {
+                "depth": tunnel.get("depth"),
+                "boss_progress": tunnel.get("boss_progress"),
+                "stinger_curse": tunnel.get("stinger_curse"),
+            },
+        )
+
+    @staticmethod
+    def _preserve_consumed_phase_event(
+        fresh_progress: dict,
+        resolved_progress: dict,
+        boundary: int,
+    ) -> dict:
+        """Keep a one-shot phase event consumed by the fight being resolved."""
+        fresh_entry = fresh_progress.get(str(boundary))
+        resolved_entry = resolved_progress.get(str(boundary))
+        if (
+            isinstance(fresh_entry, dict)
+            and isinstance(resolved_entry, dict)
+            and "pending_phase_event_id" in fresh_entry
+            and "pending_phase_event_id" not in resolved_entry
+        ):
+            fresh_entry = dict(fresh_entry)
+            fresh_entry.pop("pending_phase_event_id", None)
+            fresh_progress[str(boundary)] = fresh_entry
+        return fresh_progress
+
+    def _boss_resolution_conflict_result(
+        self,
+        discord_id: int,
+        guild_id,
+    ) -> dict:
+        """Return the persisted junction after another boss view resolves first."""
+        current = self.dig_repo.get_tunnel(discord_id, guild_id)
+        route_choice = (
+            self._route_status_from_tunnel(dict(current))
+            if current is not None
+            else None
+        )
+        route_pending = bool(
+            route_choice is not None and route_choice["choice_required"]
+        )
+        result = self._error(
+            (
+                "This boss fight was already resolved. "
+                "The saved route remains available."
+            )
+            if route_pending
+            else "This boss fight was already resolved by another view."
+        )
+        if route_choice is not None:
+            result["route_choice"] = route_choice
+            result["route_choice_required"] = route_choice["choice_required"]
+        return result
+
     def _apply_stinger_on_loss(
-        self, discord_id: int, guild_id, tunnel: dict, boss,
-    ) -> tuple[int, int]:
-        """Apply the boss's stinger effect. Returns (extra_knockback, extra_cooldown_s)."""
+        self,
+        tunnel: dict,
+        boss,
+    ) -> tuple[int, int, dict]:
+        """Build the boss's stinger effect for the guarded loss write."""
         from domain.models.boss_stingers import STINGER_REGISTRY as _STS
 
         stinger_id = getattr(boss, "stinger_id", "")
         if not stinger_id or stinger_id not in _STS:
-            return 0, 0
+            return 0, 0, {}
         stinger = _STS[stinger_id]
+        tunnel_updates = {}
 
-        # Write cursed_status JSON onto the tunnel if present.
         if stinger.cursed_status:
             curse_raw = tunnel.get("stinger_curse")
             try:
@@ -2262,10 +2493,12 @@ class BossCombatMixin:
                 curse = {}
             curse[stinger.cursed_status] = True
             curse["_boss_id"] = boss.boss_id
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id, stinger_curse=json.dumps(curse),
-            )
-        return int(stinger.extra_knockback or 0), int(stinger.extended_cooldown_s or 0)
+            tunnel_updates["stinger_curse"] = json.dumps(curse)
+        return (
+            int(stinger.extra_knockback or 0),
+            int(stinger.extended_cooldown_s or 0),
+            tunnel_updates,
+        )
 
     def _resolve_duel_outcome(
         self, *, discord_id, guild_id, tunnel, boss, at_boss,
@@ -2305,34 +2538,44 @@ class BossCombatMixin:
         # time — use them so a player who swapped gear during the pause
         # doesn't burn durability on pieces they never wore. Auto-resolve
         # path (no snapshot) ticks the currently-equipped loadout.
-        if gear_snapshot_ids:
-            # Resolve names from the snapshot rows directly (those pieces
-            # may no longer be equipped, so the loadout helper won't see
-            # them).
-            name_by_id: dict[int, str] = {}
-            for gid in gear_snapshot_ids:
-                row = self.dig_repo.get_gear_by_id(int(gid))
-                if row is None:
-                    continue
-                piece = self._hydrate_gear_piece(row)
-                if piece is not None:
-                    name_by_id[piece.id] = piece.tier_def.name
-            broken_ids = self.dig_repo.tick_gear_durability_ids(
-                [int(g) for g in gear_snapshot_ids]
-            )
-        else:
-            pre_tick_loadout = self._get_loadout(discord_id, guild_id)
-            name_by_id = {}
-            for piece in (pre_tick_loadout.weapon,
-                          pre_tick_loadout.armor,
-                          pre_tick_loadout.boots,
-                          pre_tick_loadout.amulet):
-                if piece is not None:
-                    name_by_id[piece.id] = piece.tier_def.name
-            broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
-        gear_broken_names: list[str] = [
-            name_by_id.get(i, "a piece of gear") for i in broken_ids
-        ]
+        gear_broken_names: list[str] = []
+        gear_name_by_id: dict[int, str] = {}
+
+        def tick_fight_gear() -> None:
+            """Apply this resolved fight's base wear exactly once."""
+            nonlocal gear_broken_names, gear_name_by_id
+            if gear_snapshot_ids:
+                gear_name_by_id = {}
+                for gear_id in gear_snapshot_ids:
+                    row = self.dig_repo.get_gear_by_id(int(gear_id))
+                    if row is None:
+                        continue
+                    piece = self._hydrate_gear_piece(row)
+                    if piece is not None:
+                        gear_name_by_id[piece.id] = piece.tier_def.name
+                broken_ids = self.dig_repo.tick_gear_durability_ids(
+                    [int(gear_id) for gear_id in gear_snapshot_ids]
+                )
+            else:
+                pre_tick_loadout = self._get_loadout(discord_id, guild_id)
+                gear_name_by_id = {
+                    piece.id: piece.tier_def.name
+                    for piece in (
+                        pre_tick_loadout.weapon,
+                        pre_tick_loadout.armor,
+                        pre_tick_loadout.boots,
+                        pre_tick_loadout.amulet,
+                    )
+                    if piece is not None
+                }
+                broken_ids = self.dig_repo.tick_gear_durability(
+                    discord_id,
+                    guild_id,
+                )
+            gear_broken_names = [
+                gear_name_by_id.get(gear_id, "a piece of gear")
+                for gear_id in broken_ids
+            ]
 
         ascension = self._get_ascension_effects(prestige_level)
         boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
@@ -2360,6 +2603,31 @@ class BossCombatMixin:
             )
 
             if needs_phase2 or needs_phase3:
+                resolved_progress = boss_progress
+                phase_claim = self._load_boss_outcome_claim(
+                    discord_id,
+                    guild_id,
+                    at_boss,
+                    boss.boss_id if boss else None,
+                )
+                if phase_claim is None:
+                    return self._boss_resolution_conflict_result(discord_id, guild_id)
+                tunnel, fresh_progress, phase_guard = phase_claim
+                fresh_progress = self._preserve_consumed_phase_event(
+                    fresh_progress,
+                    resolved_progress,
+                    at_boss,
+                )
+                fresh_entry = fresh_progress.get(str(at_boss), "active")
+                fresh_status = (
+                    fresh_entry.get("status", "active")
+                    if isinstance(fresh_entry, dict)
+                    else fresh_entry
+                )
+                if fresh_status != current_status:
+                    return self._boss_resolution_conflict_result(discord_id, guild_id)
+                boss_progress = fresh_progress
+                current_entry = fresh_entry
                 next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
                 phase_def = (
                     get_phase2_for(boss.boss_id if boss else "", at_boss) if needs_phase2
@@ -2383,21 +2651,33 @@ class BossCombatMixin:
                         "status": next_status,
                         "pending_phase_event_id": phase_event.id,
                     }
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    boss_progress=json.dumps(boss_progress),
-                    boss_attempts=attempts,
-                    last_dig_at=now,
-                )
+                try:
+                    self.dig_repo.atomic_tunnel_balance_update(
+                        discord_id,
+                        guild_id,
+                        tunnel_updates={
+                            "boss_progress": json.dumps(boss_progress),
+                            "boss_attempts": attempts,
+                            "last_dig_at": now,
+                        },
+                        require_tunnel_state=phase_guard,
+                        log_detail={
+                            "boundary": at_boss,
+                            "won": True,
+                            "risk": risk_tier,
+                            "phase": next_phase_num - 1,
+                            "wager": wager,
+                            "rounds": round_log,
+                        },
+                        log_action_type="boss_fight",
+                    )
+                except TunnelStateConflictError:
+                    return self._boss_resolution_conflict_result(
+                        discord_id,
+                        guild_id,
+                    )
                 p_dialogue = phase_def.dialogue[min(attempts - 1, len(phase_def.dialogue) - 1)]
-                self.dig_repo.log_action(
-                    discord_id=discord_id, guild_id=guild_id,
-                    action_type="boss_fight",
-                    details=json.dumps({
-                        "boundary": at_boss, "won": True, "risk": risk_tier,
-                        "phase": next_phase_num - 1, "wager": wager, "rounds": round_log,
-                    }),
-                )
+                tick_fight_gear()
                 return self._ok(
                     won=True,
                     phase=next_phase_num - 1,
@@ -2423,10 +2703,32 @@ class BossCombatMixin:
                 )
 
             # Full victory
+            resolved_progress = boss_progress
+            victory_claim = self._load_boss_outcome_claim(
+                discord_id,
+                guild_id,
+                at_boss,
+                boss.boss_id if boss else None,
+            )
+            if victory_claim is None:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
+            tunnel, boss_progress, boss_victory_guard = victory_claim
+            boss_progress = self._preserve_consumed_phase_event(
+                boss_progress,
+                resolved_progress,
+                at_boss,
+            )
+            current_entry = boss_progress.get(str(at_boss), "active")
+            current_status = (
+                current_entry.get("status", "active")
+                if isinstance(current_entry, dict)
+                else current_entry
+            )
             new_depth = at_boss
             # Honor drain_next_reward curse: -25% on this reward.
             curse_raw = tunnel.get("stinger_curse")
             drain_applied = False
+            stinger_curse_after_reward = curse_raw
             try:
                 curse = json.loads(curse_raw) if curse_raw else {}
             except (json.JSONDecodeError, TypeError):
@@ -2434,11 +2736,7 @@ class BossCombatMixin:
             if curse.get("drain_next_reward"):
                 drain_applied = True
                 curse.pop("drain_next_reward", None)
-                # Persist cleared curse flag (keep other curses intact)
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    stinger_curse=(json.dumps(curse) if curse else None),
-                )
+                stinger_curse_after_reward = json.dumps(curse) if curse else None
 
             # Mark defeated in the {boss_id, status} shape.
             existing_entry = boss_progress.get(str(at_boss))
@@ -2462,6 +2760,16 @@ class BossCombatMixin:
                 "cheer_data": None,
                 "last_dig_at": now,
             }
+            if drain_applied:
+                tunnel_updates["stinger_curse"] = stinger_curse_after_reward
+            route_offer = self._build_route_offer_state(tunnel, at_boss)
+            route_choice = None
+            if route_offer is not None:
+                encoded_route_offer = self._serialize_route_state(route_offer)
+                tunnel_updates["route_state"] = encoded_route_offer
+                route_choice = self._route_status_from_tunnel({
+                    "route_state": encoded_route_offer,
+                })
             # Fold the first-clear stat-point award into the atomic victory
             # write (mirroring fight_boss) instead of a separate update_tunnel,
             # so the award and the boss-defeated flip commit together. The award
@@ -2504,28 +2812,33 @@ class BossCombatMixin:
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
             # without clearing the boss (or vice versa).
-            self.dig_repo.atomic_boss_full_victory(
-                discord_id=discord_id,
-                guild_id=guild_id,
-                jc_delta=net_payout,
-                tunnel_updates=tunnel_updates,
-                boss_echo_boss_id=boss.boss_id if boss else "",
-                boss_echo_depth=at_boss,
-                boss_echo_window_seconds=24 * 3600,
-                log_detail={
-                    "boundary": at_boss, "won": True, "risk": risk_tier,
-                    "wager": wager, "jc_delta": net_payout,
-                    "gross_jc": gross_base_reward,
-                    "gross_payout": gross_payout,
-                    "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
-                    "scaled_base_jc": scaled_base_reward,
-                    "wager_profit": wager_profit,
-                    "stat_point_awarded": stat_point_awarded,
-                    "echo_applied": echo_applied,
-                    "rounds": round_log,
-                },
-            )
+            try:
+                self.dig_repo.atomic_boss_full_victory(
+                    discord_id=discord_id,
+                    guild_id=guild_id,
+                    jc_delta=net_payout,
+                    tunnel_updates=tunnel_updates,
+                    require_tunnel_state=boss_victory_guard,
+                    boss_echo_boss_id=boss.boss_id if boss else "",
+                    boss_echo_depth=at_boss,
+                    boss_echo_window_seconds=24 * 3600,
+                    log_detail={
+                        "boundary": at_boss, "won": True, "risk": risk_tier,
+                        "wager": wager, "jc_delta": net_payout,
+                        "gross_jc": gross_base_reward,
+                        "gross_payout": gross_payout,
+                        "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
+                        "scaled_base_jc": scaled_base_reward,
+                        "wager_profit": wager_profit,
+                        "stat_point_awarded": stat_point_awarded,
+                        "echo_applied": echo_applied,
+                        "rounds": round_log,
+                    },
+                )
+            except TunnelStateConflictError:
+                return self._boss_resolution_conflict_result(discord_id, guild_id)
 
+            tick_fight_gear()
             defeat_msg = self._pick_boss_outcome_line(
                 boss=boss, boss_name=boss_name, boundary=at_boss, won=True,
             )
@@ -2565,12 +2878,50 @@ class BossCombatMixin:
                 prestige_relic_drop=prestige_relic_drop,
                 trophy_relic_drop=trophy_relic_drop,
                 luminosity_display=self._luminosity_combat_display(tunnel),
+                route_choice=route_choice,
             )
 
         # Loss branch
+        resolved_progress = boss_progress
+        expected_entry = boss_progress.get(str(at_boss), "active")
+        expected_status = (
+            expected_entry.get("status", "active")
+            if isinstance(expected_entry, dict)
+            else expected_entry
+        )
+        loss_claim = self._load_boss_outcome_claim(
+            discord_id,
+            guild_id,
+            at_boss,
+            boss.boss_id if boss else None,
+        )
+        if loss_claim is None:
+            return self._boss_resolution_conflict_result(discord_id, guild_id)
+        tunnel, fresh_progress, loss_guard = loss_claim
+        fresh_progress = self._preserve_consumed_phase_event(
+            fresh_progress,
+            resolved_progress,
+            at_boss,
+        )
+        fresh_entry = fresh_progress.get(str(at_boss), "active")
+        fresh_status = (
+            fresh_entry.get("status", "active")
+            if isinstance(fresh_entry, dict)
+            else fresh_entry
+        )
+        if fresh_status != expected_status:
+            return self._boss_resolution_conflict_result(discord_id, guild_id)
+        boss_progress = fresh_progress
+        depth = int(tunnel.get("depth") or 0)
+        active_prep = (
+            fresh_entry.get("active_prep")
+            if isinstance(fresh_entry, dict)
+            else None
+        )
         knockback = random.randint(BOSS_LOSS_KNOCKBACK_MIN, BOSS_LOSS_KNOCKBACK_MAX)
-        extra_kb, extra_cd = self._apply_stinger_on_loss(
-            discord_id, guild_id, tunnel, boss,
+        extra_kb, extra_cd, stinger_updates = self._apply_stinger_on_loss(
+            tunnel,
+            boss,
         )
         knockback += extra_kb
         knockback, rescue_line_used = self._apply_boss_prep_loss(
@@ -2602,18 +2953,6 @@ class BossCombatMixin:
 
         # Loss is harsher on gear — an extra durability tick beyond the
         # per-fight tick above, on the same pieces that fought.
-        if not rescue_line_used:
-            for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
-                if gear_snapshot_ids:
-                    extra_broken = self.dig_repo.tick_gear_durability_ids(
-                        [int(g) for g in gear_snapshot_ids]
-                    )
-                else:
-                    extra_broken = self.dig_repo.tick_gear_durability(discord_id, guild_id)
-                gear_broken_names.extend(
-                    name_by_id.get(i, "a piece of gear") for i in extra_broken
-                )
-
         # Persist remaining boss HP so soften-and-retreat works for the
         # state-machine path. ending_boss_hp / boss_hp_max are forwarded
         # from the caller (start_boss_duel / resume_boss_duel) — when the
@@ -2639,28 +2978,47 @@ class BossCombatMixin:
         self._clear_active_boss_prep(bp_for_persist, at_boss)
         # Debit wager and write tunnel state atomically so a crash can't
         # leave depth knocked back without the matching balance change.
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=jc_delta,
-            tunnel_updates={
-                "depth": new_depth,
-                "boss_progress": json.dumps(bp_for_persist),
-                "boss_attempts": attempts,
-                "cheer_data": None,
-                "last_dig_at": last_dig_effective,
-            },
-        )
-        self.dig_repo.log_action(
-            discord_id=discord_id, guild_id=guild_id,
-            action_type="boss_fight",
-            details=json.dumps({
-                "boundary": at_boss, "won": False, "risk": risk_tier,
-                "wager": wager, "knockback": knockback,
-                "extra_knockback": extra_kb,
-                "extra_cooldown_s": extra_cd,
-                "rounds": round_log,
-            }),
-        )
+        try:
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_delta=jc_delta,
+                tunnel_updates={
+                    **stinger_updates,
+                    "depth": new_depth,
+                    "boss_progress": json.dumps(bp_for_persist),
+                    "boss_attempts": attempts,
+                    "cheer_data": None,
+                    "last_dig_at": last_dig_effective,
+                },
+                require_tunnel_state=loss_guard,
+                log_detail={
+                    "boundary": at_boss, "won": False, "risk": risk_tier,
+                    "wager": wager, "knockback": knockback,
+                    "extra_knockback": extra_kb,
+                    "extra_cooldown_s": extra_cd,
+                    "rounds": round_log,
+                },
+                log_action_type="boss_fight",
+            )
+        except TunnelStateConflictError:
+            return self._boss_resolution_conflict_result(discord_id, guild_id)
+
+        tick_fight_gear()
+        if not rescue_line_used:
+            for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+                if gear_snapshot_ids:
+                    extra_broken = self.dig_repo.tick_gear_durability_ids(
+                        [int(gear_id) for gear_id in gear_snapshot_ids]
+                    )
+                else:
+                    extra_broken = self.dig_repo.tick_gear_durability(
+                        discord_id,
+                        guild_id,
+                    )
+                gear_broken_names.extend(
+                    gear_name_by_id.get(gear_id, "a piece of gear")
+                    for gear_id in extra_broken
+                )
         # Soften progress line: show how much HP the player chipped off
         # before retreating, so the long-grind boss fights feel like progress
         # rather than a flat repeat.

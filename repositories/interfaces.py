@@ -2018,6 +2018,7 @@ class IDigRepository(ABC):
         guild_id: int,
         jc_delta: int,
         tunnel_updates: dict,
+        require_tunnel_state: dict,
         boss_echo_boss_id: str,
         boss_echo_depth: int,
         boss_echo_window_seconds: int,

@@ -29,6 +29,7 @@ from services.dig.gear_mixin import GearMixin
 from services.dig.pinnacle_mixin import PinnacleMixin
 from services.dig.prestige_mixin import PrestigeMixin
 from services.dig.progression_mixin import ProgressionMixin
+from services.dig.routes_mixin import RoutesMixin
 from services.dig_constants import (
     BASE_DIG_JC_PAYOUT_CAP,
     BOSS_BOUNDARIES,
@@ -103,6 +104,7 @@ def _get_events_with_art() -> set[str]:
 
 
 class DigService(
+    RoutesMixin,
     BossCombatMixin,
     BossInfoMixin,
     PinnacleMixin,
@@ -424,6 +426,10 @@ class DigService(
         deferred_tunnel_updates: dict = {}
         relic_trim_notice = int(tunnel.get("relic_trim_notice", 0) or 0) == 1
 
+        pending_route = self._pending_route_result(tunnel)
+        if pending_route is not None:
+            return pending_route
+
         # 2. Slow Drip relic: idle income since last dig (credited inline,
         # surfaces only via balance change + audit log).
         self._claim_slow_drip(
@@ -521,6 +527,7 @@ class DigService(
 
         # 7b. Apply luminosity drain
         layer_name = layer.get("name", "Dirt")
+        route_effects = self._get_route_effects(tunnel)
 
         # 7a. Resolve weather and equipped gear once for the whole request.
         weather_fx, weather_info, weather_code = self._get_weather_snapshot(guild_id, layer_name)
@@ -535,6 +542,7 @@ class DigService(
             layer_name,
             equipped_gear=equipped_gear,
             persist=False,
+            drain_multiplier=self._route_luminosity_drain_factor(route_effects),
         )
         luminosity = lum_info["luminosity_after"]
 
@@ -670,6 +678,7 @@ class DigService(
         # 9. Cave-in check (with ascension + corruption + mutation modifiers)
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
         cave_in_chance = layer.get("cave_in_pct", 0.10)
+        cave_in_chance += float(route_effects.get("cave_in_bonus", 0))
         # Ascension cave-in bonus
         cave_in_chance += ascension.get("cave_in_bonus", 0)
         cave_in_chance += curse_cave_in_bonus
@@ -760,14 +769,16 @@ class DigService(
             band = cave_in_band(depth_before)
             block_min, block_max = CAVE_IN_BLOCK_LOSS_RANGES[band]
             block_loss = random.randint(block_min, block_max)
-            # Weather: cap on block loss (e.g. Mudslide Warning)
             weather_loss_cap = weather_fx.get("cave_in_loss_cap")
-            if weather_loss_cap is not None:
-                block_loss = min(block_loss, int(weather_loss_cap))
             # Weather: extra block loss
             block_loss += int(weather_fx.get("cave_in_loss_bonus", 0))
             # Mutation: brittle_walls — extra block loss
             block_loss += int(mutation_fx.get("cave_in_loss_bonus", 0))
+            block_loss = self._apply_route_cave_in_loss(
+                block_loss,
+                route_effects,
+                weather_loss_cap,
+            )
             # Perk: steady_hands reduces depth lost on cave-in
             steady_hands_reduction = perk_fx.get("cave_in_loss_reduction", 0.0)
             if steady_hands_reduction > 0:
@@ -775,11 +786,18 @@ class DigService(
             # Relic: Patient Stone — -30% depth lost
             if self._has_relic(discord_id, guild_id, "patient_stone"):
                 block_loss = max(0, int(block_loss * 0.7))
-            # Reinforcement window: cap cave-in block_loss so a single
-            # catastrophic roll can't erase a long grind.
+            # Reinforcement remains the final loss cap after player reductions.
             reinforced_until_for_cap = tunnel.get("reinforced_until") or 0
-            if now < int(reinforced_until_for_cap):
+            reinforcement_loss_cap = (
+                8 if now < int(reinforced_until_for_cap) else None
+            )
+            if reinforcement_loss_cap is not None:
                 block_loss = min(block_loss, 8)
+            catastrophic_loss_cap = self._effective_cave_in_loss_cap(
+                route_effects,
+                weather_loss_cap,
+                reinforcement_loss_cap,
+            )
             # Capture pre-grappling block_loss for Gambler's Charm
             block_loss_pre_save = block_loss
             # Grappling hook absorbs the cave-in (zero block_loss + cushion the
@@ -871,6 +889,7 @@ class DigService(
                     depth_before=depth_before,
                     band=band,
                     block_loss=block_loss,
+                    block_loss_cap=catastrophic_loss_cap,
                     catastrophic=catastrophic,
                     balance=balance,
                     injury_bonus=injury_bonus,
@@ -943,6 +962,10 @@ class DigService(
         # the_endless perk: The Hollow advance becomes 1-2 instead of 1-1
         if "the_endless" in perks and layer_name == "The Hollow" and base_max <= 1:
             base_max = 2
+        base_max = max(
+            base_min,
+            base_max - int(route_effects.get("advance_max_penalty", 0)),
+        )
         # Mutation: heavy_air reduces max advance
         base_max = max(base_min, base_max - int(mutation_fx.get("advance_max_penalty", 0)))
         # Corruption: min_advance_roll — roll twice take lower
@@ -955,6 +978,7 @@ class DigService(
 
         # Apply modifiers
         advance += pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
+        advance += int(route_effects.get("advance_bonus", 0))
         # Relic: Pathfinder's Spur — +1 advance in the deep layers (depth 150+).
         if depth_before >= 150 and self._has_relic(discord_id, guild_id, "pathfinders_spur"):
             advance += 1
@@ -1127,7 +1151,10 @@ class DigService(
         if not (corruption and corruption["effects"].get("skip_artifact")):
             artifact = self.roll_artifact(
                 discord_id, guild_id, new_depth,
-                extra_rate_mod=weather_fx.get("artifact_multiplier", 1.0),
+                extra_rate_mod=(
+                    weather_fx.get("artifact_multiplier", 1.0)
+                    * route_effects.get("artifact_multiplier", 1.0)
+                ),
                 tunnel=tunnel,
             )
 
@@ -1141,6 +1168,7 @@ class DigService(
         event_chance *= (1.0 + ascension.get("event_chance_multiplier", 0))
         # Weather event chance modifier
         event_chance *= (1.0 + weather_fx.get("event_chance_multiplier", 0))
+        event_chance *= (1.0 + route_effects.get("event_chance_multiplier", 0))
         # Mutation event_magnet boost
         event_chance *= (1.0 + mutation_fx.get("event_chance_bonus", 0))
         # Darkness increases event chance (tiered)
@@ -1375,6 +1403,10 @@ class DigService(
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
+        pending_route = self._pending_route_result(tunnel)
+        if pending_route is not None:
+            return pending_route, None
+
         depth_before = tunnel.get("depth", 0)
 
         # Parked-at-boss short-circuit: surface the encounter before the
@@ -1445,6 +1477,7 @@ class DigService(
         # Layer, luminosity, weather, buffs
         layer = self._get_layer(depth_before)
         layer_name = layer.get("name", "Dirt")
+        route_effects = self._get_route_effects(tunnel)
         weather_fx = self._get_weather_effects(guild_id, layer_name)
         weather_info = None
         if weather_fx:
@@ -1454,7 +1487,13 @@ class DigService(
                     if w:
                         weather_info = {"name": w.name, "description": w.description}
 
-        lum_info = self._apply_luminosity_drain(discord_id, guild_id, tunnel, layer_name)
+        lum_info = self._apply_luminosity_drain(
+            discord_id,
+            guild_id,
+            tunnel,
+            layer_name,
+            drain_multiplier=self._route_luminosity_drain_factor(route_effects),
+        )
         luminosity = lum_info["luminosity_after"]
 
         if has_torch:
@@ -1554,6 +1593,7 @@ class DigService(
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
         grappling_hook_charges = int(tunnel.get("grappling_hook_charges") or 0)
         cave_in_chance = layer.get("cave_in_pct", 0.10)
+        cave_in_chance += float(route_effects.get("cave_in_bonus", 0))
         cave_in_chance += ascension.get("cave_in_bonus", 0)
         cave_in_chance += curse_cave_in_bonus
         shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
@@ -1612,22 +1652,34 @@ class DigService(
             base_adv_max = 2
         base_adv_max = max(
             base_adv_min,
+            base_adv_max - int(route_effects.get("advance_max_penalty", 0)),
+        )
+        base_adv_max = max(
+            base_adv_min,
             base_adv_max - int(mutation_fx.get("advance_max_penalty", 0)),
         )
 
         adv_fixed = pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
+        adv_fixed += int(route_effects.get("advance_bonus", 0))
         adv_fixed += int(weather_fx.get("advance_bonus", 0))
         adv_fixed -= int(ascension.get("advance_penalty", 0))
         if corruption:
             adv_fixed -= int(corruption["effects"].get("advance_penalty", 0))
-        if has_dynamite:
-            adv_fixed += 5
-        if has_depth_charge:
-            adv_fixed += 10
+        consumable_advance_bonus = (5 if has_dynamite else 0) + (
+            10 if has_depth_charge else 0
+        )
 
         adv_mult = (1.0 + perk_advance_bonus) * injury_advance_mod
-        advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult)) + int(perk_advance_flat + 0.5)
-        advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult)) + int(perk_advance_flat + 0.5)
+        advance_min = (
+            max(1, int((base_adv_min + adv_fixed) * adv_mult))
+            + int(perk_advance_flat + 0.5)
+            + consumable_advance_bonus
+        )
+        advance_max = (
+            max(1, int((base_adv_max + adv_fixed) * adv_mult))
+            + int(perk_advance_flat + 0.5)
+            + consumable_advance_bonus
+        )
 
         # ── Effective JC range ────────────────────────────────────
         jc_min_base = layer.get("jc_min", 1)
@@ -1667,6 +1719,7 @@ class DigService(
         event_chance = event_rates.get(layer_name, 0.22)
         event_chance *= 1.0 + ascension.get("event_chance_multiplier", 0)
         event_chance *= 1.0 + weather_fx.get("event_chance_multiplier", 0)
+        event_chance *= 1.0 + route_effects.get("event_chance_multiplier", 0)
         event_chance *= 1.0 + mutation_fx.get("event_chance_bonus", 0)
         if luminosity <= LUMINOSITY_PITCH_BLACK:
             event_chance *= LUMINOSITY_PITCH_EVENT_MULTIPLIER
@@ -1764,7 +1817,9 @@ class DigService(
 
         # Re-clamp after social modifiers, unless thick_skin intentionally
         # zeroed cave-in for the day (the floor would otherwise undo it).
-        if not thick_skin_saved:
+        if thick_skin_saved:
+            cave_in_chance = 0.0
+        else:
             cave_in_chance = max(0.01, cave_in_chance)
         event_chance = min(event_chance, 0.75)
 
@@ -1792,6 +1847,7 @@ class DigService(
             "lum_info": lum_info,
             "weather_fx": weather_fx,
             "weather_info": weather_info,
+            "route_effects": route_effects,
             "buff_advance_bonus": buff_advance_bonus,
             "buff_cavein_reduction": buff_cavein_reduction,
             "curse_advance_bonus": curse_advance_bonus,
