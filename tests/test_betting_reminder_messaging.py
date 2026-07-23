@@ -3,6 +3,7 @@ last-call flavor line, and the closed-state embed flip."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +29,10 @@ def _make_cog():
         bet_seed_radiant=0,
         bet_seed_dire=0,
         bet_seed_bonus=0,
+        shuffle_channel_id=111,
+        shuffle_message_id=112,
+        cmd_shuffle_channel_id=None,
+        cmd_shuffle_message_id=None,
         thread_shuffle_message_id=None,
         thread_shuffle_thread_id=None,
         radiant_team_ids=[1001, 1002, 1003, 1004, 1005],
@@ -55,6 +60,78 @@ def _scoped_user_ids(send_mock):
     am = send_mock.call_args.kwargs["allowed_mentions"]
     assert am.everyone is False and am.roles is False
     return {obj.id for obj in am.users}
+
+
+@pytest.mark.asyncio
+async def test_wager_message_copies_update_concurrently_with_reused_state(monkeypatch):
+    cog, _ = _make_cog()
+    pending = cog.match_service.get_last_shuffle.return_value
+    pending.cmd_shuffle_channel_id = 221
+    pending.cmd_shuffle_message_id = 222
+    pending.thread_shuffle_thread_id = 331
+    pending.thread_shuffle_message_id = 332
+
+    targets = {(111, 112), (221, 222), (331, 332)}
+    entered = {target: asyncio.Event() for target in targets}
+    release = asyncio.Event()
+
+    async def blocking_update(_cog, channel_id, message_id, _field_name, _field_value):
+        entered[(channel_id, message_id)].set()
+        await release.wait()
+
+    monkeypatch.setattr(bm, "update_embed_betting_field", blocking_update)
+
+    refresh = asyncio.create_task(
+        bm.update_shuffle_message_wagers(
+            cog,
+            1,
+            pending_match_id=1,
+            pending_state=pending,
+        )
+    )
+    await asyncio.wait_for(
+        asyncio.gather(*(event.wait() for event in entered.values())),
+        timeout=1,
+    )
+
+    assert not refresh.done()
+    release.set()
+    await refresh
+
+    cog.match_service.get_last_shuffle.assert_not_called()
+    cog.match_service.state_service.get_shuffle_message_info.assert_not_called()
+    cog.betting_service.get_pot_odds.assert_called_once_with(1, pending_state=pending)
+
+
+@pytest.mark.asyncio
+async def test_wager_message_targets_are_deduplicated_and_failure_isolated(monkeypatch):
+    cog, _ = _make_cog()
+    pending = cog.match_service.get_last_shuffle.return_value
+    pending.cmd_shuffle_channel_id = pending.shuffle_channel_id
+    pending.cmd_shuffle_message_id = pending.shuffle_message_id
+    pending.thread_shuffle_thread_id = 331
+    pending.thread_shuffle_message_id = 332
+    calls = []
+
+    async def recording_update(_cog, channel_id, message_id, _field_name, _field_value):
+        calls.append((channel_id, message_id))
+        if channel_id == pending.shuffle_channel_id:
+            raise RuntimeError("primary copy unavailable")
+
+    monkeypatch.setattr(bm, "update_embed_betting_field", recording_update)
+
+    await bm.update_shuffle_message_wagers(
+        cog,
+        1,
+        pending_match_id=1,
+        pending_state=pending,
+    )
+
+    assert set(calls) == {
+        (pending.shuffle_channel_id, pending.shuffle_message_id),
+        (pending.thread_shuffle_thread_id, pending.thread_shuffle_message_id),
+    }
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
@@ -122,6 +199,7 @@ async def test_closed_reminder_includes_house_bonus_text(monkeypatch):
 @pytest.mark.asyncio
 async def test_closed_reminder_flips_embed_to_locked(monkeypatch):
     cog, _ = _make_cog()
+    pending = cog.match_service.get_last_shuffle.return_value
     flip = AsyncMock()
     monkeypatch.setattr(bm, "update_shuffle_message_wagers", flip)
 
@@ -129,8 +207,13 @@ async def test_closed_reminder_flips_embed_to_locked(monkeypatch):
         cog, 1, reminder_type="closed", lock_until=LOCK_TS, pending_match_id=1
     )
 
-    flip.assert_awaited_once()
-    assert flip.call_args.kwargs.get("locked") is True
+    flip.assert_awaited_once_with(
+        cog,
+        1,
+        1,
+        locked=True,
+        pending_state=pending,
+    )
 
 
 # --- Final-warning tier (5-min by default): persona flavor + underdog ping ---

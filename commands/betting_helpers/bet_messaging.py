@@ -20,6 +20,7 @@ from utils.formatting import format_betting_display
 
 if TYPE_CHECKING:
     from commands.betting import BettingCommands
+    from domain.models.pending_match_state import PendingMatchState
 
 logger = logging.getLogger("cama_bot.commands.betting")
 
@@ -29,6 +30,8 @@ async def update_shuffle_message_wagers(
     guild_id: int | None,
     pending_match_id: int | None = None,
     locked: bool = False,
+    *,
+    pending_state: PendingMatchState | None = None,
 ) -> None:
     """Refresh the shuffle message's wager field with current totals.
 
@@ -36,9 +39,10 @@ async def update_shuffle_message_wagers(
     copy. Pass ``locked=True`` to render the closed state (no live countdown)
     once betting has locked.
     """
-    pending_state = await asyncio.to_thread(
-        cog.match_service.get_last_shuffle, guild_id, pending_match_id
-    )
+    if pending_state is None:
+        pending_state = await asyncio.to_thread(
+            cog.match_service.get_last_shuffle, guild_id, pending_match_id
+        )
     if not pending_state:
         return
 
@@ -59,26 +63,48 @@ async def update_shuffle_message_wagers(
         seed_bonus=pending_state.bet_seed_bonus,
     )
 
-    # Update main channel message (lobby channel)
-    message_info = await asyncio.to_thread(
-        cog.match_service.state_service.get_shuffle_message_info, guild_id, pending_match_id
+    # All three copies carry the same wager field and have no ordering
+    # dependency. Deduplicate defensively for legacy states whose command copy
+    # may point at the primary message, then update the distinct Discord
+    # messages concurrently.
+    targets: list[tuple[int, int]] = []
+    seen_targets: set[tuple[int, int]] = set()
+    for channel_id, message_id in (
+        (pending_state.shuffle_channel_id, pending_state.shuffle_message_id),
+        (pending_state.cmd_shuffle_channel_id, pending_state.cmd_shuffle_message_id),
+        (pending_state.thread_shuffle_thread_id, pending_state.thread_shuffle_message_id),
+    ):
+        if not channel_id or not message_id:
+            continue
+        target = (channel_id, message_id)
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        targets.append(target)
+
+    async def update_target(channel_id: int, message_id: int) -> None:
+        try:
+            await update_embed_betting_field(
+                cog,
+                channel_id,
+                message_id,
+                field_name,
+                field_value,
+            )
+        except Exception:
+            # The helper already isolates normal Discord failures. Keep this
+            # boundary as well so an unexpected failure in one copy never
+            # prevents the other copies from refreshing.
+            logger.warning(
+                "Failed to update shuffle wagers in channel %s message %s",
+                channel_id,
+                message_id,
+                exc_info=True,
+            )
+
+    await asyncio.gather(
+        *(update_target(channel_id, message_id) for channel_id, message_id in targets)
     )
-    message_id = message_info.get("message_id") if message_info else None
-    channel_id = message_info.get("channel_id") if message_info else None
-    if message_id and channel_id:
-        await update_embed_betting_field(cog, channel_id, message_id, field_name, field_value)
-
-    # Update command channel message if it exists (different from lobby channel)
-    cmd_message_id = message_info.get("cmd_message_id") if message_info else None
-    cmd_channel_id = message_info.get("cmd_channel_id") if message_info else None
-    if cmd_message_id and cmd_channel_id:
-        await update_embed_betting_field(cog, cmd_channel_id, cmd_message_id, field_name, field_value)
-
-    # Update thread message if it exists
-    thread_message_id = pending_state.thread_shuffle_message_id
-    thread_id = pending_state.thread_shuffle_thread_id
-    if thread_message_id and thread_id:
-        await update_embed_betting_field(cog, thread_id, thread_message_id, field_name, field_value)
 
 
 async def update_embed_betting_field(
@@ -256,7 +282,13 @@ async def send_betting_reminder(
     # here means this window genuinely closed at its scheduled time.
     if reminder_type == "closed":
         try:
-            await update_shuffle_message_wagers(cog, guild_id, pending_match_id, locked=True)
+            await update_shuffle_message_wagers(
+                cog,
+                guild_id,
+                pending_match_id,
+                locked=True,
+                pending_state=pending_state,
+            )
         except Exception as exc:
             logger.warning(f"Failed to flip betting embed to closed state: {exc}", exc_info=True)
 

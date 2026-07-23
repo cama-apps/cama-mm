@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -24,6 +25,11 @@ async def test_green_bet_reward_scales_before_daily_event(monkeypatch):
     monkeypatch.setattr(
         "commands.betting_helpers.bet_actions.safe_defer",
         AsyncMock(return_value=True),
+    )
+    refresh_wagers = AsyncMock()
+    monkeypatch.setattr(
+        "commands.betting_helpers.bet_actions.update_shuffle_message_wagers",
+        refresh_wagers,
     )
     user_id = 987654
     pending = SimpleNamespace(pending_match_id=77, betting_mode="house")
@@ -83,6 +89,12 @@ async def test_green_bet_reward_scales_before_daily_event(monkeypatch):
         user_id, TEST_GUILD_ID
     )
     assert interaction.followup.send.await_args.args[0].startswith("🌲 Bet placed")
+    refresh_wagers.assert_awaited_once_with(
+        cog,
+        TEST_GUILD_ID,
+        77,
+        pending_state=pending,
+    )
 
 
 @pytest.mark.asyncio
@@ -96,6 +108,11 @@ async def test_red_10x_bet_reuses_mana_effects_for_gate_and_badge(monkeypatch):
     monkeypatch.setattr(
         "commands.betting_helpers.bet_actions.safe_defer",
         AsyncMock(return_value=True),
+    )
+    refresh_wagers = AsyncMock()
+    monkeypatch.setattr(
+        "commands.betting_helpers.bet_actions.update_shuffle_message_wagers",
+        refresh_wagers,
     )
     user_id = 987655
     pending = SimpleNamespace(pending_match_id=78, betting_mode="house")
@@ -144,6 +161,132 @@ async def test_red_10x_bet_reuses_mana_effects_for_gate_and_badge(monkeypatch):
     response = interaction.followup.send.await_args.args[0]
     assert response.startswith("⛰️ Bet placed (Match #78)")
     assert "at 10x leverage (effective: 50" in response
+    refresh_wagers.assert_awaited_once_with(
+        cog,
+        TEST_GUILD_ID,
+        78,
+        pending_state=pending,
+    )
+
+
+@pytest.mark.asyncio
+async def test_bet_confirmation_overlaps_wager_refresh(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import commands.betting_helpers.bet_actions as bet_actions
+
+    monkeypatch.setattr(bet_actions, "safe_defer", AsyncMock(return_value=True))
+
+    user_id = 987656
+    pending = SimpleNamespace(pending_match_id=79, betting_mode="house")
+    refresh_started = asyncio.Event()
+    confirmation_started = asyncio.Event()
+    sent_content = []
+
+    async def refresh_wagers(
+        actual_cog,
+        guild_id,
+        pending_match_id,
+        *,
+        pending_state,
+    ):
+        assert actual_cog is cog
+        assert guild_id == TEST_GUILD_ID
+        assert pending_match_id == 79
+        assert pending_state is pending
+        refresh_started.set()
+        await confirmation_started.wait()
+
+    async def send_confirmation(content, *, ephemeral):
+        assert ephemeral is True
+        sent_content.append(content)
+        confirmation_started.set()
+        await refresh_started.wait()
+
+    monkeypatch.setattr(bet_actions, "update_shuffle_message_wagers", refresh_wagers)
+
+    cog = SimpleNamespace(
+        bot=SimpleNamespace(mana_effects_service=None),
+        betting_service=MagicMock(),
+        player_service=MagicMock(),
+        match_service=SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_all_pending_matches=MagicMock(return_value=[pending])
+            )
+        ),
+        _get_neon_service=MagicMock(return_value=None),
+    )
+    interaction = MagicMock()
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID)
+    interaction.user = SimpleNamespace(id=user_id)
+    interaction.response = AsyncMock()
+    interaction.followup = SimpleNamespace(send=send_confirmation)
+
+    await asyncio.wait_for(
+        bet_actions.bet_action(
+            cog,
+            interaction,
+            SimpleNamespace(value="radiant", name="Radiant"),
+            amount=5,
+            leverage=None,
+            match=None,
+        ),
+        timeout=1,
+    )
+
+    assert refresh_started.is_set()
+    assert confirmation_started.is_set()
+    assert len(sent_content) == 1
+    assert sent_content[0].startswith("Bet placed (Match #79): 5 ")
+    assert sent_content[0].endswith(" on Radiant.")
+
+
+@pytest.mark.asyncio
+async def test_bet_confirmation_survives_wager_refresh_failure(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import commands.betting_helpers.bet_actions as bet_actions
+
+    monkeypatch.setattr(bet_actions, "safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        bet_actions,
+        "update_shuffle_message_wagers",
+        AsyncMock(side_effect=RuntimeError("display unavailable")),
+    )
+
+    pending = SimpleNamespace(pending_match_id=80, betting_mode="house")
+    cog = SimpleNamespace(
+        bot=SimpleNamespace(mana_effects_service=None),
+        betting_service=MagicMock(),
+        player_service=MagicMock(),
+        match_service=SimpleNamespace(
+            state_service=SimpleNamespace(
+                get_all_pending_matches=MagicMock(return_value=[pending])
+            )
+        ),
+        _get_neon_service=MagicMock(return_value=None),
+    )
+    interaction = MagicMock()
+    interaction.guild = SimpleNamespace(id=TEST_GUILD_ID)
+    interaction.user = SimpleNamespace(id=987657)
+    interaction.response = AsyncMock()
+    interaction.followup = SimpleNamespace(send=AsyncMock())
+
+    await bet_actions.bet_action(
+        cog,
+        interaction,
+        SimpleNamespace(value="dire", name="Dire"),
+        amount=5,
+        leverage=None,
+        match=None,
+    )
+
+    interaction.followup.send.assert_awaited_once()
+    assert interaction.followup.send.await_args.args[0].startswith(
+        "Bet placed (Match #80)"
+    )
 
 
 @pytest.fixture
