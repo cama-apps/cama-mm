@@ -224,6 +224,32 @@ class ServerWrapped:
     best_hero: dict | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PlayerMatchEnrichment:
+    """Compact player and match facts extracted from one enrichment payload."""
+
+    actions_per_min: float | int | None = None
+    courier_kills: int | None = None
+    pings: int | None = None
+    rapier_count: int = 0
+    lane_role: int | None = None
+    comeback: float | int | None = None
+    throw: float | int | None = None
+
+
+@dataclass(frozen=True)
+class WrappedStorySnapshot:
+    """Shared query results for one player's wrapped story."""
+
+    discord_id: int
+    guild_id: int
+    year: int
+    match_stats: list[dict]
+    player_heroes: list[dict]
+    player_year_matches: list[dict]
+    enrichment_facts: list[PlayerMatchEnrichment | None]
+
+
 # ============ FLAVOR TEXT POOLS ============
 
 FLAVOR_POOLS: dict[str, list[str]] = {
@@ -690,8 +716,116 @@ class WrappedService:
         end = datetime(year, 12, 31, 23, 59, 59, tzinfo=UTC)
         return int(start.timestamp()), int(end.timestamp()) + 1
 
+    @staticmethod
+    def _normalized_guild_id(guild_id: int | None) -> int:
+        return guild_id if guild_id is not None else 0
+
+    @classmethod
+    def _snapshot_matches(
+        cls,
+        snapshot: WrappedStorySnapshot | None,
+        *,
+        guild_id: int | None,
+        year: int,
+        discord_id: int | None = None,
+    ) -> bool:
+        if not isinstance(snapshot, WrappedStorySnapshot):
+            return False
+        if snapshot.guild_id != cls._normalized_guild_id(guild_id):
+            return False
+        if snapshot.year != year:
+            return False
+        return discord_id is None or snapshot.discord_id == discord_id
+
+    @staticmethod
+    def _extract_player_enrichment_facts(
+        rows: list[dict],
+        steam_ids: set[int],
+    ) -> list[PlayerMatchEnrichment | None]:
+        """Decode each enrichment payload once and retain only needed fields."""
+        facts: list[PlayerMatchEnrichment | None] = []
+        for row in rows:
+            raw = row.get("enrichment_data")
+            if not raw:
+                facts.append(None)
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                facts.append(None)
+                continue
+            if not isinstance(data, dict):
+                facts.append(None)
+                continue
+
+            players = data.get("players")
+            if not isinstance(players, list):
+                players = []
+            player_data = next(
+                (
+                    player
+                    for player in players
+                    if isinstance(player, dict)
+                    and player.get("account_id") in steam_ids
+                ),
+                None,
+            )
+            purchase_log = player_data.get("purchase_log") if player_data else None
+            rapier_count = (
+                sum(
+                    1
+                    for item in purchase_log
+                    if isinstance(item, dict) and item.get("key") == "rapier"
+                )
+                if isinstance(purchase_log, list)
+                else 0
+            )
+            facts.append(
+                PlayerMatchEnrichment(
+                    actions_per_min=(player_data.get("actions_per_min") if player_data else None),
+                    courier_kills=(player_data.get("courier_kills") if player_data else None),
+                    pings=player_data.get("pings") if player_data else None,
+                    rapier_count=rapier_count,
+                    lane_role=player_data.get("lane_role") if player_data else None,
+                    comeback=data.get("comeback"),
+                    throw=data.get("throw"),
+                )
+            )
+        return facts
+
+    def build_wrapped_story_snapshot(
+        self,
+        discord_id: int,
+        year: int,
+        guild_id: int | None = None,
+    ) -> WrappedStorySnapshot:
+        """Load data shared by the server and player wrapped slides once."""
+        start_ts, end_ts = self._get_year_timestamps(year)
+        match_stats = self.wrapped_repo.get_month_match_stats(guild_id, start_ts, end_ts)
+        player_heroes = self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        player_year_matches = self.wrapped_repo.get_player_year_matches(
+            discord_id, guild_id, year, end_ts
+        )
+        steam_ids = set(self.player_repo.get_steam_ids(discord_id))
+        return WrappedStorySnapshot(
+            discord_id=discord_id,
+            guild_id=self._normalized_guild_id(guild_id),
+            year=year,
+            match_stats=match_stats,
+            player_heroes=player_heroes,
+            player_year_matches=player_year_matches,
+            enrichment_facts=self._extract_player_enrichment_facts(
+                player_year_matches,
+                steam_ids,
+            ),
+        )
+
     def get_server_wrapped(
-        self, guild_id: int | None, year: int
+        self,
+        guild_id: int | None,
+        year: int,
+        *,
+        snapshot: WrappedStorySnapshot | None = None,
     ) -> ServerWrapped | None:
         """
         Generate server-wide wrapped summary for a calendar year.
@@ -711,9 +845,20 @@ class WrappedService:
             return None
 
         # Get detailed stats
-        match_stats = self.wrapped_repo.get_month_match_stats(guild_id, start_ts, end_ts)
+        shared_snapshot = (
+            snapshot if self._snapshot_matches(snapshot, guild_id=guild_id, year=year) else None
+        )
+        match_stats = (
+            shared_snapshot.match_stats
+            if shared_snapshot
+            else self.wrapped_repo.get_month_match_stats(guild_id, start_ts, end_ts)
+        )
         hero_stats = self.wrapped_repo.get_month_hero_stats(guild_id, start_ts, end_ts)
-        player_heroes = self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        player_heroes = (
+            shared_snapshot.player_heroes
+            if shared_snapshot
+            else self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        )
         rating_changes = self.wrapped_repo.get_month_rating_changes(guild_id, start_ts, end_ts)
         betting_stats = self.wrapped_repo.get_month_betting_stats(guild_id, start_ts, end_ts)
         bets_against = self.wrapped_repo.get_month_bets_against_player(guild_id, start_ts, end_ts)
@@ -880,6 +1025,8 @@ class WrappedService:
         discord_id: int,
         year: int,
         guild_id: int | None = None,
+        *,
+        snapshot: WrappedStorySnapshot | None = None,
     ) -> PersonalRecordsWrapped | None:
         """
         Generate personal records wrapped for a player.
@@ -891,8 +1038,20 @@ class WrappedService:
         """
         _, end_ts = self._get_year_timestamps(year)
 
-        rows = self.wrapped_repo.get_player_year_matches(
-            discord_id, guild_id, year, end_ts
+        shared_snapshot = (
+            snapshot
+            if self._snapshot_matches(
+                snapshot,
+                guild_id=guild_id,
+                year=year,
+                discord_id=discord_id,
+            )
+            else None
+        )
+        rows = (
+            shared_snapshot.player_year_matches
+            if shared_snapshot
+            else self.wrapped_repo.get_player_year_matches(discord_id, guild_id, year, end_ts)
         )
         if len(rows) < WRAPPED_MIN_GAMES:
             return None
@@ -901,8 +1060,8 @@ class WrappedService:
         if not player:
             return None
 
-        # Build steam_id set for enrichment_data player lookup
-        steam_ids = set(self.player_repo.get_steam_ids(discord_id))
+        enrichment_facts = shared_snapshot.enrichment_facts if shared_snapshot else None
+        steam_ids = set() if shared_snapshot else set(self.player_repo.get_steam_ids(discord_id))
 
         records: list[PersonalRecord] = []
 
@@ -1031,7 +1190,11 @@ class WrappedService:
             ))
 
         # --- Enrichment-data stats ---
-        enrichment_stats = self._extract_enrichment_records(rows, steam_ids)
+        enrichment_stats = self._extract_enrichment_records(
+            rows,
+            steam_ids,
+            enrichment_facts=enrichment_facts,
+        )
         records.extend(enrichment_stats)
 
         # --- Kill participation ---
@@ -1096,10 +1259,16 @@ class WrappedService:
         )
 
     def _extract_enrichment_records(
-        self, rows: list[dict], steam_ids: set[int]
+        self,
+        rows: list[dict],
+        steam_ids: set[int],
+        *,
+        enrichment_facts: list[PlayerMatchEnrichment | None] | None = None,
     ) -> list[PersonalRecord]:
         """Extract records from enrichment_data JSON for each match."""
         records: list[PersonalRecord] = []
+        if enrichment_facts is None:
+            enrichment_facts = self._extract_player_enrichment_facts(rows, steam_ids)
 
         # Track best per enrichment stat: stat_key -> (value, row)
         best_apm: tuple[float, dict] | None = None
@@ -1109,51 +1278,39 @@ class WrappedService:
         best_comeback: tuple[int, dict] | None = None
         worst_throw: tuple[int, dict] | None = None
 
-        for row in rows:
-            raw = row.get("enrichment_data")
-            if not raw:
-                continue
-            try:
-                data = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
+        for row, facts in zip(rows, enrichment_facts, strict=True):
+            if facts is None:
                 continue
 
-            # Find player in enrichment data by account_id (steam_id)
-            player_data = None
-            for p in data.get("players", []):
-                if p.get("account_id") in steam_ids:
-                    player_data = p
-                    break
+            apm = facts.actions_per_min
+            if apm is not None and (best_apm is None or apm > best_apm[0]):
+                best_apm = (apm, row)
 
-            if player_data:
-                # APM
-                apm = player_data.get("actions_per_min")
-                if apm is not None and (best_apm is None or apm > best_apm[0]):
-                    best_apm = (apm, row)
+            courier_kills = facts.courier_kills
+            if (
+                courier_kills is not None
+                and courier_kills > 0
+                and (best_courier_kills is None or courier_kills > best_courier_kills[0])
+            ):
+                best_courier_kills = (courier_kills, row)
 
-                # Courier kills
-                ck = player_data.get("courier_kills")
-                if ck is not None and ck > 0 and (best_courier_kills is None or ck > best_courier_kills[0]):
-                    best_courier_kills = (ck, row)
+            pings = facts.pings
+            if pings is not None and (worst_pings is None or pings > worst_pings[0]):
+                worst_pings = (pings, row)
 
-                # Map pings
-                pings = player_data.get("pings")
-                if pings is not None and (worst_pings is None or pings > worst_pings[0]):
-                    worst_pings = (pings, row)
+            rapier_count = facts.rapier_count
+            if rapier_count > 0 and (best_rapiers is None or rapier_count > best_rapiers[0]):
+                best_rapiers = (rapier_count, row)
 
-                # Rapiers from purchase_log
-                purchase_log = player_data.get("purchase_log")
-                if purchase_log:
-                    rapier_count = sum(1 for item in purchase_log if item.get("key") == "rapier")
-                    if rapier_count > 0 and (best_rapiers is None or rapier_count > best_rapiers[0]):
-                        best_rapiers = (rapier_count, row)
-
-            # Match-level: comeback / throw
-            comeback = data.get("comeback")
-            if comeback is not None and comeback > 0 and (best_comeback is None or comeback > best_comeback[0]):
+            comeback = facts.comeback
+            if (
+                comeback is not None
+                and comeback > 0
+                and (best_comeback is None or comeback > best_comeback[0])
+            ):
                 best_comeback = (comeback, row)
 
-            throw = data.get("throw")
+            throw = facts.throw
             if throw is not None and throw > 0 and (worst_throw is None or throw > worst_throw[0]):
                 worst_throw = (throw, row)
 
@@ -1256,18 +1413,41 @@ class WrappedService:
     # ============ NEW WRAPPED STORY METHODS ============
 
     def get_personal_summary_wrapped(
-        self, discord_id: int, year: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        year: int,
+        guild_id: int | None = None,
+        *,
+        snapshot: WrappedStorySnapshot | None = None,
     ) -> PersonalSummaryWrapped | None:
         """Get personal summary stats with percentile comparisons."""
         start_ts, end_ts = self._get_year_timestamps(year)
+        shared_snapshot = (
+            snapshot
+            if self._snapshot_matches(
+                snapshot,
+                guild_id=guild_id,
+                year=year,
+                discord_id=discord_id,
+            )
+            else None
+        )
 
         player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             return None
 
-        match_details = self.wrapped_repo.get_month_player_match_details(
-            discord_id, guild_id, start_ts, end_ts
-        )
+        if shared_snapshot:
+            rows = shared_snapshot.player_year_matches
+            match_details = {
+                "games_played": len(rows),
+                "wins": sum(row.get("won") == 1 for row in rows),
+                "losses": sum(row.get("won") == 0 for row in rows),
+            }
+        else:
+            match_details = self.wrapped_repo.get_month_player_match_details(
+                discord_id, guild_id, start_ts, end_ts
+            )
         if not match_details:
             return None
 
@@ -1285,7 +1465,11 @@ class WrappedService:
         )
 
         # Get aggregate stats from match_stats
-        match_stats = self.wrapped_repo.get_month_match_stats(guild_id, start_ts, end_ts)
+        match_stats = (
+            shared_snapshot.match_stats
+            if shared_snapshot
+            else self.wrapped_repo.get_month_match_stats(guild_id, start_ts, end_ts)
+        )
         total_kills = 0
         total_deaths = 0
         total_assists = 0
@@ -1297,11 +1481,19 @@ class WrappedService:
                 break
 
         # Get player heroes for unique count and avg duration
-        player_heroes = self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        player_heroes = (
+            shared_snapshot.player_heroes
+            if shared_snapshot
+            else self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        )
         unique_heroes = len([ph for ph in player_heroes if ph["discord_id"] == discord_id])
 
         # Get avg game duration from match rows
-        rows = self.wrapped_repo.get_player_year_matches(discord_id, guild_id, year, end_ts)
+        rows = (
+            shared_snapshot.player_year_matches
+            if shared_snapshot
+            else self.wrapped_repo.get_player_year_matches(discord_id, guild_id, year, end_ts)
+        )
         durations = [r["duration_seconds"] for r in rows if r.get("duration_seconds")]
         avg_game_duration = int(sum(durations) / len(durations)) if durations else 0
 
@@ -1493,11 +1685,30 @@ class WrappedService:
         )
 
     def get_hero_spotlight_wrapped(
-        self, discord_id: int, year: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        year: int,
+        guild_id: int | None = None,
+        *,
+        snapshot: WrappedStorySnapshot | None = None,
     ) -> HeroSpotlightWrapped | None:
         """Get hero spotlight data for wrapped."""
         start_ts, end_ts = self._get_year_timestamps(year)
-        player_heroes = self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        shared_snapshot = (
+            snapshot
+            if self._snapshot_matches(
+                snapshot,
+                guild_id=guild_id,
+                year=year,
+                discord_id=discord_id,
+            )
+            else None
+        )
+        player_heroes = (
+            shared_snapshot.player_heroes
+            if shared_snapshot
+            else self.wrapped_repo.get_month_player_heroes(guild_id, start_ts, end_ts)
+        )
 
         # Filter to this player
         my_heroes = [ph for ph in player_heroes if ph["discord_id"] == discord_id]
@@ -1537,33 +1748,49 @@ class WrappedService:
         )
 
     def get_role_breakdown_wrapped(
-        self, discord_id: int, year: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        year: int,
+        guild_id: int | None = None,
+        *,
+        snapshot: WrappedStorySnapshot | None = None,
     ) -> RoleBreakdownWrapped | None:
         """Get lane frequency from match enrichment data."""
         _, end_ts = self._get_year_timestamps(year)
 
-        rows = self.wrapped_repo.get_player_year_matches(discord_id, guild_id, year, end_ts)
+        shared_snapshot = (
+            snapshot
+            if self._snapshot_matches(
+                snapshot,
+                guild_id=guild_id,
+                year=year,
+                discord_id=discord_id,
+            )
+            else None
+        )
+        rows = (
+            shared_snapshot.player_year_matches
+            if shared_snapshot
+            else self.wrapped_repo.get_player_year_matches(discord_id, guild_id, year, end_ts)
+        )
 
         if not rows:
             return None
 
-        # Hoist steam_ids lookup outside the loop
-        steam_ids = set(self.player_repo.get_steam_ids(discord_id))
+        enrichment_facts = (
+            shared_snapshot.enrichment_facts
+            if shared_snapshot
+            else self._extract_player_enrichment_facts(
+                rows,
+                set(self.player_repo.get_steam_ids(discord_id)),
+            )
+        )
 
         pos_freq: dict[int, int] = {}
-        for row in rows:
-            raw = row.get("enrichment_data")
-            if raw:
-                try:
-                    data = json.loads(raw)
-                    for p in data.get("players", []):
-                        if p.get("account_id") in steam_ids:
-                            lane_role = p.get("lane_role", 0)
-                            if lane_role in (1, 2, 3):  # safe, mid, off only
-                                pos_freq[lane_role] = pos_freq.get(lane_role, 0) + 1
-                            break
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        for facts in enrichment_facts:
+            if facts and facts.lane_role in (1, 2, 3):  # safe, mid, off only
+                lane_role = facts.lane_role
+                pos_freq[lane_role] = pos_freq.get(lane_role, 0) + 1
 
         lane_games = sum(pos_freq.values())
         return RoleBreakdownWrapped(

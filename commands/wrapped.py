@@ -421,13 +421,38 @@ class WrappedCog(commands.Cog):
         """Fetch all data needed for the wrapped story slides (synchronous)."""
         ws = self.wrapped_service
 
-        server_wrapped = ws.get_server_wrapped(guild_id, year)
-        personal_summary = ws.get_personal_summary_wrapped(target_user_id, year, guild_id)
-        records_wrapped = ws.get_player_records_wrapped(target_user_id, year, guild_id)
+        snapshot = ws.build_wrapped_story_snapshot(target_user_id, year, guild_id)
+        server_wrapped = ws.get_server_wrapped(
+            guild_id,
+            year,
+            snapshot=snapshot,
+        )
+        personal_summary = ws.get_personal_summary_wrapped(
+            target_user_id,
+            year,
+            guild_id,
+            snapshot=snapshot,
+        )
+        records_wrapped = ws.get_player_records_wrapped(
+            target_user_id,
+            year,
+            guild_id,
+            snapshot=snapshot,
+        )
         pairwise_data = ws.get_pairwise_wrapped(target_user_id, guild_id)
         package_deal_data = ws.get_package_deal_wrapped(target_user_id, year, guild_id)
-        hero_spotlight = ws.get_hero_spotlight_wrapped(target_user_id, year, guild_id)
-        role_breakdown = ws.get_role_breakdown_wrapped(target_user_id, year, guild_id)
+        hero_spotlight = ws.get_hero_spotlight_wrapped(
+            target_user_id,
+            year,
+            guild_id,
+            snapshot=snapshot,
+        )
+        role_breakdown = ws.get_role_breakdown_wrapped(
+            target_user_id,
+            year,
+            guild_id,
+            snapshot=snapshot,
+        )
 
         # Gamba data
         gamba_data = None
