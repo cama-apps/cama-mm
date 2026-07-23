@@ -3301,6 +3301,162 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
+    def get_player_hero_pairwise_stats(
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+        min_games: int = 2,
+    ) -> dict[str, list[dict]]:
+        """Load every Heroes-tab pairwise section with one participant join.
+
+        The legacy point methods below each join a player's matches back to
+        ``match_participants`` independently.  Nemesis and easy-prey stats even
+        perform the same enemy aggregation twice with a different sort.  This
+        grouped read visits each ally/enemy once per match, then derives the
+        four independently sorted views in memory.
+
+        Target heroes are intentionally allowed to be NULL or zero in the base
+        query: the all-hero enemy and ally summaries historically include those
+        matches.  Only the hero-vs-hero view requires a valid target hero.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    subject.team_number = other.team_number AS is_ally,
+                    subject.hero_id AS my_hero,
+                    other.hero_id AS other_hero,
+                    COUNT(*) AS games,
+                    SUM(CASE WHEN subject.won = 1 THEN 1 ELSE 0 END) AS wins,
+                    SUM(CASE WHEN subject.won = 0 THEN 1 ELSE 0 END) AS losses,
+                    SUM(CASE WHEN subject.won THEN 1 ELSE 0 END) AS truthy_wins
+                FROM match_participants AS subject
+                JOIN match_participants AS other
+                  ON other.match_id = subject.match_id
+                 AND other.discord_id != subject.discord_id
+                 AND other.guild_id = subject.guild_id
+                WHERE subject.discord_id = ?
+                  AND subject.guild_id = ?
+                  AND subject.team_number IS NOT NULL
+                  AND other.team_number IS NOT NULL
+                  AND other.hero_id IS NOT NULL
+                  AND other.hero_id > 0
+                GROUP BY is_ally, subject.hero_id, other.hero_id
+                """,
+                (discord_id, normalized_guild),
+            )
+            rows = cursor.fetchall()
+
+        enemy_totals: dict[int, dict[str, int]] = {}
+        ally_totals: dict[int, dict[str, int]] = {}
+        hero_matchups: list[dict] = []
+
+        for row in rows:
+            other_hero = row["other_hero"]
+            games = row["games"]
+            wins = row["wins"]
+            losses = row["losses"]
+
+            totals_by_hero = ally_totals if row["is_ally"] else enemy_totals
+            totals = totals_by_hero.setdefault(
+                other_hero,
+                {"games": 0, "wins": 0, "losses": 0},
+            )
+            totals["games"] += games
+            totals["wins"] += wins
+            totals["losses"] += losses
+
+            my_hero = row["my_hero"]
+            if (
+                not row["is_ally"]
+                and my_hero is not None
+                and my_hero > 0
+                and games >= min_games
+            ):
+                hero_matchups.append(
+                    {
+                        "my_hero": my_hero,
+                        "opponent_hero": other_hero,
+                        "games": games,
+                        # Preserve the legacy CASE WHEN won truthiness used by
+                        # get_player_hero_vs_opponent_heroes.
+                        "wins": row["truthy_wins"],
+                    }
+                )
+
+        enemy_rows = [
+            {
+                "enemy_hero": hero_id,
+                "games": totals["games"],
+                "wins": totals["wins"],
+                "losses": totals["losses"],
+            }
+            for hero_id, totals in enemy_totals.items()
+            if totals["games"] >= min_games
+        ]
+        ally_rows = [
+            {
+                "ally_hero": hero_id,
+                "games": totals["games"],
+                "wins": totals["wins"],
+            }
+            for hero_id, totals in ally_totals.items()
+            if totals["games"] >= min_games
+        ]
+
+        nemesis = [
+            {**row, "loss_rate": row["losses"] / row["games"]}
+            for row in sorted(
+                enemy_rows,
+                key=lambda row: (
+                    -(row["losses"] / row["games"]),
+                    -row["games"],
+                    row["enemy_hero"],
+                ),
+            )[:10]
+        ]
+
+        easy = [
+            {**row, "win_rate": row["wins"] / row["games"]}
+            for row in sorted(
+                enemy_rows,
+                key=lambda row: (
+                    -(row["wins"] / row["games"]),
+                    -row["games"],
+                    row["enemy_hero"],
+                ),
+            )[:10]
+        ]
+
+        synergies = [
+            {**row, "win_rate": row["wins"] / row["games"]}
+            for row in sorted(
+                ally_rows,
+                key=lambda row: (
+                    -(row["wins"] / row["games"]),
+                    -row["games"],
+                    row["ally_hero"],
+                ),
+            )[:10]
+        ]
+
+        hero_matchups.sort(
+            key=lambda row: (
+                -row["games"],
+                row["my_hero"],
+                row["opponent_hero"],
+            )
+        )
+
+        return {
+            "nemesis": nemesis,
+            "easy": easy,
+            "synergies": synergies,
+            "hero_vs_hero": hero_matchups[:30],
+        }
+
     def get_player_hero_vs_opponent_heroes(
         self, discord_id: int, guild_id: int | None = None, min_games: int = 2
     ) -> list[dict]:
