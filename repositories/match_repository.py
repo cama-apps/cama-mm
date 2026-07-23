@@ -8,8 +8,26 @@ import time
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IMatchRepository
+from utils.match_bans import extract_match_bans
 
 logger = logging.getLogger("cama_bot.repositories.match")
+
+
+def _replace_match_bans(cursor, match_id: int, enrichment_data: str | None) -> None:
+    """Replace Scout's compact ban projection inside the caller's transaction."""
+    cursor.execute("DELETE FROM match_bans WHERE match_id = ?", (match_id,))
+    bans = extract_match_bans(enrichment_data)
+    if bans:
+        cursor.executemany(
+            """
+            INSERT INTO match_bans (match_id, ban_index, team, hero_id)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (match_id, ban_index, team, hero_id)
+                for ban_index, team, hero_id in bans
+            ],
+        )
 
 
 class MatchRepository(BaseRepository, IMatchRepository):
@@ -1614,6 +1632,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     match_id,
                 ),
             )
+            if cursor.rowcount:
+                _replace_match_bans(cursor, match_id, enrichment_data)
 
     def update_participant_stats(
         self,
@@ -1756,6 +1776,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     match_id,
                 ),
             )
+            if cursor.rowcount:
+                _replace_match_bans(cursor, match_id, enrichment_data)
 
             if not participant_updates:
                 return 0
@@ -2154,6 +2176,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """,
                 (match_id,),
             )
+            cursor.execute(
+                "DELETE FROM match_bans WHERE match_id = ?",
+                (match_id,),
+            )
 
             return True
 
@@ -2225,6 +2251,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     fantasy_points = NULL
                 WHERE match_id IN ({placeholders})
                 """,
+                match_ids,
+            )
+            cursor.execute(
+                f"DELETE FROM match_bans WHERE match_id IN ({placeholders})",
                 match_ids,
             )
 
@@ -2320,6 +2350,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     fantasy_points = NULL
                 WHERE match_id IN ({placeholders})
                 """,
+                match_ids,
+            )
+            cursor.execute(
+                f"DELETE FROM match_bans WHERE match_id IN ({placeholders})",
                 match_ids,
             )
 
@@ -3890,7 +3924,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         self, discord_ids: list[int], guild_id: int | None = None
     ) -> dict[int, int]:
         """
-        Extract opposing-team ban data from enrichment_data for matches where players participated.
+        Count opposing-team bans for matches where the players participated.
 
         Only counts bans made by the opposing team (i.e. bans targeted against the scouted
         players). Each match is only counted once even if multiple players from the list
@@ -3914,67 +3948,31 @@ class MatchRepository(BaseRepository, IMatchRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" * len(discord_ids))
-
-            # Get matches with enrichment data and the team_number of each scouted player
             cursor.execute(
                 f"""
-                SELECT m.match_id, m.enrichment_data, mp.team_number
-                FROM matches m
-                JOIN match_participants mp ON m.match_id = mp.match_id
-                WHERE mp.discord_id IN ({placeholders})
-                  AND m.guild_id = ?
-                  AND mp.guild_id = ?
-                  AND m.enrichment_data IS NOT NULL
+                WITH scouted_match_teams AS (
+                    SELECT DISTINCT match_id, team_number
+                    FROM match_participants
+                    WHERE guild_id = ?
+                      AND discord_id IN ({placeholders})
+                      AND team_number IN (1, 2)
+                )
+                SELECT mb.hero_id, COUNT(*) AS ban_count
+                FROM scouted_match_teams smt
+                JOIN match_bans mb
+                  ON mb.match_id = smt.match_id
+                 AND mb.team = CASE smt.team_number
+                     WHEN 1 THEN 1
+                     WHEN 2 THEN 0
+                 END
+                GROUP BY mb.hero_id
                 """,
-                discord_ids + [normalized_guild, normalized_guild],
+                [normalized_guild, *discord_ids],
             )
-            rows = cursor.fetchall()
-
-            # Group by match_id: collect enrichment_data and team_numbers of scouted players
-            match_data: dict[int, dict] = {}
-            for row in rows:
-                match_id = row["match_id"]
-                if match_id not in match_data:
-                    match_data[match_id] = {
-                        "enrichment_data": row["enrichment_data"],
-                        "team_numbers": set(),
-                    }
-                match_data[match_id]["team_numbers"].add(row["team_number"])
-
-            # Parse enrichment_data and count only opposing-team bans
-            ban_counts: dict[int, int] = {}
-
-            for match_id, info in match_data.items():
-                enrichment_data = info["enrichment_data"]
-                team_numbers = info["team_numbers"]
-                if not enrichment_data:
-                    continue
-
-                # Determine which OpenDota ban teams are "opposing"
-                # Our team_number 1 (Radiant) → opposing OpenDota team is 1 (Dire)
-                # Our team_number 2 (Dire) → opposing OpenDota team is 0 (Radiant)
-                opposing_ban_teams: set[int] = set()
-                for tn in team_numbers:
-                    if tn == 1:
-                        opposing_ban_teams.add(1)  # Dire bans
-                    elif tn == 2:
-                        opposing_ban_teams.add(0)  # Radiant bans
-
-                try:
-                    data = json.loads(enrichment_data)
-                    picks_bans = data.get("picks_bans", [])
-
-                    for entry in picks_bans:
-                        if entry.get("is_pick") is False:
-                            ban_team = entry.get("team")
-                            if ban_team in opposing_ban_teams:
-                                hero_id = entry.get("hero_id")
-                                if hero_id:
-                                    ban_counts[hero_id] = ban_counts.get(hero_id, 0) + 1
-                except (json.JSONDecodeError, TypeError, KeyError):
-                    continue
-
-            return ban_counts
+            return {
+                row["hero_id"]: row["ban_count"]
+                for row in cursor.fetchall()
+            }
 
     def get_match_count_for_players(
         self, discord_ids: list[int], guild_id: int | None = None

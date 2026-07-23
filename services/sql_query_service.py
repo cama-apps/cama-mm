@@ -56,6 +56,7 @@ BLOCKED_TABLES: set[str] = {
     "prediction_levels",
     "match_predictions",
     "match_corrections",
+    "match_bans",
     "economy_ledger_context",
     # Internal provider telemetry; never expose operational LLM metadata to /ask.
     "llm_request_attempts",
