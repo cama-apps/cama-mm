@@ -459,6 +459,10 @@ class SchemaManager:
             # Continuous cadence: games start back-to-back, so more than one can
             # share a calendar start-date — drop the per-date unique constraint.
             ("rebuild_mafia_games_drop_date_unique", self._migration_rebuild_mafia_games_drop_date_unique),
+            (
+                "create_mafia_phase_reminders_table",
+                self._migration_create_mafia_phase_reminders_table,
+            ),
             # Persist the bankruptcy penalty withheld at order-book settlement so
             # realized-P&L stats / balance-chart deltas match the JC actually
             # credited (mirrors match_participants.bonus_jc).
@@ -4679,6 +4683,22 @@ class SchemaManager:
                 discord_id INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (guild_id, week_start, discord_id)
+            )
+            """
+        )
+
+    def _migration_create_mafia_phase_reminders_table(self, cursor) -> None:
+        """Durable once-per-cycle claims for automatic Mafia reminders."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mafia_phase_reminders (
+                guild_id   INTEGER NOT NULL DEFAULT 0,
+                game_id     INTEGER NOT NULL,
+                day_number  INTEGER NOT NULL,
+                phase       TEXT    NOT NULL,
+                claimed_at  INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, game_id, day_number, phase),
+                FOREIGN KEY (game_id) REFERENCES mafia_games(game_id) ON DELETE CASCADE
             )
             """
         )

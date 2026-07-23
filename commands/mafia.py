@@ -21,9 +21,11 @@ from domain.models.mafia import (
     MafiaWinner,
 )
 from services.mafia_service import (
+    DAY_DURATION_S,
     ENTRY_FEE,
     MAX_WINNER_PAYOUT,
     MVP_BONUS,
+    NIGHT_DURATION_S,
     PHASE_REMINDER_AFTER_S,
     phase_duration,
 )
@@ -91,9 +93,8 @@ class MafiaCommands(commands.Cog):
         self.bot = bot
         self.mafia_service = mafia_service
         self.flavor_service = flavor_service
-        # Per-guild memoization of post / reminder state by (game_date, phase).
+        # Per-guild memoization of public phase posts by (game_date, phase).
         self._announced_phases: dict[int, set[tuple[str, str]]] = {}
-        self._reminded_phases: dict[int, set[tuple[str, str]]] = {}
 
     async def cog_load(self) -> None:
         self._mafia_phase_loop.start()
@@ -234,18 +235,24 @@ class MafiaCommands(commands.Cog):
 
     @mafia.command(
         name="join",
-        description="Reserve a seat in the next mafia game (priority over auto-roster)",
+        description="Reserve a seat in the next mafia game",
     )
     async def join(self, interaction: discord.Interaction):
         if not await require_mafia_channel(interaction):
             return
         guild_id = interaction.guild.id if interaction.guild else None
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self.mafia_service.join, guild_id, interaction.user.id
         )
+        if not result.get("ok"):
+            await interaction.response.send_message(
+                "You need to be registered before joining Mafia.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
-            "✅ You're signed up. Signups get first dibs on the roster when the "
-            "next game starts.",
+            "✅ You're queued for the next available Mafia roster. Seats go to "
+            "registered, entry-fee-eligible players in signup order.",
             ephemeral=True,
         )
 
@@ -378,7 +385,8 @@ class MafiaCommands(commands.Cog):
         s = await asyncio.to_thread(self.mafia_service.get_public_status, guild_id)
         if not s.get("active"):
             await interaction.response.send_message(
-                "No mafia game is active. Next game starts at the next 4 AM PST rollover.",
+                "No Mafia game is active. Use `/mafia join` to queue for the next "
+                "roster; it starts once at least 5 eligible players are queued.",
                 ephemeral=True,
             )
             return
@@ -485,11 +493,14 @@ class MafiaCommands(commands.Cog):
         embed = discord.Embed(
             title="Cama Mafia — Rules",
             description=(
-                "A new game starts daily at **4 AM PST**, auto-rostered from "
-                "everyone who used `/gamba` or `/dig` in the last 24 hours.\n\n"
+                "A new game starts after the current one finishes once at least "
+                "5 registered, entry-fee-eligible players are queued with "
+                "`/mafia join`.\n\n"
                 "**Phases**\n"
-                "• Night (6h): Mafia/Doctor/Detective/Vigilante submit `/mafia act`.\n"
-                "• Day (13h): Living players vote with `/mafia vote`. Tallies hidden.\n"
+                f"• Night ({NIGHT_DURATION_S // 3600}h): "
+                "Mafia/Doctor/Detective/Vigilante submit `/mafia act`.\n"
+                f"• Day ({DAY_DURATION_S // 3600}h): "
+                "Living players vote with `/mafia vote`. Tallies hidden.\n"
                 "• Resolution: Winners split the pot, MVP gets a bonus from it.\n\n"
                 "**Roles**\n"
                 f"{ROLE_EMOJI[MafiaRole.MAFIA]} Mafia — kill at night.\n"
@@ -506,13 +517,16 @@ class MafiaCommands(commands.Cog):
                 f"MVP gets +{MVP_BONUS} from the pot, and each winner is capped at "
                 f"+{MAX_WINNER_PAYOUT} {JOPACOIN_EMOTE} — anything over the cap funds the "
                 "Jopacoin Reserve. Long-run EV is 0 — play to win.\n\n"
-                "Use `/mafia optout` to skip auto-roster."
+                "Use `/mafia optout` to stop required actions and cancel a pending signup."
             ),
             color=0x5865F2,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @mafia.command(name="optout", description="Skip auto-roster for future mafia games")
+    @mafia.command(
+        name="optout",
+        description="Stop required actions and cancel your next-game signup",
+    )
     async def optout(self, interaction: discord.Interaction):
         if not await require_mafia_channel(interaction):
             return
@@ -521,11 +535,12 @@ class MafiaCommands(commands.Cog):
             self.mafia_service.set_optout, guild_id, interaction.user.id, True
         )
         await interaction.response.send_message(
-            "You're opted out of mafia auto-roster. Use `/mafia optin` to rejoin.",
+            "You're opted out. Mafia won't wait for or remind you, and any "
+            "next-game signup was cancelled. Use `/mafia optin` to resume.",
             ephemeral=True,
         )
 
-    @mafia.command(name="optin", description="Rejoin mafia auto-roster")
+    @mafia.command(name="optin", description="Resume required actions in Mafia")
     async def optin(self, interaction: discord.Interaction):
         if not await require_mafia_channel(interaction):
             return
@@ -534,7 +549,7 @@ class MafiaCommands(commands.Cog):
             self.mafia_service.set_optout, guild_id, interaction.user.id, False
         )
         await interaction.response.send_message(
-            "Welcome back. You'll be eligible for the next mafia game.",
+            "Welcome back. Use `/mafia join` if you want a seat in the next game.",
             ephemeral=True,
         )
 
@@ -632,12 +647,6 @@ class MafiaCommands(commands.Cog):
 
     def _mark_announced(self, guild_id: int, game_date: str, phase: MafiaPhase) -> None:
         self._announced_phases.setdefault(guild_id, set()).add((game_date, phase.value))
-
-    def _was_reminded(self, guild_id: int, game_date: str, phase: MafiaPhase) -> bool:
-        return (game_date, phase.value) in self._reminded_phases.get(guild_id, set())
-
-    def _mark_reminded(self, guild_id: int, game_date: str, phase: MafiaPhase) -> None:
-        self._reminded_phases.setdefault(guild_id, set()).add((game_date, phase.value))
 
     async def _post_setup(self, guild: discord.Guild, game) -> None:
         if self._was_announced(guild.id, game.game_date, MafiaPhase.SETUP):
@@ -1048,10 +1057,6 @@ class MafiaCommands(commands.Cog):
     async def _maybe_post_reminder(
         self, guild: discord.Guild, game, phase: MafiaPhase
     ) -> None:
-        key = f"remind:{game.game_date}:{game.day_number}:{phase.value}"
-        seen = self._reminded_phases.setdefault(guild.id, set())
-        if key in seen:
-            return
         channel = _mafia_post_channel(guild)
         if channel is None:
             return
@@ -1071,6 +1076,54 @@ class MafiaCommands(commands.Cog):
         if not missing:
             return
 
+        claimed = await asyncio.to_thread(
+            self.mafia_service.repo.claim_phase_reminder,
+            guild.id,
+            game.game_id,
+            game.day_number,
+            phase,
+        )
+        if not claimed:
+            return
+
+        current = await asyncio.to_thread(
+            self.mafia_service.repo.get_active_game, guild.id
+        )
+        if (
+            current is None
+            or current.game_id != game.game_id
+            or current.day_number != game.day_number
+            or current.phase != phase
+        ):
+            await asyncio.to_thread(
+                self.mafia_service.repo.release_phase_reminder,
+                guild.id,
+                game.game_id,
+                game.day_number,
+                phase,
+            )
+            return
+
+        if phase == MafiaPhase.NIGHT:
+            missing = await asyncio.to_thread(
+                self.mafia_service.players_needing_night_action, current
+            )
+        else:
+            missing = await asyncio.to_thread(
+                self.mafia_service.players_needing_day_vote, current
+            )
+        if not missing:
+            await asyncio.to_thread(
+                self.mafia_service.repo.release_phase_reminder,
+                guild.id,
+                game.game_id,
+                game.day_number,
+                phase,
+            )
+            return
+
+        game = current
+        ends_at = self._phase_ends_at(game)
         pings = " ".join(f"<@{pid}>" for pid in missing[:25])
         msg = (
             f"⚠️ {pings}\n{len(missing)} "
@@ -1080,8 +1133,14 @@ class MafiaCommands(commands.Cog):
         try:
             await channel.send(msg)
         except discord.HTTPException:
+            await asyncio.to_thread(
+                self.mafia_service.repo.release_phase_reminder,
+                guild.id,
+                game.game_id,
+                game.day_number,
+                phase,
+            )
             return
-        seen.add(key)
 
     # ────────────────────────────────────────────────────────────────────
     # Embed builders
