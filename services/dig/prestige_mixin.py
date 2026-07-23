@@ -266,6 +266,7 @@ class PrestigeMixin:
                     "pinnacle_phase": 0,
                     "pinnacle_hp_remaining": None,
                     "pinnacle_last_engaged_at": None,
+                    "route_state": None,
                 },
             )
         except TunnelStateConflictError:
@@ -351,6 +352,7 @@ class PrestigeMixin:
                 "pinnacle_phase": 0,
                 "pinnacle_hp_remaining": None,
                 "pinnacle_last_engaged_at": None,
+                "route_state": None,
             },
             log_detail={
                 "depth": depth,

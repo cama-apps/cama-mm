@@ -91,6 +91,7 @@ class EnvironmentMixin:
         *,
         equipped_gear: dict | None = None,
         persist: bool = True,
+        drain_multiplier: float = 1.0,
     ) -> dict:
         """Apply slow refill from last_lum_update_at, then drain for this dig.
 
@@ -136,6 +137,7 @@ class EnvironmentMixin:
             drain += (depth - LUMINOSITY_DEEP_DRAIN_START_DEPTH) // (
                 LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP
             )
+        drain = max(0, int(drain * max(0.0, drain_multiplier)))
         luminosity = max(0, luminosity - drain)
 
         # Persist both luminosity and the timestamp so subsequent digs compute

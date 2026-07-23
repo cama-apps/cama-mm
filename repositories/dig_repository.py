@@ -189,6 +189,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "auto_buy_torch", "auto_buy_hard_hat",
         # add_last_cheer_at_to_tunnels migration
         "last_cheer_at",
+        # add_route_state_to_tunnels migration
+        "route_state",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
@@ -1163,6 +1165,7 @@ class DigRepository(BaseRepository, IDigRepository):
         guild_id: int,
         jc_delta: int,
         tunnel_updates: dict,
+        require_tunnel_state: dict,
         boss_echo_boss_id: str,
         boss_echo_depth: int,
         boss_echo_window_seconds: int,
@@ -1182,6 +1185,11 @@ class DigRepository(BaseRepository, IDigRepository):
             raise ValueError(
                 f"atomic_boss_full_victory got unknown tunnel columns: {sorted(unknown)}."
             )
+        unknown = set(require_tunnel_state) - self._TUNNEL_UPDATABLE_COLUMNS
+        if unknown:
+            raise ValueError(
+                f"atomic_boss_full_victory got unknown guard columns: {sorted(unknown)}."
+            )
 
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())
@@ -1192,10 +1200,22 @@ class DigRepository(BaseRepository, IDigRepository):
 
             if tunnel_updates:
                 set_clauses = ", ".join(f"{col} = ?" for col in tunnel_updates)
+                where_sql = "discord_id = ? AND guild_id = ?"
+                params: list = [*tunnel_updates.values(), discord_id, gid]
+                for col, expected in require_tunnel_state.items():
+                    if expected is None:
+                        where_sql += f" AND {col} IS NULL"
+                    else:
+                        where_sql += f" AND {col} = ?"
+                        params.append(expected)
                 cursor.execute(
-                    f"UPDATE tunnels SET {set_clauses} WHERE discord_id = ? AND guild_id = ?",
-                    (*tunnel_updates.values(), discord_id, gid),
+                    f"UPDATE tunnels SET {set_clauses} WHERE {where_sql}",
+                    params,
                 )
+                if cursor.rowcount == 0:
+                    raise TunnelStateConflictError(
+                        f"boss state changed for guard {sorted(require_tunnel_state)}"
+                    )
 
             if jc_delta != 0:
                 self._set_economy_ledger_context(

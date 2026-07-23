@@ -63,6 +63,11 @@ from commands.dig_helpers.progression_views import (
     MutationSelectionView,
     PrestigePerksView,
 )
+from commands.dig_helpers.route_views import (
+    RouteChoiceView,
+    build_route_choice_embed,
+    get_route_choice,
+)
 from config import DIG_CHANNEL_ID
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
@@ -140,6 +145,7 @@ __all__ = [
     "MutationSelectionView",
     "PaidDigView",
     "PrestigePerksView",
+    "RouteChoiceView",
     # Re-exported helpers used by tests / embed builders.
     "_DictObj",
     "_wrap",
@@ -520,6 +526,9 @@ class DigCommands(commands.Cog):
             return
 
         # Non-cooldown errors (cooldown is handled by the paid_dig_available branch)
+        if getattr(result, "route_choice_required", False):
+            await self._handle_route_choice(interaction, guild_id, result)
+            return
         if not getattr(result, "success", False) and not getattr(result, "paid_dig_available", False):
             await safe_followup(
                 interaction,
@@ -592,6 +601,9 @@ class DigCommands(commands.Cog):
         self, interaction: discord.Interaction, guild_id: int, result,
     ) -> None:
         """Send the existing dig UI, then offer any rare cross-system bonus."""
+        if getattr(result, "route_choice_required", False):
+            await self._handle_route_choice(interaction, guild_id, result)
+            return
         if getattr(result, "is_first_dig", False):
             await self._send_first_dig_welcome(interaction)
         elif getattr(result, "boss_encounter", False):
@@ -623,6 +635,32 @@ class DigCommands(commands.Cog):
                 await self._send_normal_dig_result(interaction, result)
 
         await maybe_send_dig_bonus(self.bot, interaction, result)
+
+    async def _handle_route_choice(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        result,
+    ) -> None:
+        """Render the persisted junction offered by a completed boss tier."""
+        route_choice = get_route_choice(result)
+        if route_choice is None:
+            await safe_followup(
+                interaction,
+                content="The junction could not be read. Use `/dig go` to try again.",
+                ephemeral=True,
+            )
+            return
+        embed = build_route_choice_embed(route_choice)
+        view = RouteChoiceView(
+            self.dig_service,
+            interaction.user.id,
+            guild_id,
+            route_choice,
+        )
+        message = await self._send_public_dig(interaction, embed=embed, view=view)
+        if message is not None:
+            view.message = message
 
     # ── dig_go helpers (one per result shape) ───────────────────────────
 
@@ -1213,6 +1251,22 @@ class DigCommands(commands.Cog):
             inline=True,
         )
         embed.add_field(name="Pickaxe", value=pickaxe_name, inline=True)
+
+        route_status = info.get("route", {}) if isinstance(info, dict) else {}
+        if isinstance(route_status, dict):
+            active_route = route_status.get("active_route")
+            if isinstance(active_route, dict):
+                embed.add_field(
+                    name=f"Route â€” {active_route.get('name', 'Unknown')}",
+                    value=active_route.get("description", ""),
+                    inline=False,
+                )
+            elif is_own and route_status.get("choice_required"):
+                embed.add_field(
+                    name="Route Junction",
+                    value="A route is waiting to be chosen. Use `/dig go` to reopen it.",
+                    inline=False,
+                )
 
         # Equipped relics
         relics = info.get("relics", []) if isinstance(info, dict) else []

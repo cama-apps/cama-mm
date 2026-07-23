@@ -1497,6 +1497,7 @@ class ProgressionMixin:
             "prestige_level": tunnel.get("prestige_level", 0) or 0,
             "streak": tunnel.get("streak_days", 0) or 0,
             "pinnacle_foreshadow": pinnacle_foreshadow,
+            "route": self._route_status_from_tunnel(tunnel),
         }
 
     # ------------------------------------------------------------------

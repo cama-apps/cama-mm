@@ -562,6 +562,11 @@ class SchemaManager:
                 "add_dig_action_history_indexes",
                 self._migration_add_dig_action_history_indexes,
             ),
+            # Persist the current or pending route through each Dig layer.
+            (
+                "add_route_state_to_tunnels",
+                self._migration_add_route_state_to_tunnels,
+            ),
         ]
 
     # --- Migrations ---
@@ -642,6 +647,10 @@ class SchemaManager:
         # action pay for two redundant index writes.
         cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_actor")
         cursor.execute("DROP INDEX IF EXISTS idx_dig_actions_guild_target")
+
+    def _migration_add_route_state_to_tunnels(self, cursor) -> None:
+        """Persist the active or pending layer route offer."""
+        self._add_column_if_not_exists(cursor, "tunnels", "route_state", "TEXT")
 
     def _migration_add_bonuses_paid_to_matches(self, cursor) -> None:
         """Idempotency claim for the post-core bonus credits.
