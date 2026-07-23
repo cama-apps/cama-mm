@@ -1512,17 +1512,14 @@ class ProfileCommands(commands.Cog):
                 return None
 
         # These aggregates all read the same immutable match snapshot and have
-        # no ordering dependency. Run them alongside chart rendering instead of
-        # serializing eight database round trips behind the image work.
+        # no ordering dependency. Run them alongside chart rendering; the four
+        # pairwise sections share one grouped repository read.
         (
             chart_bytes,
             overall,
             lane_stats,
             ward_stats,
-            nemesis,
-            easy,
-            synergies,
-            hero_vs_hero,
+            pairwise_stats,
             hero_lane,
         ) = await asyncio.gather(
             draw_chart(),
@@ -1543,31 +1540,7 @@ class ProfileCommands(commands.Cog):
             ),
             asyncio.to_thread(
                 functools.partial(
-                    match_repo.get_player_nemesis_heroes,
-                    target_discord_id,
-                    guild_id,
-                    min_games=2,
-                )
-            ),
-            asyncio.to_thread(
-                functools.partial(
-                    match_repo.get_player_easiest_opponents,
-                    target_discord_id,
-                    guild_id,
-                    min_games=2,
-                )
-            ),
-            asyncio.to_thread(
-                functools.partial(
-                    match_repo.get_player_best_hero_synergies,
-                    target_discord_id,
-                    guild_id,
-                    min_games=2,
-                )
-            ),
-            asyncio.to_thread(
-                functools.partial(
-                    match_repo.get_player_hero_vs_opponent_heroes,
+                    match_repo.get_player_hero_pairwise_stats,
                     target_discord_id,
                     guild_id,
                     min_games=2,
@@ -1579,6 +1552,10 @@ class ProfileCommands(commands.Cog):
                 guild_id,
             ),
         )
+        nemesis = pairwise_stats["nemesis"]
+        easy = pairwise_stats["easy"]
+        synergies = pairwise_stats["synergies"]
+        hero_vs_hero = pairwise_stats["hero_vs_hero"]
 
         files = []
         if chart_bytes is not None:

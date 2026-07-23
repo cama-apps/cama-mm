@@ -64,6 +64,14 @@ async def test_heroes_tab_runs_independent_reads_and_drawing_concurrently(
         ),
         get_player_lane_stats=MagicMock(return_value=[]),
         get_player_ward_stats_by_lane=MagicMock(return_value=[]),
+        get_player_hero_pairwise_stats=MagicMock(
+            return_value={
+                "nemesis": [],
+                "easy": [],
+                "synergies": [],
+                "hero_vs_hero": [],
+            }
+        ),
         get_player_nemesis_heroes=MagicMock(return_value=[]),
         get_player_easiest_opponents=MagicMock(return_value=[]),
         get_player_best_hero_synergies=MagicMock(return_value=[]),
@@ -88,21 +96,29 @@ async def test_heroes_tab_runs_independent_reads_and_drawing_concurrently(
     )
 
     try:
-        # Drawing plus eight independent aggregate reads share the second wave.
-        assert state["peak"] == 9
+        # Drawing plus five independent aggregate reads share the second wave.
+        assert state["peak"] == 6
         assert embed.title == "Profile: Player > Heroes"
         assert [file.filename for file in files] == ["hero_chart.png"]
         for method in (
             match_repo.get_player_overall_hero_stats,
             match_repo.get_player_lane_stats,
             match_repo.get_player_ward_stats_by_lane,
+            match_repo.get_player_hero_lane_performance,
+        ):
+            method.assert_called_once()
+        match_repo.get_player_hero_pairwise_stats.assert_called_once_with(
+            123,
+            456,
+            min_games=2,
+        )
+        for legacy_method in (
             match_repo.get_player_nemesis_heroes,
             match_repo.get_player_easiest_opponents,
             match_repo.get_player_best_hero_synergies,
             match_repo.get_player_hero_vs_opponent_heroes,
-            match_repo.get_player_hero_lane_performance,
         ):
-            method.assert_called_once()
+            legacy_method.assert_not_called()
     finally:
         for file in files:
             file.close()

@@ -1429,3 +1429,169 @@ class TestMatchRepository:
 
         assert draft_stats["avg_swing"] == 40.0  # |1560-1520| = 40
         assert draft_stats["actual_win_rate"] == 1.0
+
+    def test_hero_pairwise_batch_matches_legacy_views(
+        self,
+        match_repository,
+        monkeypatch,
+    ):
+        """The grouped Heroes read preserves all four legacy result contracts."""
+        next_match_id = 10_000
+
+        def add_match(
+            cursor,
+            *,
+            guild_id,
+            my_hero,
+            enemy_hero,
+            ally_hero,
+            won,
+            my_team=1,
+        ):
+            nonlocal next_match_id
+            match_id = next_match_id
+            next_match_id += 1
+            cursor.execute(
+                """
+                INSERT INTO matches (
+                    match_id, team1_players, team2_players, winning_team, guild_id
+                ) VALUES (?, '[1, 2]', '[3, 4, 5]', ?, ?)
+                """,
+                (match_id, won, guild_id),
+            )
+            opponent_won = None if won is None else 1 - won
+            cursor.executemany(
+                """
+                INSERT INTO match_participants (
+                    match_id, discord_id, guild_id, team_number, won, hero_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (match_id, 1, guild_id, my_team, won, my_hero),
+                    (match_id, 2, guild_id, 1, won, ally_hero),
+                    (match_id, 3, guild_id, 2, opponent_won, enemy_hero),
+                    # Invalid counterpart heroes must not enter any view.
+                    (match_id, 4, guild_id, 2, opponent_won, None),
+                    (match_id, 5, guild_id, 2, opponent_won, 0),
+                    # Legacy equality/inequality joins both exclude NULL teams.
+                    (match_id, 6, guild_id, None, opponent_won, 777),
+                ],
+            )
+
+        with sqlite3.connect(match_repository.db_path) as conn:
+            cursor = conn.cursor()
+            # 36 hero-vs-hero groups with two games each exercises the top-30
+            # limit. Repeated outcome patterns also exercise deterministic ties.
+            outcomes = (1, 0, None)
+            for my_index, my_hero in enumerate((10, 11, 12)):
+                for enemy_index, enemy_hero in enumerate(range(100, 112)):
+                    for repeat in range(2):
+                        add_match(
+                            cursor,
+                            guild_id=TEST_GUILD_ID,
+                            my_hero=my_hero,
+                            enemy_hero=enemy_hero,
+                            ally_hero=200 + ((enemy_index + repeat) % 3),
+                            won=outcomes[(my_index + enemy_index + repeat) % 3],
+                        )
+
+            # Enemy/ally summaries historically include matches whose target
+            # hero is missing; hero-vs-hero does not.
+            for my_hero in (None, 0):
+                for won in (None, 1):
+                    add_match(
+                        cursor,
+                        guild_id=TEST_GUILD_ID,
+                        my_hero=my_hero,
+                        enemy_hero=100,
+                        ally_hero=202,
+                        won=won,
+                    )
+
+            # A target with no team is likewise absent from every legacy view.
+            add_match(
+                cursor,
+                guild_id=TEST_GUILD_ID,
+                my_hero=55,
+                enemy_hero=778,
+                ally_hero=779,
+                won=1,
+                my_team=None,
+            )
+
+            # Same Discord ID in another guild must not affect this guild.
+            for _ in range(3):
+                add_match(
+                    cursor,
+                    guild_id=TEST_GUILD_ID_SECONDARY,
+                    my_hero=999,
+                    enemy_hero=999,
+                    ally_hero=999,
+                    won=0,
+                )
+
+        def legacy_views(min_games):
+            return {
+                "nemesis": match_repository.get_player_nemesis_heroes(
+                    1,
+                    TEST_GUILD_ID,
+                    min_games=min_games,
+                ),
+                "easy": match_repository.get_player_easiest_opponents(
+                    1,
+                    TEST_GUILD_ID,
+                    min_games=min_games,
+                ),
+                "synergies": match_repository.get_player_best_hero_synergies(
+                    1,
+                    TEST_GUILD_ID,
+                    min_games=min_games,
+                ),
+                "hero_vs_hero": (
+                    match_repository.get_player_hero_vs_opponent_heroes(
+                        1,
+                        TEST_GUILD_ID,
+                        min_games=min_games,
+                    )
+                ),
+            }
+
+        for min_games in (2, 7):
+            expected = legacy_views(min_games)
+            connection_count = 0
+            original_get_connection = match_repository.get_connection
+
+            def counted_get_connection(
+                original_get_connection=original_get_connection,
+            ):
+                nonlocal connection_count
+                connection_count += 1
+                return original_get_connection()
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    match_repository,
+                    "get_connection",
+                    counted_get_connection,
+                )
+                actual = match_repository.get_player_hero_pairwise_stats(
+                    1,
+                    TEST_GUILD_ID,
+                    min_games=min_games,
+                )
+
+            assert actual == expected
+            assert connection_count == 1
+
+        assert len(legacy_views(2)["nemesis"]) == 10
+        assert len(legacy_views(2)["easy"]) == 10
+        assert len(legacy_views(2)["hero_vs_hero"]) == 30
+        assert match_repository.get_player_hero_pairwise_stats(
+            1,
+            guild_id=999_999,
+        ) == {
+            "nemesis": [],
+            "easy": [],
+            "synergies": [],
+            "hero_vs_hero": [],
+        }
