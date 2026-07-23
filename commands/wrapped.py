@@ -35,6 +35,8 @@ from utils.wrapped_drawing import (
 
 logger = logging.getLogger("cama_bot.commands.wrapped")
 
+_DISCORD_PREFETCH_CONCURRENCY = 5
+
 
 def select_awards_for_viewer(
     all_awards: list, viewer_id: int, max_awards: int = 6
@@ -139,23 +141,43 @@ class WrappedStoryView(discord.ui.View):
                 pass
 
 
-async def _prefetch_avatars(
+async def _prefetch_discord_profiles(
     guild: discord.Guild | None,
     discord_ids: set[int],
-) -> dict[int, bytes]:
-    """Pre-fetch Discord avatars for pairwise slides."""
+    avatar_ids: set[int],
+    *,
+    max_concurrency: int = _DISCORD_PREFETCH_CONCURRENCY,
+) -> tuple[dict[int, str], dict[int, bytes]]:
+    """Fetch display names and avatars in one bounded, deduplicated pass."""
+    display_names: dict[int, str] = {}
     avatar_cache: dict[int, bytes] = {}
     if not guild:
-        return avatar_cache
-    for did in discord_ids:
+        return display_names, avatar_cache
+
+    limiter = asyncio.Semaphore(max_concurrency)
+
+    async def _fetch_profile(discord_id: int) -> None:
+        member = guild.get_member(discord_id)
+        if member is None:
+            try:
+                async with limiter:
+                    member = await guild.fetch_member(discord_id)
+            except Exception:
+                logger.debug("Failed to fetch Discord user %d", discord_id)
+                return
+
+        display_names[discord_id] = member.display_name
+        if discord_id not in avatar_ids or not member.avatar:
+            return
+
         try:
-            member = guild.get_member(did) or await guild.fetch_member(did)
-            if member and member.avatar:
-                avatar_bytes = await member.avatar.read()
-                avatar_cache[did] = avatar_bytes
+            async with limiter:
+                avatar_cache[discord_id] = await member.avatar.read()
         except Exception:
-            logger.debug("Failed to fetch avatar for user %d", did)
-    return avatar_cache
+            logger.debug("Failed to fetch avatar for user %d", discord_id)
+
+    await asyncio.gather(*(_fetch_profile(did) for did in discord_ids | avatar_ids))
+    return display_names, avatar_cache
 
 
 def _build_slides(
@@ -488,19 +510,8 @@ class WrappedCog(commands.Cog):
                 )
                 return
 
-            # Patch award display names with Discord display names
-            if server_wrapped.awards and interaction.guild:
-                for award in server_wrapped.awards:
-                    try:
-                        member = interaction.guild.get_member(award.discord_id)
-                        if not member:
-                            member = await interaction.guild.fetch_member(award.discord_id)
-                        if member:
-                            award.discord_username = member.display_name
-                    except Exception as e:
-                        logger.debug("Failed to fetch member display name for award: %s", e)
-
-            # Collect all referenced discord IDs for avatar pre-fetching
+            # Collect every Discord user needed for award names and avatars.
+            award_ids = {award.discord_id for award in server_wrapped.awards}
             avatar_ids: set[int] = set()
             if pairwise_data:
                 for tm in (pairwise_data.best_teammates + pairwise_data.most_played_with):
@@ -512,7 +523,14 @@ class WrappedCog(commands.Cog):
                 if pairwise_data.punching_bag:
                     avatar_ids.add(pairwise_data.punching_bag.discord_id)
 
-            avatar_cache = await _prefetch_avatars(interaction.guild, avatar_ids)
+            display_names, avatar_cache = await _prefetch_discord_profiles(
+                interaction.guild,
+                award_ids | avatar_ids,
+                avatar_ids,
+            )
+            for award in server_wrapped.awards:
+                if display_name := display_names.get(award.discord_id):
+                    award.discord_username = display_name
 
             hero_names = await asyncio.to_thread(lambda: self.hero_names)
 
