@@ -597,8 +597,8 @@ class WheelOutcomeProcessor:
             self.state.shell_missed = True
             return
 
-        percentage = max(1, int(player_above.jopacoin_balance * random.uniform(0.02, 0.07)))
-        flat = random.randint(2, 10)
+        percentage = max(1, int(player_above.jopacoin_balance * random.uniform(0.02, 0.084)))
+        flat = random.randint(2, 12)
         requested = scale_minigame_jc_delta(max(percentage, flat))
         try:
             settled = await self._hostile_loss(
@@ -664,8 +664,8 @@ class WheelOutcomeProcessor:
             return
 
         richest = leaderboard[0]
-        percentage = max(1, int(richest.jopacoin_balance * random.uniform(0.02, 0.07)))
-        flat = random.randint(4, 20)
+        percentage = max(1, int(richest.jopacoin_balance * random.uniform(0.02, 0.084)))
+        flat = random.randint(4, 24)
         requested = scale_minigame_jc_delta(max(percentage, flat))
         try:
             settled = await self._hostile_loss(
