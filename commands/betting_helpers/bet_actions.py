@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord import app_commands
 
+from commands.betting_helpers.bet_messaging import update_shuffle_message_wagers
 from config import (
     BANKRUPTCY_PENALTY_RATE,
     GARNISHMENT_PERCENTAGE,
@@ -202,8 +203,6 @@ async def bet_action(
         except Exception:
             logger.debug("Mana steady bonus on bet placement failed", exc_info=True)
 
-    await cog._update_shuffle_message_wagers(guild_id, pending_match_id)
-
     # Build response message
     betting_mode = pending_state.betting_mode if pending_state else "pool"
     pool_warning = ""
@@ -219,16 +218,40 @@ async def bet_action(
     _bet_prefix = f"{_bet_badge} " if _bet_badge else ""
 
     if lev > 1:
-        await interaction.followup.send(
+        response_content = (
             f"{_bet_prefix}Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
-            f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}",
-            ephemeral=True,
+            f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}"
         )
     else:
-        await interaction.followup.send(
-            f"{_bet_prefix}Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
-            ephemeral=True,
+        response_content = (
+            f"{_bet_prefix}Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} "
+            f"on {team.name}.{pool_warning}"
         )
+
+    async def refresh_wager_messages() -> None:
+        try:
+            await update_shuffle_message_wagers(
+                cog,
+                guild_id,
+                pending_match_id,
+                pending_state=pending_state,
+            )
+        except Exception:
+            # The bet has committed, so a display refresh failure must not
+            # suppress the bettor's confirmation.
+            logger.warning(
+                "Failed to refresh wager messages for match %s",
+                pending_match_id,
+                exc_info=True,
+            )
+
+    # Confirmation and the three independent display copies can travel at the
+    # same time. The bettor sees the same response without waiting for every
+    # message GET + PATCH pair to finish first.
+    await asyncio.gather(
+        refresh_wager_messages(),
+        interaction.followup.send(response_content, ephemeral=True),
+    )
 
     # Neon Degen Terminal hooks - at most ONE neon event per /bet action
     neon = cog._get_neon_service()
