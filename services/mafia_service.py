@@ -57,12 +57,6 @@ JESTER_PROBABILITY = 0.20
 BOOKIE_PROBABILITY = 0.20
 TWIST_PROBABILITY = 0.30
 
-# Eligibility window for /gamba and /dig activity feeding the auto-roster.
-ELIGIBILITY_WINDOW_S = 7 * 24 * 3600
-
-# Auto-skip: if a player's last N games all show acted=0, exclude from auto-roster.
-AUTO_SKIP_THRESHOLD = 3
-
 # Economy. Each rostered player is charged ENTRY_FEE at game start; the fees
 # pool into a single pot distributed among the winning faction at day
 # resolution. Because roles are assigned uniformly at random, the per-player
@@ -155,9 +149,8 @@ class MafiaService:
         if active is not None and active.status == "ACTIVE":
             return active
 
-        signups = self.repo.get_signups(guild_id)
         for attempt in range(2):
-            eligible = self._collect_roster(guild_id, signups=signups)
+            eligible = self._collect_roster(guild_id)
             if len(eligible) < MIN_ROSTER:
                 logger.info(
                     "Mafia start skipped for guild %s: only %d eligible players",
@@ -184,15 +177,21 @@ class MafiaService:
                     max_debt=self.max_debt,
                 )
             except ValueError as exc:
-                if str(exc) == "entry_fee_debit_failed" and attempt == 0:
+                error = str(exc)
+                if error == "game_already_active":
+                    return self.repo.get_active_game(guild_id)
+                if (
+                    error in {"entry_fee_debit_failed", "signup_claim_failed"}
+                    and attempt == 0
+                ):
                     continue
                 logger.info(
-                    "Mafia start skipped for guild %s: entry fee debit failed",
+                    "Mafia start skipped for guild %s: %s",
                     guild_id,
+                    error,
                 )
                 return None
 
-            self.repo.clear_signups(guild_id)
             game = self.repo.get_game_by_id(game_id)
             if game is not None:
                 game.players = self.repo.get_players(game_id)
@@ -200,18 +199,12 @@ class MafiaService:
 
         return None
 
-    def _collect_roster(
-        self, guild_id: int | None, *, signups: list[int] | tuple[int, ...] = ()
-    ) -> list[int]:
-        """Eligible players capped at MAX_ROSTER, opt-in signups first."""
-        eligible = self._collect_eligible_players(guild_id)
-        if len(eligible) <= MAX_ROSTER:
-            return eligible
-        signup_set = set(signups)
-        prioritized = [pid for pid in eligible if pid in signup_set]
-        rest = [pid for pid in eligible if pid not in signup_set]
-        self._rng.shuffle(rest)
-        return (prioritized + rest)[:MAX_ROSTER]
+    def _collect_roster(self, guild_id: int | None) -> list[int]:
+        """Registered players who explicitly joined, capped in signup order."""
+        eligible = self.repo.get_eligible_signups(
+            guild_id, entry_fee=ENTRY_FEE, max_debt=self.max_debt
+        )
+        return eligible[:MAX_ROSTER]
 
     def resolve_night(self, guild_id: int | None) -> dict:
         """Apply night actions, mark the dead, advance to DAY.
@@ -799,7 +792,9 @@ class MafiaService:
         return {"ok": True}
 
     def join(self, guild_id: int | None, discord_id: int) -> dict:
-        """Reserve a roster seat in the next game (opt-in priority)."""
+        """Queue a registered player for the next available Mafia roster."""
+        if self.player_repo.get_by_id(discord_id, guild_id) is None:
+            return {"ok": False, "error": "not_registered"}
         self.repo.add_signup(guild_id, discord_id)
         # Opting in also clears any standing opt-out.
         self.repo.set_optout(guild_id, discord_id, False)
@@ -853,11 +848,15 @@ class MafiaService:
                 game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY,
                 day_number=game.day_number,
             )
+            opted_out = self.repo.get_opted_out_player_ids(game.guild_id)
+            required_voter_ids = {
+                p.discord_id for p in alive if p.discord_id not in opted_out
+            }
             voted_ids = {
-                v["actor_id"] for v in votes if v["actor_id"] in {p.discord_id for p in alive}
+                v["actor_id"] for v in votes if v["actor_id"] in required_voter_ids
             }
             out["voted_count"] = len(voted_ids)
-            out["alive_voters"] = len(alive)
+            out["alive_voters"] = len(required_voter_ids)
         return out
 
     def get_player_role(self, guild_id: int | None, discord_id: int) -> dict | None:
@@ -924,15 +923,6 @@ class MafiaService:
     def set_optout(self, guild_id: int | None, discord_id: int, opted_out: bool) -> None:
         self.repo.set_optout(guild_id, discord_id, opted_out)
 
-    def is_active_for_auto_roster(self, guild_id: int | None, discord_id: int) -> bool:
-        """Excluded if last AUTO_SKIP_THRESHOLD games all show acted=0."""
-        recent = self.repo.get_recent_player_participation(
-            discord_id, guild_id, limit=AUTO_SKIP_THRESHOLD
-        )
-        if len(recent) < AUTO_SKIP_THRESHOLD:
-            return True
-        return any(recent)  # at least one of the last N showed activity
-
     # ────────────────────────────────────────────────────────────────────
     # Reminders (called by cog loop)
     # ────────────────────────────────────────────────────────────────────
@@ -940,6 +930,7 @@ class MafiaService:
     def players_needing_night_action(self, game: MafiaGame) -> list[int]:
         """Alive role-bearing players who haven't submitted this night's action."""
         players = self.repo.get_players(game.game_id)
+        opted_out = self.repo.get_opted_out_player_ids(game.guild_id)
         actions = self.repo.get_actions(
             game.game_id, phase=MafiaPhase.NIGHT, day_number=game.day_number
         )
@@ -949,7 +940,7 @@ class MafiaService:
 
         missing: list[int] = []
         for p in players:
-            if not p.is_alive:
+            if not p.is_alive or p.discord_id in opted_out:
                 continue
             expected = _allowed_action_for_role(p.role)
             if expected is None:
@@ -960,22 +951,20 @@ class MafiaService:
 
     def players_needing_day_vote(self, game: MafiaGame) -> list[int]:
         players = self.repo.get_players(game.game_id)
+        opted_out = self.repo.get_opted_out_player_ids(game.guild_id)
         votes = self.repo.get_actions(
             game.game_id, MafiaActionType.VOTE, MafiaPhase.DAY, day_number=game.day_number
         )
         voted = {v["actor_id"] for v in votes}
-        return [p.discord_id for p in players if p.is_alive and p.discord_id not in voted]
+        return [
+            p.discord_id
+            for p in players
+            if p.is_alive and p.discord_id not in opted_out and p.discord_id not in voted
+        ]
 
     # ────────────────────────────────────────────────────────────────────
     # Internals
     # ────────────────────────────────────────────────────────────────────
-
-    def _collect_eligible_players(self, guild_id: int | None) -> list[int]:
-        since = int(time.time()) - ELIGIBILITY_WINDOW_S
-        candidates = self.repo.get_eligible_player_ids(
-            guild_id, since, entry_fee=ENTRY_FEE, max_debt=self.max_debt
-        )
-        return [pid for pid in candidates if self.is_active_for_auto_roster(guild_id, pid)]
 
     def _roll_twist(self) -> MafiaTwist | None:
         if self._rng.random() < TWIST_PROBABILITY:

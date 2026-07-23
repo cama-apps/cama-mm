@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import random
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -89,9 +91,10 @@ def _seed_player(player_repo, discord_id: int, balance: int = 0) -> None:
     player_repo.update_balance(discord_id, TEST_GUILD_ID, balance)
 
 
-def _seed_eligible_via_dig(mafia_repo, ids: list[int], guild_id: int = TEST_GUILD_ID) -> None:
+def _seed_signed_up_players(
+    mafia_repo, ids: list[int], guild_id: int = TEST_GUILD_ID
+) -> None:
     player_repo = PlayerRepository(mafia_repo.db_path)
-    now = int(time.time())
     for pid in ids:
         try:
             player_repo.add(
@@ -102,6 +105,15 @@ def _seed_eligible_via_dig(mafia_repo, ids: list[int], guild_id: int = TEST_GUIL
         except ValueError:
             pass
         player_repo.update_balance(pid, guild_id, 100)
+        mafia_repo.add_signup(guild_id, pid)
+
+
+def _seed_activity_only_players(
+    mafia_repo, ids: list[int], guild_id: int = TEST_GUILD_ID
+) -> None:
+    _seed_signed_up_players(mafia_repo, ids, guild_id)
+    mafia_repo.remove_signups(guild_id, ids)
+    now = int(time.time())
     with mafia_repo.connection() as conn:
         cursor = conn.cursor()
         for pid in ids:
@@ -119,14 +131,20 @@ def _seed_eligible_via_dig(mafia_repo, ids: list[int], guild_id: int = TEST_GUIL
 
 
 def test_below_min_returns_none(mafia_repo, mafia_service):
-    _seed_eligible_via_dig(mafia_repo, [1, 2, 3])  # only 3 < MIN_ROSTER=5
+    _seed_signed_up_players(mafia_repo, [1, 2, 3])  # only 3 < MIN_ROSTER=5
     result = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert result is None
     assert mafia_repo.get_game_for_date(TEST_GUILD_ID, "2026-04-24") is None
 
 
+def test_activity_alone_does_not_enroll_players(mafia_repo, mafia_service):
+    _seed_activity_only_players(mafia_repo, list(range(101, 110)))
+
+    assert mafia_service.start_game(TEST_GUILD_ID, force=True) is None
+
+
 def test_idempotent_start(mafia_repo, mafia_service):
-    _seed_eligible_via_dig(mafia_repo, list(range(101, 110)))  # 9 players
+    _seed_signed_up_players(mafia_repo, list(range(101, 110)))  # 9 players
     first = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert first is not None
     second = mafia_service.start_game(TEST_GUILD_ID, force=True)
@@ -134,9 +152,94 @@ def test_idempotent_start(mafia_repo, mafia_service):
     assert first.game_id == second.game_id
 
 
+def test_start_returns_game_created_by_concurrent_caller(
+    mafia_repo, mafia_service, monkeypatch
+):
+    _seed_signed_up_players(mafia_repo, list(range(101, 110)))
+    concurrent_game_id = None
+
+    def concurrent_start(**kwargs):
+        nonlocal concurrent_game_id
+        concurrent_game_id = mafia_repo.create_game(
+            TEST_GUILD_ID,
+            kwargs["game_date"],
+            MafiaPhase.NIGHT,
+            kwargs["started_at"],
+            kwargs["roster_size"],
+            kwargs["twist_event"],
+        )
+        raise ValueError("game_already_active")
+
+    monkeypatch.setattr(
+        mafia_repo, "create_game_with_players_and_entry_fees", concurrent_start
+    )
+
+    game = mafia_service.start_game(TEST_GUILD_ID, force=True)
+
+    assert game is not None
+    assert game.game_id == concurrent_game_id
+
+
+def test_concurrent_starts_share_one_game_and_one_entry_fee(
+    mafia_repo, mafia_service, player_repo, monkeypatch
+):
+    discord_ids = list(range(101, 110))
+    _seed_signed_up_players(mafia_repo, discord_ids)
+    second_repo = MafiaRepository(mafia_repo.db_path)
+    second_service = MafiaService(
+        mafia_repo=second_repo,
+        player_repo=PlayerRepository(mafia_repo.db_path),
+        dig_service=FakeDigService(),
+        flavor_service=MagicMock(),
+        hero_provider=FakeHeroProvider(),
+        rng=random.Random(43),
+    )
+    roster_barrier = threading.Barrier(2)
+
+    def synchronized_roster(service):
+        def collect(guild_id):
+            roster = service.repo.get_eligible_signups(
+                guild_id, entry_fee=ENTRY_FEE, max_debt=service.max_debt
+            )
+            roster_barrier.wait(timeout=5)
+            return roster
+
+        return collect
+
+    monkeypatch.setattr(
+        mafia_service, "_collect_roster", synchronized_roster(mafia_service)
+    )
+    monkeypatch.setattr(
+        second_service, "_collect_roster", synchronized_roster(second_service)
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(mafia_service.start_game, TEST_GUILD_ID)
+        second_future = pool.submit(second_service.start_game, TEST_GUILD_ID)
+        first = first_future.result(timeout=10)
+        second = second_future.result(timeout=10)
+
+    assert first is not None and second is not None
+    assert first.game_id == second.game_id
+    assert {
+        player_repo.get_balance(discord_id, TEST_GUILD_ID)
+        for discord_id in discord_ids
+    } == {100 - ENTRY_FEE}
+    with mafia_repo.connection() as conn:
+        active_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM mafia_games
+            WHERE guild_id = ? AND phase != ?
+            """,
+            (TEST_GUILD_ID, MafiaPhase.RESOLVED.value),
+        ).fetchone()[0]
+    assert active_count == 1
+
+
 def test_start_daily_game_debits_entry_fee_once(mafia_repo, mafia_service, player_repo):
     ids = list(range(101, 110))
-    _seed_eligible_via_dig(mafia_repo, ids)
+    _seed_signed_up_players(mafia_repo, ids)
 
     first = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert first is not None
@@ -153,11 +256,11 @@ def test_start_daily_game_debits_entry_fee_once(mafia_repo, mafia_service, playe
     } == balances_after_first
 
 
-def test_auto_roster_excludes_players_past_entry_fee_debt_floor(
+def test_signup_roster_excludes_players_past_entry_fee_debt_floor(
     mafia_repo, mafia_service, player_repo
 ):
     ids = list(range(101, 107))
-    _seed_eligible_via_dig(mafia_repo, ids)
+    _seed_signed_up_players(mafia_repo, ids)
     # Past the debt floor: balance − ENTRY_FEE would drop below −MAX_DEBT (500).
     player_repo.update_balance(106, TEST_GUILD_ID, -495)
 
@@ -171,7 +274,7 @@ def test_auto_roster_excludes_players_past_entry_fee_debt_floor(
 @pytest.mark.parametrize("roster_size", list(range(5, 16)))
 def test_role_assignment_table(mafia_repo, mafia_service, roster_size):
     ids = list(range(101, 101 + roster_size))
-    _seed_eligible_via_dig(mafia_repo, ids)
+    _seed_signed_up_players(mafia_repo, ids)
     # Force jester probability to 0 for this test (deterministic counts)
     mafia_service._rng = random.Random(0)
     # Patch JESTER_PROBABILITY indirectly: we assert ignoring jester swap below
@@ -207,7 +310,7 @@ def test_role_assignment_table(mafia_repo, mafia_service, roster_size):
 
 
 def test_godfather_always_among_mafia(mafia_repo, mafia_service):
-    _seed_eligible_via_dig(mafia_repo, list(range(101, 113)))  # 12 players → 3 mafia
+    _seed_signed_up_players(mafia_repo, list(range(101, 113)))  # 12 players → 3 mafia
     game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     players = mafia_repo.get_players(game.game_id)
     gfs = [p for p in players if p.is_godfather]
@@ -216,14 +319,14 @@ def test_godfather_always_among_mafia(mafia_repo, mafia_service):
 
 
 def test_oversized_roster_capped(mafia_repo, mafia_service):
-    _seed_eligible_via_dig(mafia_repo, list(range(101, 131)))  # 30 players
+    _seed_signed_up_players(mafia_repo, list(range(101, 131)))  # 30 players
     game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert game.roster_size == 15
 
 
 def test_optout_excludes_player(mafia_repo, mafia_service):
     ids = list(range(101, 110))
-    _seed_eligible_via_dig(mafia_repo, ids)
+    _seed_signed_up_players(mafia_repo, ids)
     mafia_service.set_optout(TEST_GUILD_ID, 105, True)
     game = mafia_service.start_game(TEST_GUILD_ID, force=True)
     rostered = {p.discord_id for p in mafia_repo.get_players(game.game_id)}
@@ -231,7 +334,7 @@ def test_optout_excludes_player(mafia_repo, mafia_service):
 
 
 def test_guild_isolation(mafia_repo, mafia_service):
-    _seed_eligible_via_dig(mafia_repo, list(range(101, 110)))  # guild A
+    _seed_signed_up_players(mafia_repo, list(range(101, 110)))  # guild A
     game_a = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert game_a is not None
     # Guild B has no eligible players → no game
@@ -738,8 +841,11 @@ def test_cycle_cap_forces_tally(mafia_service, mafia_repo):
     assert rd["winner"] == MafiaWinner.TOWN.value
 
 
-def test_new_game_starts_after_previous_resolves(mafia_repo, mafia_service):
-    _seed_eligible_via_dig(mafia_repo, list(range(101, 110)))
+def test_new_game_requires_fresh_signups_after_previous_resolves(
+    mafia_repo, mafia_service
+):
+    player_ids = list(range(101, 110))
+    _seed_signed_up_players(mafia_repo, player_ids)
     g1 = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert g1 is not None
     # While g1 is active, start_game is idempotent.
@@ -751,6 +857,10 @@ def test_new_game_starts_after_previous_resolves(mafia_repo, mafia_service):
             "UPDATE mafia_games SET phase = ? WHERE game_id = ?",
             (MafiaPhase.RESOLVED.value, g1.game_id),
         )
+    assert mafia_service.start_game(TEST_GUILD_ID, force=True) is None
+
+    for player_id in player_ids:
+        mafia_service.join(TEST_GUILD_ID, player_id)
     g2 = mafia_service.start_game(TEST_GUILD_ID, force=True)
     assert g2 is not None and g2.game_id != g1.game_id
     assert g2.game_date == g1.game_date
@@ -783,6 +893,82 @@ def test_phase_ready_gating(mafia_service, mafia_repo):
     for voter in (1, 2, 3, 4, 5):
         mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 1)
     assert mafia_service.day_ready(g) is True
+
+
+def test_active_optout_skips_required_night_action(mafia_service, mafia_repo):
+    _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.MAFIA, False),
+            (2, MafiaRole.DOCTOR, False),
+            (3, MafiaRole.DETECTIVE, False),
+            (4, MafiaRole.TOWNIE, False),
+            (5, MafiaRole.TOWNIE, False),
+        ],
+    )
+    game = mafia_repo.get_active_game(TEST_GUILD_ID)
+    mafia_service.set_optout(TEST_GUILD_ID, 2, True)
+
+    assert mafia_service.players_needing_night_action(game) == [1, 3]
+
+    mafia_service.submit_night_action(TEST_GUILD_ID, 1, 4, MafiaActionType.KILL)
+    mafia_service.submit_night_action(
+        TEST_GUILD_ID, 3, 1, MafiaActionType.INVESTIGATE
+    )
+    assert mafia_service.night_ready(game) is True
+
+
+def test_active_optout_skips_required_day_vote(mafia_service, mafia_repo):
+    _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.MAFIA, False),
+            (2, MafiaRole.DOCTOR, False),
+            (3, MafiaRole.DETECTIVE, False),
+            (4, MafiaRole.TOWNIE, False),
+            (5, MafiaRole.TOWNIE, False),
+        ],
+    )
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    game = mafia_repo.get_active_game(TEST_GUILD_ID)
+    mafia_service.set_optout(TEST_GUILD_ID, 5, True)
+
+    assert mafia_service.players_needing_day_vote(game) == [1, 2, 3, 4]
+
+    for voter in (1, 2, 3, 4):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 5)
+    assert mafia_service.day_ready(game) is True
+
+
+def test_public_status_excludes_opted_out_players_from_vote_progress(
+    mafia_service, mafia_repo
+):
+    _new_game(
+        mafia_repo,
+        [
+            (1, MafiaRole.MAFIA, False),
+            (2, MafiaRole.DOCTOR, False),
+            (3, MafiaRole.DETECTIVE, False),
+            (4, MafiaRole.TOWNIE, False),
+            (5, MafiaRole.TOWNIE, False),
+        ],
+    )
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+    for voter in (1, 2, 5):
+        mafia_service.submit_day_vote(TEST_GUILD_ID, voter, 3)
+    mafia_service.set_optout(TEST_GUILD_ID, 5, True)
+
+    status = mafia_service.get_public_status(TEST_GUILD_ID)
+
+    assert status["voted_count"] == 2
+    assert status["alive_voters"] == 4
+
+
+def test_join_rejects_unregistered_player(mafia_service, mafia_repo):
+    result = mafia_service.join(TEST_GUILD_ID, 999)
+
+    assert result == {"ok": False, "error": "not_registered"}
+    assert mafia_repo.get_signups(TEST_GUILD_ID) == []
 
 
 def test_town_bounty_pays_on_correct_lynch(mafia_service, mafia_repo, player_repo):
@@ -1373,44 +1559,6 @@ def test_bankruptcy_penalty_sinks_mafia_profit(
         player_repo.get_balance(pid, TEST_GUILD_ID) - starting[pid] for pid in ids
     )
     assert total_delta == -sum(penalties.values()) - summary["nonprofit_overflow"]
-
-
-# ── Auto-skip ─────────────────────────────────────────────────────────────
-
-
-def test_auto_skip_after_three_misses(mafia_repo, mafia_service):
-    from domain.models.mafia import MafiaPlayer
-
-    pid = 999
-    for date in ("2026-04-21", "2026-04-22", "2026-04-23"):
-        gid = mafia_repo.create_game(
-            TEST_GUILD_ID, date, MafiaPhase.RESOLVED, 0, 5, None
-        )
-        mafia_repo.add_players(
-            gid,
-            [MafiaPlayer(gid, pid, TEST_GUILD_ID, MafiaRole.TOWNIE, acted=False)],
-        )
-        mafia_repo.finalize_game(gid, MafiaWinner.TOWN, 40, mvp_id=None)
-
-    assert mafia_service.is_active_for_auto_roster(TEST_GUILD_ID, pid) is False
-
-
-def test_auto_skip_resets_on_action(mafia_repo, mafia_service):
-    from domain.models.mafia import MafiaPlayer
-
-    pid = 999
-    # Two misses then one action
-    for i, date in enumerate(("2026-04-21", "2026-04-22", "2026-04-23")):
-        gid = mafia_repo.create_game(
-            TEST_GUILD_ID, date, MafiaPhase.RESOLVED, 0, 5, None
-        )
-        mafia_repo.add_players(
-            gid,
-            [MafiaPlayer(gid, pid, TEST_GUILD_ID, MafiaRole.TOWNIE, acted=(i == 2))],
-        )
-        mafia_repo.finalize_game(gid, MafiaWinner.TOWN, 40, mvp_id=None)
-
-    assert mafia_service.is_active_for_auto_roster(TEST_GUILD_ID, pid) is True
 
 
 # ── Status & role views ───────────────────────────────────────────────────
