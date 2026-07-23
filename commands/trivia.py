@@ -204,6 +204,15 @@ class TriviaView(discord.ui.View):
             await self._handle_answer(interaction, choice_index)
         return callback
 
+    async def _delete_previous_correct_message(self) -> None:
+        """Best-effort cleanup of the prior result message."""
+        if not self.session.prev_message:
+            return
+        try:
+            await self.session.prev_message.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
     async def _handle_answer(self, interaction: discord.Interaction, choice_index: int):
         if interaction.user.id != self.session.user_id:
             await interaction.response.send_message("This isn't your trivia session!", ephemeral=True)
@@ -331,34 +340,91 @@ class TriviaView(discord.ui.View):
                 except Exception:
                     logger.exception("Failed to award trivia JC")
 
-            # Delete the previous "correct" message if it exists (keep only last 2)
-            if self.session.prev_message:
+            correct_embed = _correct_embed(
+                self.question,
+                self.question_num,
+                self.session.streak,
+                self.session.total_jc,
+                self.session.user,
+                jc_awarded=jc,
+            )
+
+            async def edit_correct_result() -> None:
                 try:
-                    await self.session.prev_message.delete()
-                except (discord.NotFound, discord.HTTPException):
+                    await interaction.response.edit_message(
+                        embed=correct_embed,
+                        view=None,
+                        attachments=[],
+                    )
+                except discord.NotFound:
                     pass
 
-            # Edit current message to show it was answered correctly
-            correct_embed = _correct_embed(
-                self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user, jc_awarded=jc
-            )
-            try:
-                await interaction.response.edit_message(embed=correct_embed, view=None, attachments=[])
-            except discord.NotFound:
-                pass
+            async def prepare_next_question():
+                next_q = await asyncio.to_thread(
+                    generate_question,
+                    self.session.streak,
+                    self.session.recent_categories,
+                )
+                if next_q is None:
+                    return None
 
-            # The current message (now showing "Correct!") becomes prev_message
+                next_num = self.question_num + 1
+                next_view = TriviaView(self.session, next_q, next_num, self.cog)
+                next_embed = _question_embed(
+                    next_q,
+                    next_num,
+                    self.session.streak,
+                    self.session.total_jc,
+                    self.session.user,
+                )
+                next_file = await asyncio.to_thread(
+                    _prepare_question,
+                    next_embed,
+                    next_q,
+                )
+                return next_embed, next_view, next_file
+
+            # Cleanup, the required result edit, and next-question preparation
+            # are independent. Fully settle all three before the next send.
+            delete_result, edit_result, next_result = await asyncio.gather(
+                self._delete_previous_correct_message(),
+                edit_correct_result(),
+                prepare_next_question(),
+                return_exceptions=True,
+            )
+
+            def close_unused_next_file() -> None:
+                if isinstance(next_result, tuple):
+                    next_file = next_result[2]
+                    if next_file is not None:
+                        next_file.close()
+
+            for result in (delete_result, edit_result, next_result):
+                if isinstance(result, asyncio.CancelledError):
+                    close_unused_next_file()
+                    raise result
+            if isinstance(edit_result, BaseException):
+                close_unused_next_file()
+                raise edit_result
+            if isinstance(delete_result, BaseException):
+                close_unused_next_file()
+                raise delete_result
+
+            # The current message (now showing "Correct!") becomes prev_message.
             self.session.prev_message = self.session.message
 
-            # Generate and send next question
-            next_q = await asyncio.to_thread(
-                generate_question,
-                self.session.streak,
-                self.session.recent_categories,
-            )
-            if next_q is None:
+            if isinstance(next_result, BaseException):
+                raise next_result
+            if next_result is None:
                 # Ran out of questions somehow
-                over_embed = _game_over_embed(None, self.question_num, self.session.streak, self.session.total_jc, False, self.session.user)
+                over_embed = _game_over_embed(
+                    None,
+                    self.question_num,
+                    self.session.streak,
+                    self.session.total_jc,
+                    False,
+                    self.session.user,
+                )
                 over_embed.title = "Trivia — No more questions!"
                 try:
                     await interaction.followup.send(embed=over_embed)
@@ -367,10 +433,7 @@ class TriviaView(discord.ui.View):
                 await self.cog._end_session(self.session)
                 return
 
-            next_num = self.question_num + 1
-            next_view = TriviaView(self.session, next_q, next_num, self.cog)
-            next_embed = _question_embed(next_q, next_num, self.session.streak, self.session.total_jc, self.session.user)
-            next_file = await asyncio.to_thread(_prepare_question, next_embed, next_q)
+            next_embed, next_view, next_file = next_result
             try:
                 send_kwargs = {"embed": next_embed, "view": next_view}
                 if next_file:
@@ -381,19 +444,38 @@ class TriviaView(discord.ui.View):
                 logger.exception("Failed to send next trivia question")
                 await self.cog._end_session(self.session)
         else:
-            # Wrong answer — delete previous "Correct!" message, game over
-            if self.session.prev_message:
-                try:
-                    await self.session.prev_message.delete()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
             over_embed = _game_over_embed(
-                self.question, self.question_num, self.session.streak, self.session.total_jc, False, self.session.user
+                self.question,
+                self.question_num,
+                self.session.streak,
+                self.session.total_jc,
+                False,
+                self.session.user,
             )
-            try:
-                await interaction.response.edit_message(embed=over_embed, view=None, attachments=[])
-            except discord.NotFound:
-                pass
+
+            async def edit_wrong_result() -> None:
+                try:
+                    await interaction.response.edit_message(
+                        embed=over_embed,
+                        view=None,
+                        attachments=[],
+                    )
+                except discord.NotFound:
+                    pass
+
+            delete_result, edit_result = await asyncio.gather(
+                self._delete_previous_correct_message(),
+                edit_wrong_result(),
+                return_exceptions=True,
+            )
+            for result in (delete_result, edit_result):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+            if isinstance(edit_result, BaseException):
+                raise edit_result
+            if isinstance(delete_result, BaseException):
+                raise delete_result
+
             await self.cog._end_session(self.session)
 
     async def on_timeout(self):
@@ -402,21 +484,40 @@ class TriviaView(discord.ui.View):
             return
         self.answered = True
 
-        # Delete previous "Correct!" message
-        if self.session.prev_message:
-            try:
-                await self.session.prev_message.delete()
-            except (discord.NotFound, discord.HTTPException):
-                pass
-
         over_embed = _game_over_embed(
-            self.question, self.question_num, self.session.streak, self.session.total_jc, True, self.session.user
+            self.question,
+            self.question_num,
+            self.session.streak,
+            self.session.total_jc,
+            True,
+            self.session.user,
         )
-        if self.session.message:
+
+        async def edit_timeout_result() -> None:
+            if not self.session.message:
+                return
             try:
-                await self.session.message.edit(embed=over_embed, view=None, attachments=[])
+                await self.session.message.edit(
+                    embed=over_embed,
+                    view=None,
+                    attachments=[],
+                )
             except discord.NotFound:
                 pass
+
+        delete_result, edit_result = await asyncio.gather(
+            self._delete_previous_correct_message(),
+            edit_timeout_result(),
+            return_exceptions=True,
+        )
+        for result in (delete_result, edit_result):
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+        if isinstance(edit_result, BaseException):
+            raise edit_result
+        if isinstance(delete_result, BaseException):
+            raise delete_result
+
         await self.cog._end_session(self.session)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:

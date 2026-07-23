@@ -1,9 +1,11 @@
 """Tests for trivia cooldown and economy integration."""
 
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 
 from repositories.player_repository import PlayerRepository
@@ -51,6 +53,31 @@ def _trivia_user(discord_id):
     user.display_name = "trivia_tester"
     user.display_avatar.url = "https://example.com/avatar.png"
     return user
+
+
+def _transition_view(trivia_mod, *, user_id=100001):
+    player_service = SimpleNamespace(
+        adjust_balance=MagicMock(),
+        record_trivia_session=MagicMock(),
+    )
+    bot = SimpleNamespace(
+        player_service=player_service,
+        mana_effects_service=None,
+        bankruptcy_service=None,
+    )
+    cog = trivia_mod.TriviaCog(bot)
+    current_message = SimpleNamespace(edit=AsyncMock())
+    previous_message = SimpleNamespace(delete=AsyncMock())
+    session = trivia_mod.TriviaSession(
+        user_id=user_id,
+        guild_id=TEST_GUILD_ID,
+        user=_trivia_user(user_id),
+        message=current_message,
+        prev_message=previous_message,
+    )
+    cog._sessions[(user_id, TEST_GUILD_ID)] = session
+    view = trivia_mod.TriviaView(session, _trivia_question(), 1, cog)
+    return view, session, cog, current_message, previous_message
 
 
 class TestTriviaPayout:
@@ -375,6 +402,262 @@ class TestTriviaSessionLifecycle:
         await cog.trivia.callback(cog, interaction)
         # The claim was rolled back, so the player can play again immediately.
         assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) is None
+
+
+class TestTriviaTransitionConcurrency:
+    @pytest.mark.asyncio
+    async def test_correct_answer_overlaps_delete_edit_and_next_question_preparation(
+        self,
+        monkeypatch,
+    ):
+        import commands.trivia as trivia_mod
+
+        view, session, _, current_message, previous_message = _transition_view(
+            trivia_mod
+        )
+        next_question = _trivia_question()
+        next_message = SimpleNamespace(id=222)
+        delete_started = asyncio.Event()
+        edit_started = asyncio.Event()
+        generation_started = asyncio.Event()
+        image_started = asyncio.Event()
+        release_delete = asyncio.Event()
+        release_edit = asyncio.Event()
+        release_generation = asyncio.Event()
+        release_image = asyncio.Event()
+        next_sent = asyncio.Event()
+        order = []
+
+        async def delete_previous():
+            delete_started.set()
+            await release_delete.wait()
+            order.append("delete_done")
+
+        async def edit_current(**kwargs):
+            edit_started.set()
+            await release_edit.wait()
+            order.append("edit_done")
+
+        def generate_next(streak, recent_categories):
+            assert streak == 1
+            assert recent_categories == ["test"]
+            return next_question
+
+        async def controlled_to_thread(func, *args, **kwargs):
+            if func is generate_next:
+                generation_started.set()
+                await release_generation.wait()
+                return func(*args, **kwargs)
+            if func is trivia_mod._prepare_question:
+                image_started.set()
+                await release_image.wait()
+                result = func(*args, **kwargs)
+                order.append("image_done")
+                return result
+            return func(*args, **kwargs)
+
+        async def send_next(**kwargs):
+            order.append("next_send")
+            next_sent.set()
+            return next_message
+
+        previous_message.delete = AsyncMock(side_effect=delete_previous)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=session.user_id),
+            response=SimpleNamespace(edit_message=AsyncMock(side_effect=edit_current)),
+            followup=SimpleNamespace(send=AsyncMock(side_effect=send_next)),
+        )
+        monkeypatch.setattr(trivia_mod, "generate_question", generate_next)
+        monkeypatch.setattr(trivia_mod.asyncio, "to_thread", controlled_to_thread)
+
+        answer_task = asyncio.create_task(view._handle_answer(interaction, 1))
+        await asyncio.wait_for(
+            asyncio.gather(
+                delete_started.wait(),
+                edit_started.wait(),
+                generation_started.wait(),
+            ),
+            timeout=1,
+        )
+
+        # The next-image step follows generation, but all three top-level
+        # branches began before any of them was released.
+        interaction.followup.send.assert_not_awaited()
+        assert not answer_task.done()
+
+        release_generation.set()
+        await asyncio.wait_for(image_started.wait(), timeout=1)
+        release_image.set()
+        await asyncio.sleep(0)
+        interaction.followup.send.assert_not_awaited()
+
+        release_edit.set()
+        await asyncio.sleep(0)
+        interaction.followup.send.assert_not_awaited()
+
+        release_delete.set()
+        await asyncio.wait_for(next_sent.wait(), timeout=1)
+        await answer_task
+
+        assert order.index("edit_done") < order.index("next_send")
+        assert order.index("image_done") < order.index("next_send")
+        assert session.prev_message is current_message
+        assert session.message is next_message
+        assert session.active is True
+
+    @pytest.mark.asyncio
+    async def test_correct_edit_error_waits_for_cleanup_and_preparation_then_propagates(
+        self,
+        monkeypatch,
+    ):
+        import commands.trivia as trivia_mod
+
+        view, session, cog, current_message, previous_message = _transition_view(
+            trivia_mod
+        )
+        original_previous = previous_message
+        delete_started = asyncio.Event()
+        image_started = asyncio.Event()
+        release_delete = asyncio.Event()
+        release_image = asyncio.Event()
+        prepared_file = SimpleNamespace(close=MagicMock())
+        edit_error = discord.HTTPException(
+            SimpleNamespace(status=500, reason="error"),
+            "edit failed",
+        )
+
+        async def delete_previous():
+            delete_started.set()
+            await release_delete.wait()
+
+        def generate_next(streak, recent_categories):
+            return _trivia_question()
+
+        async def controlled_to_thread(func, *args, **kwargs):
+            if func is trivia_mod._prepare_question:
+                image_started.set()
+                await release_image.wait()
+                return prepared_file
+            return func(*args, **kwargs)
+
+        previous_message.delete = AsyncMock(side_effect=delete_previous)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=session.user_id),
+            response=SimpleNamespace(
+                edit_message=AsyncMock(side_effect=edit_error),
+            ),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        monkeypatch.setattr(trivia_mod, "generate_question", generate_next)
+        monkeypatch.setattr(trivia_mod.asyncio, "to_thread", controlled_to_thread)
+
+        answer_task = asyncio.create_task(view._handle_answer(interaction, 1))
+        await asyncio.wait_for(
+            asyncio.gather(delete_started.wait(), image_started.wait()),
+            timeout=1,
+        )
+
+        # The required edit has failed, but sibling work is still fully awaited.
+        await asyncio.sleep(0)
+        assert not answer_task.done()
+
+        release_delete.set()
+        release_image.set()
+        with pytest.raises(discord.HTTPException):
+            await answer_task
+
+        interaction.followup.send.assert_not_awaited()
+        prepared_file.close.assert_called_once_with()
+        assert session.prev_message is original_previous
+        assert session.message is current_message
+        assert session.active is True
+        assert (session.user_id, session.guild_id) in cog._sessions
+
+    @pytest.mark.asyncio
+    async def test_wrong_answer_overlaps_best_effort_delete_with_required_edit(
+        self,
+    ):
+        import commands.trivia as trivia_mod
+
+        view, session, cog, _, previous_message = _transition_view(trivia_mod)
+        delete_started = asyncio.Event()
+        edit_started = asyncio.Event()
+        release_delete = asyncio.Event()
+        release_edit = asyncio.Event()
+
+        async def delete_previous():
+            delete_started.set()
+            await release_delete.wait()
+            raise discord.HTTPException(
+                SimpleNamespace(status=500, reason="error"),
+                "delete failed",
+            )
+
+        async def edit_current(**kwargs):
+            edit_started.set()
+            await release_edit.wait()
+
+        previous_message.delete = AsyncMock(side_effect=delete_previous)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=session.user_id),
+            response=SimpleNamespace(edit_message=AsyncMock(side_effect=edit_current)),
+        )
+
+        answer_task = asyncio.create_task(view._handle_answer(interaction, 0))
+        await asyncio.wait_for(
+            asyncio.gather(delete_started.wait(), edit_started.wait()),
+            timeout=1,
+        )
+
+        assert session.active is True
+        assert not answer_task.done()
+        release_delete.set()
+        release_edit.set()
+        await answer_task
+
+        assert session.active is False
+        assert (session.user_id, session.guild_id) not in cog._sessions
+
+    @pytest.mark.asyncio
+    async def test_timeout_overlaps_delete_and_message_edit_before_session_end(self):
+        import commands.trivia as trivia_mod
+
+        view, session, cog, current_message, previous_message = _transition_view(
+            trivia_mod
+        )
+        delete_started = asyncio.Event()
+        edit_started = asyncio.Event()
+        release_delete = asyncio.Event()
+        release_edit = asyncio.Event()
+
+        async def delete_previous():
+            delete_started.set()
+            await release_delete.wait()
+
+        async def edit_current(**kwargs):
+            edit_started.set()
+            await release_edit.wait()
+
+        previous_message.delete = AsyncMock(side_effect=delete_previous)
+        current_message.edit = AsyncMock(side_effect=edit_current)
+
+        timeout_task = asyncio.create_task(view.on_timeout())
+        await asyncio.wait_for(
+            asyncio.gather(delete_started.wait(), edit_started.wait()),
+            timeout=1,
+        )
+
+        assert view.answered is True
+        assert session.active is True
+        release_edit.set()
+        await asyncio.sleep(0)
+        assert not timeout_task.done()
+
+        release_delete.set()
+        await timeout_task
+
+        assert session.active is False
+        assert (session.user_id, session.guild_id) not in cog._sessions
 
 
 class TestTriviaSessionRecording:
