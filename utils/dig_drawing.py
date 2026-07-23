@@ -603,6 +603,10 @@ _FONT_CACHE: dict[str, "ImageFont.FreeTypeFont | ImageFont.ImageFont"] = {}
 # Hold duration (ms) for the final frame so Discord lingers on the payoff.
 _HOLD_MS = 60000
 
+# Palette analysis stays small even if a future animation adds frames or raises
+# the scene resolution.
+_DIG_GIF_PALETTE_SAMPLE_PIXEL_BUDGET = 250_000
+
 
 def _dig_font(size: int, bold: bool = False) -> "ImageFont.FreeTypeFont | ImageFont.ImageFont":
     """Cached monospace font (mirrors neon_drawing's loader, with a safe fallback)."""
@@ -630,21 +634,92 @@ def _ease(t: float) -> float:
 
 
 def _dig_frame(img: Image.Image) -> Image.Image:
-    """Quantize a frame to a 256-colour adaptive palette for the GIF."""
-    return img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+    """Convert a rendered frame to RGB for animation-wide quantization."""
+    frame = img.convert("RGB")
+    if frame is not img:
+        img.close()
+    return frame
+
+
+def _dig_palette_sample_size(
+    frame_size: tuple[int, int],
+    frame_count: int,
+) -> tuple[int, int]:
+    """Return per-frame sample dimensions under the palette pixel budget."""
+    frame_width, frame_height = frame_size
+    source_pixels = frame_width * frame_height * frame_count
+    sample_scale = max(
+        1.0,
+        math.sqrt(source_pixels / _DIG_GIF_PALETTE_SAMPLE_PIXEL_BUDGET),
+    )
+    return (
+        max(1, int(frame_width / sample_scale)),
+        max(1, int(frame_height / sample_scale)),
+    )
+
+
+def _build_dig_shared_palette(frames: list[Image.Image]) -> Image.Image:
+    """Build one representative palette from bounded samples of every frame."""
+    sample_width, sample_height = _dig_palette_sample_size(
+        frames[0].size,
+        len(frames),
+    )
+    contact_sheet = Image.new(
+        "RGB",
+        (sample_width, sample_height * len(frames)),
+    )
+    for frame_index, frame in enumerate(frames):
+        sample = frame.resize(
+            (sample_width, sample_height),
+            Image.Resampling.NEAREST,
+        )
+        contact_sheet.paste(sample, (0, frame_index * sample_height))
+        sample.close()
+
+    quantized_sample = contact_sheet.quantize(
+        colors=256,
+        method=Image.Quantize.MEDIANCUT,
+        dither=Image.Dither.NONE,
+    )
+    contact_sheet.close()
+
+    palette = Image.new("P", (1, 1))
+    palette.putpalette(quantized_sample.getpalette())
+    quantized_sample.close()
+    return palette
+
+
+def _quantize_dig_frames(frames: list[Image.Image]) -> None:
+    """Remap dig frames in place using one shared, non-dithered palette."""
+    palette = _build_dig_shared_palette(frames)
+    try:
+        for frame_index, frame in enumerate(frames):
+            frames[frame_index] = frame.quantize(
+                palette=palette,
+                dither=Image.Dither.NONE,
+            )
+            frame.close()
+    finally:
+        palette.close()
 
 
 def _save_dig_gif(frames: list[Image.Image], durations: list[int]) -> io.BytesIO:
     """Save frames as a play-once GIF that holds on the final frame."""
+    _quantize_dig_frames(frames)
     buf = io.BytesIO()
-    frames[0].save(
-        buf,
-        format="GIF",
-        save_all=True,
-        append_images=frames[1:],
-        duration=durations,
-        loop=1,
-    )
+    try:
+        frames[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=1,
+            optimize=False,
+        )
+    finally:
+        for frame in frames:
+            frame.close()
     buf.seek(0)
     return buf
 
