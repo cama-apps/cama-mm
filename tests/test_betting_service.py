@@ -733,8 +733,8 @@ class TestAutoSpectatorBets:
         assert len(placed_bets) == 5
         assert all(bet["is_blind"] for bet in placed_bets)
 
-    def test_auto_spectator_can_manual_bet_opposite_team_on_shuffle(self, services):
-        """After auto-wager, shuffle spectator can /bet on the other team."""
+    def test_auto_spectator_can_manual_bet_opposite_team_on_draft(self, services):
+        """After a draft auto-wager, a spectator can /bet on the other team."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -761,6 +761,12 @@ class TestAutoSpectatorBets:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         pending.bet_lock_until = int(time.time()) + 600
+        pending.is_draft = True
+        match_service.match_repo.update_pending_match(
+            pending.pending_match_id,
+            match_service._build_pending_match_payload(pending),
+            guild_id=TEST_GUILD_ID,
+        )
 
         auto_result = betting_service.create_auto_spectator_bets(
             guild_id=TEST_GUILD_ID,
@@ -1204,6 +1210,67 @@ def test_settle_skims_blood_pact_on_net_profit_for_penalized_winner(services):
     assert distributions["blood_pact_skims"] == {winner: 5}
     # Mock skim moves no coins: 103 - 20 stake + 40 payout - 10 penalty.
     assert player_repo.get_balance(winner, TEST_GUILD_ID) == 113
+
+
+def test_two_sided_bettor_penalties_use_net_match_profit(services):
+    """A losing-side hedge offsets profit before bankruptcy and Blood Pact."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    match_service = services["match_service"]
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+
+    player_ids = list(range(16700, 16710))
+    for pid in player_ids:
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"DraftPlayer{pid}",
+            guild_id=TEST_GUILD_ID,
+        )
+
+    spectator = 16800
+    player_repo.add(
+        discord_id=spectator,
+        discord_username="DraftHedger",
+        guild_id=TEST_GUILD_ID,
+    )
+    player_repo.add_balance(spectator, TEST_GUILD_ID, 100)
+    with betting_service.bet_repo.connection() as conn:
+        conn.execute(
+            "INSERT INTO bankruptcy_state (guild_id, discord_id, last_bankruptcy_at, "
+            "penalty_games_remaining, bankruptcy_count) VALUES (?, ?, ?, 3, 1)",
+            (TEST_GUILD_ID, spectator, int(time.time())),
+        )
+
+    betting_service.bankruptcy_service = SimpleNamespace(penalty_rate=0.5)
+    buff_service = MagicMock()
+    buff_service.get_blood_pact_targets.return_value = {spectator}
+    buff_service.apply_blood_pact_skim.return_value = 0
+    betting_service.buff_service = buff_service
+
+    match_service.shuffle_players(
+        player_ids, guild_id=TEST_GUILD_ID, betting_mode="house"
+    )
+    pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+    pending.bet_lock_until = int(time.time()) + 600
+    pending.is_draft = True
+    match_service.match_repo.update_pending_match(
+        pending.pending_match_id,
+        match_service._build_pending_match_payload(pending),
+        guild_id=TEST_GUILD_ID,
+    )
+
+    betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 10, pending)
+    betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
+
+    distributions = betting_service.settle_bets(
+        911, TEST_GUILD_ID, "radiant", pending_state=pending
+    )
+
+    assert distributions.get("bankruptcy_penalties", {}) == {}
+    buff_service.apply_blood_pact_skim.assert_not_called()
+    assert player_repo.get_balance(spectator, TEST_GUILD_ID) == 103
 
 
 def test_award_win_bonus_skims_blood_pact_on_net(services):

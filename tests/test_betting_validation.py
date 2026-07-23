@@ -360,8 +360,8 @@ class TestMultipleBetsValidation:
         with pytest.raises(ValueError, match="Insufficient balance"):
             betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
 
-    def test_participant_can_place_multiple_bets_on_own_team(self, services):
-        """Match participant can place multiple bets on their own team."""
+    def test_draft_participant_can_only_bet_on_own_team(self, services):
+        """Draft participants may add own-team bets but cannot bet against themselves."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -383,6 +383,12 @@ class TestMultipleBetsValidation:
         match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         pending.bet_lock_until = int(time.time()) + 600
+        pending.is_draft = True
+        match_service.match_repo.update_pending_match(
+            pending.pending_match_id,
+            match_service._build_pending_match_payload(pending),
+            guild_id=TEST_GUILD_ID,
+        )
 
         # Get a participant from radiant team
         radiant_player = pending.radiant_team_ids[0]
@@ -537,8 +543,8 @@ class TestMultipleBetsValidation:
         bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
         assert {b["team_bet_on"] for b in bets} == {"dire", "radiant"}
 
-    def test_draft_spectator_cannot_bet_both_teams(self, services):
-        """Draft matches keep one-side betting for spectators."""
+    def test_draft_spectator_can_bet_both_teams(self, services):
+        """Draft spectators may bet on both Radiant and Dire."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -576,11 +582,13 @@ class TestMultipleBetsValidation:
         )
 
         betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
-        with pytest.raises(ValueError, match="Draft matches only allow bets on one team"):
-            betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
 
-    def test_shuffle_spectator_dual_team_requires_explicit_is_draft_false(self, services):
-        """Pending payload without is_draft=False does not allow dual-team betting."""
+        bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
+        assert {b["team_bet_on"] for b in bets} == {"dire", "radiant"}
+
+    def test_legacy_pending_payload_allows_spectator_dual_team(self, services):
+        """Legacy payloads still identify spectators from the persisted teams."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -619,8 +627,10 @@ class TestMultipleBetsValidation:
         )
 
         betting_service.place_bet(TEST_GUILD_ID, spectator, "dire", 10, pending)
-        with pytest.raises(ValueError, match="already have bets on Dire"):
-            betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
+        betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending)
+
+        bets = betting_service.get_pending_bets(TEST_GUILD_ID, spectator, pending_state=pending)
+        assert {b["team_bet_on"] for b in bets} == {"dire", "radiant"}
 
 
 class TestBlindBetsValidation:
