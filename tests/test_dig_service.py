@@ -20,7 +20,6 @@ from services.dig_constants import (
     BOSS_VICTORY_BASE_JC,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_RANGES,
-    CHEER_COOLDOWN_SECONDS,
     DIG_TIPS,
     FIRST_DIG_ADVANCE_MAX,
     FIRST_DIG_ADVANCE_MIN,
@@ -31,7 +30,6 @@ from services.dig_constants import (
     INSURANCE_COST_DEPTH_DIVISOR,
     INSURANCE_DURATION_SECONDS,
     MILESTONES,
-    PAID_DIG_COST_CAP,
     PAID_DIG_COSTS_PER_DAY,
     PICKAXE_TIERS,
     PINNACLE_DEPTH,
@@ -136,12 +134,17 @@ class TestDigConstants:
                 f"cost[{i+1}]={PAID_DIG_COSTS_PER_DAY[i+1]}"
             )
 
-    def test_paid_dig_cost_cap_equals_last_ramp_entry(self):
-        """The cap should equal the final escalated cost so the ramp tops out there."""
-        assert PAID_DIG_COSTS_PER_DAY[-1] == PAID_DIG_COST_CAP, (
-            f"CAP={PAID_DIG_COST_CAP} does not match last ramp entry "
-            f"{PAID_DIG_COSTS_PER_DAY[-1]}"
-        )
+    def test_paid_dig_cost_keeps_doubling_after_seed_ladder(self, dig_service):
+        """Paid digs beyond the seed ladder keep escalating before modifiers."""
+        tunnel = {"prestige_level": 0, "stat_stamina": 0}
+
+        assert [
+            dig_service._calculate_paid_dig_cost(tunnel, paid_count)
+            for paid_count in (4, 5, 6)
+        ] == [40, 80, 160]
+
+        tunnel["stat_stamina"] = 13
+        assert dig_service._calculate_paid_dig_cost(tunnel, paid_count=5) == 40
 
     def test_boss_victory_base_jc_covers_every_boss_boundary(self):
         """Every regular boss boundary needs a base-reward entry, else a win
@@ -2901,7 +2904,7 @@ class TestCheer:
             f"cheer should not block dig, got: {dig_result.get('error')}"
         )
 
-    def test_cheer_has_own_30s_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+    def test_cheer_has_own_45s_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """A cheerer cannot cheer twice inside CHEER_COOLDOWN_SECONDS."""
         _register_player(player_repository, discord_id=10001, balance=200)
         _register_player(player_repository, discord_id=10002, balance=200)
@@ -2916,13 +2919,14 @@ class TestCheer:
         first = dig_service.cheer_boss(10002, 10001, guild_id)
         assert first["success"]
 
-        # Same cheerer, different target — still on cooldown.
+        # Same cheerer, different target — still on cooldown after 44 seconds.
+        monkeypatch.setattr(time, "time", lambda: 1_000_044)
         second = dig_service.cheer_boss(10002, 10003, guild_id)
         assert not second["success"]
         assert "cooldown" in second.get("error", "").lower()
 
-        # After the cheer cooldown, the same cheerer may cheer again.
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + CHEER_COOLDOWN_SECONDS + 1)
+        # At 45 seconds, the same cheerer may cheer again.
+        monkeypatch.setattr(time, "time", lambda: 1_000_045)
         third = dig_service.cheer_boss(10002, 10003, guild_id)
         assert third["success"]
 
@@ -3431,7 +3435,7 @@ def _get_preconditions_at_depth(dig_service, dig_repo, player_repository, uid, *
 
 
 class TestMainDigAdvanceCap:
-    """The primary Dig result cannot exceed 20 blocks after bonuses."""
+    """The primary Dig result cannot exceed 10 blocks after bonuses."""
 
     def test_direct_dig_caps_advance_after_all_bonuses(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
@@ -3452,8 +3456,8 @@ class TestMainDigAdvanceCap:
         result = dig_service.dig(uid, guild_id)
 
         assert result["success"], result
-        assert result["advance"] == 20
-        assert result["depth_after"] == 21
+        assert result["advance"] == 10
+        assert result["depth_after"] == 11
 
     def test_advertised_advance_range_is_capped_after_all_bonuses(
         self, dig_service, dig_repo, player_repository, guild_id,
@@ -3472,8 +3476,55 @@ class TestMainDigAdvanceCap:
         terminal, preconditions = dig_service.dig_with_preconditions(uid, guild_id)
 
         assert terminal is None
-        assert preconditions["advance_min"] == 20
-        assert preconditions["advance_max"] == 20
+        assert preconditions["advance_min"] == 10
+        assert preconditions["advance_max"] == 10
+
+    def test_authored_event_depth_is_not_capped(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        uid = 20092
+        _register_player(
+            player_repository, discord_id=uid, guild_id=guild_id, balance=100,
+        )
+        dig_repo.create_tunnel(uid, guild_id, "Event Tunnel")
+        dig_repo.update_tunnel(
+            uid,
+            guild_id,
+            depth=101,
+            max_depth=101,
+            boss_progress=json.dumps({
+                "25": "defeated",
+                "50": "defeated",
+                "75": "defeated",
+                "100": "defeated",
+            }),
+        )
+        monkeypatch.setattr(
+            "services.dig_service.EVENT_POOL",
+            [{
+                "id": "long_event",
+                "name": "Long Event",
+                "safe_option": {
+                    "label": "Follow the passage",
+                    "success_chance": 1.0,
+                    "success": {
+                        "advance": 18,
+                        "jc": 0,
+                        "cave_in": False,
+                        "description": "The event carries you deeper.",
+                    },
+                    "failure": None,
+                },
+            }],
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        monkeypatch.setattr(random, "randint", lambda low, high: 0)
+
+        result = dig_service.resolve_event(uid, guild_id, "long_event", "safe")
+
+        assert result["success"], result
+        assert result["depth_delta"] == 18
+        assert dig_repo.get_tunnel(uid, guild_id)["depth"] == 119
 
 
 class TestApplyDigOutcomeSecondaryPaths:
@@ -3512,7 +3563,7 @@ class TestApplyDigOutcomeSecondaryPaths:
             f"max_depth not updated: got {tunnel['max_depth']}"
         )
 
-    def test_dm_dig_caps_main_advance_at_20(
+    def test_dm_dig_caps_main_advance_at_10(
         self, dig_service, dig_repo, player_repository, guild_id,
     ):
         uid = 20110
@@ -3525,8 +3576,8 @@ class TestApplyDigOutcomeSecondaryPaths:
             {"advance": 50, "jc_earned": 0, "cave_in": False, "event_id": ""},
         )
 
-        assert result["advance"] == 20
-        assert result["depth_after"] == 21
+        assert result["advance"] == 10
+        assert result["depth_after"] == 11
 
     def test_max_depth_does_not_regress_on_dm_cave_in(self, dig_service, dig_repo, player_repository, guild_id):
         """Finding 1: max_depth must not decrease when a cave-in knocks depth back."""
@@ -3742,8 +3793,8 @@ class TestExecuteDeterministicOutcomePaths:
 
         result = dig_service._execute_deterministic_outcome(p)
 
-        assert result["advance"] == 20
-        assert result["depth_after"] == 21
+        assert result["advance"] == 10
+        assert result["depth_after"] == 11
 
     def test_milestone_not_re_awarded_after_knockback_deterministic(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch

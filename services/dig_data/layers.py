@@ -53,17 +53,16 @@ def get_layer(depth: int) -> LayerDef:
 # ---------------------------------------------------------------------------
 
 FREE_DIG_COOLDOWN_SECONDS: int = 3_600           # 1 hour (flat, all players)
-CHEER_COOLDOWN_SECONDS: int = 30                 # short anti-spam, independent of dig
+CHEER_COOLDOWN_SECONDS: int = 45                 # short anti-spam, independent of dig
 
 PAID_DIG_COSTS_PER_DAY: list[int] = [3, 5, 10, 20, 40]
-PAID_DIG_COST_CAP: int = 40
 
 # First dig guarantees
 FIRST_DIG_ADVANCE_MIN: int = 3
 FIRST_DIG_ADVANCE_MAX: int = 7
 FIRST_DIG_JC_MIN: int = 1
 FIRST_DIG_JC_MAX: int = 5
-MAIN_DIG_ADVANCE_CAP: int = 20
+MAIN_DIG_ADVANCE_CAP: int = 10
 BASE_DIG_JC_PAYOUT_CAP: int = 20
 
 # Milestone rewards: depth -> JC bonus.

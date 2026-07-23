@@ -14,13 +14,12 @@ from config import (
     BANKRUPTCY_PENALTY_RATE,
     WHEEL_TARGET_EV,
 )
-from services.dig_data.layers import PAID_DIG_COST_CAP, PAID_DIG_COSTS_PER_DAY
+from services.dig_data.layers import PAID_DIG_COSTS_PER_DAY
 from services.prediction_service import PredictionService
 
 
 def test_paid_dig_cost_ladder_pinned():
     assert PAID_DIG_COSTS_PER_DAY == [3, 5, 10, 20, 40]
-    assert PAID_DIG_COST_CAP == 40
 
 
 def test_gamba_wheel_target_ev_pinned():

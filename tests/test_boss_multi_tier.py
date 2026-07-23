@@ -15,7 +15,11 @@ import time
 import pytest
 
 from domain.models.boss_mechanics import MECHANIC_REGISTRY
-from domain.models.boss_stingers import STINGER_REGISTRY
+from domain.models.boss_stingers import (
+    CURSE_HALVE_NEXT_WAGER,
+    CURSE_NO_SCOUT_NEXT_DIG,
+    STINGER_REGISTRY,
+)
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSSES_BY_ID,
@@ -698,6 +702,104 @@ class TestApplyOptionOutcome:
 
 class TestStingers:
     """Stinger application on loss (extra_knockback / extended_cooldown_s / curse)."""
+
+    def test_halves_next_new_wager_and_consumes_curse(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        monkeypatch,
+        deterministic_rng,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            stinger_curse=json.dumps({
+                CURSE_HALVE_NEXT_WAGER: True,
+                "_boss_id": "crystal_maiden",
+            }),
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+
+        result = dig_service.start_boss_duel(
+            10001,
+            TEST_GUILD_ID,
+            "cautious",
+            wager=101,
+        )
+
+        assert result.get("pending_prompt"), result
+        assert result["wager"] == 51
+        assert dig_repo.get_active_duel(10001, TEST_GUILD_ID)["wager"] == 51
+        assert dig_repo.get_tunnel(10001, TEST_GUILD_ID)["stinger_curse"] is None
+
+    def test_halves_legacy_fight_wager_and_consumes_curse(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        monkeypatch,
+        deterministic_rng,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            stinger_curse=json.dumps({
+                CURSE_HALVE_NEXT_WAGER: True,
+                "_boss_id": "crystal_maiden",
+            }),
+        )
+        balance_before = player_repository.get_balance(10001, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+
+        result = dig_service.fight_boss(
+            10001,
+            TEST_GUILD_ID,
+            "cautious",
+            wager=101,
+        )
+
+        assert result["won"] is False
+        assert result["jc_delta"] == -51
+        assert (
+            player_repository.get_balance(10001, TEST_GUILD_ID)
+            == balance_before - 51
+        )
+        assert dig_repo.get_tunnel(10001, TEST_GUILD_ID)["stinger_curse"] is None
+
+    def test_no_scout_curse_blocks_once_without_consuming_lantern(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            stinger_curse=json.dumps({
+                CURSE_NO_SCOUT_NEXT_DIG: True,
+                "_boss_id": "spectre",
+            }),
+        )
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+
+        blocked = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        assert blocked["success"] is False
+        assert "curse" in blocked["error"].lower()
+        assert any(
+            item["item_type"] == "lantern"
+            for item in dig_repo.get_inventory(10001, TEST_GUILD_ID)
+        )
+        assert dig_repo.get_tunnel(10001, TEST_GUILD_ID)["stinger_curse"] is None
+
+        allowed = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        assert allowed["success"] is True
+        assert not any(
+            item["item_type"] == "lantern"
+            for item in dig_repo.get_inventory(10001, TEST_GUILD_ID)
+        )
 
     def test_new_additive_knockback_flavor_describes_extra_distance(self):
         for stinger_id in ("cairn_aftershock", "saltveil_pressgang"):
