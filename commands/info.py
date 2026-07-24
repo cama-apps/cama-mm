@@ -14,7 +14,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import LEVERAGE_TIERS, PINGEDASH_COST
+from config import LEVERAGE_TIERS, PINGEDASH_COST, PINGEDKEVIN_COST
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
@@ -978,7 +978,8 @@ class InfoCommands(commands.Cog):
                 "`/economy reserve` / `/economy disburse` - View or allocate Reserve funds\n"
                 "`/shop buy` / `/shop mana` - Browse the jopacoin and mana shops\n"
                 "`/shop avoids` / `/shop deals` - View active matchmaking purchases\n"
-                f"`/shop pingedash` - Spend {PINGEDASH_COST} jopacoin to send the Pingedash"
+                f"`/shop pingedash` - Spend {PINGEDASH_COST} jopacoin to send the Pingedash\n"
+                f"`/shop pingedkevin` - Spend {PINGEDKEVIN_COST} jopacoin to send the PingedKevin"
             ),
             inline=False,
         )

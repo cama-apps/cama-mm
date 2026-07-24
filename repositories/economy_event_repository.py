@@ -30,6 +30,7 @@ class EconomyEventRepository(BaseRepository):
         "mana_reward",
         "match_streak",
         "pingedash",
+        "pingedkevin",
         "mana_protection",
         "bet",
         "bet_settlement",

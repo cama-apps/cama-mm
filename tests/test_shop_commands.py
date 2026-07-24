@@ -11,6 +11,9 @@ from commands.shop import (
     PINGEDASH_COOLDOWN_SECONDS,
     PINGEDASH_COST,
     PINGEDASH_TENOR_URL,
+    PINGEDKEVIN_COOLDOWN_SECONDS,
+    PINGEDKEVIN_COST,
+    PINGEDKEVIN_TENOR_URL,
     SHOP_ANNOUNCE_COST,
     SHOP_ANNOUNCE_TARGET_COST,
     SHOP_JOPA_COIN_COST,
@@ -41,12 +44,22 @@ def test_pingedash_description_uses_configured_cost():
     )
 
 
+def test_pingedkevin_description_and_url():
+    assert ShopCommands.pingedkevin.description == (
+        f"Spend {PINGEDKEVIN_COST} jopacoin to send the PingedKevin"
+    )
+    assert PINGEDKEVIN_TENOR_URL == (
+        "https://tenor.com/view/in-trouble-mad-face-gif-10963449859613356314"
+    )
+
+
 @pytest.mark.asyncio
 async def test_pingedash_is_not_a_shop_item():
     commands = ShopCommands(MagicMock(), MagicMock())
     choices = await commands.item_autocomplete(_make_interaction(guild_id=9000), "")
 
     assert "pingedash" not in {choice.value for choice in choices}
+    assert "pingedkevin" not in {choice.value for choice in choices}
 
 
 @pytest.mark.asyncio
@@ -169,6 +182,90 @@ async def test_pingedash_cooldown_response_is_private(monkeypatch):
     assert PINGEDASH_TENOR_URL not in kwargs["content"]
 
 
+@pytest.mark.asyncio
+async def test_pingedkevin_requires_configured_target(monkeypatch):
+    bot = MagicMock()
+    player_service = MagicMock()
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    monkeypatch.setattr("commands.shop.PINGEDKEVIN_TARGET_USER_ID", None)
+
+    await commands._handle_pingedkevin(interaction)
+
+    interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.call_args.kwargs["ephemeral"] is True
+    player_service.try_purchase_pingedkevin.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pingedkevin_success_charges_and_mentions_only_configured_target(
+    monkeypatch,
+):
+    frozen_now = 1_700_000_000
+    target_user_id = 234567890123456789
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.try_purchase_pingedkevin.return_value = {
+        "success": True,
+        "reason": None,
+        "balance": 40,
+        "cooldown_ends_at": frozen_now + PINGEDKEVIN_COOLDOWN_SECONDS,
+    }
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    monkeypatch.setattr(
+        "commands.shop.PINGEDKEVIN_TARGET_USER_ID",
+        target_user_id,
+    )
+    monkeypatch.setattr("commands.shop.time.time", lambda: frozen_now)
+
+    await commands._handle_pingedkevin(interaction)
+
+    player_service.try_purchase_pingedkevin.assert_called_once_with(
+        interaction.user.id,
+        interaction.guild.id,
+        cost=PINGEDKEVIN_COST,
+        now=frozen_now,
+        cooldown_seconds=PINGEDKEVIN_COOLDOWN_SECONDS,
+    )
+    interaction.followup.send.assert_awaited_once()
+    kwargs = interaction.followup.send.call_args.kwargs
+    assert kwargs["content"] == (
+        f"<@{target_user_id}>\n{PINGEDKEVIN_TENOR_URL}"
+    )
+    assert [user.id for user in kwargs["allowed_mentions"].users] == [
+        target_user_id
+    ]
+    assert kwargs["allowed_mentions"].everyone is False
+    assert kwargs["allowed_mentions"].roles is False
+
+
+@pytest.mark.asyncio
+async def test_pingedkevin_cooldown_response_is_private(monkeypatch):
+    cooldown_ends_at = 1_700_086_400
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.try_purchase_pingedkevin.return_value = {
+        "success": False,
+        "reason": "on_cooldown",
+        "balance": 50,
+        "cooldown_ends_at": cooldown_ends_at,
+    }
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    monkeypatch.setattr(
+        "commands.shop.PINGEDKEVIN_TARGET_USER_ID",
+        234567890123456789,
+    )
+
+    await commands._handle_pingedkevin(interaction)
+
+    kwargs = interaction.followup.send.call_args.kwargs
+    assert kwargs["ephemeral"] is True
+    assert f"<t:{cooldown_ends_at}:R>" in kwargs["content"]
+    assert PINGEDKEVIN_TENOR_URL not in kwargs["content"]
+
+
 def test_pingedash_purchase_debits_once_per_cooldown(player_repository):
     user_id = 1001
     guild_id = 9000
@@ -236,6 +333,91 @@ def test_pingedash_purchase_debits_once_per_cooldown(player_repository):
             "source": "pingedash",
             "related_type": "command",
             "related_id": "pingedash",
+        },
+    ]
+
+
+def test_pingedkevin_has_an_independent_cooldown_and_ledger_source(
+    player_repository,
+):
+    user_id = 1001
+    guild_id = 9000
+    now = 1_700_000_000
+    player_repository.add(user_id, "Buyer", guild_id)
+    player_repository.update_balance(user_id, guild_id, 30)
+
+    ash = player_repository.try_purchase_pingedash(
+        user_id,
+        guild_id,
+        cost=10,
+        now=now,
+        cooldown_seconds=86_400,
+    )
+    kevin = player_repository.try_purchase_pingedkevin(
+        user_id,
+        guild_id,
+        cost=10,
+        now=now,
+        cooldown_seconds=86_400,
+    )
+    blocked_kevin = player_repository.try_purchase_pingedkevin(
+        user_id,
+        guild_id,
+        cost=10,
+        now=now + 1,
+        cooldown_seconds=86_400,
+    )
+
+    assert ash["success"] is True
+    assert kevin == {
+        "success": True,
+        "reason": None,
+        "balance": 10,
+        "cooldown_ends_at": now + 86_400,
+    }
+    assert blocked_kevin == {
+        "success": False,
+        "reason": "on_cooldown",
+        "balance": 10,
+        "cooldown_ends_at": now + 86_400,
+    }
+
+    with player_repository.connection() as conn:
+        player_row = conn.execute(
+            """
+            SELECT last_pingedash, last_pingedkevin
+            FROM players
+            WHERE discord_id = ? AND guild_id = ?
+            """,
+            (user_id, guild_id),
+        ).fetchone()
+        ledger_rows = conn.execute(
+            """
+            SELECT delta, source, related_type, related_id
+            FROM economy_ledger_entries
+            WHERE guild_id = ? AND account_id = ?
+              AND source IN ('pingedash', 'pingedkevin')
+            ORDER BY ledger_id
+            """,
+            (guild_id, str(user_id)),
+        ).fetchall()
+
+    assert dict(player_row) == {
+        "last_pingedash": now,
+        "last_pingedkevin": now,
+    }
+    assert [dict(row) for row in ledger_rows] == [
+        {
+            "delta": -10,
+            "source": "pingedash",
+            "related_type": "command",
+            "related_id": "pingedash",
+        },
+        {
+            "delta": -10,
+            "source": "pingedkevin",
+            "related_type": "command",
+            "related_id": "pingedkevin",
         },
     ]
 

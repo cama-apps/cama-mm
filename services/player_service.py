@@ -307,6 +307,24 @@ class PlayerService:
             cooldown_seconds=cooldown_seconds,
         )
 
+    def try_purchase_pingedkevin(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+        now: int,
+        cooldown_seconds: int,
+    ) -> dict[str, int | str | bool | None]:
+        """Atomically charge for /shop pingedkevin and claim its cooldown."""
+        return self.player_repo.try_purchase_pingedkevin(
+            discord_id,
+            guild_id,
+            cost=cost,
+            now=now,
+            cooldown_seconds=cooldown_seconds,
+        )
+
     # --- Exclusion count operations ---
 
     def get_exclusion_count(self, discord_id: int, guild_id: int) -> int:

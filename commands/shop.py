@@ -24,6 +24,9 @@ from config import (
     PINGEDASH_COOLDOWN_SECONDS,
     PINGEDASH_COST,
     PINGEDASH_TARGET_USER_ID,
+    PINGEDKEVIN_COOLDOWN_SECONDS,
+    PINGEDKEVIN_COST,
+    PINGEDKEVIN_TARGET_USER_ID,
     SHOP_ANNOUNCE_COST,
     SHOP_ANNOUNCE_TARGET_COST,
     SHOP_DOUBLE_OR_NOTHING_COST,
@@ -65,6 +68,9 @@ SOUL_HARVEST_COST = 25
 SOUL_HARVEST_DRAIN_PER_TARGET = 2
 SOUL_HARVEST_BONUS_DRAIN_CHANCE = 0.20
 PINGEDASH_TENOR_URL = "https://tenor.com/view/hiash-gif-25282310"
+PINGEDKEVIN_TENOR_URL = (
+    "https://tenor.com/view/in-trouble-mad-face-gif-10963449859613356314"
+)
 SOFT_AVOID_MIN_TEAMMATE_GAMES = 3
 SOFT_AVOID_MIN_COST = 250
 SOFT_AVOID_WINRATE_COST_SCALE = 1500
@@ -397,12 +403,57 @@ class ShopCommands(commands.Cog):
         """Buy and send the Pingedash."""
         await self._handle_pingedash(interaction)
 
+    @shop_group.command(
+        name="pingedkevin",
+        description=f"Spend {PINGEDKEVIN_COST} jopacoin to send the PingedKevin",
+    )
+    @require_guild
+    async def pingedkevin(self, interaction: discord.Interaction):
+        """Buy and send the PingedKevin."""
+        await self._handle_pingedkevin(interaction)
+
     async def _handle_pingedash(self, interaction: discord.Interaction) -> None:
         """Charge for Pingedash, claim its cooldown, and send the Tenor embed."""
-        target_user_id = PINGEDASH_TARGET_USER_ID
+        await self._handle_paid_ping(
+            interaction,
+            command_name="pingedash",
+            display_name="Pingedash",
+            target_user_id=PINGEDASH_TARGET_USER_ID,
+            tenor_url=PINGEDASH_TENOR_URL,
+            cost=PINGEDASH_COST,
+            cooldown_seconds=PINGEDASH_COOLDOWN_SECONDS,
+            purchase=self.player_service.try_purchase_pingedash,
+        )
+
+    async def _handle_pingedkevin(self, interaction: discord.Interaction) -> None:
+        """Charge for PingedKevin, claim its cooldown, and send the Tenor embed."""
+        await self._handle_paid_ping(
+            interaction,
+            command_name="pingedkevin",
+            display_name="PingedKevin",
+            target_user_id=PINGEDKEVIN_TARGET_USER_ID,
+            tenor_url=PINGEDKEVIN_TENOR_URL,
+            cost=PINGEDKEVIN_COST,
+            cooldown_seconds=PINGEDKEVIN_COOLDOWN_SECONDS,
+            purchase=self.player_service.try_purchase_pingedkevin,
+        )
+
+    async def _handle_paid_ping(
+        self,
+        interaction: discord.Interaction,
+        *,
+        command_name: str,
+        display_name: str,
+        target_user_id: int | None,
+        tenor_url: str,
+        cost: int,
+        cooldown_seconds: int,
+        purchase,
+    ) -> None:
+        """Charge for a paid ping command and safely mention its configured target."""
         if target_user_id is None or target_user_id <= 0:
             await interaction.response.send_message(
-                "Pingedash is unavailable because its target user is not configured.",
+                f"{display_name} is unavailable because its target user is not configured.",
                 ephemeral=True,
             )
             return
@@ -414,30 +465,33 @@ class ShopCommands(commands.Cog):
         guild_id = interaction.guild.id
         now = int(time.time())
         result = await asyncio.to_thread(
-            self.player_service.try_purchase_pingedash,
+            purchase,
             user_id,
             guild_id,
-            cost=PINGEDASH_COST,
+            cost=cost,
             now=now,
-            cooldown_seconds=PINGEDASH_COOLDOWN_SECONDS,
+            cooldown_seconds=cooldown_seconds,
         )
 
         if not result["success"]:
             reason = result["reason"]
             if reason == "not_registered":
-                message = "You need to `/player register` before using `/shop pingedash`."
+                message = (
+                    "You need to `/player register` before using "
+                    f"`/shop {command_name}`."
+                )
             elif reason == "on_cooldown":
                 message = (
-                    "Pingedash is on cooldown. You can use it again "
+                    f"{display_name} is on cooldown. You can use it again "
                     f"<t:{result['cooldown_ends_at']}:R>."
                 )
             elif reason == "insufficient_balance":
                 message = (
-                    f"You need {PINGEDASH_COST} {JOPACOIN_EMOTE} for Pingedash, "
+                    f"You need {cost} {JOPACOIN_EMOTE} for {display_name}, "
                     f"but you only have {result['balance']}."
                 )
             else:
-                message = "Pingedash is unavailable right now."
+                message = f"{display_name} is unavailable right now."
             await safe_followup(interaction, content=message, ephemeral=True)
             return
 
@@ -449,7 +503,7 @@ class ShopCommands(commands.Cog):
         )
         await safe_followup(
             interaction,
-            content=f"<@{target_user_id}>\n{PINGEDASH_TENOR_URL}",
+            content=f"<@{target_user_id}>\n{tenor_url}",
             allowed_mentions=allowed_mentions,
         )
 

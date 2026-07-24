@@ -595,6 +595,11 @@ class SchemaManager:
                 "create_match_bans_for_scout",
                 self._migration_create_match_bans_for_scout,
             ),
+            # Persistent per-guild cooldown for /shop pingedkevin.
+            (
+                "add_last_pingedkevin_to_players",
+                self._migration_add_last_pingedkevin_to_players,
+            ),
         ]
 
     # --- Migrations ---
@@ -853,6 +858,14 @@ class SchemaManager:
 
     def _migration_add_last_pingedash_to_players(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "last_pingedash", "INTEGER")
+
+    def _migration_add_last_pingedkevin_to_players(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor,
+            "players",
+            "last_pingedkevin",
+            "INTEGER",
+        )
 
     def _migration_create_player_trivia_tables(self, cursor) -> None:
         """Create durable player-trivia sessions and question snapshots."""
