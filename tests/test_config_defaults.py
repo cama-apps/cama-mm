@@ -10,7 +10,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 
-def test_dota_betting_window_defaults_to_twenty_minutes():
+def _load_config_without_env(*env_vars: str):
     dotenv_stub = ModuleType("dotenv")
 
     def load_dotenv() -> None:
@@ -27,7 +27,20 @@ def test_dota_betting_window_defaults_to_twenty_minutes():
         patch.dict(os.environ, {}, clear=False),
         patch.dict(sys.modules, {"dotenv": dotenv_stub}),
     ):
-        os.environ.pop("BET_LOCK_SECONDS", None)
+        for env_var in env_vars:
+            os.environ.pop(env_var, None)
         spec.loader.exec_module(config_module)
 
+    return config_module
+
+
+def test_dota_betting_window_defaults_to_twenty_minutes():
+    config_module = _load_config_without_env("BET_LOCK_SECONDS")
+
     assert config_module.BET_LOCK_SECONDS == 20 * 60
+
+
+def test_openskill_shuffle_chance_defaults_to_two_percent():
+    config_module = _load_config_without_env("OPENSKILL_SHUFFLE_CHANCE")
+
+    assert config_module.OPENSKILL_SHUFFLE_CHANCE == 0.02
