@@ -69,15 +69,12 @@ class PredictionService:
 
         try:
             payout = float(getattr(effects, "prediction_payout_multiplier", 1.0))
-            depth = float(getattr(effects, "prediction_depth_multiplier", 1.0))
             spread_delta = int(getattr(effects, "prediction_spread_ticks_delta", 0))
         except (TypeError, ValueError, OverflowError):
             return 1.0, 1.0, 0
         if not math.isfinite(payout):
             payout = 1.0
-        if not math.isfinite(depth):
-            depth = 1.0
-        return max(0.0, payout), max(0.0, depth), spread_delta
+        return max(0.0, payout), 1.0, spread_delta
 
     def _build_event_levels(
         self,
@@ -98,7 +95,7 @@ class PredictionService:
         base_spread = (
             PREDICTION_SPREAD_TICKS if spread_ticks is None else spread_ticks
         )
-        adjusted_size = max(0, round(base_size * depth_multiplier))
+        adjusted_size = max(0, round(base_size))
         # At least one tick keeps LP asks and bids from locking at fair. The
         # upper clamp is the widest offset that can still yield a valid 1..99
         # quote somewhere in the book; _build_initial_levels filters prices at

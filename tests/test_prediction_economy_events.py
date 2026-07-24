@@ -49,7 +49,7 @@ def _add_player(player_repository, discord_id: int, balance: int = 1_000):
     player_repository.update_balance(discord_id, TEST_GUILD_ID, balance)
 
 
-def test_event_modifies_new_and_refreshed_ladder(
+def test_event_preserves_depth_while_modifying_new_and_refreshed_spreads(
     repo_db_path, player_repository, monkeypatch
 ):
     events = StubEconomyEventService(depth=0.5, spread=2)
@@ -61,26 +61,27 @@ def test_event_modifies_new_and_refreshed_ladder(
     prediction_id = created["prediction_id"]
     book = repo.get_book(prediction_id)
     assert book["yes_asks"] == [
-        (54, round(PREDICTION_SIZE_PER_LEVEL * 0.5)),
-        (55, round(PREDICTION_SIZE_PER_LEVEL * 0.5)),
-        (56, round(PREDICTION_SIZE_PER_LEVEL * 0.5)),
+        (54, PREDICTION_SIZE_PER_LEVEL),
+        (55, PREDICTION_SIZE_PER_LEVEL),
+        (56, PREDICTION_SIZE_PER_LEVEL),
     ]
-    assert book["yes_bids"][0] == (46, round(PREDICTION_SIZE_PER_LEVEL * 0.5))
+    assert book["yes_bids"][0] == (46, PREDICTION_SIZE_PER_LEVEL)
 
     monkeypatch.setattr(random, "randint", lambda _lo, _hi: 0)
     result = service.refresh_market(prediction_id)
     book = repo.get_book(prediction_id)
     asks = dict(book["yes_asks"])
-    # Refresh base spread 4 + event delta 2, with half of normal refresh depth.
-    assert asks[56] == round(PREDICTION_SIZE_PER_LEVEL * 0.5) + round(
-        PREDICTION_REFRESH_SIZE_PER_LEVEL * 0.5
-    )
-    assert asks[57] == round(PREDICTION_REFRESH_SIZE_PER_LEVEL * 0.5)
+    # Refresh base spread 4 + event delta 2, with normal quote depth.
+    assert asks[56] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert asks[57] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert result["economy_event_modifiers"]["prediction_depth_multiplier"] == 1.0
     assert result["economy_event_modifiers"]["prediction_spread_ticks"] == 6
     assert events.guild_ids == [TEST_GUILD_ID, TEST_GUILD_ID]
 
 
-def test_event_ladder_modifiers_are_clamped(repo_db_path, player_repository):
+def test_event_ladder_spread_is_clamped_without_changing_depth(
+    repo_db_path, player_repository
+):
     events = StubEconomyEventService(depth=-4, spread=-999)
     service, repo = _service(repo_db_path, player_repository, events)
 
@@ -88,9 +89,14 @@ def test_event_ladder_modifiers_are_clamped(repo_db_path, player_repository):
         TEST_GUILD_ID, 1, "Will Global Silence empty the book?", initial_fair=50
     )
 
-    assert repo.get_book(created["prediction_id"])["yes_asks"] == []
+    assert repo.get_book(created["prediction_id"])["yes_asks"] == [
+        (51, PREDICTION_SIZE_PER_LEVEL),
+        (52, PREDICTION_SIZE_PER_LEVEL),
+        (53, PREDICTION_SIZE_PER_LEVEL),
+    ]
     modifiers = created["economy_event_modifiers"]
-    assert modifiers["prediction_size_per_level"] == 0
+    assert modifiers["prediction_depth_multiplier"] == 1.0
+    assert modifiers["prediction_size_per_level"] == PREDICTION_SIZE_PER_LEVEL
     assert modifiers["prediction_spread_ticks"] == 1
 
 

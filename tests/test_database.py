@@ -285,10 +285,10 @@ class TestDatabase:
         player_id = 11101
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Increment exclusion count twice (5 per exclusion)
+        # Increment exclusion count once (6 per exclusion)
         test_db.increment_exclusion_count(player_id)
 
-        # Verify count increased by 5
+        # Verify count increased by 6
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == _expected_after_exclusions(1)
 
@@ -298,11 +298,11 @@ class TestDatabase:
         assert exclusion_counts[player_id] == _expected_after_exclusions(2)
 
     def test_decay_exclusion_count(self, test_db):
-        """Test decaying a player's exclusion count (halves it)."""
+        """Test decaying a player's exclusion count by one."""
         player_id = 11201
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Set exclusion count to 10 exclusions (count becomes boost + 40)
+        # Set exclusion count to 10 exclusions (count becomes boost + 60)
         for _ in range(10):
             test_db.increment_exclusion_count(player_id)
 
@@ -310,60 +310,21 @@ class TestDatabase:
         value = _expected_after_exclusions(10)
         assert exclusion_counts[player_id] == value
 
-        # Decay (should become value / 2)
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
+        for _ in range(6):
+            test_db.decay_exclusion_count(player_id)
+            exclusion_counts = test_db.get_exclusion_counts([player_id])
+            value -= 1
+            assert exclusion_counts[player_id] == value
 
-        # Decay again
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
-
-        # Decay again
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
-
-        # Decay again
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
-
-        # Decay again
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
-
-        # Decay again
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
-
-    def test_exclusion_count_with_odd_numbers(self, test_db):
-        """Test decay with odd numbers (should round down)."""
+    def test_exclusion_count_decay_stops_at_zero(self, test_db):
+        """Test decay never makes the exclusion count negative."""
         player_id = 11301
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Set count to 7 exclusions (boost + 28 total)
-        for _ in range(7):
-            test_db.increment_exclusion_count(player_id)
-
+        for _ in range(NEW_PLAYER_EXCLUSION_BOOST + 1):
+            test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value = _expected_after_exclusions(7)
-        assert exclusion_counts[player_id] == value
-
-        # Decay: value / 2
-        test_db.decay_exclusion_count(player_id)
-        exclusion_counts = test_db.get_exclusion_counts([player_id])
-        value //= 2
-        assert exclusion_counts[player_id] == value
+        assert exclusion_counts[player_id] == 0
 
 
 if __name__ == "__main__":

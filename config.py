@@ -139,7 +139,7 @@ FIRST_GAME_RESET_HOUR = _parse_int("FIRST_GAME_RESET_HOUR", 17)  # Hour (0-23) i
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 4)
 JOPACOIN_EXCLUSION_REWARD = _parse_int("JOPACOIN_EXCLUSION_REWARD", 3)
-BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 900)  # 15 minutes
+BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 1200)  # 20 minutes
 # Betting reminders during the open window: plain terse reminders fire at each
 # offset (seconds before lock); the AI "last call" fires at BET_LAST_CALL_OFFSET.
 BET_REMINDER_OFFSETS = _parse_int_list("BET_REMINDER_OFFSETS", [600, 300])  # 10m, 5m left

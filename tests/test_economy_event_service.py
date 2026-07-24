@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from domain.models.economy_event import EconomyEventEffects
 from repositories.economy_event_repository import EconomyEventRepository
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
@@ -186,6 +187,105 @@ def test_disabled_service_returns_neutral_effects(repo_db_path):
     assert service.get_effects(TEST_GUILD_ID).reward_multiplier == 1.0
 
 
+@pytest.mark.parametrize(
+    ("required_effect", "deadband", "expected_severity"),
+    (
+        (0, 5, 1),
+        (5, 5, 1),
+        (25, 5, 1),
+        (26, 5, 2),
+        (75, 5, 2),
+        (76, 5, 3),
+        (-76, 5, 3),
+    ),
+)
+def test_severity_follows_correction_magnitude(
+    required_effect, deadband, expected_severity
+):
+    assert (
+        EconomyEventService._severity_for_correction(required_effect, deadband)
+        == expected_severity
+    )
+
+
+def test_controller_scores_only_the_flow_selected_severity(repo_db_path, monkeypatch):
+    repo, _ = _seed_economy(repo_db_path)
+    service = EconomyEventService(
+        repo,
+        enabled=True,
+        recovery_mode=True,
+        lookback_days=7,
+    )
+    now = _local_timestamp(2026, 7, 18, 10)
+    monkeypatch.setattr(repo, "forecast_daily_flow", lambda *args, **kwargs: 1_000)
+    monkeypatch.setattr(
+        repo,
+        "get_surface_daily_volumes",
+        lambda *args, **kwargs: {
+            "reward_credits": 0.0,
+            "gamba_credits": 0.0,
+            "gamba_debits": 0.0,
+            "bet_payouts": 0.0,
+            "prediction_payouts": 0.0,
+        },
+    )
+    seen_severities: list[int] = []
+    real_effects_for = service._effects_for
+
+    def _recording_effects_for(template, severity, balance_sheet):
+        seen_severities.append(severity)
+        return real_effects_for(template, severity, balance_sheet)
+
+    monkeypatch.setattr(service, "_effects_for", _recording_effects_for)
+
+    event, created = service.ensure_daily_event(
+        TEST_GUILD_ID,
+        now=now,
+        event_date="2026-07-18",
+    )
+
+    assert created is True
+    assert event["direction"] == "deflationary"
+    assert event["severity"] == 3
+    assert set(seen_severities) == {3}
+
+
+def test_legacy_prediction_depth_effect_is_neutralized():
+    effects = EconomyEventEffects.from_mapping(
+        {"prediction_depth_multiplier": 0.16}
+    )
+
+    assert effects.prediction_depth_multiplier == 1.0
+
+
+def test_event_announcement_omits_fixed_prediction_depth():
+    template = next(event for event in _EVENT_CATALOG if event.name == "Ravage")
+    effects = {
+        "reward_multiplier": 1.0,
+        "gamba_win_multiplier": 1.0,
+        "gamba_loss_multiplier": 1.0,
+        "bet_payout_multiplier": 1.0,
+        "prediction_payout_multiplier": 0.99,
+        "prediction_depth_multiplier": 1.0,
+        "prediction_spread_ticks_delta": 2,
+        "reserve_burn_jc": 0,
+        "reserve_release_jc": 0,
+        "wallet_burn_rate": 0.0,
+    }
+
+    announcement = EconomyEventService._announcement_text(
+        template,
+        severity=2,
+        effects=effects,
+        required_effect=-100,
+        forecast=100,
+    )
+
+    assert "depth" not in announcement
+    assert "resolution **-1.0%**" in announcement
+    assert "spread **+2 ticks**" in announcement
+
+
 def test_pre_trigger_missing_prior_card_stays_neutral(repo_db_path):
     repo, _ = _seed_economy(repo_db_path)
     service = EconomyEventService(repo, enabled=True, trigger_hour_local=10)
@@ -308,7 +408,7 @@ def test_seconds_until_next_trigger_tracks_dst(
     assert service.seconds_until_next_trigger(now=now) == expected_seconds
 
 
-def test_estimate_effect_counts_reserve_release_as_expansion():
+def test_estimate_effect_treats_reserve_redistribution_as_supply_neutral():
     effects = {
         "reward_multiplier": 1.0,
         "gamba_win_multiplier": 1.0,
@@ -328,10 +428,10 @@ def test_estimate_effect_counts_reserve_release_as_expansion():
     }
     balance_sheet = {"positive_wallets": 0}
 
-    assert EconomyEventService._estimate_effect(effects, volumes, balance_sheet) == 250
+    assert EconomyEventService._estimate_effect(effects, volumes, balance_sheet) == 0
 
 
-def test_atomic_event_release_credits_players_and_counts_direct_effect(repo_db_path):
+def test_atomic_event_release_credits_players_without_changing_supply(repo_db_path):
     repo, players = _seed_economy(repo_db_path)
     date = get_game_date()
     before = repo.capture_balance_sheet(TEST_GUILD_ID)
@@ -344,7 +444,7 @@ def test_atomic_event_release_credits_players_and_counts_direct_effect(repo_db_p
 
     assert created is True
     assert event["effects"]["reserve_release_jc"] == 200
-    assert event["direct_effect_jc"] == 200
+    assert event["direct_effect_jc"] == 0
     assert players.get_balance(1, TEST_GUILD_ID) == 1100
     assert players.get_balance(2, TEST_GUILD_ID) == 600
     assert LoanRepository(repo_db_path).get_nonprofit_fund(TEST_GUILD_ID) == 800

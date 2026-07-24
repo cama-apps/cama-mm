@@ -174,7 +174,7 @@ def test_record_applies_deferred_exclusion_factor_updates(repo_db_path):
 
     after = player_repo.get_exclusion_counts(tracked_ids, TEST_GUILD_ID)
     for pid in pending.radiant_team_ids + pending.dire_team_ids:
-        assert after[pid] == before[pid] // 2
+        assert after[pid] == max(before[pid] - 1, 0)
     for pid in pending.full_exclusion_increment_ids:
         assert after[pid] == before[pid] + 6
     assert after[conditional_id] == before[conditional_id] + 1
