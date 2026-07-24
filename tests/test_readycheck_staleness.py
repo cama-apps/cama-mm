@@ -277,7 +277,8 @@ async def test_refresh_invoker_reaching_ten_announces_shuffle(monkeypatch):
         sent.content for sent in env.thread.sent[sent_before_refresh:] if sent.content
     ]
     assert (
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
         in refresh_messages
     )
 
