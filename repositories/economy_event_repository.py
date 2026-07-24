@@ -569,7 +569,6 @@ class EconomyEventRepository(BaseRepository):
                             released += credit
                     finally:
                         self._clear_economy_ledger_context(cursor)
-                direct_effect += released
 
             effects["reserve_burn_jc"] = reserve_burn
             effects["wallet_burn_jc"] = wallet_burn

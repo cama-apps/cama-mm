@@ -42,7 +42,6 @@ class _EventTemplate:
     gamba_loss_step: float = 0.0
     bet_step: float = 0.0
     prediction_payout_step: float = 0.0
-    prediction_depth_step: float = 0.0
     spread_step: int = 0
     reserve_burn_step: float = 0.0
     reserve_release_step: float = 0.0
@@ -55,100 +54,99 @@ _EVENT_CATALOG = (
         "A tidal shock tears through every corner of the Jopacoin economy.",
         reward_step=-0.08, gamba_win_step=-0.03, gamba_loss_step=0.04,
         bet_step=-0.015, prediction_payout_step=-0.005,
-        prediction_depth_step=-0.12, spread_step=1, reserve_burn_step=0.004,
+        spread_step=1, reserve_burn_step=0.004,
     ),
     _EventTemplate(
         "Black Hole", "Enigma", "deflationary",
         "Liquidity is dragged toward a singularity and refuses to escape.",
         reward_step=-0.05, gamba_win_step=-0.04, gamba_loss_step=0.08,
         bet_step=-0.02, prediction_payout_step=-0.008,
-        prediction_depth_step=-0.22, spread_step=2, reserve_burn_step=0.003,
+        spread_step=2, reserve_burn_step=0.003,
     ),
     _EventTemplate(
         "Doom", "Doom", "deflationary",
         "The server's opt-in rewards have been marked for destruction.",
         reward_step=-0.15, gamba_win_step=-0.08, gamba_loss_step=0.10,
         bet_step=-0.025, prediction_payout_step=-0.01,
-        prediction_depth_step=-0.08, spread_step=1,
+        spread_step=1,
     ),
     _EventTemplate(
         "Echo Slam", "Earthshaker", "deflationary",
         "Every transaction makes the next shock hit harder.",
         reward_step=-0.07, gamba_win_step=-0.04, gamba_loss_step=0.12,
         bet_step=-0.015, prediction_payout_step=-0.005,
-        prediction_depth_step=-0.08, spread_step=1, reserve_burn_step=0.002,
+        spread_step=1, reserve_burn_step=0.002,
     ),
     _EventTemplate(
         "Reaper's Scythe", "Necrophos", "deflationary",
         "Large voluntary risks now carry a much sharper edge.",
         reward_step=-0.04, gamba_win_step=-0.10, gamba_loss_step=0.14,
         bet_step=-0.035, prediction_payout_step=-0.012,
-        prediction_depth_step=-0.05, spread_step=1,
+        spread_step=1,
     ),
     _EventTemplate(
         "Global Silence", "Silencer", "deflationary",
         "Bonus rewards vanish and market makers fall quiet.",
         reward_step=-0.12, gamba_win_step=-0.03, bet_step=-0.01,
-        prediction_depth_step=-0.28, spread_step=2,
+        spread_step=2,
     ),
     _EventTemplate(
         "Sanity's Eclipse", "Outworld Destroyer", "deflationary",
         "A rare hard shock erases a thin layer of exposed liquidity.",
         reward_step=-0.05, gamba_win_step=-0.03, bet_step=-0.01,
-        prediction_payout_step=-0.005, prediction_depth_step=-0.08,
-        spread_step=1, wallet_burn_step=0.0005,
+        prediction_payout_step=-0.005, spread_step=1,
+        wallet_burn_step=0.0005,
     ),
     _EventTemplate(
         "Chronosphere", "Faceless Void", "neutral",
         "Time stops around the order books while the wider economy catches up.",
-        prediction_depth_step=-0.25, spread_step=2,
+        spread_step=2,
     ),
     _EventTemplate(
         "Song of the Siren", "Naga Siren", "neutral",
         "Volatility sleeps; both upside and downside soften for a day.",
         gamba_win_step=-0.04, gamba_loss_step=-0.04,
-        prediction_depth_step=-0.10, spread_step=1,
+        spread_step=1,
     ),
     _EventTemplate(
         "Sunder", "Terrorblade", "neutral",
         "Wallet and Reserve liquidity trade places without changing supply.",
-        reserve_release_step=0.002, prediction_depth_step=0.05,
+        reserve_release_step=0.002,
     ),
     _EventTemplate(
         "Hand of God", "Chen", "boon",
         "The Reserve opens and every voluntary economy surface receives aid.",
         reward_step=0.05, gamba_win_step=0.05, gamba_loss_step=-0.04,
         bet_step=0.015, prediction_payout_step=0.005,
-        prediction_depth_step=0.18, spread_step=-1, reserve_release_step=0.004,
+        spread_step=-1, reserve_release_step=0.004,
     ),
     _EventTemplate(
         "Guardian Angel", "Omniknight", "boon",
         "Losses are softened and market liquidity receives divine protection.",
         reward_step=0.03, gamba_win_step=0.03, gamba_loss_step=-0.08,
         bet_step=0.01, prediction_payout_step=0.004,
-        prediction_depth_step=0.12, spread_step=-1,
+        spread_step=-1,
     ),
     _EventTemplate(
         "Reincarnation", "Wraith King", "boon",
         "Defeated wagers rise again with part of their value restored.",
         reward_step=0.04, gamba_win_step=0.06, gamba_loss_step=-0.10,
         bet_step=0.015, prediction_payout_step=0.006,
-        prediction_depth_step=0.08, spread_step=-1,
+        spread_step=-1,
     ),
     _EventTemplate(
         "Stampede", "Centaur Warrunner", "boon",
         "Activity surges and liquidity charges into every open market.",
         reward_step=0.10, gamba_win_step=0.04, gamba_loss_step=-0.03,
         bet_step=0.02, prediction_payout_step=0.005,
-        prediction_depth_step=0.25, spread_step=-1,
+        spread_step=-1,
     ),
     _EventTemplate(
         "Supernova", "Phoenix", "boon",
         "Reserve liquidity is reborn as a burst of server-wide economic heat.",
         reward_step=0.08, gamba_win_step=0.07, gamba_loss_step=-0.05,
         bet_step=0.02, prediction_payout_step=0.008,
-        prediction_depth_step=0.15, spread_step=-1,
-        reserve_release_step=0.006,
+        spread_step=-1, reserve_release_step=0.006,
     ),
 )
 
@@ -256,6 +254,17 @@ class EconomyEventService:
         multiplier = self.get_effects(guild_id).reward_multiplier
         return max(0, int(float(amount) * multiplier + 0.5))
 
+    @staticmethod
+    def _severity_for_correction(required_effect: int, deadband: int) -> int:
+        """Map the policy-correction magnitude to a stable event level."""
+        unit = max(1, int(deadband))
+        magnitude = abs(int(required_effect))
+        if magnitude <= unit * 5:
+            return 1
+        if magnitude <= unit * 15:
+            return 2
+        return 3
+
     def ensure_daily_event(
         self,
         guild_id: int | None,
@@ -303,6 +312,7 @@ class EconomyEventService:
             direction = "boon"
         else:
             direction = "neutral"
+        severity = self._severity_for_correction(required_effect, deadband)
 
         volumes = self.repository.get_surface_daily_volumes(
             guild_id, lookback_days=self.lookback_days, now=now
@@ -311,11 +321,10 @@ class EconomyEventService:
         for template in _EVENT_CATALOG:
             if template.direction != direction:
                 continue
-            for severity in (1, 2, 3):
-                effects = self._effects_for(template, severity, before)
-                expected = self._estimate_effect(effects, volumes, before)
-                distance = abs(required_effect - expected)
-                candidates.append((distance, template, severity, effects, expected))
+            effects = self._effects_for(template, severity, before)
+            expected = self._estimate_effect(effects, volumes, before)
+            distance = abs(required_effect - expected)
+            candidates.append((distance, template, severity, effects, expected))
         candidates.sort(key=lambda item: item[0])
         shortlist = candidates[: min(3, len(candidates))]
         seed_bytes = hashlib.sha256(
@@ -417,9 +426,7 @@ class EconomyEventService:
             "prediction_payout_multiplier": multiplier(
                 template.prediction_payout_step, low=0.9, high=1.1
             ),
-            "prediction_depth_multiplier": multiplier(
-                template.prediction_depth_step, low=0.1, high=2.0
-            ),
+            "prediction_depth_multiplier": 1.0,
             "prediction_spread_ticks_delta": template.spread_step * severity,
             "reserve_burn_jc": int(available * burn_pct),
             "reserve_release_jc": int(available * release_pct),
@@ -449,7 +456,8 @@ class EconomyEventService:
             effects["prediction_payout_multiplier"] - 1.0
         )
         expected -= int(effects.get("reserve_burn_jc", 0))
-        expected += int(effects.get("reserve_release_jc", 0))
+        # Reserve releases move existing JC into wallets. Both accounts are
+        # already included in monetary_stock, so the net supply effect is zero.
         expected -= int(
             float(balance_sheet["positive_wallets"])
             * float(effects.get("wallet_burn_rate", 0.0))
@@ -494,14 +502,14 @@ class EconomyEventService:
             change = (effects["bet_payout_multiplier"] - 1.0) * 100
             lines.append(f"Placed-bet payouts resolving today: **{change:+.1f}%**.")
         pred_payout = (effects["prediction_payout_multiplier"] - 1.0) * 100
-        pred_depth = (effects["prediction_depth_multiplier"] - 1.0) * 100
         spread = int(effects["prediction_spread_ticks_delta"])
-        if pred_payout or pred_depth or spread:
-            lines.append(
-                "Prediction markets: "
-                f"resolution **{pred_payout:+.1f}%**, depth **{pred_depth:+.0f}%**, "
-                f"spread **{spread:+d} ticks**."
-            )
+        prediction_parts = []
+        if pred_payout:
+            prediction_parts.append(f"resolution **{pred_payout:+.1f}%**")
+        if spread:
+            prediction_parts.append(f"spread **{spread:+d} ticks**")
+        if prediction_parts:
+            lines.append(f"Prediction markets: {', '.join(prediction_parts)}.")
         lines.append(
             f"Policy target: **{required_effect:+,} JC** after a "
             f"**{forecast:+,} JC/day** unmanaged-flow forecast."
