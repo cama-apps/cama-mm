@@ -302,7 +302,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 cursor.executemany(
                     """
                     UPDATE players
-                    SET exclusion_count = COALESCE(exclusion_count, 0) / 2,
+                    SET exclusion_count = MAX(COALESCE(exclusion_count, 0) - 1, 0),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                     """,

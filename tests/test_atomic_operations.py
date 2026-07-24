@@ -372,6 +372,15 @@ class TestMatchRecordAtomic:
         for did in all_ids:
             register(player_repo, did, balance=50)
             player_repo.update_glicko_rating(did, TEST_GUILD_ID, 1500.0, 350.0, 0.06)
+        with sqlite3.connect(player_repo.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE players
+                SET exclusion_count = 0
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (team1[0], TEST_GUILD_ID),
+            )
         before = player_repo.get_exclusion_counts(all_ids, TEST_GUILD_ID)
         pending_match_id = match_repo.save_pending_match(
             TEST_GUILD_ID,
@@ -410,7 +419,7 @@ class TestMatchRecordAtomic:
 
         assert second_match_id == first_match_id
         for pid in team1 + team2:
-            assert after_first[pid] == before[pid] // 2
+            assert after_first[pid] == max(before[pid] - 1, 0)
         assert after_first[full_increment_id] == before[full_increment_id] + 6
         assert after_first[half_increment_id] == before[half_increment_id] + 1
         assert after_second == after_first

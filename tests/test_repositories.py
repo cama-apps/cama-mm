@@ -430,11 +430,17 @@ class TestPlayerRepository:
         expected = _expected_after_exclusions(2)
         assert counts[12345] == expected
 
-        # Decay (halves the count)
+        # Decay subtracts one per recorded game.
         player_repository.decay_exclusion_count(12345, TEST_GUILD_ID)
         counts = player_repository.get_exclusion_counts([12345], TEST_GUILD_ID)
-        expected //= 2
+        expected -= 1
         assert counts[12345] == expected
+
+        # Repeated decay stops at zero.
+        for _ in range(expected + 1):
+            player_repository.decay_exclusion_count(12345, TEST_GUILD_ID)
+        counts = player_repository.get_exclusion_counts([12345], TEST_GUILD_ID)
+        assert counts[12345] == 0
 
     def test_delete_player(self, player_repository):
         """Test deleting a player."""
