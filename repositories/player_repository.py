@@ -2133,14 +2133,14 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
 
     def decay_exclusion_count(self, discord_id: int, guild_id: int) -> None:
-        """Decay player's exclusion count by halving it."""
+        """Decay player's exclusion count by one, stopping at zero."""
         guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE players
-                SET exclusion_count = COALESCE(exclusion_count, 0) / 2,
+                SET exclusion_count = MAX(COALESCE(exclusion_count, 0) - 1, 0),
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
             """,
