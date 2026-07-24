@@ -583,10 +583,9 @@ class TestE2EExclusionTracking:
         unique_counts = set(final_counts.values())
         assert len(unique_counts) > 1, "Exclusion counts should vary across players"
 
-    def test_exclusion_decay_prevents_overflow(self, test_db_memory):
+    def test_exclusion_decay_subtracts_one_per_inclusion(self, test_db_memory):
         """
-        Test that the decay mechanism prevents exclusion counts from growing unbounded.
-        Even with repeated exclusions, included players should have their counts decay.
+        Test that included players lose one exclusion-factor point per game.
         """
         # Create 11 players (1 will always be excluded in this test)
         player_ids = list(range(400201, 400212))
@@ -602,57 +601,18 @@ class TestE2EExclusionTracking:
 
         # Artificially set one player to have high exclusion count
         unlucky_player_id = player_ids[0]
-        for _ in range(16):  # Start with count of boost + 80 (16 * 5 per exclusion)
+        for _ in range(16):  # Start with count of boost + 96 (16 * 6 per exclusion)
             test_db_memory.increment_exclusion_count(unlucky_player_id)
 
         initial_counts = test_db_memory.get_exclusion_counts(player_ids)
         value = _expected_after_exclusions(16)
         assert initial_counts[unlucky_player_id] == value
 
-        # Simulate: Player gets included in next match (decay should happen)
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Include again
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Include again
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Include again
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Include again
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Include again
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Include again
-        test_db_memory.decay_exclusion_count(unlucky_player_id)
-        after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        value //= 2
-        assert after_decay[unlucky_player_id] == value, "value / 2"
-
-        # Decay prevents unbounded growth - after 7 inclusions, count goes from 64 to 0
+        for _ in range(7):
+            test_db_memory.decay_exclusion_count(unlucky_player_id)
+            after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
+            value -= 1
+            assert after_decay[unlucky_player_id] == value
 
     def test_exclusion_penalty_affects_matchup_selection(self, test_db_memory):
         """
