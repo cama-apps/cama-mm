@@ -70,6 +70,7 @@ from commands.dig_helpers.route_views import (
     get_route_choice,
 )
 from config import DIG_CHANNEL_ID
+from services.dig._common import MINER_RESPEC_COST
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
     LUMINOSITY_DEEP_DRAIN_START_DEPTH,
@@ -2590,6 +2591,56 @@ class DigCommands(commands.Cog):
             description=_format_s_stats(result.get("stats", {}), result.get("effects", {})),
             color=0x5865F2,
         )
+        await safe_followup(interaction, embed=embed, ephemeral=True)
+
+    @miner.command(
+        name="respec",
+        description=f"Reset your allocated S points for {MINER_RESPEC_COST} JC",
+    )
+    @require_guild
+    async def dig_respec(self, interaction: discord.Interaction):
+        if not await require_dig_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id
+        result = await asyncio.to_thread(
+            self.dig_service.respec_miner_stats,
+            interaction.user.id,
+            guild_id,
+        )
+        if not result.get("success"):
+            await safe_followup(
+                interaction,
+                content=result.get("error", "Build reset failed."),
+                ephemeral=True,
+            )
+            return
+
+        stats = result.get("stats", {})
+        returned_points = result.get("returned_points", 0)
+        total_unspent = stats.get("unspent_points", 0)
+        cost = result.get("cost", MINER_RESPEC_COST)
+        embed = discord.Embed(
+            title="S Points Reset",
+            description=(
+                f"Returned **{returned_points}** allocated S points. "
+                f"You now have **{total_unspent}** unspent S points."
+            ),
+            color=0x5865F2,
+        )
+        embed.add_field(
+            name="Current Build",
+            value=_format_s_stats(stats, result.get("effects", {})),
+            inline=False,
+        )
+        embed.set_footer(text=f"{cost} JC spent on the respec.")
         await safe_followup(interaction, embed=embed, ephemeral=True)
 
     @miner.command(name="autobuy", description="Auto-buy Torch and/or Hard Hat for each dig")

@@ -112,3 +112,67 @@ def test_dig_atomic_balance_update_records_dig_context(repo_db_path):
         "event_id": "crystal_garden",
         "choice": "safe",
     }
+
+
+def test_miner_respec_records_sink_context_and_action(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    dig_repo = DigRepository(repo_db_path)
+    player_repo.add(401, "digger", GUILD_ID)
+    player_repo.update_balance(401, GUILD_ID, 100)
+    dig_repo.create_tunnel(401, GUILD_ID, "Test Tunnel")
+    dig_repo.update_tunnel(
+        401,
+        GUILD_ID,
+        stat_strength=2,
+        stat_smarts=1,
+        stat_stamina=7,
+        stat_points=12,
+    )
+    _clear_ledger(repo_db_path)
+
+    status = dig_repo.atomic_respec_miner_stats(
+        401,
+        GUILD_ID,
+        cost=50,
+    )
+    repeated_status = dig_repo.atomic_respec_miner_stats(
+        401,
+        GUILD_ID,
+        cost=50,
+    )
+
+    assert status["status"] == "ok"
+    assert repeated_status["status"] == "no_allocated_points"
+    assert player_repo.get_balance(401, GUILD_ID) == 50
+    rows = _ledger_rows(repo_db_path)
+    assert len(rows) == 1
+    assert rows[0]["delta"] == -50
+    assert rows[0]["source"] == "dig"
+    assert rows[0]["actor_id"] == 401
+    assert rows[0]["related_type"] == "miner_respec"
+    assert rows[0]["related_id"] == "s_points"
+    assert rows[0]["reason"] == "dig miner respec debit"
+    assert json.loads(rows[0]["metadata"]) == {
+        "cost": 50,
+        "returned_points": 10,
+        "previous_stats": {
+            "strength": 2,
+            "smarts": 1,
+            "stamina": 7,
+        },
+    }
+
+    with sqlite3.connect(repo_db_path) as conn:
+        action = conn.execute(
+            """
+            SELECT action_type, jc_delta, detail
+            FROM dig_actions
+            WHERE actor_id = ? AND guild_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (401, GUILD_ID),
+        ).fetchone()
+    assert action[0] == "miner_respec"
+    assert action[1] == -50
+    assert json.loads(action[2])["returned_points"] == 10

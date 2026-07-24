@@ -988,6 +988,108 @@ class DigRepository(BaseRepository, IDigRepository):
 
         return purchased_ids
 
+    def atomic_respec_miner_stats(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+    ) -> dict:
+        """Debit JC and return all allocated S points in one transaction."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT stat_strength, stat_smarts, stat_stamina, stat_points
+                FROM tunnels
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, gid),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return {"status": "no_allocated_points"}
+
+            allocated = {
+                "strength": int(row["stat_strength"] or 0),
+                "smarts": int(row["stat_smarts"] or 0),
+                "stamina": int(row["stat_stamina"] or 0),
+            }
+            returned_points = sum(allocated.values())
+            if returned_points <= 0:
+                return {"status": "no_allocated_points"}
+
+            detail = {
+                "cost": int(cost),
+                "returned_points": returned_points,
+                "previous_stats": allocated,
+            }
+            self._set_economy_ledger_context(
+                cursor,
+                source="dig",
+                actor_id=discord_id,
+                related_type="miner_respec",
+                related_id="s_points",
+                reason="dig miner respec debit",
+                metadata=detail,
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                      AND jopacoin_balance >= ?
+                    """,
+                    (cost, discord_id, gid, cost),
+                )
+                debit_rowcount = cursor.rowcount
+            finally:
+                self._clear_economy_ledger_context(cursor)
+            if debit_rowcount != 1:
+                return {"status": "insufficient_balance"}
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL
+                       OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (discord_id, gid),
+            )
+            cursor.execute(
+                """
+                UPDATE tunnels
+                SET stat_strength = 0, stat_smarts = 0, stat_stamina = 0
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, gid),
+            )
+            cursor.execute(
+                """
+                INSERT INTO dig_actions
+                    (guild_id, actor_id, target_id, action_type, depth_before,
+                     depth_after, jc_delta, detail, created_at)
+                VALUES (?, ?, NULL, 'miner_respec', 0, 0, ?, ?, ?)
+                """,
+                (
+                    gid,
+                    discord_id,
+                    -int(cost),
+                    json.dumps(detail),
+                    int(time.time()),
+                ),
+            )
+            return {
+                "status": "ok",
+                "returned_points": returned_points,
+                "stat_points": int(row["stat_points"] or 0),
+            }
+
     def atomic_tunnel_balance_update(
         self,
         discord_id: int,

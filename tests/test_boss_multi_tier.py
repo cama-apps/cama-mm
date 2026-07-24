@@ -22,9 +22,11 @@ from domain.models.boss_stingers import (
 )
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
+    BOSS_BOUNDARIES,
     BOSSES_BY_ID,
     BOSSES_BY_TIER,
     FREE_DIG_COOLDOWN_SECONDS,
+    PINNACLE_DEPTH,
     get_boss_pool_for_tier,
 )
 from services.dig_service import DigService
@@ -80,7 +82,7 @@ def _seed_paused_duel(
     boss_id="grothak", tier=25, mechanic_id="grothak_earthquake",
     risk_tier="cautious", wager=10, player_hp=3, boss_hp=3, round_num=3,
     player_hit=0.60, player_dmg=1, boss_hit=0.30, boss_dmg=1,
-    round_log=None, pending_prompt=None,
+    round_log=None, pending_prompt=None, status_effects=None,
 ):
     """Seed a mid-duel row directly (bypasses ``start_boss_duel`` timing).
 
@@ -99,6 +101,12 @@ def _seed_paused_duel(
         ],
         "safe_option_idx": mech.safe_option_idx,
     }
+    if status_effects is None:
+        status_effects = {
+            "attempts_this_fight": 1,
+            "initial_win_chance": 0.5,
+            "multiplier": 2.0,
+        }
     state = {
         "boss_id": boss_id, "tier": tier, "mechanic_id": mechanic_id,
         "risk_tier": risk_tier, "wager": wager,
@@ -107,11 +115,7 @@ def _seed_paused_duel(
         "round_log": json.dumps(round_log or []),
         "pending_prompt": json.dumps(pp),
         "rng_state": "",
-        "status_effects": json.dumps({
-            "attempts_this_fight": 1,
-            "initial_win_chance": 0.5,
-            "multiplier": 2.0,
-        }),
+        "status_effects": json.dumps(status_effects),
         "echo_applied": 0, "echo_killer_id": None,
         "player_hit": player_hit, "player_dmg": player_dmg,
         "boss_hit": boss_hit, "boss_dmg": boss_dmg,
@@ -184,6 +188,13 @@ class TestRosterShape:
         assert len(all_ids) == len(set(all_ids))
         # 21 base + 6 P2 + 3 P3 + 3 P4 additions.
         assert len(all_ids) == 33
+
+    def test_next_boundary_is_unfinished_pinnacle_after_regular_clears(
+        self, dig_service,
+    ):
+        progress = {str(boundary): "defeated" for boundary in BOSS_BOUNDARIES}
+
+        assert dig_service._next_boss_boundary(progress) == PINNACLE_DEPTH
 
 
 class TestMechanicInvariants:
@@ -397,6 +408,100 @@ class TestStartBossDuel:
         assert result["success"]
         assert "won" in result
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
+
+    def test_voluntary_free_duel_uses_seventy_percent_accuracy(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert result["pending_prompt"]
+        state = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        assert state["player_hit"] == pytest.approx(0.42)
+
+    def test_forced_no_wager_phase_keeps_its_full_accuracy(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(
+            dig_service, dig_repo, player_repository, monkeypatch, prestige=2,
+        )
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            boss_progress=json.dumps({
+                "25": {"boss_id": "grothak", "status": "active"},
+            }),
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert result["pending_prompt"]
+        state = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        assert state["player_hit"] == pytest.approx(0.55)
+
+    def test_resume_loss_ticks_snapshot_armor_twice_after_a_gear_swap(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            boss_progress=json.dumps({
+                "25": {"boss_id": "grothak", "status": "active"},
+            }),
+        )
+        weapon_id = dig_repo.get_equipped_gear(10001, TEST_GUILD_ID)["weapon"]["id"]
+        armor_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        boots_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "boots", 1)
+        replacement_armor_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        dig_repo.equip_gear(armor_id, 10001, TEST_GUILD_ID, "armor")
+        dig_repo.equip_gear(boots_id, 10001, TEST_GUILD_ID, "boots")
+        snapshot_ids = [weapon_id, armor_id, boots_id]
+        durability_before = {
+            gear_id: dig_repo.get_gear_by_id(gear_id)["durability"]
+            for gear_id in (*snapshot_ids, replacement_armor_id)
+        }
+        _seed_paused_duel(
+            dig_repo,
+            10001,
+            TEST_GUILD_ID,
+            player_hp=1,
+            boss_hp=3,
+            player_hit=0.0,
+            boss_hit=1.0,
+            status_effects={
+                "attempts_this_fight": 1,
+                "initial_win_chance": 0.5,
+                "multiplier": 2.0,
+                "gear_snapshot_ids": snapshot_ids,
+                "armor_snapshot_id": armor_id,
+            },
+        )
+        dig_repo.equip_gear(replacement_armor_id, 10001, TEST_GUILD_ID, "armor")
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        result = dig_service.resume_boss_duel(
+            10001, TEST_GUILD_ID, option_idx=0,
+        )
+
+        assert result["won"] is False
+        assert dig_repo.get_gear_by_id(armor_id)["durability"] == (
+            durability_before[armor_id] - 2
+        )
+        for gear_id in (weapon_id, boots_id):
+            assert dig_repo.get_gear_by_id(gear_id)["durability"] == (
+                durability_before[gear_id] - 1
+            )
+        assert dig_repo.get_gear_by_id(replacement_armor_id)["durability"] == (
+            durability_before[replacement_armor_id]
+        )
 
     def test_resume_claims_duel_atomically(
         self, dig_service, dig_repo, player_repository, monkeypatch,

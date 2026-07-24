@@ -120,6 +120,39 @@ class TestDuelDeterministicOutcomes:
         assert "boss_hit" in result["round_log"][0]  # boss did swing round 1
         assert "boss_hit" not in result["round_log"][-1]  # killing blow, boss never swings back
 
+    @pytest.mark.parametrize("entrypoint", ("legacy", "interactive"))
+    def test_wagered_fights_keep_a_ten_percent_hit_floor(
+        self, entrypoint, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Paid fights must retain a 10% chance even after all penalties."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setitem(BOSS_DUEL_STATS["reckless"], "player_hit", 0.0)
+        monkeypatch.setitem(BOSS_DUEL_STATS["reckless"], "player_dmg", 100)
+        monkeypatch.setattr(random, "random", lambda: 0.09)
+
+        if entrypoint == "legacy":
+            result = dig_service.fight_boss(
+                10001, TEST_GUILD_ID, "reckless", wager=10,
+            )
+        else:
+            result = dig_service.start_boss_duel(
+                10001, TEST_GUILD_ID, "reckless", wager=10,
+            )
+
+        assert result["won"] is True
+
+    def test_voluntary_free_fight_uses_seventy_percent_accuracy(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.4)
+
+        result = dig_service.fight_boss(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert result["won"] is True
+
 
 class TestMechanicSelectionPerAttempt:
     """Mechanics reroll per attempt while paused duels keep their selected id."""
@@ -474,6 +507,36 @@ class TestDuelPayout:
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         assert tunnel["last_dig_at"] == fight_time + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 
+    def test_loss_extra_wear_only_hits_the_armor_that_fought(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        weapon_id = dig_repo.get_equipped_gear(10001, TEST_GUILD_ID)["weapon"]["id"]
+        armor_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        boots_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "boots", 1)
+        amulet_id = dig_repo.add_gear(10001, TEST_GUILD_ID, "amulet", 1)
+        dig_repo.equip_gear(armor_id, 10001, TEST_GUILD_ID, "armor")
+        dig_repo.equip_gear(boots_id, 10001, TEST_GUILD_ID, "boots")
+        dig_repo.equip_gear(amulet_id, 10001, TEST_GUILD_ID, "amulet")
+        durability_before = {
+            gear_id: dig_repo.get_gear_by_id(gear_id)["durability"]
+            for gear_id in (weapon_id, armor_id, boots_id, amulet_id)
+        }
+        monkeypatch.setattr(random, "random", lambda: 0.999)
+
+        result = dig_service.fight_boss(
+            10001, TEST_GUILD_ID, "cautious", wager=10,
+        )
+
+        assert result["won"] is False
+        assert dig_repo.get_gear_by_id(armor_id)["durability"] == (
+            durability_before[armor_id] - 1 - BOSS_LOSS_EXTRA_GEAR_TICKS
+        )
+        for gear_id in (weapon_id, boots_id, amulet_id):
+            assert dig_repo.get_gear_by_id(gear_id)["durability"] == (
+                durability_before[gear_id] - 1
+            )
+
     def test_loss_suppresses_soften_line_when_no_chip_damage(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
@@ -609,6 +672,88 @@ class TestApproxWinProb:
         assert prob < 0.35
 
 
+class TestBossScouting:
+    def test_forced_no_wager_phase_previews_full_accuracy(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(
+            dig_service,
+            dig_repo,
+            player_repository,
+            monkeypatch,
+            prestige=2,
+        )
+        dig_repo.add_inventory_item(
+            10001, TEST_GUILD_ID, "lantern",
+        )
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob",
+            lambda **stats: stats["player_hit"],
+        )
+
+        result = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        cautious = result["odds"]["cautious"]
+        assert cautious["free_fight_pct"] == cautious["player_hit"]
+        assert cautious["free_fight_pct"] == pytest.approx(0.55)
+
+    def test_phase_scout_matches_live_modifiers_without_consuming_event(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(
+            dig_service,
+            dig_repo,
+            player_repository,
+            monkeypatch,
+            prestige=2,
+        )
+        progress = {
+            "25": {
+                "boss_id": "grothak",
+                "status": "phase1_defeated",
+                "pending_phase_event_id": "fissure",
+            },
+        }
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            boss_progress=json.dumps(progress),
+        )
+        dig_repo.add_inventory_item(
+            10001, TEST_GUILD_ID, "lantern",
+        )
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob",
+            lambda **stats: stats["player_hit"],
+        )
+
+        scout = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        after_scout = json.loads(
+            dig_repo.get_tunnel(10001, TEST_GUILD_ID)["boss_progress"],
+        )
+        assert after_scout["25"]["pending_phase_event_id"] == "fissure"
+
+        from domain.models.boss_mechanics import MECHANIC_REGISTRY
+
+        mechanic = MECHANIC_REGISTRY["grothak_earthquake"]
+        monkeypatch.setattr(
+            "domain.models.boss_mechanics.get_mechanic",
+            lambda _mechanic_id: mechanic,
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        live = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=10,
+        )
+
+        assert live["pending_prompt"]
+        state = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        assert scout["odds"]["cautious"]["win_pct"] == pytest.approx(
+            state["player_hit"],
+            abs=0.005,
+        )
+
+
 class TestBossEchoWeakening:
     """After a guild-first kill, subsequent fighters see a weakened boss for 24h."""
 
@@ -705,6 +850,31 @@ class TestBossEchoWeakening:
         assert result["odds"]["cautious"]["multiplier"] == round(
             expected_multiplier, 2,
         )
+
+    def test_scout_uses_paid_and_free_accuracy_floors(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.add_inventory_item(10001, TEST_GUILD_ID, "lantern")
+        monkeypatch.setattr(
+            dig_service,
+            "_apply_gear_to_combat",
+            lambda base, loadout: {**base, "player_hit": 0.0},
+        )
+        captured_hits = []
+
+        def capture_hit(**kwargs):
+            captured_hits.append(kwargs["player_hit"])
+            return 0.5
+
+        monkeypatch.setattr(
+            "services.dig_service._approx_duel_win_prob", capture_hit,
+        )
+
+        result = dig_service.scout_boss(10001, TEST_GUILD_ID)
+
+        assert result["success"] is True
+        assert captured_hits == [0.10, 0.05] * 3
 
     def test_p4_echo_scout_multiplier_includes_boss_rage(
         self, dig_service, dig_repo, player_repository, monkeypatch,

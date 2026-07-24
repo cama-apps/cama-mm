@@ -26,6 +26,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE_V2,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
+    BOSS_LOSS_EXTRA_GEAR_TICKS,
     BOSS_PAYOUTS,
     BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
@@ -43,6 +44,7 @@ from services.dig_constants import (
     PINNACLE_RELIC_STAT_POOL,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
+    WAGERED_PLAYER_HIT_FLOOR,
     pinnacle_suffix_from_stats,
     scale_positive_dig_jc,
 )
@@ -143,6 +145,216 @@ class PinnacleMixin:
             "carried_wager": carried[0] if carried else None,
             "luminosity_display": self._luminosity_combat_display(tunnel),
         }
+
+    def _scout_pinnacle_boss(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        boss_progress: dict,
+        *,
+        enhanced: bool,
+    ) -> dict:
+        """Build scout odds for the pinnacle's currently locked phase."""
+        now = int(time.time())
+        pinnacle_id = self._ensure_pinnacle_locked(
+            discord_id, guild_id, tunnel,
+        )
+        pinnacle = PINNACLE_BOSSES[pinnacle_id]
+        phase_idx = max(
+            1, min(3, int(tunnel.get("pinnacle_phase", 1) or 1)),
+        )
+        phase_def = pinnacle.phases[phase_idx - 1]
+        prestige_level = int(tunnel.get("prestige_level", 0) or 0)
+
+        phase_penalty = {1: 0.0, 2: 0.10, 3: 0.15}[phase_idx]
+        entry = self._read_boss_progress_entry(
+            boss_progress, PINNACLE_DEPTH,
+        )
+        active_prep = entry.get("active_prep")
+        pending_event_id = entry.get("pending_phase_event_id")
+        phase_event_obj = next(
+            (
+                event
+                for event in PHASE_TRANSITION_EVENTS
+                if event.id == pending_event_id
+            ),
+            None,
+        )
+
+        cheers = self._get_cheers(tunnel)
+        active_cheers = [
+            cheer for cheer in cheers
+            if cheer.get("expires_at", 0) > now
+        ]
+        cheer_bonus = min(0.15, len(active_cheers) * 0.05)
+        lum_value = self._get_luminosity(tunnel)
+        lum_hit_offset, lum_dmg_bonus = _luminosity_combat_penalty(
+            lum_value,
+        )
+        depth_hit_penalty = BOSS_TIER_BONUS[PINNACLE_DEPTH]["pen"]
+        prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(
+            prestige_level,
+            BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)],
+        )["pen"]
+
+        payouts = BOSS_PAYOUTS.get(
+            PINNACLE_DEPTH, (2.0, 3.0, 6.0),
+        )
+        loadout = self._get_loadout(discord_id, guild_id)
+        phase_key = f"{PINNACLE_DEPTH}:{phase_idx}"
+
+        odds = {}
+        for index, risk_tier in enumerate(
+            ("cautious", "bold", "reckless"),
+        ):
+            stats = self._apply_gear_to_combat(
+                BOSS_DUEL_STATS[risk_tier], loadout,
+            )
+            stats = self._apply_pinnacle_relic_stats(stats, loadout)
+            scaled = self._scale_boss_stats(
+                stats,
+                boss_id=pinnacle_id,
+                at_boss=PINNACLE_DEPTH,
+                prestige_level=prestige_level,
+                echo_applied=False,
+                archetype_name=phase_def.archetype,
+            )
+
+            fresh_boss_hp = int(scaled["boss_hp"])
+            if phase_event_obj is not None:
+                fresh_boss_hp = max(
+                    1,
+                    fresh_boss_hp
+                    + int(phase_event_obj.boss_hp_delta),
+                )
+            boss_hp, _ = self._resolve_persisted_boss_hp(
+                boss_progress,
+                phase_key,
+                fresh_boss_hp,
+                now,
+            )
+
+            boss_hit = float(scaled["boss_hit"])
+            boss_dmg = int(scaled["boss_dmg"]) + lum_dmg_bonus
+            player_hp = int(stats["player_hp"])
+            player_dmg = int(stats["player_dmg"])
+            raw_player_hit = (
+                float(stats["player_hit"])
+                - depth_hit_penalty
+                - prestige_hit_penalty
+                - phase_penalty
+                + cheer_bonus
+                + lum_hit_offset
+            )
+            if phase_event_obj is not None:
+                boss_hit = max(
+                    0.05,
+                    min(
+                        0.95,
+                        boss_hit
+                        + float(phase_event_obj.boss_hit_offset),
+                    ),
+                )
+                boss_dmg = max(
+                    1,
+                    boss_dmg + int(phase_event_obj.boss_dmg_delta),
+                )
+                raw_player_hit += float(
+                    phase_event_obj.player_hit_offset,
+                )
+                player_hp = max(
+                    1,
+                    player_hp + int(phase_event_obj.player_hp_delta),
+                )
+                player_dmg = max(
+                    0,
+                    player_dmg + int(phase_event_obj.player_dmg_delta),
+                )
+            player_dmg += self._pinnacle_dmg_per_100_count(
+                loadout,
+            ) * (PINNACLE_DEPTH // 100)
+            player_dmg = self._apply_boss_prep_damage(
+                player_dmg, active_prep,
+            )
+
+            paid_hit = max(
+                WAGERED_PLAYER_HIT_FLOOR,
+                min(PLAYER_HIT_CEILING, raw_player_hit),
+            )
+            free_hit = max(
+                PLAYER_HIT_FLOOR,
+                min(
+                    PLAYER_HIT_CEILING,
+                    raw_player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD,
+                ),
+            )
+            crit_chance = float(stats.get("crit_chance", 0) or 0)
+            crit_bonus = int(stats.get("crit_bonus", 0) or 0)
+            paid_win_pct = dig_service._approx_duel_win_prob(
+                player_hp=player_hp,
+                boss_hp=boss_hp,
+                player_hit=paid_hit,
+                player_dmg=player_dmg,
+                boss_hit=boss_hit,
+                boss_dmg=boss_dmg,
+                crit_chance=crit_chance,
+                crit_bonus=crit_bonus,
+            )
+            free_win_pct = dig_service._approx_duel_win_prob(
+                player_hp=player_hp,
+                boss_hp=boss_hp,
+                player_hit=free_hit,
+                player_dmg=player_dmg,
+                boss_hit=boss_hit,
+                boss_dmg=boss_dmg,
+                crit_chance=crit_chance,
+                crit_bonus=crit_bonus,
+            )
+            base_multiplier = (
+                payouts[index] if index < len(payouts) else 2.0
+            )
+            effective_multiplier = self._effective_wager_multiplier(
+                base_multiplier, paid_win_pct,
+            )
+            odds[risk_tier] = {
+                "win_pct": round(paid_win_pct, 2),
+                "free_fight_pct": round(free_win_pct, 2),
+                "player_hp": player_hp,
+                "boss_hp": boss_hp,
+                "player_hit": round(paid_hit, 2),
+                "boss_hit": round(boss_hit, 2),
+                "multiplier": round(effective_multiplier, 2),
+            }
+
+        mechanic_pool_preview = None
+        if enhanced:
+            from domain.models.boss_mechanics import (
+                MECHANIC_REGISTRY as _MECHS,
+            )
+
+            mechanic_pool_preview = []
+            for mechanic_id in phase_def.mechanic_pool:
+                mechanic = _MECHS.get(mechanic_id)
+                if mechanic is None:
+                    continue
+                mechanic_pool_preview.append({
+                    "id": mechanic_id,
+                    "archetype": mechanic.archetype,
+                    "prompt_title": mechanic.prompt_title,
+                })
+
+        return self._ok(
+            boundary=PINNACLE_DEPTH,
+            boss_name=phase_def.title,
+            boss_id=pinnacle_id,
+            odds=odds,
+            echo_applied=False,
+            echo_killer_id=None,
+            enhanced=enhanced,
+            mechanic_pool=mechanic_pool_preview,
+            stinger=None,
+        )
 
     def _pinnacle_foreshadow_line(self, tunnel: dict) -> str | None:
         """Return a subtle foreshadowing line for /dig info if the player
@@ -384,7 +596,10 @@ class PinnacleMixin:
             player_hit += float(phase_event_obj.player_hit_offset)
         if wager == 0:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
-        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+        player_hit_floor = (
+            WAGERED_PLAYER_HIT_FLOOR if wager > 0 else PLAYER_HIT_FLOOR
+        )
+        player_hit = max(player_hit_floor, min(PLAYER_HIT_CEILING, player_hit))
 
         player_hp = int(stats["player_hp"])
         if phase_event_obj is not None:
@@ -499,6 +714,10 @@ class PinnacleMixin:
                             for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                             if p is not None
                         ],
+                        "armor_snapshot_id": (
+                            int(loadout.armor.id)
+                            if loadout.armor is not None else None
+                        ),
                     }),
                     "echo_applied": 0,
                     "echo_killer_id": None,
@@ -572,6 +791,9 @@ class PinnacleMixin:
             win_chance=win_chance, attempts=attempts,
             round_log=round_log,
             gear_broken_names=gear_broken_names,
+            armor_snapshot_id=(
+                int(loadout.armor.id) if loadout.armor is not None else None
+            ),
             prestige_level=prestige_level, depth=depth, now=now,
             starting_boss_hp=starting_boss_hp,
         )
@@ -705,6 +927,7 @@ class PinnacleMixin:
 
         # Tick durability for the gear that fought this fight.
         gear_snapshot_ids = status_effects.get("gear_snapshot_ids") or []
+        armor_snapshot_id = status_effects.get("armor_snapshot_id")
         gear_broken_names: list[str] = []
         if gear_snapshot_ids:
             name_by_id: dict[int, str] = {}
@@ -712,6 +935,8 @@ class PinnacleMixin:
                 row = self.dig_repo.get_gear_by_id(int(gid))
                 if row is None:
                     continue
+                if armor_snapshot_id is None and row.get("slot") == "armor":
+                    armor_snapshot_id = int(gid)
                 piece = self._hydrate_gear_piece(row)
                 if piece is not None:
                     name_by_id[piece.id] = piece.tier_def.name
@@ -720,12 +945,15 @@ class PinnacleMixin:
             )
             gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
         else:
+            loadout = self._get_loadout(discord_id, guild_id)
+            armor_snapshot_id = (
+                int(loadout.armor.id) if loadout.armor is not None else None
+            )
             broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
             if broken_ids:
-                pre_loadout = self._get_loadout(discord_id, guild_id)
                 name_by_id = {
                     p.id: p.tier_def.name
-                    for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots, pre_loadout.amulet)
+                    for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                     if p is not None
                 }
                 gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
@@ -760,6 +988,7 @@ class PinnacleMixin:
             win_chance=win_chance, attempts=attempts,
             round_log=round_log,
             gear_broken_names=gear_broken_names,
+            armor_snapshot_id=armor_snapshot_id,
             prestige_level=prestige_level, depth=depth, now=now,
             starting_boss_hp=starting_boss_hp_for_resume,
         )
@@ -789,6 +1018,7 @@ class PinnacleMixin:
         depth: int,
         now: int,
         starting_boss_hp: int | None = None,
+        armor_snapshot_id: int | None = None,
     ) -> dict:
         """Shared end-of-pinnacle-fight resolution used by both
         ``_fight_pinnacle`` and ``_resume_pinnacle_duel``."""
@@ -971,6 +1201,22 @@ class PinnacleMixin:
             knockback,
             active_prep,
         )
+        if not rescue_line_used and armor_snapshot_id is not None:
+            armor_row = self.dig_repo.get_gear_by_id(int(armor_snapshot_id))
+            armor_piece = (
+                self._hydrate_gear_piece(armor_row)
+                if armor_row is not None else None
+            )
+            armor_name = (
+                armor_piece.tier_def.name
+                if armor_piece is not None else "a piece of gear"
+            )
+            for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
+                broken_ids = self.dig_repo.tick_gear_durability_ids(
+                    [int(armor_snapshot_id)]
+                )
+                if broken_ids:
+                    gear_broken_names.append(armor_name)
         new_depth = max(0, depth - knockback)
         jc_delta = -wager if wager > 0 else 0
         self._persist_boss_hp_after_fight(
