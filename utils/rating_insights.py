@@ -94,11 +94,14 @@ def compute_calibration_stats(
     )[:3]
     most_experienced = sorted(players, key=lambda p: p.wins + p.losses, reverse=True)[:3]
 
+    rating_system = CamaRatingSystem()
     drifts = []
     for player in rated_players:
         if player.initial_mmr is None or player.glicko_rating is None:
             continue
-        seed_rating = CamaRatingSystem().mmr_to_rating(player.initial_mmr)
+        seed_rating = rating_system.mmr_to_rating(
+            rating_system.new_player_seed_mmr(player.initial_mmr)
+        )
         drift = player.glicko_rating - seed_rating
         drifts.append((player, drift))
     drift_values = [drift for _, drift in drifts]
@@ -529,7 +532,7 @@ def compute_player_calibration(
     """
     # Percentile vs the rated population
     percentile: float | None = None
-    if player.glicko_rating and rated_players:
+    if player.glicko_rating is not None and rated_players:
         lower_count = sum(
             1 for p in rated_players if (p.glicko_rating or 0) < player.glicko_rating
         )
@@ -537,8 +540,10 @@ def compute_player_calibration(
 
     # Drift from the initial MMR seed
     drift: float | None = None
-    if player.initial_mmr and player.glicko_rating:
-        seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
+    if player.initial_mmr is not None and player.glicko_rating is not None:
+        seed_rating = rating_system.mmr_to_rating(
+            rating_system.new_player_seed_mmr(player.initial_mmr)
+        )
         drift = player.glicko_rating - seed_rating
 
     # Performance vs expectations

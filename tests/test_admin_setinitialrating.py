@@ -70,6 +70,30 @@ async def test_setinitialrating_happy_path(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_setinitialrating_uses_new_player_rd_when_rating_data_is_missing(
+    monkeypatch,
+):
+    service = FakePlayerService(game_count=0, rating_data=None)
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    await admin_cmd.setinitialrating.callback(
+        admin_cmd, interaction, target_user, 1500.0
+    )
+
+    assert service.updates == [(42, 1500.0, 350.0, 0.06)]
+
+
+@pytest.mark.asyncio
 async def test_setinitialrating_rejects_too_many_games(monkeypatch):
     service = FakePlayerService(game_count=1000, rating_data=None)
     admin_cmd = AdminCommands(bot=None, lobby_service=None, player_service=service, loan_service=None, bankruptcy_service=None)
@@ -104,6 +128,30 @@ async def test_adjust_rating_allows_many_games_and_preserves_rd(monkeypatch):
     assert service.game_count_calls == 0
     assert service.updates == [(42, 2400.0, 110.0, 0.08)]
     assert any("RD kept at 110.0" in msg for msg, _ep in interaction.response_messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_name", ["setinitialrating", "adjust_rating"])
+async def test_admin_rating_commands_allow_values_above_seed_scale(
+    monkeypatch, command_name
+):
+    service = FakePlayerService(game_count=0, rating_data=(3100.0, 110.0, 0.08))
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    command = getattr(admin_cmd, command_name)
+    await command.callback(admin_cmd, interaction, target_user, 3200.0)
+
+    assert service.updates == [(42, 3200.0, 110.0, 0.08)]
 
 
 @pytest.mark.asyncio

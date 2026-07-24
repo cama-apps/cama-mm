@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
-from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES
+from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES, INITIAL_GLICKO_RD
 from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS, format_betting_display
@@ -785,7 +785,7 @@ class AdminCommands(commands.Cog):
     @admin.command(name="setrating", description="Set initial rating for a player")
     @app_commands.describe(
         user="Player to adjust (must have few games)",
-        rating="Initial rating (0-3000)",
+        rating="Initial rating (0 or higher)",
     )
     @require_guild
     async def setinitialrating(
@@ -799,9 +799,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        if rating < 0 or rating > 3000:
+        if rating < 0:
             await interaction.response.send_message(
-                "❌ Rating must be between 0 and 3000.",
+                "❌ Rating must be 0 or higher.",
                 ephemeral=True,
             )
             return
@@ -826,7 +826,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Keep existing RD and volatility if available
-        rd = 300.0
+        rd = INITIAL_GLICKO_RD
         vol = 0.06
         rating_data = await asyncio.to_thread(
             self.player_service.get_glicko_rating, user.id, guild_id
@@ -854,7 +854,7 @@ class AdminCommands(commands.Cog):
     @adjust.command(name="rating", description="Set a player's Glicko rating (Admin only)")
     @app_commands.describe(
         user="Player to adjust",
-        rating="New rating (0-3000)",
+        rating="New rating (0 or higher)",
     )
     @require_guild
     async def adjust_rating(
@@ -868,9 +868,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        if rating < 0 or rating > 3000:
+        if rating < 0:
             await interaction.response.send_message(
-                "❌ Rating must be between 0 and 3000.",
+                "❌ Rating must be 0 or higher.",
                 ephemeral=True,
             )
             return

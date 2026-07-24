@@ -6,6 +6,7 @@ OpenDota API: https://docs.opendota.com/
 import asyncio
 import functools
 import logging
+import math
 import os
 import re
 import threading
@@ -327,58 +328,50 @@ class OpenDotaAPI:
         is_immortal = rank_tier == 80
         leaderboard_rank = player_data.get("leaderboard_rank")
 
+        mmr = None
+
         # Try mmr_estimate first (OpenDota's estimate)
         mmr_estimate = player_data.get("mmr_estimate", {}).get("estimate")
         if mmr_estimate:
-            return int(mmr_estimate)
+            mmr = int(mmr_estimate)
 
         # Fallback to computed_mmr (calculated from match data)
-        computed_mmr = player_data.get("computed_mmr")
-        if computed_mmr:
-            mmr = int(computed_mmr)
-            # If Immortal but computed_mmr seems too low, use minimum Immortal MMR
-            if is_immortal and mmr < 5500:
-                return self._estimate_immortal_mmr(leaderboard_rank)
-            return mmr
+        if mmr is None:
+            computed_mmr = player_data.get("computed_mmr")
+            if computed_mmr:
+                mmr = int(computed_mmr)
 
         # Fallback to legacy ranked MMR
-        solo_mmr = player_data.get("solo_competitive_rank")
-        if solo_mmr:
-            return int(solo_mmr)
+        if mmr is None:
+            solo_mmr = player_data.get("solo_competitive_rank")
+            if solo_mmr:
+                mmr = int(solo_mmr)
 
-        # If Immortal but no MMR data, estimate from leaderboard rank
+        # OpenDota estimates can substantially understate current Immortal MMR.
+        # Preserve higher estimates while enforcing the approved rank-based floor.
         if is_immortal:
-            return self._estimate_immortal_mmr(leaderboard_rank)
+            immortal_floor = self._estimate_immortal_mmr(leaderboard_rank)
+            return max(mmr or 0, immortal_floor)
 
-        return None
+        return mmr
 
     def _estimate_immortal_mmr(self, leaderboard_rank: int | None) -> int:
         """
-        Estimate MMR for Immortal players based on leaderboard rank.
+        Estimate a current MMR floor for Immortal players by leaderboard rank.
 
         Args:
             leaderboard_rank: Immortal leaderboard rank (lower = better)
 
         Returns:
-            Estimated MMR (minimum 5500 for Immortal)
+            Estimated MMR floor, clamped to 6000-12000
         """
-        if leaderboard_rank is None:
-            # No leaderboard rank = bottom of Immortal, estimate ~5500
-            return 5500
-
-        # Rough estimation: higher rank (lower number) = higher MMR
-        # Top 100: ~7000+, Top 500: ~6500+, Top 1000: ~6000+, Rest: ~5500-6000
-        if leaderboard_rank <= 100:
-            return 7000
-        elif leaderboard_rank <= 500:
-            return 6500
-        elif leaderboard_rank <= 1000:
+        if leaderboard_rank is None or leaderboard_rank <= 0:
             return 6000
-        else:
-            # For ranks > 1000, use a formula: 5500 + (1000 / rank) * 500
-            # This gives diminishing returns as rank increases
-            estimated = 5500 + int((1000 / leaderboard_rank) * 500)
-            return min(estimated, 6000)  # Cap at 6000 for lower ranks
+
+        # Every fivefold improvement in rank adds roughly 1000 MMR:
+        # rank 5000 -> 7000, 1000 -> 8000, 200 -> 9000, and so on.
+        estimated = round(7000 + 1000 * math.log(5000 / leaderboard_rank, 5))
+        return max(6000, min(12000, estimated))
 
 
     def get_player_roles(self, steam_id: int) -> dict | None:

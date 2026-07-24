@@ -290,7 +290,7 @@ class MatchCommands(commands.Cog):
             role_name = ROLE_NAMES.get(role, role)
             rating = (
                 rating_system.rating_to_display(player.glicko_rating)
-                if player.glicko_rating
+                if player.glicko_rating is not None
                 else "N/A"
             )
 

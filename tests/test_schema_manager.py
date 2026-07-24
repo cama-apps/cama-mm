@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from infrastructure.schema_manager import SchemaManager
+from rating_system import CamaRatingSystem
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
 
@@ -105,6 +106,56 @@ def test_schema_manager_initialize_is_idempotent(tmp_path):
 
     assert applied == distinct
     assert applied > 0
+
+
+def test_prediction_probability_migration_recomputes_history_symmetrically(repo_db_path):
+    manager = SchemaManager(repo_db_path)
+    with sqlite3.connect(repo_db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO match_predictions (
+                match_id, radiant_rating, dire_rating, radiant_rd, dire_rd,
+                expected_radiant_win_prob
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (9876, 1700.0, 1500.0, 350.0, 50.0, 0.7571404149989154),
+        )
+        cursor.executemany(
+            """
+            INSERT INTO rating_history (
+                discord_id, match_id, team_number, expected_team_win_prob
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, 9876, 1, 0.7571404149989154),
+                (2, 9876, 2, 0.31641538274428405),
+            ],
+        )
+
+        manager._migration_recompute_glicko_prediction_probabilities(cursor)
+
+        stored_prediction = cursor.execute(
+            """
+            SELECT expected_radiant_win_prob
+            FROM match_predictions
+            WHERE match_id = 9876
+            """
+        ).fetchone()[0]
+        stored_history = cursor.execute(
+            """
+            SELECT team_number, expected_team_win_prob
+            FROM rating_history
+            WHERE match_id = 9876
+            ORDER BY team_number
+            """
+        ).fetchall()
+
+    expected = CamaRatingSystem.predict_win_probability(
+        1700.0, 350.0, 1500.0, 50.0
+    )
+    assert stored_prediction == pytest.approx(expected)
+    assert stored_history == pytest.approx([(1, expected), (2, 1.0 - expected)])
 
 
 def test_soft_avoid_duration_migration_caps_legacy_stacks(tmp_path):

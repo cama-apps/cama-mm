@@ -247,7 +247,9 @@ class RatingUpdateMixin:
                 continue
             if reset_first:
                 seed_mu = (
-                    self.openskill_system.mmr_to_os_mu(player.initial_mmr)
+                    self.openskill_system.mmr_to_os_mu(
+                        self.rating_system.new_player_seed_mmr(player.initial_mmr)
+                    )
                     if player.initial_mmr is not None
                     else self.openskill_system.DEFAULT_MU
                 )

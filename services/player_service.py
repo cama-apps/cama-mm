@@ -93,7 +93,8 @@ class PlayerService:
         glicko_player = self.rating_system.create_player_from_mmr(mmr)
 
         # Initialize OpenSkill from MMR (same scale alignment as Glicko)
-        os_mu = self.openskill_system.mmr_to_os_mu(mmr)
+        seed_mmr = self.rating_system.new_player_seed_mmr(mmr)
+        os_mu = self.openskill_system.mmr_to_os_mu(seed_mmr)
         os_sigma = CamaOpenSkillSystem.DEFAULT_SIGMA  # High uncertainty for new players
 
         steam_id64 = steam_id + STEAM_ID64_OFFSET

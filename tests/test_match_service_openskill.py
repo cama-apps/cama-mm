@@ -192,10 +192,10 @@ def test_update_openskill_for_match_missing_match_errors(repo_db_path):
 def test_backfill_moves_winners_up_losers_down_from_reseed(repo_db_path):
     """Backfill with reset_first reseeds from initial_mmr, then replays the match.
 
-    All players share SEED_MMR, so the reseeded baseline mu is identical
-    (mmr_to_os_mu(SEED_MMR)). After replaying one match (no fantasy -> equal
-    weight), winners sit above that baseline and losers below it, and the two
-    groups are cleanly separated.
+    All players share SEED_MMR, so the reseeded baseline mu uses the same
+    capped newcomer discount as registration. After replaying one match (no
+    fantasy -> equal weight), winners sit above that baseline and losers below
+    it, and the two groups are cleanly separated.
 
     Runs on guild 0 (guild_id=None): reseed and per-match replay both target
     guild 0, so the winner/loser separation is unambiguous. See
@@ -208,7 +208,9 @@ def test_backfill_moves_winners_up_losers_down_from_reseed(repo_db_path):
     match_id = _record_a_match(service, player_ids, guild_id=guild)
     won_by = _won_map(match_repo, match_id, guild_id=0)
 
-    baseline_mu = CamaOpenSkillSystem().mmr_to_os_mu(SEED_MMR)
+    baseline_mu = CamaOpenSkillSystem().mmr_to_os_mu(
+        service.rating_system.new_player_seed_mmr(SEED_MMR)
+    )
 
     summary = service.backfill_openskill_ratings(guild_id=guild, reset_first=True)
     assert summary["matches_processed"] == 1
@@ -242,7 +244,9 @@ def test_backfill_routes_per_match_writes_to_correct_guild(repo_db_path):
     match_id = _record_a_match(service, player_ids, guild_id=guild)
     won_by = _won_map(match_repo, match_id, guild_id=guild)
 
-    baseline_mu = CamaOpenSkillSystem().mmr_to_os_mu(SEED_MMR)
+    baseline_mu = CamaOpenSkillSystem().mmr_to_os_mu(
+        service.rating_system.new_player_seed_mmr(SEED_MMR)
+    )
     before_g0 = player_repo.get_openskill_ratings_bulk(player_ids, 0)
 
     summary = service.backfill_openskill_ratings(guild_id=guild, reset_first=True)
@@ -320,7 +324,9 @@ def test_backfill_replays_in_memory_and_flushes_once_with_reset(
 
     expected_ratings = {
         player_id: (
-            service.openskill_system.mmr_to_os_mu(SEED_MMR),
+            service.openskill_system.mmr_to_os_mu(
+                service.rating_system.new_player_seed_mmr(SEED_MMR)
+            ),
             service.openskill_system.DEFAULT_SIGMA,
         )
         for player_id in player_ids

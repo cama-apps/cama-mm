@@ -85,6 +85,8 @@ def test_register_player_fallback_to_current_mmr(monkeypatch):
     assert repo.add_calls, "Repo add should be called"
     added = repo.add_calls[0]
     assert added["initial_mmr"] == 5200
+    assert added["glicko_rating"] == pytest.approx(1175.0)
+    assert added["os_mu"] == pytest.approx(48.5)
     assert result["mmr"] == 5200
     assert api_calls == {"player_data": 1, "mmr_from_data": 1}
 
@@ -118,9 +120,12 @@ def test_register_player_raises_when_no_mmr_anywhere(monkeypatch):
             5200,
         ),
         ({"computed_mmr": "4800"}, 4800),
-        ({"rank_tier": 80, "leaderboard_rank": 500, "computed_mmr": 4000}, 6500),
+        ({"rank_tier": 80, "leaderboard_rank": 500, "computed_mmr": 4000}, 8431),
+        ({"rank_tier": 80, "leaderboard_rank": 1000, "mmr_estimate": {"estimate": 6200}}, 8000),
+        ({"rank_tier": 80, "leaderboard_rank": 5000, "mmr_estimate": {"estimate": 6800}}, 7000),
+        ({"rank_tier": 80, "leaderboard_rank": 200, "mmr_estimate": {"estimate": 9500}}, 9500),
         ({"solo_competitive_rank": "4200"}, 4200),
-        ({"rank_tier": 80, "leaderboard_rank": None}, 5500),
+        ({"rank_tier": 80, "leaderboard_rank": None}, 6000),
         ({}, None),
         (None, None),
     ],
@@ -129,3 +134,21 @@ def test_get_player_mmr_from_data_preserves_fallback_chain(player_data, expected
     api = object.__new__(OpenDotaAPI)
 
     assert api.get_player_mmr_from_data(player_data) == expected_mmr
+
+
+@pytest.mark.parametrize(
+    ("leaderboard_rank", "expected_floor"),
+    [
+        (None, 6000),
+        (5000, 7000),
+        (1000, 8000),
+        (200, 9000),
+        (40, 10000),
+        (8, 11000),
+        (1, 12000),
+    ],
+)
+def test_immortal_mmr_floor_follows_approved_curve(leaderboard_rank, expected_floor):
+    api = object.__new__(OpenDotaAPI)
+
+    assert api._estimate_immortal_mmr(leaderboard_rank) == expected_floor

@@ -157,7 +157,7 @@ class TestRecalibrationService:
         assert result["success"] is True
         assert result["old_rating"] == 1500.0
         assert result["old_rd"] == 80.0
-        assert result["new_rd"] == 300.0
+        assert result["new_rd"] == 350.0
         assert result["new_volatility"] == 0.06
         assert result["total_recalibrations"] == 1
 
@@ -166,7 +166,7 @@ class TestRecalibrationService:
         assert rating_data is not None
         rating, rd, vol = rating_data
         assert rating == 1500.0  # Rating unchanged
-        assert rd == 300.0  # RD set to max(300, old_rd)
+        assert rd == 350.0  # RD set to max(configured initial RD, old_rd)
         assert vol == 0.06  # Volatility reset
 
     def test_recalibrate_preserves_rating(self, services):
