@@ -365,6 +365,7 @@ DIG_LLM_ENABLED = _parse_bool("DIG_LLM_ENABLED", True)  # Hard kill switch for D
 CALIBRATION_RD_THRESHOLD = _parse_float("CALIBRATION_RD_THRESHOLD", 100.0)  # Players with RD <= this are considered calibrated
 INITIAL_GLICKO_RD = _parse_float("INITIAL_GLICKO_RD", 350.0)  # New-player uncertainty and inactivity ceiling
 MAX_RATING_SWING_PER_GAME = _parse_float("MAX_RATING_SWING_PER_GAME", 400.0)  # Cap on individual rating change per match
+BASE_RATING_DELTA_MULTIPLIER = _parse_float("BASE_RATING_DELTA_MULTIPLIER", 1.1)  # Target about +/-15 at 80% certainty
 MAX_RD_CONTRACTION_PER_GAME = _parse_float("MAX_RD_CONTRACTION_PER_GAME", 0.065)  # Slow active confidence gain
 NEW_PLAYER_MMR_DISCOUNT = _parse_int("NEW_PLAYER_MMR_DISCOUNT", 500)  # Deliberate newcomer underseed before rating conversion
 ADMIN_RATING_ADJUSTMENT_MAX_GAMES = _parse_int("ADMIN_RATING_ADJUSTMENT_MAX_GAMES", 50)  # Max games for allowing admin rating adjustments
