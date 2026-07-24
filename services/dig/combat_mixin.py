@@ -54,6 +54,7 @@ from services.dig_constants import (
     PLAYER_HIT_FLOOR,
     RETREAT_BLOCK_LOSS_MAX,
     RETREAT_BLOCK_LOSS_MIN,
+    WAGERED_PLAYER_HIT_FLOOR,
     WIN_CHANCE_CAP,
     get_phase2_for,
     get_phase3_for,
@@ -500,6 +501,42 @@ class BossCombatMixin:
             )
         )
 
+    @staticmethod
+    def _regular_boss_phase_context(
+        boss_progress: dict,
+        at_boss: int,
+    ) -> tuple[dict | None, float, object | None]:
+        """Return the live phase entry, accuracy penalty, and pending event."""
+        raw_entry = boss_progress.get(str(at_boss))
+        entry = raw_entry if isinstance(raw_entry, dict) else None
+        status = entry.get("status") if entry is not None else raw_entry
+        boss_id = entry.get("boss_id", "") if entry is not None else ""
+
+        phase_hit_penalty = 0.0
+        if status == "phase1_defeated" and at_boss in BOSS_PHASE2:
+            phase = get_phase2_for(boss_id, at_boss)
+            phase_hit_penalty = (
+                abs(phase.win_odds_penalty) if phase else 0.0
+            )
+        elif status == "phase2_defeated" and at_boss in BOSS_PHASE3:
+            phase = get_phase3_for(boss_id, at_boss)
+            phase_hit_penalty = (
+                abs(phase.win_odds_penalty) if phase else 0.0
+            )
+
+        pending_event_id = (
+            entry.get("pending_phase_event_id") if entry is not None else None
+        )
+        phase_event = next(
+            (
+                event
+                for event in PHASE_TRANSITION_EVENTS
+                if event.id == pending_event_id
+            ),
+            None,
+        )
+        return entry, phase_hit_penalty, phase_event
+
     def _persist_boss_hp_after_fight(
         self,
         boss_progress: dict,
@@ -749,6 +786,22 @@ class BossCombatMixin:
             status = entry.get("status") if isinstance(entry, dict) else entry
             if status in ("active", "phase1_defeated", "phase2_defeated"):
                 return b
+        pinnacle_entry = boss_progress.get(str(PINNACLE_DEPTH))
+        pinnacle_status = (
+            pinnacle_entry.get("status")
+            if isinstance(pinnacle_entry, dict)
+            else pinnacle_entry
+        )
+        all_regular_defeated = all(
+            (entry.get("status") if isinstance(entry, dict) else entry) == "defeated"
+            for b in BOSS_BOUNDARIES
+            for entry in (boss_progress.get(str(b)),)
+        )
+        if (
+            all_regular_defeated
+            and pinnacle_status in (None, "active", "phase1_defeated", "phase2_defeated")
+        ):
+            return PINNACLE_DEPTH
         return None
 
     def _at_boss_boundary(self, depth: int, boss_progress: dict) -> int | None:
@@ -906,32 +959,11 @@ class BossCombatMixin:
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
-        # Phase accuracy penalty: phase 2 (status phase1_defeated) reads
-        # BOSS_PHASE2; phase 3 (status phase2_defeated) reads BOSS_PHASE3.
-        phase2_penalty = 0.0
-        _phase_entry = boss_progress.get(str(at_boss))
-        _phase_status = (
-            _phase_entry.get("status") if isinstance(_phase_entry, dict)
-            else _phase_entry
-        )
-        _phase_boss_id = (
-            _phase_entry.get("boss_id", "") if isinstance(_phase_entry, dict) else ""
-        )
-        if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
-            _ph = get_phase2_for(_phase_boss_id, at_boss)
-            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
-        elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
-            _ph = get_phase3_for(_phase_boss_id, at_boss)
-            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
-
-        # Pending phase-transition event (rolled when this boss entered its
-        # next phase): a one-shot environmental effect applied to this fight.
-        phase_event_obj = None
-        if isinstance(_phase_entry, dict) and _phase_entry.get("pending_phase_event_id"):
-            phase_event_obj = next(
-                (e for e in PHASE_TRANSITION_EVENTS
-                 if e.id == _phase_entry["pending_phase_event_id"]), None,
-            )
+        (
+            _phase_entry,
+            phase_hit_penalty,
+            phase_event_obj,
+        ) = self._regular_boss_phase_context(boss_progress, at_boss)
 
         # Lock the boss to know its archetype for stat scaling.
         boss_def = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
@@ -994,14 +1026,17 @@ class BossCombatMixin:
         )["pen"]
         player_hit = (
             stats["player_hit"]
-            - depth_hit_penalty - prestige_hit_penalty - phase2_penalty
+            - depth_hit_penalty - prestige_hit_penalty - phase_hit_penalty
             + cheer_bonus
             + lum_hit_offset
             + self._wager_skin_bonus(wager)
         )
         if wager == 0 and not forced_no_wager_phase:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
-        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+        player_hit_floor = (
+            WAGERED_PLAYER_HIT_FLOOR if wager > 0 else PLAYER_HIT_FLOOR
+        )
+        player_hit = max(player_hit_floor, min(PLAYER_HIT_CEILING, player_hit))
 
         player_hp = int(stats["player_hp"])
         player_dmg = int(stats["player_dmg"])
@@ -1051,7 +1086,7 @@ class BossCombatMixin:
             )
             boss_dmg = max(1, boss_dmg + int(phase_event_obj.boss_dmg_delta))
             player_hit += float(phase_event_obj.player_hit_offset)
-            player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+            player_hit = max(player_hit_floor, min(PLAYER_HIT_CEILING, player_hit))
             player_hp = max(1, player_hp + int(phase_event_obj.player_hp_delta))
             player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
             _phase_entry.pop("pending_phase_event_id", None)
@@ -1556,9 +1591,9 @@ class BossCombatMixin:
             tick_fight_gear()
             if not rescue_line_used:
                 for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
-                    for gear_id in self.dig_repo.tick_gear_durability(
-                        discord_id,
-                        guild_id,
+                    armor_id = loadout.armor.id if loadout.armor is not None else None
+                    for gear_id in self.dig_repo.tick_gear_durability_ids(
+                        [armor_id] if armor_id is not None else []
                     ):
                         gear_broken_names.append(
                             gear_name_by_id.get(gear_id, "a piece of gear")
@@ -1791,30 +1826,11 @@ class BossCombatMixin:
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
-        phase2_penalty = 0.0
-        _phase_entry = boss_progress.get(str(at_boss))
-        _phase_status = (
-            _phase_entry.get("status") if isinstance(_phase_entry, dict)
-            else _phase_entry
-        )
-        _phase_boss_id = (
-            _phase_entry.get("boss_id", "") if isinstance(_phase_entry, dict) else ""
-        )
-        if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
-            _ph = get_phase2_for(_phase_boss_id, at_boss)
-            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
-        elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
-            _ph = get_phase3_for(_phase_boss_id, at_boss)
-            phase2_penalty = abs(_ph.win_odds_penalty) if _ph else 0.0
-
-        # Pending phase-transition event (rolled when this boss entered its
-        # next phase): a one-shot environmental effect applied to this fight.
-        phase_event_obj = None
-        if isinstance(_phase_entry, dict) and _phase_entry.get("pending_phase_event_id"):
-            phase_event_obj = next(
-                (e for e in PHASE_TRANSITION_EVENTS
-                 if e.id == _phase_entry["pending_phase_event_id"]), None,
-            )
+        (
+            _phase_entry,
+            phase_hit_penalty,
+            phase_event_obj,
+        ) = self._regular_boss_phase_context(boss_progress, at_boss)
 
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, boss.boss_id)
         echo_applied = bool(
@@ -1849,14 +1865,17 @@ class BossCombatMixin:
         prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)])["pen"]
         player_hit = (
             stats["player_hit"]
-            - depth_hit_penalty - prestige_hit_penalty - phase2_penalty
+            - depth_hit_penalty - prestige_hit_penalty - phase_hit_penalty
             + cheer_bonus
             + lum_hit_offset
             + self._wager_skin_bonus(wager)
         )
         if wager == 0 and not forced_no_wager_phase:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
-        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+        player_hit_floor = (
+            WAGERED_PLAYER_HIT_FLOOR if wager > 0 else PLAYER_HIT_FLOOR
+        )
+        player_hit = max(player_hit_floor, min(PLAYER_HIT_CEILING, player_hit))
 
         player_hp = int(stats["player_hp"])
         player_dmg = int(stats["player_dmg"])
@@ -1873,7 +1892,7 @@ class BossCombatMixin:
             )
             boss_dmg = max(1, boss_dmg + int(phase_event_obj.boss_dmg_delta))
             player_hit += float(phase_event_obj.player_hit_offset)
-            player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+            player_hit = max(player_hit_floor, min(PLAYER_HIT_CEILING, player_hit))
             player_hp = max(1, player_hp + int(phase_event_obj.player_hp_delta))
             player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
             _phase_entry.pop("pending_phase_event_id", None)
@@ -1960,6 +1979,10 @@ class BossCombatMixin:
                             for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
                             if p is not None
                         ],
+                        "armor_snapshot_id": (
+                            int(loadout.armor.id)
+                            if loadout.armor is not None else None
+                        ),
                         "forced_no_wager_phase": forced_no_wager_phase,
                     }),
                     "echo_applied": 1 if echo_applied else 0,
@@ -2234,6 +2257,7 @@ class BossCombatMixin:
             attempts=attempts, boss_progress=boss_progress,
             depth=depth,
             gear_snapshot_ids=snapshot_ids,
+            armor_snapshot_id=status_effects.get("armor_snapshot_id"),
             ending_boss_hp=int(boss_hp), boss_hp_max=int(resolved_hp_max),
             starting_boss_hp=starting_boss_hp_for_resume,
             forced_no_wager_phase=bool(status_effects.get("forced_no_wager_phase")),
@@ -2660,6 +2684,7 @@ class BossCombatMixin:
         win_chance, multiplier, prestige_level, attempts,
         boss_progress, depth,
         gear_snapshot_ids: list[int] | None = None,
+        armor_snapshot_id: int | None = None,
         ending_boss_hp: int | None = None,
         boss_hp_max: int | None = None,
         starting_boss_hp: int | None = None,
@@ -2730,6 +2755,18 @@ class BossCombatMixin:
                 gear_name_by_id.get(gear_id, "a piece of gear")
                 for gear_id in broken_ids
             ]
+
+        def fighting_armor_id() -> int | None:
+            if armor_snapshot_id is not None:
+                return int(armor_snapshot_id)
+            if gear_snapshot_ids:
+                for gear_id in gear_snapshot_ids:
+                    row = self.dig_repo.get_gear_by_id(int(gear_id))
+                    if row is not None and row.get("slot") == "armor":
+                        return int(gear_id)
+                return None
+            loadout = self._get_loadout(discord_id, guild_id)
+            return loadout.armor.id if loadout.armor is not None else None
 
         ascension = self._get_ascension_effects(prestige_level)
         boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
@@ -3105,8 +3142,8 @@ class BossCombatMixin:
         # Extended cooldown (stinger + flat loss penalty) pushes the timer forward.
         last_dig_effective = now + extra_cd + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 
-        # Loss is harsher on gear — an extra durability tick beyond the
-        # per-fight tick above, on the same pieces that fought.
+        # Loss is harsher on armor — an extra durability tick beyond the
+        # per-fight tick above, on the armor that fought.
         # Persist remaining boss HP so soften-and-retreat works for the
         # state-machine path. ending_boss_hp / boss_hp_max are forwarded
         # from the caller (start_boss_duel / resume_boss_duel) — when the
@@ -3160,15 +3197,10 @@ class BossCombatMixin:
         tick_fight_gear()
         if not rescue_line_used:
             for _ in range(BOSS_LOSS_EXTRA_GEAR_TICKS):
-                if gear_snapshot_ids:
-                    extra_broken = self.dig_repo.tick_gear_durability_ids(
-                        [int(gear_id) for gear_id in gear_snapshot_ids]
-                    )
-                else:
-                    extra_broken = self.dig_repo.tick_gear_durability(
-                        discord_id,
-                        guild_id,
-                    )
+                armor_id = fighting_armor_id()
+                extra_broken = self.dig_repo.tick_gear_durability_ids(
+                    [armor_id] if armor_id is not None else []
+                )
                 gear_broken_names.extend(
                     gear_name_by_id.get(gear_id, "a piece of gear")
                     for gear_id in extra_broken
@@ -3330,15 +3362,36 @@ class BossCombatMixin:
             )
 
         enhanced = has_great_lantern
-        if not enhanced:
-            # Base lantern is single-use; Great Lantern is persistent.
-            self.dig_repo.remove_inventory_item(discord_id, guild_id, "lantern")
+        if self._is_pinnacle_depth(at_boss):
+            result = self._scout_pinnacle_boss(
+                discord_id,
+                guild_id,
+                tunnel,
+                boss_progress,
+                enhanced=enhanced,
+            )
+            if result.get("success") and not enhanced:
+                self.dig_repo.remove_inventory_item(
+                    discord_id, guild_id, "lantern",
+                )
+            return result
 
         # Calculate odds for all tiers using the HP-duel model.
         prestige_level = tunnel.get("prestige_level", 0) or 0
         _tk = at_boss if at_boss in BOSS_TIER_BONUS else max((k for k in BOSS_TIER_BONUS if k <= at_boss), default=25)
         depth_hit_penalty = BOSS_TIER_BONUS[_tk]["pen"]
         prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)])["pen"]
+        (
+            _,
+            phase_hit_penalty,
+            phase_event_obj,
+        ) = self._regular_boss_phase_context(boss_progress, at_boss)
+        forced_no_wager_phase = self._forced_no_wager_regular_phase(
+            boss_progress,
+            at_boss,
+            prestige_level,
+            wager=0,
+        )
 
         cheers = self._get_cheers(tunnel)
         now = int(time.time())
@@ -3381,39 +3434,95 @@ class BossCombatMixin:
                 echo_applied=echo_applied,
             )
             fresh_boss_hp = int(scaled["boss_hp"])
+            if phase_event_obj is not None:
+                fresh_boss_hp = max(
+                    1,
+                    fresh_boss_hp + int(phase_event_obj.boss_hp_delta),
+                )
             boss_hp, _ = self._resolve_persisted_boss_hp(
                 boss_progress, at_boss, fresh_boss_hp, now,
             )
             boss_hit_chance = float(scaled["boss_hit"])
             boss_dmg_eff = int(scaled["boss_dmg"]) + lum_dmg_bonus
+            player_hp = int(stats["player_hp"])
+            player_dmg = int(stats["player_dmg"])
 
-            player_hit = (
+            raw_player_hit = (
                 stats["player_hit"]
-                - depth_hit_penalty - prestige_hit_penalty
+                - depth_hit_penalty
+                - prestige_hit_penalty
+                - phase_hit_penalty
                 + cheer_bonus + lum_hit_offset
             )
-            player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+            player_hit = max(
+                WAGERED_PLAYER_HIT_FLOOR,
+                min(PLAYER_HIT_CEILING, raw_player_hit),
+            )
             free_hit = max(
                 PLAYER_HIT_FLOOR,
-                min(PLAYER_HIT_CEILING, player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD),
+                min(
+                    PLAYER_HIT_CEILING,
+                    (
+                        raw_player_hit
+                        if forced_no_wager_phase
+                        else raw_player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD
+                    ),
+                ),
             )
+            if phase_event_obj is not None:
+                boss_hit_chance = max(
+                    0.05,
+                    min(
+                        0.95,
+                        boss_hit_chance
+                        + float(phase_event_obj.boss_hit_offset),
+                    ),
+                )
+                boss_dmg_eff = max(
+                    1,
+                    boss_dmg_eff + int(phase_event_obj.boss_dmg_delta),
+                )
+                player_hit = max(
+                    WAGERED_PLAYER_HIT_FLOOR,
+                    min(
+                        PLAYER_HIT_CEILING,
+                        player_hit
+                        + float(phase_event_obj.player_hit_offset),
+                    ),
+                )
+                free_hit = max(
+                    PLAYER_HIT_FLOOR,
+                    min(
+                        PLAYER_HIT_CEILING,
+                        free_hit
+                        + float(phase_event_obj.player_hit_offset),
+                    ),
+                )
+                player_hp = max(
+                    1,
+                    player_hp + int(phase_event_obj.player_hp_delta),
+                )
+                player_dmg = max(
+                    0,
+                    player_dmg + int(phase_event_obj.player_dmg_delta),
+                )
             _scout_crit_chance = float(stats.get("crit_chance", 0) or 0)
             _scout_crit_bonus = int(stats.get("crit_bonus", 0) or 0)
             win_pct = dig_service._approx_duel_win_prob(
-                player_hp=int(stats["player_hp"]),
+                player_hp=player_hp,
                 boss_hp=boss_hp,
                 player_hit=player_hit,
-                player_dmg=int(stats["player_dmg"]),
+                player_dmg=player_dmg,
                 boss_hit=boss_hit_chance,
                 boss_dmg=boss_dmg_eff,
                 crit_chance=_scout_crit_chance,
                 crit_bonus=_scout_crit_bonus,
             )
             free_win_pct = dig_service._approx_duel_win_prob(
-                player_hp=int(stats["player_hp"]),
+                player_hp=player_hp,
                 boss_hp=boss_hp,
                 player_hit=free_hit,
-                player_dmg=int(stats["player_dmg"]),
+                player_dmg=player_dmg,
                 boss_hit=boss_hit_chance,
                 boss_dmg=boss_dmg_eff,
                 crit_chance=_scout_crit_chance,
@@ -3428,7 +3537,7 @@ class BossCombatMixin:
             odds[tier] = {
                 "win_pct": round(win_pct, 2),
                 "free_fight_pct": round(free_win_pct, 2),
-                "player_hp": int(stats["player_hp"]),
+                "player_hp": player_hp,
                 "boss_hp": boss_hp,
                 "player_hit": round(player_hit, 2),
                 "boss_hit": round(boss_hit_chance, 2),
@@ -3466,7 +3575,7 @@ class BossCombatMixin:
                     "cursed_status": st.cursed_status,
                 }
 
-        return self._ok(
+        result = self._ok(
             boundary=at_boss,
             boss_name=boss_name,
             boss_id=scout_boss_id,
@@ -3477,6 +3586,12 @@ class BossCombatMixin:
             mechanic_pool=mechanic_pool_preview,
             stinger=stinger_preview,
         )
+        if not enhanced:
+            # Base lantern is single-use, but only after a valid scout result.
+            self.dig_repo.remove_inventory_item(
+                discord_id, guild_id, "lantern",
+            )
+        return result
 
     def cheer_boss(self, cheerer_id: int, target_id: int, guild_id) -> dict:
         """Cheer for a player fighting a boss. Free; capped at 3 per fight."""

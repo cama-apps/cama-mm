@@ -1983,6 +1983,17 @@ class IDigRepository(ABC):
 
     # Atomic Operations
     @abstractmethod
+    def atomic_respec_miner_stats(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        cost: int,
+    ) -> dict:
+        """Debit a respec cost and reset allocated miner stats atomically."""
+        ...
+
+    @abstractmethod
     def atomic_auto_buy_items(
         self,
         discord_id: int,

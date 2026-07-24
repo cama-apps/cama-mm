@@ -17,6 +17,7 @@ from services.dig._common import (
     DIG_BOSS_STAT_POINT_BONUS,
     DIG_STARTING_STAT_POINTS,
     MINER_BACKSTORY_MAX_LENGTH,
+    MINER_RESPEC_COST,
     SMARTS_CAVE_IN_REDUCTION,
     STAMINA_COOLDOWN_REDUCTION,
     STAMINA_MAX_REDUCTION,
@@ -25,6 +26,7 @@ from services.dig._common import (
     logger,
 )
 from services.dig_constants import (
+    BOOSTED_DIG_ADVANCE_CAP,
     CONSUMABLE_ITEMS,
     DIG_POSITIVE_JC_MULTIPLIER,
     DIG_TIPS,
@@ -32,6 +34,7 @@ from services.dig_constants import (
     HELLTIDE_MODIFIER_ID,
     HELLTIDE_TAX_PER_DIG,
     LAYER_WEATHER_POOL,
+    MAIN_DIG_ADVANCE_CAP,
     MILESTONES,
     PAID_DIG_COSTS,
     PICKAXE_TIERS,
@@ -420,12 +423,25 @@ class ProgressionMixin:
             multiplier = 1.0 - (stamina_discount * 1.25)
         return max(1, int(cost * multiplier))
 
+    def _get_dig_advance_cap(
+        self,
+        stat_effects: dict,
+        *,
+        has_dynamite: bool = False,
+        has_depth_charge: bool = False,
+    ) -> int:
+        """Return the hard advance cap for this dig's qualifying bonuses."""
+        if (
+            stat_effects.get("advance_min_bonus", 0) > 0
+            or stat_effects.get("advance_max_bonus", 0) > 0
+            or has_dynamite
+            or has_depth_charge
+        ):
+            return BOOSTED_DIG_ADVANCE_CAP
+        return MAIN_DIG_ADVANCE_CAP
+
     def _calculate_paid_dig_cost(self, tunnel: dict, paid_count: int) -> int:
-        if paid_count < len(PAID_DIG_COSTS):
-            paid_dig_cost = PAID_DIG_COSTS[paid_count]
-        else:
-            doublings = paid_count - len(PAID_DIG_COSTS) + 1
-            paid_dig_cost = PAID_DIG_COSTS[-1] * (2 ** doublings)
+        paid_dig_cost = PAID_DIG_COSTS[min(paid_count, len(PAID_DIG_COSTS) - 1)]
         prestige_lvl = tunnel.get("prestige_level", 0) or 0
         asc = self._get_ascension_effects(prestige_lvl)
         if asc.get("paid_dig_cost_multiplier"):
@@ -624,6 +640,44 @@ class ProgressionMixin:
         }
         updated_stats = self._get_miner_stats(updated)
         return self._ok(
+            stats=updated_stats,
+            effects=self._get_stat_effects(updated_stats),
+        )
+
+    def respec_miner_stats(self, discord_id: int, guild_id) -> dict:
+        """Return every allocated S point for a small JC fee."""
+        if not self.player_repo.exists(discord_id, guild_id):
+            return self._error("You need to register first. Use /player register.")
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._error("You don't have any allocated S points to reset.")
+        tunnel = dict(tunnel)
+        stats = self._get_miner_stats(tunnel)
+        if stats["spent_points"] <= 0:
+            return self._error("You don't have any allocated S points to reset.")
+
+        outcome = self.dig_repo.atomic_respec_miner_stats(
+            discord_id,
+            guild_id,
+            cost=MINER_RESPEC_COST,
+        )
+        status = outcome["status"]
+        if status == "insufficient_balance":
+            return self._error(
+                f"You need {MINER_RESPEC_COST} JC to respec your S points."
+            )
+        if status != "ok":
+            return self._error("You don't have any allocated S points to reset.")
+
+        updated_stats = self._get_miner_stats({
+            "stat_strength": 0,
+            "stat_smarts": 0,
+            "stat_stamina": 0,
+            "stat_points": outcome["stat_points"],
+        })
+        return self._ok(
+            cost=MINER_RESPEC_COST,
+            returned_points=outcome["returned_points"],
             stats=updated_stats,
             effects=self._get_stat_effects(updated_stats),
         )

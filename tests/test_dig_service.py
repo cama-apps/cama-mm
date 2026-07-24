@@ -160,17 +160,17 @@ class TestDigConstants:
                 f"cost[{i+1}]={PAID_DIG_COSTS_PER_DAY[i+1]}"
             )
 
-    def test_paid_dig_cost_keeps_doubling_after_seed_ladder(self, dig_service):
-        """Paid digs beyond the seed ladder keep escalating before modifiers."""
+    def test_paid_dig_cost_levels_off_after_seed_ladder(self, dig_service):
+        """Paid digs beyond the seed ladder cost 60 JC before modifiers."""
         tunnel = {"prestige_level": 0, "stat_stamina": 0}
 
         assert [
             dig_service._calculate_paid_dig_cost(tunnel, paid_count)
             for paid_count in (4, 5, 6)
-        ] == [40, 80, 160]
+        ] == [40, 60, 60]
 
         tunnel["stat_stamina"] = 13
-        assert dig_service._calculate_paid_dig_cost(tunnel, paid_count=5) == 40
+        assert dig_service._calculate_paid_dig_cost(tunnel, paid_count=5) == 30
 
     def test_boss_victory_base_jc_covers_every_boss_boundary(self):
         """Every regular boss boundary needs a base-reward entry, else a win
@@ -1080,7 +1080,9 @@ class TestMinerProfile:
         assert not result["success"]
         assert "only have 5" in result["error"]
 
-    def test_stat_build_cannot_respec(self, dig_service, player_repository, guild_id):
+    def test_stat_build_cannot_reduce_existing_allocations(
+        self, dig_service, player_repository, guild_id,
+    ):
         _register_player(player_repository)
         first = dig_service.set_miner_stats(
             10001,
@@ -1100,6 +1102,114 @@ class TestMinerProfile:
         )
         assert not second["success"]
         assert "only have 0 unspent" in second["error"]
+
+    def test_respec_returns_all_points_and_charges_fifty_jc(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        _register_player(player_repository, balance=100)
+        allocated = dig_service.set_miner_stats(
+            10001,
+            guild_id,
+            strength=2,
+            smarts=2,
+            stamina=1,
+        )
+        assert allocated["success"]
+
+        result = dig_service.respec_miner_stats(10001, guild_id)
+
+        assert result["success"]
+        assert result["cost"] == 50
+        assert result["stats"] == {
+            "strength": 0,
+            "smarts": 0,
+            "stamina": 0,
+            "stat_points": 5,
+            "spent_points": 0,
+            "unspent_points": 5,
+        }
+        assert player_repository.get_balance(10001, guild_id) == 50
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert (
+            tunnel["stat_strength"],
+            tunnel["stat_smarts"],
+            tunnel["stat_stamina"],
+        ) == (0, 0, 0)
+
+    def test_respec_reports_returned_points_separately_from_total_unspent(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        _register_player(player_repository, balance=100)
+        dig_repo.create_tunnel(10001, guild_id, "Deep Ledger")
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            stat_strength=2,
+            stat_smarts=1,
+            stat_stamina=2,
+            stat_points=12,
+        )
+
+        result = dig_service.respec_miner_stats(10001, guild_id)
+
+        assert result["success"]
+        assert result["returned_points"] == 5
+        assert result["stats"]["unspent_points"] == 12
+
+    def test_respec_rejects_insufficient_balance_without_resetting_stats(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        _register_player(player_repository, balance=49)
+        dig_service.set_miner_stats(
+            10001,
+            guild_id,
+            strength=3,
+            smarts=2,
+            stamina=0,
+        )
+
+        result = dig_service.respec_miner_stats(10001, guild_id)
+
+        assert not result["success"]
+        assert "50 JC" in result["error"]
+        assert player_repository.get_balance(10001, guild_id) == 49
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert (
+            tunnel["stat_strength"],
+            tunnel["stat_smarts"],
+            tunnel["stat_stamina"],
+        ) == (3, 2, 0)
+
+    def test_respec_rejects_empty_build_without_charging(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        _register_player(player_repository, balance=100)
+        assert dig_repo.get_tunnel(10001, guild_id) is None
+
+        result = dig_service.respec_miner_stats(10001, guild_id)
+
+        assert not result["success"]
+        assert "allocated" in result["error"].lower()
+        assert player_repository.get_balance(10001, guild_id) == 100
+        assert dig_repo.get_tunnel(10001, guild_id) is None
+
+    def test_respec_can_repeat_after_reallocating(
+        self, dig_service, player_repository, guild_id,
+    ):
+        _register_player(player_repository, balance=100)
+        dig_service.set_miner_stats(
+            10001, guild_id, strength=5, smarts=0, stamina=0,
+        )
+        assert dig_service.respec_miner_stats(10001, guild_id)["success"]
+        dig_service.set_miner_stats(
+            10001, guild_id, strength=0, smarts=0, stamina=5,
+        )
+
+        result = dig_service.respec_miner_stats(10001, guild_id)
+
+        assert result["success"]
+        assert result["stats"]["unspent_points"] == 5
+        assert player_repository.get_balance(10001, guild_id) == 0
 
     def test_strength_and_smarts_affect_preconditions(
         self, dig_service, player_repository, guild_id, monkeypatch,
@@ -3192,6 +3302,38 @@ class TestBossErrors:
         assert result["boss_encounter"] is True
         assert result["dig_consumed"] is True
 
+    def test_reaching_pinnacle_surfaces_boss_on_arrival(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        boss_progress = {
+            str(boundary): "defeated" for boundary in BOSS_BOUNDARIES
+        }
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=PINNACLE_DEPTH - 2,
+            max_depth=PINNACLE_DEPTH - 2,
+            boss_progress=json.dumps(boss_progress),
+        )
+        dig_repo.queue_item(
+            dig_repo.add_inventory_item(10001, guild_id, "depth_charge")
+        )
+
+        monkeypatch.setattr(
+            time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1,
+        )
+        result = dig_service.dig(10001, guild_id)
+
+        assert result["success"] is True
+        assert result["boss_encounter"] is True
+        assert result["boss_info"]["boundary"] == PINNACLE_DEPTH
+        assert result["depth_after"] == PINNACLE_DEPTH - 1
+        assert result["dig_consumed"] is True
+
     def test_boss_boundary_returns_full_info(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Boss encounter from dig includes dialogue and ascii_art."""
         _register_player(player_repository, balance=200)
@@ -3632,6 +3774,76 @@ class TestMainDigAdvanceCap:
         assert preconditions["advance_min"] == 10
         assert preconditions["advance_max"] == 10
 
+    @pytest.mark.parametrize("item_type", ["dynamite", "depth_charge"])
+    def test_queued_explosive_advertises_twenty_block_cap(
+        self, dig_service, dig_repo, player_repository, guild_id, item_type,
+    ):
+        uid = 20093
+        _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        dig_service.set_temp_buff(uid, guild_id, {
+            "id": "power",
+            "name": "Power",
+            "duration_digs": 2,
+            "effect": {"advance_bonus": 50},
+        })
+        dig_repo.queue_item(dig_repo.add_inventory_item(uid, guild_id, item_type))
+
+        terminal, preconditions = dig_service.dig_with_preconditions(uid, guild_id)
+
+        assert terminal is None
+        assert preconditions["advance_min"] == 20
+        assert preconditions["advance_max"] == 20
+
+    def test_direct_dig_with_queued_dynamite_caps_at_twenty_blocks(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        uid = 20094
+        _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        dig_service.set_temp_buff(uid, guild_id, {
+            "id": "power",
+            "name": "Power",
+            "duration_digs": 2,
+            "effect": {"advance_bonus": 50},
+        })
+        dig_repo.queue_item(dig_repo.add_inventory_item(uid, guild_id, "dynamite"))
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
+
+        result = dig_service.dig(uid, guild_id)
+
+        assert result["success"], result
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
+
+    def test_direct_dig_with_strength_caps_at_twenty_blocks(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        uid = 20095
+        _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        dig_service.set_miner_stats(
+            uid, guild_id, strength=5, smarts=0, stamina=0,
+        )
+        dig_service.set_temp_buff(uid, guild_id, {
+            "id": "power",
+            "name": "Power",
+            "duration_digs": 2,
+            "effect": {"advance_bonus": 50},
+        })
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
+
+        result = dig_service.dig(uid, guild_id)
+
+        assert result["success"], result
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
+
     def test_authored_event_depth_is_not_capped(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
@@ -3731,6 +3943,23 @@ class TestApplyDigOutcomeSecondaryPaths:
 
         assert result["advance"] == 10
         assert result["depth_after"] == 11
+
+    def test_dm_dig_with_strength_bonus_caps_advance_at_20(
+        self, dig_service, dig_repo, player_repository, guild_id,
+    ):
+        uid = 20111
+        p = _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        p["stat_effects"]["advance_max_bonus"] = 1
+
+        result = dig_service.apply_dig_outcome(
+            p,
+            {"advance": 50, "jc_earned": 0, "cave_in": False, "event_id": ""},
+        )
+
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
 
     def test_max_depth_does_not_regress_on_dm_cave_in(self, dig_service, dig_repo, player_repository, guild_id):
         """Finding 1: max_depth must not decrease when a cave-in knocks depth back."""
@@ -3960,6 +4189,23 @@ class TestExecuteDeterministicOutcomePaths:
 
         assert result["advance"] == 10
         assert result["depth_after"] == 11
+
+    def test_deterministic_dig_with_strength_bonus_caps_at_twenty_blocks(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        uid = 20206
+        p = _get_preconditions_at_depth(
+            dig_service, dig_repo, player_repository, uid, depth=1, guild_id=guild_id,
+        )
+        p["stat_effects"]["advance_min_bonus"] = 1
+        p["buff_advance_bonus"] = 50
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)
+
+        result = dig_service._execute_deterministic_outcome(p)
+
+        assert result["advance"] == 20
+        assert result["depth_after"] == 21
 
     def test_milestone_not_re_awarded_after_knockback_deterministic(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch

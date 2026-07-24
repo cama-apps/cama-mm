@@ -1125,9 +1125,8 @@ def get_boss_by_id(boss_id: str) -> BossDef | None:
 # wager + cave-in to the previous milestone.
 #
 # Per-tier stats (player_hp, boss_hp, player_hit, player_dmg, boss_hit, boss_dmg).
-# Reckless is tuned for WAGERED play. Free-fight reckless clamps to the
-# PLAYER_HIT_FLOOR (0.10 * BOSS_FREE_FIGHT_ACCURACY_MOD = 0.06, floored to
-# 0.05) which is intentionally near-impossible: high-stakes wager only.
+# Reckless is tuned for wagered play. At upper tiers, its voluntary
+# zero-wager accuracy can still clamp to PLAYER_HIT_FLOOR.
 BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
     "cautious": {"player_hp": 5, "boss_hp": 4, "player_hit": 0.60, "player_dmg": 1, "boss_hit": 0.30, "boss_dmg": 1, "crit_chance": 0.00, "crit_bonus": 0},
     "bold":     {"player_hp": 3, "boss_hp": 5, "player_hit": 0.42, "player_dmg": 2, "boss_hit": 0.45, "boss_dmg": 1, "crit_chance": 0.15, "crit_bonus": 1},
@@ -1163,9 +1162,10 @@ BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
     6: {"hp": 26, "hit": 0.24, "dmg": 0, "pen": 0.165},
     7: {"hp": 27, "hit": 0.26, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
 }
-PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
+PLAYER_HIT_FLOOR: float = 0.05                     # hard floor for zero-wager fights
+WAGERED_PLAYER_HIT_FLOOR: float = 0.10             # paid fights retain a viable per-round chance
 PLAYER_HIT_CEILING: float = 0.90                   # hard ceiling — luminosity already eats hit chance, so leave a wider cap
-BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
+BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.7          # voluntary zero-wager fights multiply player_hit by this
 BOSS_WAGER_MAX_JC: int = 1_000                     # hard cap for newly submitted boss wagers
 BOSS_ROUND_CAP: int = 20                           # safety valve against infinite loops
 WIN_CHANCE_CAP: float = 0.95                       # ceiling on displayed/computed win probability
