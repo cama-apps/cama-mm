@@ -114,7 +114,7 @@ if _dig_channel_raw:
 # are gated to it (threads under it inherit). Hardcoded rather than env-driven.
 MAFIA_CHANNEL_ID: int = 1514997325385306132
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
-OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
+OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.02)  # 2% chance per shuffle
 
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
