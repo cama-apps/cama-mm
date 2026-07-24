@@ -7,6 +7,7 @@ import math
 from glicko2 import Player
 
 from config import (
+    BASE_RATING_DELTA_MULTIPLIER,
     CALIBRATION_RD_THRESHOLD,
     INITIAL_GLICKO_RD,
     MAX_RATING_SWING_PER_GAME,
@@ -290,6 +291,8 @@ class CamaRatingSystem:
 
         # Delta is how much the "team representative with this player's RD" moved
         delta = synth.rating - team_rating
+
+        delta = delta * BASE_RATING_DELTA_MULTIPLIER
 
         # Apply streak multiplier before capping
         delta = delta * streak_multiplier
