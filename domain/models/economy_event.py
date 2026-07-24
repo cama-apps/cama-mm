@@ -33,9 +33,9 @@ class EconomyEventEffects:
             prediction_payout_multiplier=float(
                 raw.get("prediction_payout_multiplier", 1.0)
             ),
-            prediction_depth_multiplier=float(
-                raw.get("prediction_depth_multiplier", 1.0)
-            ),
+            # Legacy event rows may carry a depth modifier. Quote volume is now
+            # policy-neutral, so all consumers see normal market depth.
+            prediction_depth_multiplier=1.0,
             prediction_spread_ticks_delta=int(
                 raw.get("prediction_spread_ticks_delta", 0)
             ),

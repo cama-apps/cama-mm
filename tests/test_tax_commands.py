@@ -202,7 +202,7 @@ def test_public_event_embed_is_high_level_theatrical_and_explains_indirect_effec
     assert "36% lower" in text
     assert "9% lower" in text
     assert "3% lower" in text
-    assert "84% thinner" in text
+    assert "thinner" not in text
     assert "6 ticks wider" in text
     assert "No JC moved when this spell activated" in text
     assert "Forecast unmanaged flow" not in text
