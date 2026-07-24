@@ -31,6 +31,83 @@ def test_shuffle_roster_ignores_legacy_conditional_players():
 
 
 @pytest.mark.asyncio
+async def test_readycheck_nonresponders_are_implicit_conditional_exclusions():
+    player_ids = list(range(1, 16))
+    players = [
+        Player(name=f"Player {player_id}", discord_id=player_id)
+        for player_id in player_ids
+    ]
+    confirmed_ids = set(player_ids[:10])
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby_players_and_readycheck_snapshot.return_value = (
+        player_ids,
+        players,
+        (1234, confirmed_ids | {999}),
+    )
+    cog = MatchCommands(MagicMock(), lobby_service, MagicMock(), MagicMock())
+
+    selected_ids, selected_players, included, excluded = (
+        await cog._select_shuffle_roster(TEST_GUILD_ID)
+    )
+
+    assert selected_ids == player_ids[:10]
+    assert [player.discord_id for player in selected_players] == player_ids[:10]
+    assert included == []
+    assert excluded == player_ids[10:]
+
+
+@pytest.mark.asyncio
+async def test_readycheck_below_threshold_does_not_change_shuffle_roster():
+    player_ids = list(range(1, 13))
+    players = [
+        Player(name=f"Player {player_id}", discord_id=player_id)
+        for player_id in player_ids
+    ]
+    lobby_service = MagicMock()
+    lobby_service.ready_threshold = 10
+    lobby_service.get_lobby_players_and_readycheck_snapshot.return_value = (
+        player_ids,
+        players,
+        (1234, set(player_ids[:9]) | {999}),
+    )
+    cog = MatchCommands(MagicMock(), lobby_service, MagicMock(), MagicMock())
+
+    selected_ids, selected_players, included, excluded = (
+        await cog._select_shuffle_roster(TEST_GUILD_ID)
+    )
+
+    assert selected_ids == player_ids
+    assert selected_players == players
+    assert included == []
+    assert excluded == []
+
+
+@pytest.mark.asyncio
+async def test_execute_shuffle_stops_if_lobby_changes_before_atomic_snapshot(
+    monkeypatch,
+):
+    lobby = SimpleNamespace(get_player_count=lambda: 10)
+    match_service = MagicMock()
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(MagicMock(), MagicMock(), match_service, MagicMock())
+    monkeypatch.setattr(
+        cog,
+        "_validate_shuffle_preconditions",
+        AsyncMock(return_value=lobby),
+    )
+    monkeypatch.setattr(cog, "_select_shuffle_roster", AsyncMock(return_value=None))
+
+    await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    match_service.shuffle_players.assert_not_called()
+    interaction.followup.send.assert_awaited_once_with(
+        "❌ The lobby changed while starting the shuffle. Please try again.",
+        ephemeral=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service(monkeypatch):
     player_ids = list(range(100, 110))
     lobby = SimpleNamespace(get_player_count=lambda: 10)
@@ -55,6 +132,39 @@ async def test_execute_shuffle_passes_no_conditional_exclusions_to_match_service
         rating_system=ANY,
         shuffle_mode="balanced",
         excluded_conditional_ids=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_ready_responder_count_controls_shuffle_draft_redirect(monkeypatch):
+    player_ids = list(range(100, 110))
+    excluded_ids = list(range(110, 115))
+    lobby = SimpleNamespace(get_player_count=lambda: 15)
+    draft_cog = SimpleNamespace(_execute_draft=AsyncMock())
+    bot = MagicMock()
+    bot.get_cog.return_value = draft_cog
+    match_service = MagicMock()
+    match_service.state_service.get_all_pending_player_ids.return_value = set()
+    match_service.shuffle_players.side_effect = RuntimeError("stop after service call")
+    interaction = SimpleNamespace(followup=SimpleNamespace(send=AsyncMock()))
+    cog = MatchCommands(bot, MagicMock(), match_service, MagicMock())
+    monkeypatch.setattr(cog, "_validate_shuffle_preconditions", AsyncMock(return_value=lobby))
+    monkeypatch.setattr(
+        cog,
+        "_select_shuffle_roster",
+        AsyncMock(return_value=(player_ids, [], [], excluded_ids)),
+    )
+
+    await cog._execute_shuffle(interaction, None, TEST_GUILD_ID, None)
+
+    draft_cog._execute_draft.assert_not_awaited()
+    match_service.shuffle_players.assert_called_once_with(
+        player_ids,
+        guild_id=TEST_GUILD_ID,
+        betting_mode="pool",
+        rating_system=ANY,
+        shuffle_mode="balanced",
+        excluded_conditional_ids=excluded_ids,
     )
 
 

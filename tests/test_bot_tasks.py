@@ -608,7 +608,8 @@ async def test_tenth_readycheck_confirmation_recommends_shuffle_once_in_origin_c
         await bot_module.on_raw_reaction_add(payload)
 
     origin_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
     )
     readycheck_channel.fetch_message.assert_not_awaited()
     assert readycheck_channel.get_partial_message.call_count == 4
@@ -642,7 +643,8 @@ async def test_readycheck_completion_falls_back_when_origin_channel_fetch_fails(
 
     assert sent is True
     readycheck_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
     )
 
 
@@ -667,7 +669,8 @@ async def test_readycheck_completion_falls_back_when_origin_lookup_fails(
 
     assert sent is True
     readycheck_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
     )
 
 
@@ -717,7 +720,8 @@ async def test_readycheck_completion_uses_origin_when_source_channel_fetch_fails
         await bot_module.on_raw_reaction_add(payload)
 
     origin_channel.send.assert_awaited_once_with(
-        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+        "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+        "Only players who confirmed ready will be included; everyone else will sit out."
     )
 
 

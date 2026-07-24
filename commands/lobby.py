@@ -141,7 +141,9 @@ class LobbyCommands(commands.Cog):
 
             try:
                 await target_channel.send(
-                    "✅ **10 players confirmed ready.** Anyone can use `/shuffle` to create balanced teams!"
+                    "✅ **10 players confirmed ready.** Anyone can use `/shuffle` now. "
+                    "Only players who confirmed ready will be included; "
+                    "everyone else will sit out."
                 )
             except Exception as exc:
                 logger.error(

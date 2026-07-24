@@ -515,13 +515,37 @@ class MatchCommands(commands.Cog):
         return lobby
 
     async def _select_shuffle_roster(
-        self, lobby, guild_id: int | None
-    ) -> tuple[list[int], list, list[int], list[int]]:
-        """Return the active regular-player roster for the shuffle."""
-        player_ids, players = await asyncio.to_thread(
-            self.lobby_service.get_lobby_players, lobby, guild_id
+        self, guild_id: int | None
+    ) -> tuple[list[int], list, list[int], list[int]] | None:
+        """Treat nonresponders as transient conditionals after ten confirmations."""
+        snapshot = await asyncio.to_thread(
+            self.lobby_service.get_lobby_players_and_readycheck_snapshot,
+            guild_id=guild_id,
         )
-        return select_players_for_shuffle(player_ids, players, [], [])
+        if snapshot is None:
+            return None
+
+        player_ids, players, readycheck = snapshot
+        if readycheck is None:
+            return select_players_for_shuffle(player_ids, players, [], [])
+
+        _, confirmed_ids = readycheck
+        confirmed_lobby_ids = set(player_ids) & confirmed_ids
+        if len(confirmed_lobby_ids) < self.lobby_service.ready_threshold:
+            return select_players_for_shuffle(player_ids, players, [], [])
+
+        selected_ids = [
+            player_id for player_id in player_ids if player_id in confirmed_lobby_ids
+        ]
+        selected_players = [
+            player
+            for player in players
+            if getattr(player, "discord_id", None) in confirmed_lobby_ids
+        ]
+        excluded_ids = [
+            player_id for player_id in player_ids if player_id not in confirmed_lobby_ids
+        ]
+        return selected_ids, selected_players, [], excluded_ids
 
     async def _execute_shuffle(
         self,
@@ -536,7 +560,21 @@ class MatchCommands(commands.Cog):
         if lobby is None:
             return
 
-        regular_count = lobby.get_player_count()
+        roster = await self._select_shuffle_roster(guild_id)
+        if roster is None:
+            await interaction.followup.send(
+                "❌ The lobby changed while starting the shuffle. Please try again.",
+                ephemeral=True,
+            )
+            return
+
+        (
+            player_ids,
+            players,
+            _conditional_player_ids_included,
+            excluded_conditional_ids,
+        ) = roster
+        regular_count = len(player_ids)
 
         # 15 or more regular (non-conditional) players → force Immortal Draft
         if regular_count >= 15:
@@ -552,7 +590,13 @@ class MatchCommands(commands.Cog):
                 # path, so inspecting the return value here would only let us
                 # add a misleading duplicate. The except below covers the
                 # unexpected-exception path.
-                await draft_cog._execute_draft(interaction, guild_id, lobby)
+                await draft_cog._execute_draft(
+                    interaction,
+                    guild_id,
+                    lobby,
+                    regular_player_ids=player_ids,
+                    conditional_player_ids=excluded_conditional_ids,
+                )
             except Exception as e:
                 logger.error(f"Draft auto-redirect failed: {e}", exc_info=True)
                 # Clean up any partially-created draft state so it doesn't block
@@ -566,12 +610,6 @@ class MatchCommands(commands.Cog):
                 )
             return
 
-        (
-            player_ids,
-            players,
-            _conditional_player_ids_included,
-            excluded_conditional_ids,
-        ) = await self._select_shuffle_roster(lobby, guild_id)
         roster_players = dict(zip(player_ids, players, strict=False))
         roster_players.update(
             {

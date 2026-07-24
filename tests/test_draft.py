@@ -1643,6 +1643,35 @@ class TestExecuteDraft:
         assert set(state.player_pool_ids).isdisjoint(conditional_ids)
         assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
 
+    async def test_roster_overrides_track_nonresponders_as_half_exclusions(
+        self, player_repository
+    ):
+        guild_id = TEST_GUILD_ID
+        player_ids = _register_draft_players(player_repository, guild_id, 17)
+        regular_ids = player_ids[:15]
+        conditional_ids = player_ids[15:]
+        exclusion_before = player_repository.get_exclusion_counts(player_ids, guild_id)
+        cog = _make_draft_cog(player_repository)
+        interaction = _FakeInteraction(guild_id)
+
+        result = await cog._execute_draft(
+            interaction,
+            guild_id,
+            _make_lobby(player_ids),
+            regular_player_ids=regular_ids,
+            conditional_player_ids=conditional_ids,
+        )
+
+        assert result is True
+        state = cog.draft_state_manager.get_state(guild_id)
+        assert state is not None
+        assert set(state.player_pool_ids).isdisjoint(conditional_ids)
+        assert set(state.half_exclusion_increment_ids) == set(conditional_ids)
+        assert set(state.full_exclusion_increment_ids) == (
+            set(regular_ids) - set(state.player_pool_ids)
+        )
+        assert player_repository.get_exclusion_counts(player_ids, guild_id) == exclusion_before
+
     async def test_captain_eligibility_flags_do_not_limit_selection(self, player_repository):
         """Legacy eligibility values do not affect automatic captains."""
         guild_id = TEST_GUILD_ID
@@ -2225,6 +2254,43 @@ class TestPreDraftChoiceDoubleClick:
 class TestShuffleDraftRedirect:
     """/shuffle hands lobbies of >=15 players to Immortal Draft."""
 
+    async def test_redirect_passes_readycheck_roster_overrides(self, monkeypatch):
+        guild_id = TEST_GUILD_ID
+        ready_ids = list(range(60001, 60016))
+        nonresponder_ids = [60016, 60017]
+        lobby = _make_lobby(ready_ids + nonresponder_ids)
+        draft_cog = MagicMock()
+        draft_cog._execute_draft = AsyncMock(return_value=True)
+        bot = MagicMock()
+        bot.get_cog.return_value = draft_cog
+        match_cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
+        monkeypatch.setattr(
+            match_cog,
+            "_validate_shuffle_preconditions",
+            AsyncMock(return_value=lobby),
+        )
+        monkeypatch.setattr(
+            match_cog,
+            "_select_shuffle_roster",
+            AsyncMock(return_value=(ready_ids, [], [], nonresponder_ids)),
+        )
+        interaction = _FakeInteraction(guild_id)
+
+        await match_cog._execute_shuffle(
+            interaction,
+            interaction.guild,
+            guild_id,
+            None,
+        )
+
+        draft_cog._execute_draft.assert_awaited_once_with(
+            interaction,
+            guild_id,
+            lobby,
+            regular_player_ids=ready_ids,
+            conditional_player_ids=nonresponder_ids,
+        )
+
     async def test_redirects_without_adding_a_duplicate_message(self, monkeypatch):
         """A >=15-player /shuffle runs _execute_draft and adds no message of
         its own — even on failure, since _execute_draft owns its messaging."""
@@ -2237,11 +2303,17 @@ class TestShuffleDraftRedirect:
 
         match_cog = MatchCommands(bot, MagicMock(), MagicMock(), MagicMock())
 
-        lobby = _make_lobby(list(range(60001, 60016)))  # 15 regular players
+        player_ids = list(range(60001, 60016))
+        lobby = _make_lobby(player_ids)  # 15 regular players
         monkeypatch.setattr(
             match_cog,
             "_validate_shuffle_preconditions",
             AsyncMock(return_value=lobby),
+        )
+        monkeypatch.setattr(
+            match_cog,
+            "_select_shuffle_roster",
+            AsyncMock(return_value=(player_ids, [], [], [])),
         )
 
         interaction = _FakeInteraction(guild_id)

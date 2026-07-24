@@ -8,6 +8,7 @@ import pytest
 from domain.models.lobby import Lobby
 from services.lobby_manager_service import LobbyManagerService
 from services.lobby_service import LobbyService
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 class TestLobbyServicePendingMatchCheck:
@@ -149,6 +150,37 @@ class TestLobbyServicePendingMatchCheck:
         assert success is False
         assert reason == "conditional_join_deprecated"
         assert pending_info is None
+
+
+def test_readycheck_confirmation_snapshot_is_available_through_lobby_service():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    lobby_manager.set_readycheck_state(111, 222, {1}, {})
+    lobby_manager.add_readycheck_reaction(1, "<@1>")
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=MagicMock())
+
+    assert service.get_readycheck_confirmation_snapshot() == (111, {1})
+
+
+def test_lobby_readycheck_snapshot_loads_players_from_atomic_manager_snapshot():
+    lobby_manager = LobbyManagerService(FakeLobbyRepo())
+    lobby = lobby_manager.get_or_create_lobby(creator_id=1)
+    lobby.players.update({1, 2})
+    lobby_manager.set_readycheck_state(111, 222, {1, 2}, {})
+    lobby_manager.add_readycheck_reaction(1, "<@1>")
+    player_repo = MagicMock()
+    players = [MagicMock(discord_id=1), MagicMock(discord_id=2)]
+    player_repo.get_by_ids.return_value = players
+    service = LobbyService(lobby_manager=lobby_manager, player_repo=player_repo)
+
+    player_ids, loaded_players, readycheck = (
+        service.get_lobby_players_and_readycheck_snapshot(guild_id=0)
+    )
+
+    assert set(player_ids) == {1, 2}
+    assert loaded_players == players
+    assert readycheck == (111, {1})
+    player_repo.get_by_ids.assert_called_once_with(player_ids, 0)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

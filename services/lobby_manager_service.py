@@ -265,6 +265,39 @@ class LobbyManagerService:
     def get_readycheck_reacted(self, guild_id: int | None = None) -> dict[int, str]:
         return self.readycheck_reacted.get(self._normalize_guild_id(guild_id), {})
 
+    def get_readycheck_confirmation_snapshot(
+        self, guild_id: int | None = None
+    ) -> tuple[int, set[int]] | None:
+        """Return the current readycheck generation and a copy of its confirmations."""
+        normalized = self._normalize_guild_id(guild_id)
+        with self._state_lock:
+            message_id = self.readycheck_message_ids.get(normalized)
+            if message_id is None:
+                return None
+            return message_id, set(self.readycheck_reacted.get(normalized, {}))
+
+    def get_lobby_readycheck_snapshot(
+        self, guild_id: int | None = None
+    ) -> tuple[list[int], tuple[int, set[int]] | None] | None:
+        """Copy the open lobby roster and current confirmations atomically."""
+        normalized = self._normalize_guild_id(guild_id)
+        with self._state_lock:
+            lobby = self.lobbies.get(normalized)
+            if lobby is None or lobby.status != "open":
+                return None
+
+            player_ids = list(lobby.players)
+            message_id = self.readycheck_message_ids.get(normalized)
+            readycheck = (
+                None
+                if message_id is None
+                else (
+                    message_id,
+                    set(self.readycheck_reacted.get(normalized, {})),
+                )
+            )
+            return player_ids, readycheck
+
     def get_readycheck_player_data(self, guild_id: int | None = None) -> dict[int, dict]:
         return self.readycheck_player_data.get(self._normalize_guild_id(guild_id), {})
 

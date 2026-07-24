@@ -3,11 +3,14 @@ Tests for the /readycheck feature: join timestamps on Lobby model,
 persistence through lobby repository, and the _is_playing_dota helper.
 """
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 from unittest.mock import MagicMock
 
 import discord
+import pytest
 
 from domain.models.lobby import Lobby
 from services.lobby_manager_service import LobbyManagerService
@@ -302,3 +305,84 @@ class TestReadycheckCreatedAt:
         mgr.set_readycheck_state(111, 222, {1}, {}, created_at=1000.0)
         mgr.reset_lobby()
         assert mgr.get_readycheck_created_at(guild_id=0) is None
+
+
+class TestReadycheckConfirmationSnapshot:
+    def test_snapshot_identifies_current_generation_and_copies_confirmations(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.set_readycheck_state(111, 222, {1, 2}, {})
+        mgr.add_readycheck_reaction(1, "<@1>")
+
+        message_id, confirmed_ids = mgr.get_readycheck_confirmation_snapshot()
+
+        assert message_id == 111
+        assert confirmed_ids == {1}
+
+        mgr.add_readycheck_reaction(2, "<@2>")
+        mgr.set_readycheck_state(333, 222, {1, 2}, {})
+
+        assert confirmed_ids == {1}
+        assert mgr.get_readycheck_confirmation_snapshot() == (333, set())
+
+    def test_snapshot_is_none_without_a_current_readycheck(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+
+        assert mgr.get_readycheck_confirmation_snapshot() is None
+
+
+class TestLobbyReadycheckSnapshot:
+    def test_snapshot_copies_current_lobby_and_confirmations_together(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        lobby = mgr.get_or_create_lobby(creator_id=1)
+        lobby.players.update({1, 2})
+        mgr.set_readycheck_state(111, 222, {1, 2}, {})
+        mgr.add_readycheck_reaction(1, "<@1>")
+
+        player_ids, readycheck = mgr.get_lobby_readycheck_snapshot()
+
+        assert set(player_ids) == {1, 2}
+        assert readycheck == (111, {1})
+
+        lobby.players.add(3)
+        mgr.add_readycheck_reaction(2, "<@2>")
+
+        assert set(player_ids) == {1, 2}
+        assert readycheck == (111, {1})
+
+    def test_lobby_mutation_cannot_interleave_with_snapshot(self):
+        iteration_started = threading.Event()
+        release_iteration = threading.Event()
+        leave_started = threading.Event()
+
+        class BlockingPlayers(set):
+            def __iter__(self):
+                iteration_started.set()
+                if not release_iteration.wait(timeout=1):
+                    raise TimeoutError("snapshot iteration was not released")
+                yield from super().__iter__()
+
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        lobby = mgr.get_or_create_lobby(creator_id=1)
+        lobby.players = BlockingPlayers(range(1, 11))
+        mgr.set_readycheck_state(111, 222, set(range(1, 11)), {})
+        for player_id in range(1, 11):
+            mgr.add_readycheck_reaction(player_id, f"<@{player_id}>")
+
+        def leave_lobby():
+            leave_started.set()
+            return mgr.leave_lobby(10)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            snapshot_future = executor.submit(mgr.get_lobby_readycheck_snapshot)
+            assert iteration_started.wait(timeout=1)
+            leave_future = executor.submit(leave_lobby)
+            assert leave_started.wait(timeout=1)
+            with pytest.raises(TimeoutError):
+                leave_future.result(timeout=0.05)
+
+            release_iteration.set()
+            player_ids, readycheck = snapshot_future.result(timeout=1)
+            assert leave_future.result(timeout=1) is True
+
+        assert set(player_ids) == set(range(1, 11))
+        assert readycheck == (111, set(range(1, 11)))

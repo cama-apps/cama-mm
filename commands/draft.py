@@ -648,6 +648,8 @@ class DraftCommands(commands.Cog):
         lobby,
         specified_captain1_id: int | None = None,
         specified_captain2_id: int | None = None,
+        regular_player_ids: list[int] | None = None,
+        conditional_player_ids: list[int] | None = None,
     ) -> bool:
         """
         Core draft logic, callable from /startdraft or /shuffle auto-redirect.
@@ -658,19 +660,25 @@ class DraftCommands(commands.Cog):
             lobby: The Lobby object
             specified_captain1_id: Optional specified captain 1 ID
             specified_captain2_id: Optional specified captain 2 ID
+            regular_player_ids: Optional transient regular roster from /shuffle
+            conditional_player_ids: Optional transient conditional exclusions from /shuffle
 
         Returns:
             True if the draft started, False otherwise. Every failure path
             sends its own user-facing error first, so callers must not post a
             generic failure message when this returns False.
         """
-        regular_players = list(lobby.players)
-        lobby_player_ids = regular_players
+        regular_players = (
+            list(lobby.players)
+            if regular_player_ids is None
+            else list(regular_player_ids)
+        )
+        conditional_players = list(conditional_player_ids or [])
+        lobby_player_ids = regular_players + conditional_players
 
         logger.info(
-            "Immortal Draft starting: guild=%s, %d player(s)",
-            guild_id,
-            len(regular_players),
+            "Immortal Draft starting: guild=%s, %d regular + %d conditional player(s)",
+            guild_id, len(regular_players), len(conditional_players),
         )
 
         players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
@@ -693,7 +701,7 @@ class DraftCommands(commands.Cog):
             pool_result = await asyncio.to_thread(
                 self.draft_service.select_player_pool,
                 regular_player_ids=regular_players,
-                conditional_player_ids=[],
+                conditional_player_ids=conditional_players,
                 exclusion_counts=exclusion_counts,
                 player_ratings=player_ratings,
                 forced_include_ids=forced_captain_ids,
@@ -713,8 +721,16 @@ class DraftCommands(commands.Cog):
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return False
 
-        full_exclusion_increment_ids = list(pool_result.excluded_ids)
-        half_exclusion_increment_ids: list[int] = []
+        full_exclusion_increment_ids = [
+            player_id
+            for player_id in pool_result.excluded_ids
+            if player_id in regular_players
+        ]
+        half_exclusion_increment_ids = [
+            player_id
+            for player_id in pool_result.excluded_ids
+            if player_id in conditional_players
+        ]
 
         # Create draft state
         try:
