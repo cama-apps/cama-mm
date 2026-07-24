@@ -466,7 +466,7 @@ Additional settings can be configured in `.env` (see `config.py` for all 50+ opt
 **Betting:**
 - `LEVERAGE_TIERS` - Available leverage options (default: 2,3,5)
 - `MAX_DEBT` - Maximum negative balance (default: 500)
-- `BET_LOCK_SECONDS` - Betting window duration (default: 900 / 15 min)
+- `BET_LOCK_SECONDS` - Betting window duration (default: 1200 / 20 min)
 - `AUTO_BLIND_ENABLED`, `AUTO_BLIND_THRESHOLD`, `AUTO_BLIND_PERCENTAGE` - Auto-liquidity settings
 - `AUTO_SPECTATOR_BET_ENABLED`, `AUTO_SPECTATOR_BET_COUNT`, `AUTO_SPECTATOR_BET_PERCENTAGE` (default 1% of balance) - Rich spectator auto-wager; spectators may also `/bet` both teams
 
