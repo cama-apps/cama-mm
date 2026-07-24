@@ -39,9 +39,9 @@ class RecalibrationService:
     """
     Handles player rating recalibration.
 
-    Recalibration allows players to set their RD (rating deviation) to at least 300,
-    effectively entering a new calibration phase where their rating can change
-    more rapidly. The player's current rating is preserved.
+    Recalibration restores RD (rating deviation) to at least the configured
+    initial uncertainty, effectively entering a new calibration phase where
+    rating can change more rapidly. The player's current rating is preserved.
 
     Requirements:
     - Player must have played at least 5 games
@@ -154,7 +154,7 @@ class RecalibrationService:
         Execute recalibration for a player.
 
         - Preserves current rating
-        - Sets RD to max(300, current_rd)
+        - Sets RD to max(configured initial RD, current_rd)
         - Resets volatility to initial_volatility (0.06)
         - Records recalibration timestamp and increments count
 
@@ -180,7 +180,7 @@ class RecalibrationService:
         old_rd = check["current_rd"]
         old_volatility = check["current_volatility"]
 
-        new_rd = max(300.0, old_rd)
+        new_rd = max(self.initial_rd, old_rd)
 
         # Atomic cooldown check + Glicko update + state bump. Closes the TOCTOU
         # where two concurrent /recalibrate calls could both pass the check

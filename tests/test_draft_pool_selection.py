@@ -23,6 +23,17 @@ def _make_player(
     )
 
 
+def test_draft_rating_fallback_preserves_zero_and_defaults_only_none():
+    import commands.draft as draft_commands
+
+    assert draft_commands._glicko_rating_or_default(
+        Player(name="Zero", glicko_rating=0.0)
+    ) == pytest.approx(0.0)
+    assert draft_commands._glicko_rating_or_default(
+        Player(name="Missing", glicko_rating=None)
+    ) == pytest.approx(1500.0)
+
+
 class TestScoreDraftPool:
     """Tests for _score_draft_pool helper."""
 

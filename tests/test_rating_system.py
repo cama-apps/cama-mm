@@ -9,8 +9,6 @@ from glicko2 import Player
 from config import (
     CALIBRATION_RD_THRESHOLD,
     MAX_RATING_SWING_PER_GAME,
-    RD_DECAY_CONSTANT,
-    RD_DECAY_GRACE_PERIOD_WEEKS,
 )
 from rating_system import CamaRatingSystem
 
@@ -53,6 +51,22 @@ class TestRatingSystemEdgeCases:
         rating_low = rating_system.mmr_to_rating(3000)
         rating_high = rating_system.mmr_to_rating(9000)
         assert rating_high > rating_low, "Higher MMR should give higher rating"
+
+    @pytest.mark.parametrize(
+        ("mmr", "expected_rating"),
+        [
+            (8000, 1875.0),
+            (12000, 2875.0),
+            (20000, 2875.0),
+            (250, 0.0),
+        ],
+    )
+    def test_new_player_seed_applies_discount_after_mmr_cap(self, mmr, expected_rating):
+        rating_system = CamaRatingSystem()
+
+        player = rating_system.create_player_from_mmr(mmr)
+
+        assert player.rating == pytest.approx(expected_rating)
 
     def test_create_player_from_none_mmr(self):
         """Test creating player when MMR is None."""
@@ -563,34 +577,68 @@ class TestRatingSystemCalibrationAndDecay:
         assert CamaRatingSystem.is_calibrated(CALIBRATION_RD_THRESHOLD)
         assert not CamaRatingSystem.is_calibrated(CALIBRATION_RD_THRESHOLD + 0.1)
 
-    def test_rd_decay_grace_and_floor_weeks(self):
-        # Grace period: no decay when below grace period (14 days default)
+    def test_rd_decay_starts_continuously_after_seven_day_grace(self):
         rd_start = 150.0
-        rd_after_13_days = CamaRatingSystem.apply_rd_decay(rd_start, RD_DECAY_GRACE_PERIOD_WEEKS * 7 - 1)
-        assert rd_after_13_days == rd_start, "No decay should apply during grace period"
-
-        # Right at the grace boundary: still no decay (one full week beyond
-        # grace is required before any decay applies).
-        rd_at_grace = CamaRatingSystem.apply_rd_decay(rd_start, RD_DECAY_GRACE_PERIOD_WEEKS * 7)
+        rd_at_grace = CamaRatingSystem.apply_rd_decay(rd_start, 7)
         assert rd_at_grace == rd_start, "Grace boundary itself should not decay"
 
-        # After grace: only the weeks BEYOND the grace period count. With grace
-        # of 14 days, 21 days inactive = 7 days past grace = 1 week of decay.
-        days = RD_DECAY_GRACE_PERIOD_WEEKS * 7 + 7
-        rd_after_21_days = CamaRatingSystem.apply_rd_decay(rd_start, days)
-        expected_weeks = (days - RD_DECAY_GRACE_PERIOD_WEEKS * 7) // 7
-        expected_rd = min(350.0, (rd_start * rd_start + (RD_DECAY_CONSTANT * RD_DECAY_CONSTANT) * expected_weeks) ** 0.5)
-        assert rd_after_21_days == expected_rd
-        assert rd_after_21_days > rd_start, "RD should increase after inactivity past grace period"
+        rd_after_8_days = CamaRatingSystem.apply_rd_decay(rd_start, 8)
+        assert rd_after_8_days > rd_start
 
-    def test_rd_decay_cap_and_already_max(self):
-        # Already at cap stays at cap
+        rd_after_14_days = CamaRatingSystem.apply_rd_decay(rd_start, 14)
+        assert rd_after_14_days == pytest.approx((rd_start**2 + 100.0**2) ** 0.5)
+
+        rd_after_30_days = CamaRatingSystem.apply_rd_decay(rd_start, 30)
+        expected_periods = (30 - 7) / 7
+        expected_rd = (rd_start**2 + 100.0**2 * expected_periods) ** 0.5
+        assert rd_after_30_days == pytest.approx(expected_rd)
+
+    def test_rd_decay_never_exceeds_new_player_rd(self):
         assert CamaRatingSystem.apply_rd_decay(350.0, 100) == 350.0
 
-        # Large gap should cap at 350
         rd_start = 340.0
-        rd_after_long_break = CamaRatingSystem.apply_rd_decay(rd_start, 70)  # 10 weeks
-        assert rd_after_long_break == 350.0, "RD decay should not exceed 350"
+        rd_after_long_break = CamaRatingSystem.apply_rd_decay(rd_start, 70)
+        assert rd_after_long_break == 350.0, "RD decay should not exceed new-player RD"
+
+
+class TestPredictiveProbability:
+    def test_probability_uses_both_teams_uncertainty_and_is_symmetric(self):
+        stronger_win_probability = CamaRatingSystem.predict_win_probability(
+            rating=1700.0,
+            rd=350.0,
+            opponent_rating=1500.0,
+            opponent_rd=50.0,
+        )
+        weaker_win_probability = CamaRatingSystem.predict_win_probability(
+            rating=1500.0,
+            rd=50.0,
+            opponent_rating=1700.0,
+            opponent_rd=350.0,
+        )
+
+        assert stronger_win_probability == pytest.approx(0.6826526903)
+        assert stronger_win_probability + weaker_win_probability == pytest.approx(1.0)
+
+
+class TestFixedVolatility:
+    @pytest.mark.parametrize("volatility", [0.04, 0.06, 0.08])
+    def test_match_update_preserves_each_players_volatility(self, volatility):
+        rating_system = CamaRatingSystem()
+        player = rating_system.create_player_from_rating(
+            rating=1500.0,
+            rd=200.0,
+            volatility=volatility,
+        )
+
+        _, _, updated_volatility = rating_system._update_player_rating(
+            player,
+            team_rating=1500.0,
+            opponent_rating=1500.0,
+            opponent_rd=100.0,
+            result=1.0,
+        )
+
+        assert updated_volatility == volatility
 
 
 class TestV3IndividualGlickoWithCap:
@@ -969,10 +1017,7 @@ class TestV3IndividualGlickoWithCap:
         assert all(abs(d - deltas[0]) < 0.01 for d in deltas), \
             f"Equal RD and rating should give equal deltas: {deltas}"
 
-    def test_new_player_converges_over_matches(self, rating_system):
-        """
-        A new player's RD should decrease substantially after a match.
-        """
+    def test_new_player_rd_contraction_is_limited_per_match(self, rating_system):
         team1 = [
             (Player(rating=1000, rd=350, vol=0.06), "new_player"),
             (Player(rating=1200, rd=80, vol=0.06), "cal_1"),
@@ -990,9 +1035,22 @@ class TestV3IndividualGlickoWithCap:
         )
 
         new_player_rd = t1_updated[0][1]
-        # RD should decrease significantly (at least 10%)
-        assert new_player_rd < 350 * 0.9, \
-            f"New player RD should decrease significantly: {350} -> {new_player_rd}"
+        assert new_player_rd == pytest.approx(350 * 0.935)
+
+    def test_new_player_reaches_calibration_after_about_twenty_matches(self, rating_system):
+        player = Player(rating=1500, rd=350, vol=0.06)
+
+        for game_number in range(20):
+            rating, rd, volatility = rating_system._update_player_rating(
+                player,
+                team_rating=1500,
+                opponent_rating=1500,
+                opponent_rd=100,
+                result=float(game_number % 2),
+            )
+            player = Player(rating=rating, rd=rd, vol=volatility)
+
+        assert 100.0 <= player.rd <= 105.0
 
 
 class TestV3TeamBasedExpectedOutcome:

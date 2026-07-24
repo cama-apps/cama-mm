@@ -2,8 +2,10 @@ import pytest
 
 from domain.models.player import Player
 from openskill_rating_system import CamaOpenSkillSystem
+from rating_system import CamaRatingSystem
 from utils.rating_insights import (
     compute_calibration_stats,
+    compute_player_calibration,
     get_os_win_probabilities,
 )
 
@@ -95,8 +97,8 @@ def test_compute_calibration_stats_with_predictions_and_drift():
     assert stats["rd_tiers"]["Fresh"] == 1
 
     assert stats["avg_certainty"] == pytest.approx(47.6, rel=1e-2)
-    assert stats["avg_drift"] == pytest.approx(-47.5, rel=1e-3)
-    assert stats["median_drift"] == pytest.approx(-47.5, rel=1e-3)
+    assert stats["avg_drift"] == pytest.approx(77.5, rel=1e-3)
+    assert stats["median_drift"] == pytest.approx(77.5, rel=1e-3)
 
     prediction_quality = stats["prediction_quality"]
     assert prediction_quality["count"] == 2
@@ -160,6 +162,21 @@ def test_compute_calibration_stats_openskill_prediction_quality_from_history():
     assert os_quality["ece"] is not None
     assert os_quality["accuracy"] == pytest.approx(0.5, rel=1e-6)
     assert calibrated_prob < raw_prob
+
+
+def test_player_calibration_treats_zero_rating_as_valid_seed_and_percentile():
+    rating_system = CamaRatingSystem()
+    player = Player(name="Zero", glicko_rating=0.0, initial_mmr=500)
+
+    calibration = compute_player_calibration(
+        player,
+        history=[],
+        rated_players=[player, Player(name="Higher", glicko_rating=100.0)],
+        rating_system=rating_system,
+    )
+
+    assert calibration.drift == pytest.approx(0.0)
+    assert calibration.percentile == pytest.approx(0.0)
 
 
 def _history_row(rating: float, rating_before: float | None = None) -> dict:

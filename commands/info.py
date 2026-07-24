@@ -1702,7 +1702,11 @@ class InfoCommands(commands.Cog):
         )
 
         # Rating profile
-        rating_display = rating_system.rating_to_display(player.glicko_rating) if player.glicko_rating else "N/A"
+        rating_display = (
+            rating_system.rating_to_display(player.glicko_rating)
+            if player.glicko_rating is not None
+            else "N/A"
+        )
         certainty = 100 - rating_system.get_rating_uncertainty_percentage(rd)
         percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
 

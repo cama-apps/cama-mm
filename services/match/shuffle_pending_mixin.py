@@ -367,28 +367,34 @@ class ShufflePendingMixin:
         )
 
         # Calculate Glicko-2 win probability for Radiant
-        radiant_glicko_rating, _, _ = self.rating_system.aggregate_team_stats(
-            [
-                self.rating_system.create_player_from_rating(
-                    p.glicko_rating or self.rating_system.mmr_to_rating(p.mmr or 4000),
-                    p.glicko_rd or 350.0,
-                    p.glicko_volatility or 0.06,
-                )
-                for p in radiant_team.players
-            ]
+        def prediction_player(player):
+            if player.glicko_rating is None:
+                return self.rating_system.create_player_from_mmr(player.mmr)
+            return self.rating_system.create_player_from_rating(
+                player.glicko_rating,
+                (
+                    player.glicko_rd
+                    if player.glicko_rd is not None
+                    else self.rating_system.initial_rd
+                ),
+                (
+                    player.glicko_volatility
+                    if player.glicko_volatility is not None
+                    else self.rating_system.initial_volatility
+                ),
+            )
+
+        radiant_glicko_rating, radiant_glicko_rd, _ = self.rating_system.aggregate_team_stats(
+            [prediction_player(player) for player in radiant_team.players]
         )
         dire_glicko_rating, dire_glicko_rd, _ = self.rating_system.aggregate_team_stats(
-            [
-                self.rating_system.create_player_from_rating(
-                    p.glicko_rating or self.rating_system.mmr_to_rating(p.mmr or 4000),
-                    p.glicko_rd or 350.0,
-                    p.glicko_volatility or 0.06,
-                )
-                for p in dire_team.players
-            ]
+            [prediction_player(player) for player in dire_team.players]
         )
-        glicko_radiant_win_prob = self.rating_system.expected_outcome(
-            radiant_glicko_rating, dire_glicko_rating, dire_glicko_rd
+        glicko_radiant_win_prob = self.rating_system.predict_win_probability(
+            radiant_glicko_rating,
+            radiant_glicko_rd,
+            dire_glicko_rating,
+            dire_glicko_rd,
         )
 
         # Calculate OpenSkill win probability for Radiant

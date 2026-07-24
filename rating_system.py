@@ -8,12 +8,22 @@ from glicko2 import Player
 
 from config import (
     CALIBRATION_RD_THRESHOLD,
+    INITIAL_GLICKO_RD,
     MAX_RATING_SWING_PER_GAME,
+    MAX_RD_CONTRACTION_PER_GAME,
+    NEW_PLAYER_MMR_DISCOUNT,
     RD_DECAY_CONSTANT,
-    RD_DECAY_GRACE_PERIOD_WEEKS,
+    RD_DECAY_GRACE_PERIOD_DAYS,
     STREAK_MULTIPLIER_PER_GAME,
     STREAK_THRESHOLD,
 )
+
+
+class FixedVolatilityPlayer(Player):
+    """Glicko-2 player whose volatility is an input, not an inferred state."""
+
+    def _newVol(self, *_args) -> float:
+        return self.vol
 
 
 class CamaRatingSystem:
@@ -35,14 +45,19 @@ class CamaRatingSystem:
     MMR_MIN = 0  # Minimum expected MMR
     MMR_MAX = 12000  # Maximum expected MMR (covers Immortal+)
     RATING_MIN = 0  # Minimum Glicko-2 rating
-    RATING_MAX = 3000  # Maximum Glicko-2 rating (standard Glicko-2 range)
+    # Upper end of the MMR-to-seed scale; live ratings are not upper-bounded.
+    RATING_MAX = 3000
 
     @classmethod
     def mmr_to_rating_scale(cls) -> float:
         """Calculate the scale factor for MMR to rating conversion."""
         return (cls.RATING_MAX - cls.RATING_MIN) / (cls.MMR_MAX - cls.MMR_MIN)
 
-    def __init__(self, initial_rd: float = 350.0, initial_volatility: float = 0.06):
+    def __init__(
+        self,
+        initial_rd: float = INITIAL_GLICKO_RD,
+        initial_volatility: float = 0.06,
+    ):
         """
         Initialize rating system.
 
@@ -78,37 +93,35 @@ class CamaRatingSystem:
         """
         Apply Glicko-2 style RD decay over time.
 
-        - Uses c (RD_DECAY_CONSTANT) and time periods in weeks (rounded down).
-        - Grace period: no decay for the first RD_DECAY_GRACE_PERIOD_WEEKS.
-        - RD is capped at 350.
-        - If RD is already 350, return as-is.
+        - Uses continuous fractional weeks after a calendar-day grace period.
+        - RD is capped at the configured new-player RD.
+        - If RD is already at that ceiling, return as-is.
         """
-        if rd >= 350.0:
-            return 350.0
+        if rd >= INITIAL_GLICKO_RD:
+            return INITIAL_GLICKO_RD
 
-        if days_since_last_match < RD_DECAY_GRACE_PERIOD_WEEKS * 7:
+        if days_since_last_match <= RD_DECAY_GRACE_PERIOD_DAYS:
             return rd
 
-        # Decay only over the weeks BEYOND the grace period. Otherwise crossing
-        # the grace boundary by a single day applies the full week count and
-        # punishes a player who returned right at the threshold.
-        decay_days = days_since_last_match - RD_DECAY_GRACE_PERIOD_WEEKS * 7
-        weeks = max(0, decay_days // 7)
-        if weeks == 0:
-            return rd
-
-        new_rd = math.sqrt(rd * rd + (RD_DECAY_CONSTANT * RD_DECAY_CONSTANT) * weeks)
-        return min(350.0, new_rd)
+        decay_days = days_since_last_match - RD_DECAY_GRACE_PERIOD_DAYS
+        periods = decay_days / 7.0
+        new_rd = math.sqrt(
+            rd * rd + (RD_DECAY_CONSTANT * RD_DECAY_CONSTANT) * periods
+        )
+        return min(INITIAL_GLICKO_RD, new_rd)
 
     @classmethod
-    def expected_outcome(
-        cls, rating: float, opponent_rating: float, opponent_rd: float
+    def predict_win_probability(
+        cls,
+        rating: float,
+        rd: float,
+        opponent_rating: float,
+        opponent_rd: float,
     ) -> float:
-        """
-        Estimate win probability given two ratings and opponent RD.
-        """
+        """Estimate a side-symmetric win probability using both teams' RDs."""
+        combined_rd = math.hypot(rd, opponent_rd)
         g = 1.0 / math.sqrt(
-            1.0 + (3.0 * (opponent_rd / cls.GLICKO2_SCALE) ** 2) / (math.pi**2)
+            1.0 + (3.0 * (combined_rd / cls.GLICKO2_SCALE) ** 2) / (math.pi**2)
         )
         expectation = 1.0 / (
             1.0 + math.exp(-g * (rating - opponent_rating) / cls.GLICKO2_SCALE)
@@ -119,14 +132,14 @@ class CamaRatingSystem:
         """
         Convert OpenDota MMR to Glicko-2 rating.
 
-        Maps MMR range (0-12000) to Glicko-2 range (0-3000) linearly.
-        This ensures new players aren't undervalued and the full range is used.
+        Maps the clamped MMR seed range (0-12000) to (0-3000) linearly.
+        Live Glicko ratings may subsequently rise above this seed scale.
 
         Args:
             mmr: MMR from OpenDota
 
         Returns:
-            Glicko-2 rating (0-3000 range)
+            Glicko-2 seed rating (0-3000 range)
         """
         # Clamp MMR to expected range
         mmr_clamped = max(self.MMR_MIN, min(mmr, self.MMR_MAX))
@@ -137,11 +150,17 @@ class CamaRatingSystem:
 
         return rating
 
+    @classmethod
+    def new_player_seed_mmr(cls, mmr: int) -> int:
+        """Clamp source MMR, then apply the deliberate newcomer underseed."""
+        capped_mmr = max(cls.MMR_MIN, min(mmr, cls.MMR_MAX))
+        return max(cls.MMR_MIN, capped_mmr - NEW_PLAYER_MMR_DISCOUNT)
+
     def rating_to_display(self, rating: float) -> int:
         """
         Convert Glicko-2 rating to display value (Cama Rating).
 
-        Cama Rating is displayed directly as the Glicko-2 rating (0-3000 range).
+        Cama Rating is displayed directly as the Glicko-2 rating.
 
         Args:
             rating: Glicko-2 rating
@@ -161,13 +180,14 @@ class CamaRatingSystem:
         Returns:
             Glicko-2 Player object
         """
-        if mmr is not None:
-            rating = self.mmr_to_rating(mmr)
-        else:
-            # Default rating if no MMR (use average MMR ~4000 = ~1000 rating)
-            rating = self.mmr_to_rating(4000)
+        source_mmr = mmr if mmr is not None else 4000
+        rating = self.mmr_to_rating(self.new_player_seed_mmr(source_mmr))
 
-        return Player(rating=rating, rd=self.initial_rd, vol=self.initial_volatility)
+        return FixedVolatilityPlayer(
+            rating=rating,
+            rd=self.initial_rd,
+            vol=self.initial_volatility,
+        )
 
     def create_player_from_rating(self, rating: float, rd: float, volatility: float) -> Player:
         """
@@ -181,7 +201,7 @@ class CamaRatingSystem:
         Returns:
             Glicko-2 Player object
         """
-        return Player(rating=rating, rd=rd, vol=volatility)
+        return FixedVolatilityPlayer(rating=rating, rd=rd, vol=volatility)
 
     def calculate_streak_multiplier(
         self, recent_outcomes: list[bool], won: bool
@@ -261,7 +281,11 @@ class CamaRatingSystem:
             Tuple of (new_rating, new_rd, new_vol)
         """
         # Use TEAM rating for expected outcome, but PLAYER's RD for convergence speed
-        synth = Player(rating=team_rating, rd=player.rd, vol=player.vol)
+        synth = FixedVolatilityPlayer(
+            rating=team_rating,
+            rd=player.rd,
+            vol=player.vol,
+        )
         synth.update_player([opponent_rating], [opponent_rd], [result])
 
         # Delta is how much the "team representative with this player's RD" moved
@@ -273,9 +297,10 @@ class CamaRatingSystem:
         delta = max(-MAX_RATING_SWING_PER_GAME, min(MAX_RATING_SWING_PER_GAME, delta))
 
         final_rating = max(0.0, player.rating + delta)
-        # RD and volatility from the synthetic player (team-based update)
-        # RD should never increase after a match
-        final_rd = min(player.rd, synth.rd)
+        # Preserve Glicko's confidence update, but do not allow RD to contract
+        # faster than the configured per-match limit.
+        contraction_floor = player.rd * (1.0 - MAX_RD_CONTRACTION_PER_GAME)
+        final_rd = min(player.rd, max(synth.rd, contraction_floor))
         final_vol = synth.vol
 
         return final_rating, final_rd, final_vol

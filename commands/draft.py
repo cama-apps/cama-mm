@@ -44,6 +44,12 @@ PRE_DRAFT_TIMEOUT = 300.0  # 5 minutes for pre-draft choices
 DRAFTING_TIMEOUT = 600.0  # 10 minutes for player drafting
 
 
+def _glicko_rating_or_default(player, default: float = 1500.0) -> float:
+    """Return a stored rating, treating only missing data as the default."""
+    rating = getattr(player, "glicko_rating", None)
+    return default if rating is None else rating
+
+
 # ============================================================================
 # Pre-Draft Choice Views
 # ============================================================================
@@ -281,7 +287,7 @@ class DraftingView(discord.ui.View):
                 PlayerPickButton(
                     player_id=player.discord_id,
                     player_name=display_name,
-                    player_rating=player.glicko_rating or 1500.0,
+                    player_rating=_glicko_rating_or_default(player),
                     player_roles=player.preferred_roles,
                     row=row,
                 )
@@ -524,7 +530,7 @@ class DraftCommands(commands.Cog):
         # Get available players for buttons
         available_ids = state.available_player_ids
         available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, guild_id)
-        available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+        available_players.sort(key=_glicko_rating_or_default, reverse=True)
 
         # Pass the mock state (never stored in the manager) so this sample
         # view's timeout can never clear a real draft; do not track it either.
@@ -682,7 +688,9 @@ class DraftCommands(commands.Cog):
         )
 
         players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
-        player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
+        player_ratings = {
+            p.discord_id: _glicko_rating_or_default(p) for p in players
+        }
 
         # Get exclusion counts for player pool selection
         exclusion_counts = await asyncio.to_thread(self.player_repo.get_exclusion_counts, lobby_player_ids, guild_id)
@@ -779,7 +787,7 @@ class DraftCommands(commands.Cog):
             state.player_pool_data = {
                 p.discord_id: {
                     "name": get_player_display_name(p, discord_id=p.discord_id, guild=interaction.guild),
-                    "rating": p.glicko_rating or 1500.0,
+                    "rating": _glicko_rating_or_default(p),
                     "roles": p.preferred_roles or [],
                 }
                 for p in players
@@ -1357,8 +1365,8 @@ class DraftCommands(commands.Cog):
                     self.player_repo.get_by_id, state.dire_captain_id, guild_id
                 )
                 if radiant_cap and dire_cap:
-                    rad_rating = radiant_cap.glicko_rating or 1500.0
-                    dire_rating = dire_cap.glicko_rating or 1500.0
+                    rad_rating = _glicko_rating_or_default(radiant_cap)
+                    dire_rating = _glicko_rating_or_default(dire_cap)
                     rating_diff = int(abs(rad_rating - dire_rating))
                     if rating_diff <= 50:
                         neon_result = await neon.on_captain_symmetry(
@@ -1385,7 +1393,7 @@ class DraftCommands(commands.Cog):
         # Get available players for buttons, sorted by rating descending
         available_ids = state.available_player_ids
         available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, guild_id)
-        available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+        available_players.sort(key=_glicko_rating_or_default, reverse=True)
 
         # Create view with player buttons
         view = DraftingView(
@@ -1439,7 +1447,7 @@ class DraftCommands(commands.Cog):
             player = all_players.get(pid)
             # Use radiant_captain_name for captain (already resolved), else use get_player_display_name
             name = radiant_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
-            rating = player.glicko_rating if player and player.glicko_rating else 1500.0
+            rating = _glicko_rating_or_default(player)
             roles = get_role_nums(pid)
             radiant_lines.append(format_player_row(is_cap, name, rating, roles))
 
@@ -1449,7 +1457,7 @@ class DraftCommands(commands.Cog):
             player = all_players.get(pid)
             # Use dire_captain_name for captain (already resolved), else use get_player_display_name
             name = dire_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
-            rating = player.glicko_rating if player and player.glicko_rating else 1500.0
+            rating = _glicko_rating_or_default(player)
             roles = get_role_nums(pid)
             dire_lines.append(format_player_row(is_cap, name, rating, roles))
 
@@ -1460,11 +1468,11 @@ class DraftCommands(commands.Cog):
         available_ids = state.available_player_ids
         available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, state.guild_id)
         # Sort by rating descending
-        available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+        available_players.sort(key=_glicko_rating_or_default, reverse=True)
         available_display = []
         for p in available_players:
             display_name = get_player_display_name(p, discord_id=p.discord_id, guild=guild)
-            rating = p.glicko_rating or 1500.0
+            rating = _glicko_rating_or_default(p)
             roles = format_roles(p.preferred_roles)
             pref = state.side_preferences.get(p.discord_id)
             # Preference indicator at end
@@ -1535,11 +1543,11 @@ class DraftCommands(commands.Cog):
         )
         if display_excluded_ids:
             excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, display_excluded_ids, state.guild_id)
-            excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+            excluded_players.sort(key=_glicko_rating_or_default, reverse=True)
             excluded_display = []
             for p in excluded_players:
                 display_name = get_player_display_name(p, discord_id=p.discord_id, guild=guild)
-                rating = p.glicko_rating or 1500.0
+                rating = _glicko_rating_or_default(p)
                 roles = format_roles(p.preferred_roles)
                 excluded_display.append(f"{display_name} ({rating:.0f}) {roles}".strip())
 
@@ -1588,7 +1596,7 @@ class DraftCommands(commands.Cog):
                 # Still drafting - update with new buttons, sorted by rating
                 available_ids = state.available_player_ids
                 available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, state.guild_id)
-                available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+                available_players.sort(key=_glicko_rating_or_default, reverse=True)
 
                 view = DraftingView(
                     cog=self,
@@ -2028,8 +2036,8 @@ class DraftCommands(commands.Cog):
         radiant_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.radiant_player_ids, guild_id)
         dire_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.dire_player_ids, guild_id)
 
-        radiant_value = sum(p.glicko_rating or 1500.0 for p in radiant_players)
-        dire_value = sum(p.glicko_rating or 1500.0 for p in dire_players)
+        radiant_value = sum(_glicko_rating_or_default(p) for p in radiant_players)
+        dire_value = sum(_glicko_rating_or_default(p) for p in dire_players)
         value_diff = abs(radiant_value - dire_value)
 
         # Determine if this is a bomb pot match (~10% chance)
@@ -2102,12 +2110,12 @@ class DraftCommands(commands.Cog):
 
         # Calculate team rating totals
         radiant_sum = sum(
-            (all_players.get(pid).glicko_rating or 1500.0)
+            _glicko_rating_or_default(all_players.get(pid))
             for pid in state.radiant_player_ids
             if all_players.get(pid)
         )
         dire_sum = sum(
-            (all_players.get(pid).glicko_rating or 1500.0)
+            _glicko_rating_or_default(all_players.get(pid))
             for pid in state.dire_player_ids
             if all_players.get(pid)
         )
@@ -2120,7 +2128,7 @@ class DraftCommands(commands.Cog):
             player = all_players.get(pid)
             # Use radiant_captain_name for captain (already resolved), else use get_player_display_name
             name = radiant_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
-            rating = player.glicko_rating if player and player.glicko_rating else 1500.0
+            rating = _glicko_rating_or_default(player)
             roles = get_role_nums(pid)
             radiant_lines.append(format_player_row(is_cap, name, rating, roles))
 
@@ -2130,7 +2138,7 @@ class DraftCommands(commands.Cog):
             player = all_players.get(pid)
             # Use dire_captain_name for captain (already resolved), else use get_player_display_name
             name = dire_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
-            rating = player.glicko_rating if player and player.glicko_rating else 1500.0
+            rating = _glicko_rating_or_default(player)
             roles = get_role_nums(pid)
             dire_lines.append(format_player_row(is_cap, name, rating, roles))
 
@@ -2189,11 +2197,11 @@ class DraftCommands(commands.Cog):
         )
         if display_excluded_ids:
             excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, display_excluded_ids, state.guild_id)
-            excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+            excluded_players.sort(key=_glicko_rating_or_default, reverse=True)
             excluded_display = []
             for p in excluded_players:
                 display_name = get_player_display_name(p, discord_id=p.discord_id, guild=guild)
-                rating = p.glicko_rating or 1500.0
+                rating = _glicko_rating_or_default(p)
                 roles = format_roles(p.preferred_roles)
                 excluded_display.append(f"{display_name} ({rating:.0f}) {roles}".strip())
 

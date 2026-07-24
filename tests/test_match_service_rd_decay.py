@@ -36,8 +36,6 @@ def _iso_days_ago(days: int) -> str:
 
 
 def test_load_glicko_player_applies_decay_after_grace_period():
-    from config import RD_DECAY_GRACE_PERIOD_WEEKS
-
     start_rd = 100.0
     rating_tuple = (1500.0, start_rd, 0.06)
     days_inactive = 21  # 3 weeks ago
@@ -47,9 +45,8 @@ def test_load_glicko_player_applies_decay_after_grace_period():
 
     player, _pid = ms._load_glicko_player(1)
 
-    # Decay only counts weeks past the grace period.
-    expected_weeks = max(0, (days_inactive - RD_DECAY_GRACE_PERIOD_WEEKS * 7) // 7)
-    expected_rd = math.sqrt(start_rd * start_rd + (50.0 * 50.0) * expected_weeks)
+    expected_periods = (days_inactive - 7) / 7
+    expected_rd = math.sqrt(start_rd * start_rd + (100.0 * 100.0) * expected_periods)
     assert math.isclose(player.rd, expected_rd, rel_tol=1e-6), "RD should decay using Glicko formula"
     assert player.rd >= start_rd
 

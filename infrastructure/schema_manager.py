@@ -600,9 +600,64 @@ class SchemaManager:
                 "add_last_pingedkevin_to_players",
                 self._migration_add_last_pingedkevin_to_players,
             ),
+            (
+                "recompute_symmetric_glicko_predictions",
+                self._migration_recompute_glicko_prediction_probabilities,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_recompute_glicko_prediction_probabilities(self, cursor) -> None:
+        """Rewrite historical prediction snapshots with the symmetric formula."""
+        from rating_system import CamaRatingSystem
+
+        rows = cursor.execute(
+            """
+            SELECT match_id, radiant_rating, radiant_rd, dire_rating, dire_rd
+            FROM match_predictions
+            WHERE radiant_rating IS NOT NULL
+              AND radiant_rd IS NOT NULL
+              AND dire_rating IS NOT NULL
+              AND dire_rd IS NOT NULL
+            """
+        ).fetchall()
+        updates = []
+        for match_id, radiant_rating, radiant_rd, dire_rating, dire_rd in rows:
+            radiant_probability = CamaRatingSystem.predict_win_probability(
+                radiant_rating,
+                radiant_rd,
+                dire_rating,
+                dire_rd,
+            )
+            updates.append((radiant_probability, match_id))
+
+        if not updates:
+            return
+
+        cursor.executemany(
+            """
+            UPDATE match_predictions
+            SET expected_radiant_win_prob = ?
+            WHERE match_id = ?
+            """,
+            updates,
+        )
+        cursor.executemany(
+            """
+            UPDATE rating_history
+            SET expected_team_win_prob = CASE team_number
+                WHEN 1 THEN ?
+                WHEN 2 THEN 1.0 - ?
+                ELSE expected_team_win_prob
+            END
+            WHERE match_id = ?
+            """,
+            [
+                (radiant_probability, radiant_probability, match_id)
+                for radiant_probability, match_id in updates
+            ],
+        )
 
     def _migration_create_llm_request_attempts_table(self, cursor) -> None:
         """Create the metadata-only LLM request telemetry table."""

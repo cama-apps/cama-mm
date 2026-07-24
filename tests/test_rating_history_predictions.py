@@ -73,3 +73,62 @@ def test_record_match_stores_predictions_and_history(repo_db_path):
         assert entry["expected_team_win_prob"] == pytest.approx(0.5, rel=1e-6)
         assert entry["team_number"] in (1, 2)
         assert entry["won"] in (0, 1, True, False)
+
+
+@pytest.mark.parametrize(
+    ("special_rating", "special_mmr"),
+    [(0.0, 500), (None, 8000)],
+)
+def test_shuffle_prediction_preserves_zero_and_uses_discounted_missing_seed(
+    repo_db_path, special_rating, special_mmr
+):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=True,
+    )
+
+    player_ids = list(range(9201, 9211))
+    for index, pid in enumerate(player_ids):
+        is_special = index == 0
+        player_repo.add(
+            discord_id=pid,
+            discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
+            initial_mmr=special_mmr if is_special else 6000,
+            glicko_rating=special_rating if is_special else 1500.0,
+            glicko_rd=350.0 if is_special else 100.0,
+            glicko_volatility=0.06,
+        )
+
+    result = match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    def aggregate(team):
+        glicko_players = []
+        for player in team.players:
+            if player.glicko_rating is None:
+                glicko_players.append(
+                    match_service.rating_system.create_player_from_mmr(player.mmr)
+                )
+            else:
+                glicko_players.append(
+                    match_service.rating_system.create_player_from_rating(
+                        player.glicko_rating,
+                        player.glicko_rd,
+                        player.glicko_volatility,
+                    )
+                )
+        return match_service.rating_system.aggregate_team_stats(glicko_players)
+
+    radiant_rating, radiant_rd, _ = aggregate(result["radiant_team"])
+    dire_rating, dire_rd, _ = aggregate(result["dire_team"])
+    expected = match_service.rating_system.predict_win_probability(
+        radiant_rating,
+        radiant_rd,
+        dire_rating,
+        dire_rd,
+    )
+
+    assert result["glicko_radiant_win_prob"] == pytest.approx(expected)
