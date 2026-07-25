@@ -358,3 +358,122 @@ def test_resumed_pinnacle_loss_ticks_snapshot_armor_after_swap(
     assert dig_repo.get_gear_by_id(replacement_armor_id)["durability"] == (
         durability_before[replacement_armor_id]
     )
+
+
+def _seed_pinnacle_phase(dig_repo, *, phase, status, wager=0):
+    """Move the parked pinnacle fight to a later phase, optionally with a
+    carried stake from phase 1."""
+    tunnel = dig_repo.get_tunnel(DISCORD_ID, TEST_GUILD_ID)
+    bp = json.loads(tunnel["boss_progress"])
+    entry = {
+        "boss_id": "forgotten_king",
+        "status": status,
+        "first_meet_seen": True,
+    }
+    if wager > 0:
+        entry["carried_wager"] = wager
+        entry["carried_risk_tier"] = "bold"
+    bp[str(PINNACLE_DEPTH)] = entry
+    dig_repo.update_tunnel(
+        DISCORD_ID, TEST_GUILD_ID,
+        boss_progress=json.dumps(bp),
+        pinnacle_phase=phase,
+    )
+
+
+def test_pinnacle_loss_debit_floors_at_live_balance(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    """A carried-wager loss clamps the debit to the player's live balance.
+
+    The stake was only validated when it was first placed, never escrowed, so
+    the balance can drop below it between phases; a loss must zero the balance,
+    not drive it negative (the regular boss-loss path already clamps).
+    """
+    _at_pinnacle(dig_service, dig_repo, player_repository, monkeypatch)
+    _seed_pinnacle_phase(dig_repo, phase=2, status="phase1_defeated", wager=1_500)
+    player_repository.update_balance(DISCORD_ID, TEST_GUILD_ID, 100)
+    _fix_combat_stats(
+        dig_service, monkeypatch,
+        player_hp=1, boss_hp=30, boss_dmg=1, player_hit=0.0,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+
+    result = dig_service.fight_boss(
+        DISCORD_ID, TEST_GUILD_ID, "cautious", wager=0,
+    )
+
+    assert result["success"]
+    assert result["won"] is False
+    assert result["jc_delta"] == -100
+    assert player_repository.get_balance(DISCORD_ID, TEST_GUILD_ID) == 0
+
+
+def test_pinnacle_loss_never_credits_a_negative_balance(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    """A loss with an already-negative balance must debit nothing — clamping
+    against a negative balance must not mint coins."""
+    _at_pinnacle(dig_service, dig_repo, player_repository, monkeypatch)
+    _seed_pinnacle_phase(dig_repo, phase=2, status="phase1_defeated", wager=1_500)
+    player_repository.update_balance(DISCORD_ID, TEST_GUILD_ID, -50)
+    _fix_combat_stats(
+        dig_service, monkeypatch,
+        player_hp=1, boss_hp=30, boss_dmg=1, player_hit=0.0,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.99)
+
+    result = dig_service.fight_boss(
+        DISCORD_ID, TEST_GUILD_ID, "cautious", wager=0,
+    )
+
+    assert result["success"]
+    assert result["won"] is False
+    assert result["jc_delta"] == 0
+    assert player_repository.get_balance(DISCORD_ID, TEST_GUILD_ID) == -50
+
+
+class _HalvingBankruptcy:
+    """Stub bankruptcy service that withholds half of any winnings."""
+
+    def apply_penalty_to_winnings(self, discord_id, amount, guild_id):
+        return {
+            "penalized": amount // 2,
+            "penalty_applied": amount - amount // 2,
+        }
+
+
+def test_pinnacle_victory_applies_bankruptcy_debuff(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    """The phase-3 payout must run through the bankruptcy debuff like every
+    other JC-earning path."""
+    from services.dig_constants import (
+        PINNACLE_BASE_JC_REWARD,
+        scale_positive_dig_jc,
+    )
+
+    _at_pinnacle(dig_service, dig_repo, player_repository, monkeypatch)
+    _seed_pinnacle_phase(dig_repo, phase=3, status="phase2_defeated")
+    dig_service.bankruptcy_service = _HalvingBankruptcy()
+    _fix_combat_stats(
+        dig_service, monkeypatch,
+        player_hp=5, boss_hp=1, boss_dmg=0, player_hit=1.0, player_dmg=5,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+    balance_before = player_repository.get_balance(DISCORD_ID, TEST_GUILD_ID)
+
+    result = dig_service.fight_boss(
+        DISCORD_ID, TEST_GUILD_ID, "cautious", wager=0,
+    )
+
+    full = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD)
+    assert result["success"]
+    assert result["won"] is True
+    assert result["pinnacle_defeated"] is True
+    assert result["jc_delta"] == full // 2
+    assert result["bankruptcy_penalty"] == full - full // 2
+    assert (
+        player_repository.get_balance(DISCORD_ID, TEST_GUILD_ID)
+        == balance_before + full // 2
+    )

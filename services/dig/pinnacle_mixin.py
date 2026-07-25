@@ -1128,6 +1128,11 @@ class PinnacleMixin:
             scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
             gross_payout = gross_base_reward + wager_payout
             total_reward = scaled_base_reward + wager_payout
+            # Bankruptcy debuff: a penalized player keeps only the configured
+            # fraction of the pinnacle winnings; withheld share is a sink.
+            total_reward, pinnacle_bankruptcy_penalty = self._penalize_jc(
+                discord_id, guild_id, total_reward
+            )
             relic_drop = self._roll_pinnacle_relic(tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
             boss_progress[str(PINNACLE_DEPTH)] = {
@@ -1169,6 +1174,7 @@ class PinnacleMixin:
                     "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "scaled_base_jc": scaled_base_reward,
                     "wager_payout": wager_payout,
+                    "bankruptcy_penalty": pinnacle_bankruptcy_penalty,
                     "relic_id": relic_drop["artifact_id"],
                 }),
             )
@@ -1182,6 +1188,7 @@ class PinnacleMixin:
                 jc_delta=total_reward,
                 payout=total_reward,
                 gross_payout=gross_payout,
+                bankruptcy_penalty=pinnacle_bankruptcy_penalty,
                 base_reward=jc_reward,
                 wager_payout=wager_payout,
                 new_depth=new_depth,
@@ -1219,6 +1226,14 @@ class PinnacleMixin:
                     gear_broken_names.append(armor_name)
         new_depth = max(0, depth - knockback)
         jc_delta = -wager if wager > 0 else 0
+        # Floor the debit at the player's current balance, mirroring the
+        # regular-boss loss path: the carried wager was only *validated* when
+        # it was first placed, never escrowed, so a player who spent JC
+        # between phases or during a mid-fight pause could be driven negative
+        # here. Never credit a player whose balance is already negative.
+        if jc_delta < 0:
+            current_balance = self.player_repo.get_balance(discord_id, guild_id)
+            jc_delta = max(jc_delta, -max(0, current_balance))
         self._persist_boss_hp_after_fight(
             boss_progress, phase_key, pinnacle_id,
             ending_hp=max(0, boss_hp), hp_max=boss_hp_max,
@@ -1235,7 +1250,7 @@ class PinnacleMixin:
 
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            balance_delta=(-wager if wager > 0 else 0),
+            balance_delta=jc_delta,
             tunnel_updates={
                 "depth": new_depth,
                 "boss_progress": json.dumps(boss_progress),
