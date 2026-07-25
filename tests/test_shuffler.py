@@ -1222,6 +1222,32 @@ class TestRoleAssignmentCommonPath:
 class TestShuffler14Players:
     """Tests for 14-player pool shuffling (new max lobby size)."""
 
+    def test_split_bound_indexes_each_team_summary_once(
+        self, monkeypatch
+    ):
+        """Recurring five-player teams should bypass repeated summary lookups."""
+        players = _seeded_14_player_pool(0x14CA, "Mask")
+        shuffler = BalancedShuffler()
+        _give_shuffler_loose_upper_bound(monkeypatch, shuffler)
+        original_summary = shuffler._team_role_metrics_summary
+        summarized_teams: list[tuple[int | None, ...]] = []
+
+        def counted_summary(team_players, *args, **kwargs):
+            summarized_teams.append(
+                tuple(player.discord_id for player in team_players)
+            )
+            return original_summary(team_players, *args, **kwargs)
+
+        monkeypatch.setattr(
+            shuffler, "_team_role_metrics_summary", counted_summary
+        )
+
+        shuffler.shuffle_branch_bound(players)
+
+        assert summarized_teams
+        assert len(summarized_teams) == len(set(summarized_teams))
+        assert len(summarized_teams) <= math.comb(14, 5)
+
     @pytest.mark.parametrize(
         ("seed", "recent_count"),
         [

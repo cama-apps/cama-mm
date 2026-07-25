@@ -1564,6 +1564,17 @@ class BalancedShuffler:
             and getattr(score_unconstrained_assignments, "__func__", None)
             is BalancedShuffler._score_unconstrained_role_assignments
         )
+        player_bit_masks = tuple(1 << index for index in range(14))
+        team_summary_by_mask: list[_TeamRoleMetricsSummary | None] = (
+            [None] * (1 << 14) if use_split_role_bound else []
+        )
+        best_mask_result: tuple[
+            int,
+            int,
+            tuple[str, ...],
+            tuple[str, ...],
+            list[Player],
+        ] | None = None
 
         # Step 2: Iterate through all ways to select 10 players from 14
         # C(14,10) = C(14,4) = 1001 combinations
@@ -1619,19 +1630,48 @@ class BalancedShuffler:
                 pruned_team_splits += len(_UNIQUE_TEAM_SPLITS)
                 continue
 
+            selected_mask = (
+                sum(player_bit_masks[index] for index in selected_indices)
+                if use_split_role_bound
+                else 0
+            )
+
             # Step 3: Iterate once through each unordered team split with pruning.
             for team1_indices, team2_indices in _UNIQUE_TEAM_SPLITS:
-                team1_players = [selected_players[i] for i in team1_indices]
-                team2_players = [selected_players[i] for i in team2_indices]
-
                 # Step 4: Full role optimization (only for promising splits)
                 if use_split_role_bound:
-                    team1_summary = get_team_metrics_summary(
-                        team1_players, 3, scoring_context
+                    team1_mask = (
+                        player_bit_masks[selected_indices[team1_indices[0]]]
+                        | player_bit_masks[selected_indices[team1_indices[1]]]
+                        | player_bit_masks[selected_indices[team1_indices[2]]]
+                        | player_bit_masks[selected_indices[team1_indices[3]]]
+                        | player_bit_masks[selected_indices[team1_indices[4]]]
                     )
-                    team2_summary = get_team_metrics_summary(
-                        team2_players, 3, scoring_context
-                    )
+                    team2_mask = selected_mask ^ team1_mask
+
+                    team1_summary = team_summary_by_mask[team1_mask]
+                    if team1_summary is None:
+                        team1_players = [
+                            players[index]
+                            for index, bit_mask in enumerate(player_bit_masks)
+                            if team1_mask & bit_mask
+                        ]
+                        team1_summary = get_team_metrics_summary(
+                            team1_players, 3, scoring_context
+                        )
+                        team_summary_by_mask[team1_mask] = team1_summary
+
+                    team2_summary = team_summary_by_mask[team2_mask]
+                    if team2_summary is None:
+                        team2_players = [
+                            players[index]
+                            for index, bit_mask in enumerate(player_bit_masks)
+                            if team2_mask & bit_mask
+                        ]
+                        team2_summary = get_team_metrics_summary(
+                            team2_players, 3, scoring_context
+                        )
+                        team_summary_by_mask[team2_mask] = team2_summary
 
                     # Every assignment's value lies in its team's interval.
                     # The distance between disjoint intervals is therefore a
@@ -1675,6 +1715,8 @@ class BalancedShuffler:
                         )
                     )
                 else:
+                    team1_players = [selected_players[i] for i in team1_indices]
+                    team2_players = [selected_players[i] for i in team2_indices]
                     team1_roles, team2_roles, base_score = (
                         score_role_assignments(
                             team1_players,
@@ -1694,11 +1736,44 @@ class BalancedShuffler:
                     if team1_roles is None or team2_roles is None:
                         continue
                     best_score = total_score
-                    best_result = (
-                        Team(team1_players, role_assignments=team1_roles),
-                        Team(team2_players, role_assignments=team2_roles),
-                        excluded_players,
-                    )
+                    if use_split_role_bound:
+                        best_mask_result = (
+                            team1_mask,
+                            team2_mask,
+                            team1_roles,
+                            team2_roles,
+                            excluded_players,
+                        )
+                    else:
+                        best_result = (
+                            Team(team1_players, role_assignments=team1_roles),
+                            Team(team2_players, role_assignments=team2_roles),
+                            excluded_players,
+                        )
+
+        if best_mask_result is not None:
+            (
+                team1_mask,
+                team2_mask,
+                team1_roles,
+                team2_roles,
+                excluded_players,
+            ) = best_mask_result
+            team1_players = [
+                players[index]
+                for index, bit_mask in enumerate(player_bit_masks)
+                if team1_mask & bit_mask
+            ]
+            team2_players = [
+                players[index]
+                for index, bit_mask in enumerate(player_bit_masks)
+                if team2_mask & bit_mask
+            ]
+            best_result = (
+                Team(team1_players, role_assignments=team1_roles),
+                Team(team2_players, role_assignments=team2_roles),
+                excluded_players,
+            )
 
         logger.info(
             f"Branch & bound stats: pruned {pruned_player_selections} player selections, "
