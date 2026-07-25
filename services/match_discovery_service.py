@@ -300,17 +300,22 @@ class MatchDiscoveryService:
         if not candidate_matches:
             return {"match_id": match_id, "status": "no_candidates"}
 
-        # Find best candidate based on unique player count
         best_match_id = selected_match_id
         best_player_count = selected_player_count
 
-        for valve_match_id, matched_discord_ids in candidate_matches.items():
-            if valve_match_id in rejected_detail_candidates:
-                continue
-            player_count = len(matched_discord_ids)
-            if player_count > best_player_count:
-                best_match_id = valve_match_id
-                best_player_count = player_count
+        # A candidate validated against the full details payload is
+        # authoritative; only when none validated do we fall back to the
+        # naive per-player history correlation. Rescanning naive counts on
+        # top of a validated pick could replace it with a candidate whose
+        # roster was never checked.
+        if best_match_id is None:
+            for valve_match_id, matched_discord_ids in candidate_matches.items():
+                if valve_match_id in rejected_detail_candidates:
+                    continue
+                player_count = len(matched_discord_ids)
+                if player_count > best_player_count:
+                    best_match_id = valve_match_id
+                    best_player_count = player_count
 
         # If every fetched details payload disproved the historical candidate,
         # retain the strongest roster overlap for useful low-confidence output.

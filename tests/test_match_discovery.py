@@ -156,6 +156,52 @@ class TestMatchDiscoveryService:
         )
         mock_opendota_api.get_match_details.assert_called_once_with(99999)
 
+    def test_validated_candidate_not_replaced_by_unvalidated_naive_count(
+        self, mock_repos, mock_opendota_api, monkeypatch
+    ):
+        """A roster-validated candidate is authoritative: a candidate whose
+        details were never checked must not outrank it on naive
+        timestamp-correlation counts (reachable when
+        ENRICHMENT_MIN_PLAYER_MATCH is configured below the lobby size)."""
+        monkeypatch.setattr(
+            "services.match_discovery_service.ENRICHMENT_MIN_PLAYER_MATCH", 2
+        )
+        match_repo, player_repo = mock_repos
+        match_repo.get_match.return_value = {
+            "match_id": 1,
+            "match_date": "2024-01-15 12:00:00",
+        }
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": discord_id} for discord_id in range(1, 11)
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {
+            discord_id: [discord_id + 1000] for discord_id in range(1, 11)
+        }
+        match_time = int(datetime(2024, 1, 15, 12, 0, tzinfo=UTC).timestamp())
+        # Five players' histories correlate with 99999 (naive count 5), but
+        # its details are unavailable so it is never roster-validated. The
+        # sixth history surfaces 88888, whose details validate 2 players.
+        histories = {
+            steam_id: [{"match_id": 99999, "start_time": match_time + 10}]
+            for steam_id in range(1001, 1006)
+        }
+        histories[1006] = [{"match_id": 88888, "start_time": match_time + 60}]
+        mock_opendota_api.get_player_matches.side_effect = (
+            lambda steam_id, *a, **kw: histories.get(steam_id, [])
+        )
+        mock_opendota_api.get_match_details.side_effect = lambda mid: (
+            {"players": [{"account_id": 1001}, {"account_id": 1006}]}
+            if mid == 88888
+            else None
+        )
+
+        service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
+
+        assert result["status"] == "discovered"
+        assert result["valve_match_id"] == 88888
+        assert result["player_count"] == 2
+
     def test_discover_match_low_confidence_skipped(self, mock_repos, mock_opendota_api):
         """Test discovery with low confidence (<80%) is skipped."""
         match_repo, player_repo = mock_repos
