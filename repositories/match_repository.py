@@ -1324,27 +1324,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
         guild_id = self.normalize_guild_id(guild_id)
         outcomes = {discord_id: [] for discord_id in unique_ids}
-        placeholders = ",".join("?" for _ in unique_ids)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                SELECT discord_id, won FROM (
-                    SELECT discord_id, won, id,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY discord_id ORDER BY id DESC
-                           ) AS recency_rank
-                    FROM rating_history
-                    WHERE guild_id = ? AND won IS NOT NULL
-                      AND discord_id IN ({placeholders})
+            for discord_id in unique_ids:
+                cursor.execute(
+                    """
+                    SELECT won FROM rating_history
+                    WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (discord_id, guild_id, limit),
                 )
-                WHERE recency_rank <= ?
-                ORDER BY discord_id, id DESC
-                """,
-                (guild_id, *unique_ids, limit),
-            )
-            for row in cursor.fetchall():
-                outcomes[row["discord_id"]].append(bool(row["won"]))
+                outcomes[discord_id] = [
+                    bool(row["won"]) for row in cursor.fetchall()
+                ]
         return outcomes
 
     def get_player_outcomes_before_match(
