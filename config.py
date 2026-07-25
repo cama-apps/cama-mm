@@ -409,9 +409,11 @@ PREDICTION_CONTRACT_VALUE = _parse_int("PREDICTION_CONTRACT_VALUE", 10)         
 PREDICTION_TICK_SIZE = _parse_int("PREDICTION_TICK_SIZE", 1)                     # jopa per price tick (= 1% probability)
 PREDICTION_LEVELS_PER_SIDE = _parse_int("PREDICTION_LEVELS_PER_SIDE", 3)         # ladder depth each side (initial seed)
 PREDICTION_SIZE_PER_LEVEL = _parse_int("PREDICTION_SIZE_PER_LEVEL", 50)          # contracts per level (initial seed)
+PREDICTION_OUTER_LEVEL_SIZES = _parse_int_list("PREDICTION_OUTER_LEVEL_SIZES", [20, 15, 10, 5])  # tapered levels beyond the initial seed
 PREDICTION_SPREAD_TICKS = _parse_int("PREDICTION_SPREAD_TICKS", 2)               # top-of-book offset from mid (initial seed)
 PREDICTION_REFRESH_LEVELS_PER_SIDE = _parse_int("PREDICTION_REFRESH_LEVELS_PER_SIDE", 3)  # daily-refresh ladder depth
 PREDICTION_REFRESH_SIZE_PER_LEVEL = _parse_int("PREDICTION_REFRESH_SIZE_PER_LEVEL", 10)   # daily-refresh contracts/level
+PREDICTION_REFRESH_OUTER_LEVEL_SIZES = _parse_int_list("PREDICTION_REFRESH_OUTER_LEVEL_SIZES", [8, 6, 4, 2])  # tapered levels beyond the normal refresh range
 PREDICTION_REFRESH_SPREAD_TICKS = _parse_int("PREDICTION_REFRESH_SPREAD_TICKS", 4)        # daily-refresh top-of-book offset (wider than seed)
 PREDICTION_REFRESH_SECONDS = _parse_int("PREDICTION_REFRESH_SECONDS", 86400)     # per-market refresh interval (~daily)
 PREDICTION_REFRESH_WAKE_SECONDS = _parse_int("PREDICTION_REFRESH_WAKE_SECONDS", 3600)  # how often the worker wakes to scan

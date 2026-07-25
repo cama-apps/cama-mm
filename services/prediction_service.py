@@ -14,9 +14,11 @@ from config import (
     PREDICTION_FADE_TICKS,
     PREDICTION_INITIAL_FAIR_DEFAULT,
     PREDICTION_LEVELS_PER_SIDE,
+    PREDICTION_OUTER_LEVEL_SIZES,
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
     PREDICTION_REFRESH_LEVELS_PER_SIDE,
+    PREDICTION_REFRESH_OUTER_LEVEL_SIZES,
     PREDICTION_REFRESH_SECONDS,
     PREDICTION_REFRESH_SIZE_PER_LEVEL,
     PREDICTION_REFRESH_SPREAD_TICKS,
@@ -84,6 +86,7 @@ class PredictionService:
         levels_per_side: int | None = None,
         size_per_level: int | None = None,
         spread_ticks: int | None = None,
+        outer_level_sizes: list[int] | None = None,
     ) -> tuple[list[tuple[str, int, int]], dict[str, float | int]]:
         """Build a ladder after applying the active daily market conditions."""
         payout_multiplier, depth_multiplier, spread_delta = (
@@ -108,6 +111,7 @@ class PredictionService:
                 levels_per_side=levels_per_side,
                 size_per_level=adjusted_size,
                 spread_ticks=adjusted_spread,
+                outer_level_sizes=outer_level_sizes,
             )
             if adjusted_size > 0
             else []
@@ -214,15 +218,14 @@ class PredictionService:
         levels_per_side: int | None = None,
         size_per_level: int | None = None,
         spread_ticks: int | None = None,
+        outer_level_sizes: list[int] | None = None,
     ) -> list[tuple[str, int, int]]:
         """Construct a ladder of asks and bids around ``fair``.
 
-        Defaults to the *initial-seed* params (`PREDICTION_LEVELS_PER_SIDE`,
-        `_SIZE_PER_LEVEL`, `_SPREAD_TICKS`). Pass overrides to use the *refresh*
-        params (smaller and wider) — the daily-refresh worker calls with those
-        so the layered depth sits further from fair than the initial book.
-        Levels outside ``{1..99}`` are dropped (the price clamp prevents this
-        in practice).
+        Defaults to the initial seed's normal levels and tapered outer sizes.
+        The daily-refresh worker passes its smaller, wider normal range and its
+        own outer taper. Levels outside ``{1..99}`` are dropped, so the fair
+        bounds do not need to narrow when outer levels are added.
         """
         n_levels = (
             levels_per_side if levels_per_side is not None else PREDICTION_LEVELS_PER_SIDE
@@ -233,14 +236,22 @@ class PredictionService:
         spread = (
             spread_ticks if spread_ticks is not None else PREDICTION_SPREAD_TICKS
         )
+        outer_sizes = (
+            PREDICTION_OUTER_LEVEL_SIZES
+            if outer_level_sizes is None
+            else outer_level_sizes
+        )
         levels: list[tuple[str, int, int]] = []
-        for k in range(0, n_levels):
+        level_sizes = [size] * n_levels + [max(0, value) for value in outer_sizes]
+        for k, level_size in enumerate(level_sizes):
+            if level_size == 0:
+                continue
             ask_price = fair + (spread + k) * PREDICTION_TICK_SIZE
             bid_price = fair - (spread + k) * PREDICTION_TICK_SIZE
             if 1 <= ask_price <= 99:
-                levels.append(("yes_ask", ask_price, size))
+                levels.append(("yes_ask", ask_price, level_size))
             if 1 <= bid_price <= 99:
-                levels.append(("yes_bid", bid_price, size))
+                levels.append(("yes_bid", bid_price, level_size))
         return levels
 
     @staticmethod
@@ -385,15 +396,16 @@ class PredictionService:
         drift = random.randint(PREDICTION_DRIFT_MIN, PREDICTION_DRIFT_MAX)
         new_price = self.clamp_price(round(observed_mid) + drift)
 
-        # Daily refresh layers thinner / wider than the initial seed: fewer
-        # levels, smaller per-level size, larger spread offset. Legacy quotes
-        # inside the current minimum spread are pruned while crossing arb stays.
+        # Daily refresh keeps its normal thin/wide range, then adds a tapered
+        # extension farther from fair. Legacy quotes inside the current minimum
+        # spread are pruned while crossing arb stays.
         levels, modifiers = self._build_event_levels(
             new_price,
             int(pred["guild_id"]),
             levels_per_side=PREDICTION_REFRESH_LEVELS_PER_SIDE,
             size_per_level=PREDICTION_REFRESH_SIZE_PER_LEVEL,
             spread_ticks=PREDICTION_REFRESH_SPREAD_TICKS,
+            outer_level_sizes=PREDICTION_REFRESH_OUTER_LEVEL_SIZES,
         )
         now = int(time.time())
         self.prediction_repo.apply_refresh(
