@@ -369,6 +369,7 @@ BASE_RATING_DELTA_MULTIPLIER = _parse_float("BASE_RATING_DELTA_MULTIPLIER", 1.1)
 MAX_RD_CONTRACTION_PER_GAME = _parse_float("MAX_RD_CONTRACTION_PER_GAME", 0.065)  # Slow active confidence gain
 NEW_PLAYER_MMR_DISCOUNT = _parse_int("NEW_PLAYER_MMR_DISCOUNT", 500)  # Deliberate newcomer underseed before rating conversion
 ADMIN_RATING_ADJUSTMENT_MAX_GAMES = _parse_int("ADMIN_RATING_ADJUSTMENT_MAX_GAMES", 50)  # Max games for allowing admin rating adjustments
+ADMIN_RATING_MAX = _parse_float("ADMIN_RATING_MAX", 6000.0)  # Sanity ceiling on admin-set Glicko ratings (2x the MMR seed scale; catches MMR typed as rating)
 RD_DECAY_CONSTANT = _parse_float("RD_DECAY_CONSTANT", 100.0)  # Weekly inactivity uncertainty growth (c value)
 RD_DECAY_GRACE_PERIOD_DAYS = _parse_int("RD_DECAY_GRACE_PERIOD_DAYS", 7)  # No inactivity growth through this day
 MMR_MODAL_TIMEOUT_MINUTES = _parse_int("MMR_MODAL_TIMEOUT_MINUTES", 5)  # Timeout for MMR input modal

@@ -155,6 +155,40 @@ async def test_admin_rating_commands_allow_values_above_seed_scale(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("command_name", ["setinitialrating", "adjust_rating"])
+async def test_admin_rating_commands_reject_values_above_sanity_ceiling(
+    monkeypatch, command_name
+):
+    """Live ratings are unbounded, but admin input gets a sanity ceiling so
+    an MMR typed into the rating field can't poison match balancing."""
+    from config import ADMIN_RATING_MAX
+
+    service = FakePlayerService(game_count=0, rating_data=(1500.0, 110.0, 0.08))
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    command = getattr(admin_cmd, command_name)
+    await command.callback(
+        admin_cmd, interaction, target_user, ADMIN_RATING_MAX + 1
+    )
+
+    assert not service.updates
+    assert any(
+        "must be between" in msg.lower()
+        for msg, _ep in interaction.response_messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_adjust_rd_preserves_rating_and_volatility(monkeypatch):
     service = FakePlayerService(game_count=1000, rating_data=(1512.0, 95.0, 0.07))
     admin_cmd = AdminCommands(
