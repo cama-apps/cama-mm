@@ -1017,3 +1017,90 @@ class TestEchoPerBossId:
         assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, "pudge") is not None
         assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, "grothak") is None
         assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, "ogre_magi") is None
+
+
+# ---------------------------------------------------------------------------
+# fight_boss economy parity with the live duel path
+# ---------------------------------------------------------------------------
+
+
+def _script_combat(dig_service, monkeypatch, *, player_wins):
+    """Pin the combat numbers so the fight outcome is fully deterministic
+    (boss identity at a boundary is rolled with an unpatched RNG, so HP and
+    damage would otherwise vary between runs)."""
+    monkeypatch.setattr(
+        dig_service,
+        "_apply_gear_to_combat",
+        lambda base, loadout: {
+            "player_hp": 100 if player_wins else 1,
+            "player_hit": 1.0 if player_wins else 0.0,
+            "player_dmg": 100,
+            "crit_chance": 0.0,
+            "crit_bonus": 0,
+        },
+    )
+    monkeypatch.setattr(
+        dig_service,
+        "_scale_boss_stats",
+        lambda stats, **kwargs: {
+            "boss_hp": 1 if player_wins else 100,
+            "boss_hit": 1.0,
+            "boss_dmg": 0 if player_wins else 1,
+        },
+    )
+
+
+class TestFightBossEconomyParity:
+    """The legacy ``fight_boss`` path resolves payouts through the same
+    shared helpers as the live duel path (``_net_boss_payout`` /
+    ``_clamp_loss_debit``), so its economics cannot drift."""
+
+    def test_win_applies_economy_event_and_bankruptcy_debuff(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_constants import scale_positive_dig_jc
+
+        class _DoublingEconomy:
+            def adjust_reward(self, guild_id, amount):
+                return amount * 2
+
+        class _HalvingBankruptcy:
+            def apply_penalty_to_winnings(self, discord_id, amount, guild_id):
+                return {
+                    "penalized": amount // 2,
+                    "penalty_applied": amount - amount // 2,
+                }
+
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_service.economy_event_service = _DoublingEconomy()
+        dig_service.bankruptcy_service = _HalvingBankruptcy()
+        _script_combat(dig_service, monkeypatch, player_wins=True)
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=0)
+
+        assert result["success"], result
+        assert result["won"] is True
+        base = dig_service._boss_base_reward(25, prestige_level=0)
+        assert result["gross_payout"] == 2 * base
+        full = scale_positive_dig_jc(2 * base)
+        assert result["jc_delta"] == full // 2
+        assert result["bankruptcy_penalty"] == full - full // 2
+
+    def test_free_fight_loss_repair_bill_floors_at_live_balance(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_data.bosses import BOSS_LOSS_REPAIR_BILL
+
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        assert BOSS_LOSS_REPAIR_BILL > 2
+        player_repository.update_balance(10001, TEST_GUILD_ID, 2)
+        _script_combat(dig_service, monkeypatch, player_wins=False)
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=0)
+
+        assert result["success"], result
+        assert result["won"] is False
+        assert result["jc_delta"] == -2
+        assert player_repository.get_balance(10001, TEST_GUILD_ID) == 0
