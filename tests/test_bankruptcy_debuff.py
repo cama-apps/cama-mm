@@ -312,9 +312,9 @@ class TestDigDebuff:
         self, repos, bankruptcy_service, dig_service, monkeypatch
     ):
         """The live boss path (start_boss_duel -> _resolve_duel_outcome) debuffs
-        the victory payout. Existing boss tests use the legacy ``fight_boss``
-        path and wire no bankruptcy_service, so this is the only guard on the
-        live boss debuff branch."""
+        the victory payout. The legacy ``fight_boss`` path now shares the same
+        _net_boss_payout helper and is guarded separately by
+        test_boss_multi_tier.py::TestFightBossEconomyParity."""
         import json
 
         pid = 7301
