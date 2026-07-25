@@ -1173,6 +1173,28 @@ def _is_jopacoin_emoji(emoji) -> bool:
     return emoji.id == JOPACOIN_EMOJI_ID or emoji.name == "jopacoin"
 
 
+async def _resolve_raw_reaction_user(
+    payload,
+) -> discord.User | discord.Member:
+    """Resolve a reaction actor without REST when gateway/cache data exists."""
+    member = getattr(payload, "member", None)
+    if member is not None:
+        return member
+
+    guild_id = getattr(payload, "guild_id", None)
+    guild = bot.get_guild(guild_id) if guild_id is not None else None
+    if guild is not None:
+        member = guild.get_member(payload.user_id)
+        if member is not None:
+            return member
+
+    user = bot.get_user(payload.user_id)
+    if user is not None:
+        return user
+
+    return await bot.fetch_user(payload.user_id)
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
     """Handle reaction adds for lobby joining, readycheck confirmations, and gamba notifications."""
@@ -1253,7 +1275,7 @@ async def on_raw_reaction_add(payload):
                 if not channel:
                     channel = await bot.fetch_channel(payload.channel_id)
                 message = channel.get_partial_message(payload.message_id)
-                user = await bot.fetch_user(payload.user_id)
+                user = await _resolve_raw_reaction_user(payload)
                 await message.remove_reaction("🔔", user)
             except Exception:
                 pass
@@ -1293,63 +1315,67 @@ async def on_raw_reaction_add(payload):
     _init_services()  # Ensure services are initialized
     try:
         payload_guild_id = payload.guild_id
-        channel = bot.get_channel(payload.channel_id)
-        if not channel:
-            channel = await bot.fetch_channel(payload.channel_id)
-
-        message = await channel.fetch_message(payload.message_id)
         lobby_message_id = await asyncio.to_thread(
             bot.lobby_service.get_lobby_message_id, guild_id=payload_guild_id
         )
-        if message.id != lobby_message_id:
+        if payload.message_id != lobby_message_id:
             return
 
         lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
         if not lobby or lobby.status != "open":
             return
 
-        user = await bot.fetch_user(payload.user_id)
-
         # Handle jopacoin reaction for gamba notifications
         if is_jopacoin:
             already_in_lobby = payload.user_id in lobby.players
-            if not already_in_lobby:
-                thread_id = await asyncio.to_thread(
-                    bot.lobby_service.get_lobby_thread_id, guild_id=payload_guild_id
-                )
-                if thread_id:
-                    try:
-                        thread = bot.get_channel(thread_id)
-                        if not thread:
-                            thread = await bot.fetch_channel(thread_id)
-                        await thread.send(f"{JOPACOIN_EMOTE} {user.mention} is here for the gamba!")
-                    except Exception as exc:
-                        logger.warning(f"Failed to post gamba subscription in thread: {exc}")
+            if already_in_lobby:
+                return
 
-                # Neon Degen Terminal hook (~35% chance, auto-deletes)
+        channel = bot.get_channel(payload.channel_id)
+        if not channel:
+            channel = await bot.fetch_channel(payload.channel_id)
+        user = await _resolve_raw_reaction_user(payload)
+
+        if is_jopacoin:
+            thread_id = await asyncio.to_thread(
+                bot.lobby_service.get_lobby_thread_id, guild_id=payload_guild_id
+            )
+            if thread_id:
                 try:
-                    from services.neon_degen_service import NeonDegenService
-                    neon = getattr(bot, "neon_degen_service", None)
-                    if isinstance(neon, NeonDegenService):
-                        neon_result = await neon.on_gamba_spectator(
-                            payload.user_id, payload.guild_id, user.display_name
-                        )
-                        if neon_result and neon_result.text_block:
-                            neon_msg = await channel.send(neon_result.text_block)
-                            async def _delete_after(m, delay):
-                                try:
-                                    await asyncio.sleep(delay)
-                                    await m.delete()
-                                except Exception:
-                                    pass
-                            _retain_background_task(
-                                asyncio.create_task(_delete_after(neon_msg, 60))
-                            )
+                    thread = bot.get_channel(thread_id)
+                    if not thread:
+                        thread = await bot.fetch_channel(thread_id)
+                    await thread.send(f"{JOPACOIN_EMOTE} {user.mention} is here for the gamba!")
                 except Exception as exc:
-                    logger.debug(f"Neon gamba spectator hook failed: {exc}")
+                    logger.warning(f"Failed to post gamba subscription in thread: {exc}")
+
+            # Neon Degen Terminal hook (~35% chance, auto-deletes)
+            try:
+                from services.neon_degen_service import NeonDegenService
+                neon = getattr(bot, "neon_degen_service", None)
+                if isinstance(neon, NeonDegenService):
+                    neon_result = await neon.on_gamba_spectator(
+                        payload.user_id, payload.guild_id, user.display_name
+                    )
+                    if neon_result and neon_result.text_block:
+                        neon_msg = await channel.send(neon_result.text_block)
+
+                        async def _delete_after(m, delay):
+                            try:
+                                await asyncio.sleep(delay)
+                                await m.delete()
+                            except Exception:
+                                pass
+
+                        _retain_background_task(
+                            asyncio.create_task(_delete_after(neon_msg, 60))
+                        )
+            except Exception as exc:
+                logger.debug(f"Neon gamba spectator hook failed: {exc}")
             return
 
         # The rest of the handler is for sword-based lobby joining.
+        message = channel.get_partial_message(payload.message_id)
         guild_id = payload.guild_id
         player = await asyncio.to_thread(bot.player_service.get_player, payload.user_id, guild_id)
         if not player:
@@ -1492,19 +1518,20 @@ async def on_raw_reaction_remove(payload):
     _init_services()  # Ensure services are initialized
     try:
         payload_guild_id = payload.guild_id
-        channel = bot.get_channel(payload.channel_id)
-        if not channel:
-            channel = await bot.fetch_channel(payload.channel_id)
-        message = await channel.fetch_message(payload.message_id)
         lobby_message_id = await asyncio.to_thread(
             bot.lobby_service.get_lobby_message_id, guild_id=payload_guild_id
         )
-        if message.id != lobby_message_id:
+        if payload.message_id != lobby_message_id:
             return
 
         lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
         if not lobby or lobby.status != "open":
             return
+
+        channel = bot.get_channel(payload.channel_id)
+        if not channel:
+            channel = await bot.fetch_channel(payload.channel_id)
+        message = channel.get_partial_message(payload.message_id)
 
         left = await asyncio.to_thread(
             bot.lobby_service.leave_lobby, payload.user_id, payload_guild_id

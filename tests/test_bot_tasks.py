@@ -357,7 +357,134 @@ async def test_retired_frogling_reaction_is_removed_from_active_lobby_message(
     lobby_service.join_lobby_conditional.assert_not_called()
 
 
-async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch(
+async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module):
+    member = SimpleNamespace(
+        id=123,
+        mention="<@123>",
+        display_name="Lobby Player",
+    )
+    payload = SimpleNamespace(
+        user_id=member.id,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="⚔️"),
+        member=member,
+    )
+    initial_lobby = SimpleNamespace(status="open", players=set())
+    refreshed_lobby = MagicMock(status="open", players={member.id})
+    refreshed_lobby.get_player_count.return_value = 2
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = payload.message_id
+    lobby_service.get_lobby.side_effect = [initial_lobby, refreshed_lobby]
+    lobby_service.join_lobby.return_value = (True, None, None)
+    lobby_service.get_lobby_thread_id.return_value = None
+    lobby_service.is_ready.return_value = False
+    lobby_service.build_lobby_embed.return_value = object()
+    player_service = MagicMock()
+    player_service.get_player.return_value = SimpleNamespace(preferred_roles=[1])
+    message = SimpleNamespace(edit=AsyncMock(), remove_reaction=AsyncMock())
+    channel = SimpleNamespace(
+        id=payload.channel_id,
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(return_value=message),
+        send=AsyncMock(),
+    )
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "player_service", player_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(bot_module.bot, "get_user") as get_user,
+        patch.object(bot_module.bot, "fetch_channel", AsyncMock()) as fetch_channel,
+        patch.object(bot_module.bot, "fetch_user", AsyncMock()) as fetch_user,
+        patch.object(bot_module, "notify_lobby_rally", AsyncMock()) as notify_rally,
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    channel.fetch_message.assert_not_awaited()
+    fetch_channel.assert_not_awaited()
+    get_user.assert_not_called()
+    fetch_user.assert_not_awaited()
+    channel.get_partial_message.assert_called_once_with(payload.message_id)
+    message.edit.assert_awaited_once()
+    lobby_service.join_lobby.assert_called_once_with(member.id, payload.guild_id)
+    notify_rally.assert_awaited_once_with(
+        channel,
+        None,
+        refreshed_lobby,
+        payload.guild_id,
+    )
+
+
+async def test_jopacoin_reaction_uses_gateway_member_without_message_get(bot_module):
+    member = SimpleNamespace(
+        id=123,
+        mention="<@123>",
+        display_name="Gamba Player",
+    )
+    payload = SimpleNamespace(
+        user_id=member.id,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="jopacoin"),
+        member=member,
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = payload.message_id
+    lobby_service.get_lobby.return_value = SimpleNamespace(
+        status="open",
+        players=set(),
+    )
+    lobby_service.get_lobby_thread_id.return_value = 300
+    channel = SimpleNamespace(
+        id=payload.channel_id,
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(),
+        send=AsyncMock(),
+    )
+    thread = SimpleNamespace(id=300, send=AsyncMock())
+    bot_user = SimpleNamespace(id=999)
+
+    def get_channel(channel_id):
+        return {
+            channel.id: channel,
+            thread.id: thread,
+        }.get(channel_id)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", side_effect=get_channel),
+        patch.object(bot_module.bot, "get_user") as get_user,
+        patch.object(bot_module.bot, "fetch_channel", AsyncMock()) as fetch_channel,
+        patch.object(bot_module.bot, "fetch_user", AsyncMock()) as fetch_user,
+        patch.object(bot_module.bot, "neon_degen_service", None, create=True),
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    channel.fetch_message.assert_not_awaited()
+    channel.get_partial_message.assert_not_called()
+    fetch_channel.assert_not_awaited()
+    get_user.assert_not_called()
+    fetch_user.assert_not_awaited()
+    thread.send.assert_awaited_once()
+
+
+async def test_lobby_reaction_wrong_message_returns_before_discord_lookups(
     bot_module,
 ):
     payload = SimpleNamespace(
@@ -365,7 +492,126 @@ async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch
         guild_id=42,
         channel_id=200,
         message_id=100,
+        emoji=SimpleNamespace(id=None, name="⚔️"),
+        member=SimpleNamespace(id=123),
+    )
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = 999
+    bot_user = SimpleNamespace(id=777)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel") as get_channel,
+        patch.object(bot_module.bot, "fetch_channel", AsyncMock()) as fetch_channel,
+        patch.object(bot_module.bot, "get_user") as get_user,
+        patch.object(bot_module.bot, "fetch_user", AsyncMock()) as fetch_user,
+    ):
+        await bot_module.on_raw_reaction_add(payload)
+
+    lobby_service.get_lobby.assert_not_called()
+    get_channel.assert_not_called()
+    fetch_channel.assert_not_awaited()
+    get_user.assert_not_called()
+    fetch_user.assert_not_awaited()
+
+
+async def test_raw_reaction_user_checks_caches_before_rest(bot_module):
+    payload = SimpleNamespace(
+        user_id=123,
+        guild_id=42,
+        member=None,
+    )
+    guild_member = SimpleNamespace(id=payload.user_id)
+    cached_user = SimpleNamespace(id=payload.user_id)
+    fetched_user = SimpleNamespace(id=payload.user_id)
+    guild = SimpleNamespace(get_member=MagicMock(return_value=guild_member))
+
+    with (
+        patch.object(bot_module.bot, "get_guild", return_value=guild),
+        patch.object(bot_module.bot, "get_user") as get_user,
+        patch.object(
+            bot_module.bot,
+            "fetch_user",
+            AsyncMock(return_value=fetched_user),
+        ) as fetch_user,
+    ):
+        assert await bot_module._resolve_raw_reaction_user(payload) is guild_member
+        get_user.assert_not_called()
+        fetch_user.assert_not_awaited()
+
+        guild.get_member.return_value = None
+        get_user.return_value = cached_user
+        assert await bot_module._resolve_raw_reaction_user(payload) is cached_user
+        fetch_user.assert_not_awaited()
+
+        get_user.return_value = None
+        assert await bot_module._resolve_raw_reaction_user(payload) is fetched_user
+        fetch_user.assert_awaited_once_with(payload.user_id)
+
+
+async def test_sword_reaction_remove_uses_partial_message_without_get(bot_module):
+    payload = SimpleNamespace(
+        user_id=123,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
+        emoji=SimpleNamespace(id=None, name="⚔️"),
+    )
+    lobby = MagicMock(status="open")
+    lobby.get_player_count.return_value = 1
+    lobby_service = MagicMock()
+    lobby_service.get_lobby_message_id.return_value = payload.message_id
+    lobby_service.get_lobby.return_value = lobby
+    lobby_service.leave_lobby.return_value = True
+    lobby_service.get_lobby_thread_id.return_value = None
+    lobby_service.build_lobby_embed.return_value = object()
+    message = SimpleNamespace(edit=AsyncMock())
+    channel = SimpleNamespace(
+        fetch_message=AsyncMock(),
+        get_partial_message=MagicMock(return_value=message),
+    )
+    bot_user = SimpleNamespace(id=999)
+
+    with (
+        patch.object(
+            type(bot_module.bot),
+            "user",
+            new_callable=lambda: property(lambda _self: bot_user),
+        ),
+        patch.object(bot_module, "_init_services"),
+        patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_channel", return_value=channel),
+        patch.object(bot_module.bot, "fetch_channel", AsyncMock()) as fetch_channel,
+    ):
+        await bot_module.on_raw_reaction_remove(payload)
+
+    channel.fetch_message.assert_not_awaited()
+    fetch_channel.assert_not_awaited()
+    channel.get_partial_message.assert_called_once_with(payload.message_id)
+    message.edit.assert_awaited_once()
+    lobby_service.leave_lobby.assert_called_once_with(
+        payload.user_id,
+        payload.guild_id,
+    )
+
+
+async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch(
+    bot_module,
+):
+    user = SimpleNamespace(id=123)
+    payload = SimpleNamespace(
+        user_id=user.id,
+        guild_id=42,
+        channel_id=200,
+        message_id=100,
         emoji=SimpleNamespace(id=None, name="🔔"),
+        member=user,
     )
     lobby_service = MagicMock()
     lobby_service.get_lobby_message_id.return_value = payload.message_id
@@ -374,7 +620,6 @@ async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch
         fetch_message=AsyncMock(),
         get_partial_message=MagicMock(return_value=message),
     )
-    user = SimpleNamespace(id=payload.user_id)
     cog = SimpleNamespace(
         _execute_readycheck=AsyncMock(return_value=("error", {})),
     )
@@ -391,11 +636,12 @@ async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch
         patch.object(bot_module.bot, "get_cog", return_value=cog),
         patch.object(bot_module.bot, "get_guild", return_value=SimpleNamespace()),
         patch.object(bot_module.bot, "get_channel", return_value=channel),
-        patch.object(bot_module.bot, "fetch_user", AsyncMock(return_value=user)),
+        patch.object(bot_module.bot, "fetch_user", AsyncMock()) as fetch_user,
     ):
         await bot_module.on_raw_reaction_add(payload)
 
     channel.fetch_message.assert_not_awaited()
+    fetch_user.assert_not_awaited()
     channel.get_partial_message.assert_called_once_with(payload.message_id)
     message.remove_reaction.assert_awaited_once_with("🔔", user)
 
