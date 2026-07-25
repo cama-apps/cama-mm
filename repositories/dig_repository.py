@@ -927,12 +927,15 @@ class DigRepository(BaseRepository, IDigRepository):
         *,
         queue_item_ids: list[int],
         purchases: list[tuple[str, int]],
-    ) -> list[int]:
+    ) -> list[int | None]:
         """Queue reserves and buy auto-use items in one transaction.
 
         Each purchase retains its own balance update and therefore its own
         economy-ledger row, while all mutations share one connection/commit.
-        Returned inventory IDs align with ``purchases``.
+        Returned inventory IDs align with ``purchases``; an entry is None when
+        the live balance no longer covered that item's price (the caller's
+        affordability check ran outside this transaction), in which case
+        nothing was debited or inserted for it.
         """
         if not queue_item_ids and not purchases:
             return []
@@ -955,7 +958,7 @@ class DigRepository(BaseRepository, IDigRepository):
                     (discord_id, gid, *unique_ids),
                 )
 
-            purchased_ids: list[int] = []
+            purchased_ids: list[int | None] = []
             for item_type, price in purchases:
                 self._set_economy_ledger_context(
                     cursor,
@@ -971,11 +974,16 @@ class DigRepository(BaseRepository, IDigRepository):
                         SET jopacoin_balance = jopacoin_balance - ?,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE discord_id = ? AND guild_id = ?
+                          AND jopacoin_balance >= ?
                         """,
-                        (price, discord_id, gid),
+                        (price, discord_id, gid, price),
                     )
+                    debit_rowcount = cursor.rowcount
                 finally:
                     self._clear_economy_ledger_context(cursor)
+                if debit_rowcount != 1:
+                    purchased_ids.append(None)
+                    continue
                 cursor.execute(
                     """
                     INSERT INTO dig_inventory

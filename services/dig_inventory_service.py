@@ -301,6 +301,11 @@ class DigInventoryService:
         for result_index, item_id in zip(
             purchase_result_indexes, purchased_ids, strict=True
         ):
+            if item_id is None:
+                # The live balance dropped below the price after our
+                # affordability check — the repo skipped the debit and insert.
+                results[result_index]["status"] = "skipped_insufficient_balance"
+                continue
             results[result_index]["item_id"] = item_id
 
         return results

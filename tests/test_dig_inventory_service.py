@@ -330,6 +330,39 @@ class TestEnsureAutoBuyItems:
             for item in dig_repo.get_queued_items(10001, guild_id)
         ] == ["torch"]
 
+    def test_stale_balance_snapshot_cannot_drive_balance_negative(
+        self, inv_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        """The atomic debit floors at the live balance.
+
+        The affordability check reads the balance once outside the purchase
+        transaction, so a concurrent spend can invalidate it; the repo must
+        then skip the purchase instead of debiting below zero.
+        """
+        _register_player(player_repository, balance=6)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        original_balance = player_repository.get_balance
+        # Simulate the balance dropping after the snapshot: the service sees
+        # 14 (enough for hard_hat 8 + torch 6) but the DB only holds 6.
+        monkeypatch.setattr(
+            player_repository, "get_balance", lambda d, g: 14
+        )
+
+        results = inv_service.ensure_auto_buy_items(
+            10001, guild_id, ["hard_hat", "torch"]
+        )
+
+        assert [result["status"] for result in results] == [
+            "skipped_insufficient_balance",
+            "purchased",
+        ]
+        assert "item_id" not in results[0]
+        assert original_balance(10001, guild_id) == 0
+        assert [
+            item["item_type"]
+            for item in dig_repo.get_queued_items(10001, guild_id)
+        ] == ["torch"]
+
     def test_first_purchase_consumes_last_inventory_slot(
         self, inv_service, dig_repo, player_repository, guild_id
     ):

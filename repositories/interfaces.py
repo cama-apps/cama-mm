@@ -2012,8 +2012,12 @@ class IDigRepository(ABC):
         *,
         queue_item_ids: list[int],
         purchases: list[tuple[str, int]],
-    ) -> list[int]:
-        """Queue reserves and buy auto-use items in one transaction."""
+    ) -> list[int | None]:
+        """Queue reserves and buy auto-use items in one transaction.
+
+        Entries aligned with ``purchases``; None marks a purchase skipped
+        because the live balance no longer covered its price.
+        """
         ...
 
     @abstractmethod
