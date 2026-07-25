@@ -19,6 +19,7 @@ from utils.drawing._common import (
     _get_text_size,
     _heatmap_contest_rate,
     _heatmap_winrate,
+    get_pyplot,
 )
 from utils.drawing.heroes import _get_hero_images_batch
 
@@ -34,7 +35,7 @@ def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> Bytes
     Returns:
         BytesIO containing the PNG image
     """
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
 
     if len(match_data) < window:
         # Return error image
@@ -117,7 +118,7 @@ def draw_advantage_graph(
     if not gold_adv and not xp_adv:
         return None
 
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
     import numpy as np
 
     fig, ax = plt.subplots(figsize=(8, 3.5), facecolor=DISCORD_BG)
