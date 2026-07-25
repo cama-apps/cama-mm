@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from config import (
     PREDICTION_CONTRACT_VALUE,
-    PREDICTION_REFRESH_SIZE_PER_LEVEL,
     PREDICTION_SIZE_PER_LEVEL,
 )
 from repositories.prediction_repository import PredictionRepository
@@ -64,6 +63,10 @@ def test_event_preserves_depth_while_modifying_new_and_refreshed_spreads(
         (54, PREDICTION_SIZE_PER_LEVEL),
         (55, PREDICTION_SIZE_PER_LEVEL),
         (56, PREDICTION_SIZE_PER_LEVEL),
+        (57, 20),
+        (58, 15),
+        (59, 10),
+        (60, 5),
     ]
     assert book["yes_bids"][0] == (46, PREDICTION_SIZE_PER_LEVEL)
 
@@ -71,9 +74,18 @@ def test_event_preserves_depth_while_modifying_new_and_refreshed_spreads(
     result = service.refresh_market(prediction_id)
     book = repo.get_book(prediction_id)
     asks = dict(book["yes_asks"])
-    # Refresh base spread 4 + event delta 2, with normal quote depth.
-    assert asks[56] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
-    assert asks[57] == PREDICTION_REFRESH_SIZE_PER_LEVEL
+    # Refresh base spread 4 + event delta 2, including its outer taper.
+    assert asks == {
+        54: 50,
+        55: 50,
+        56: 60,
+        57: 30,
+        58: 25,
+        59: 18,
+        60: 11,
+        61: 4,
+        62: 2,
+    }
     assert result["economy_event_modifiers"]["prediction_depth_multiplier"] == 1.0
     assert result["economy_event_modifiers"]["prediction_spread_ticks"] == 6
     assert events.guild_ids == [TEST_GUILD_ID, TEST_GUILD_ID]
@@ -93,6 +105,10 @@ def test_event_ladder_spread_is_clamped_without_changing_depth(
         (51, PREDICTION_SIZE_PER_LEVEL),
         (52, PREDICTION_SIZE_PER_LEVEL),
         (53, PREDICTION_SIZE_PER_LEVEL),
+        (54, 20),
+        (55, 15),
+        (56, 10),
+        (57, 5),
     ]
     modifiers = created["economy_event_modifiers"]
     assert modifiers["prediction_depth_multiplier"] == 1.0
