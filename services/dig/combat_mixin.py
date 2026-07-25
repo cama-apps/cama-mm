@@ -58,7 +58,6 @@ from services.dig_constants import (
     WIN_CHANCE_CAP,
     get_phase2_for,
     get_phase3_for,
-    scale_positive_dig_jc,
 )
 
 
@@ -1423,10 +1422,12 @@ class BossCombatMixin:
                     wager_profit = int(wager_profit * 0.7)
             else:
                 wager_profit = 0
-            gross_base_reward = base_reward
-            scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
-            gross_payout = gross_base_reward + wager_profit
-            payout_delta = scaled_base_reward + wager_profit
+            (
+                gross_base_reward, scaled_base_reward, gross_payout,
+                payout_delta, boss_bankruptcy_penalty,
+            ) = self._net_boss_payout(
+                discord_id, guild_id, base_reward, wager_profit
+            )
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
             # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
@@ -1484,6 +1485,7 @@ class BossCombatMixin:
                 jc_delta=payout_delta,
                 payout=payout_delta,
                 gross_payout=gross_payout,
+                bankruptcy_penalty=boss_bankruptcy_penalty,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 stat_point_awarded=stat_point_awarded,
@@ -1547,6 +1549,7 @@ class BossCombatMixin:
                 else 0 if forced_no_wager_phase
                 else -BOSS_LOSS_REPAIR_BILL
             )
+            jc_delta = self._clamp_loss_debit(discord_id, guild_id, jc_delta)
 
             # Loss is harsher on gear — an extra durability tick beyond the
             # per-fight tick above.
@@ -2988,16 +2991,11 @@ class BossCombatMixin:
                     wager_profit = int(wager_profit * 0.7)
             else:
                 wager_profit = 0
-            gross_base_reward = self._apply_daily_economy_reward(
-                guild_id, base_reward
-            )
-            scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
-            gross_payout = gross_base_reward + wager_profit
-            net_payout = scaled_base_reward + wager_profit
-            # Bankruptcy debuff: a penalized player keeps only the configured
-            # fraction of the boss-victory winnings; withheld share is a sink.
-            net_payout, boss_bankruptcy_penalty = self._penalize_jc(
-                discord_id, guild_id, net_payout
+            (
+                gross_base_reward, scaled_base_reward, gross_payout,
+                net_payout, boss_bankruptcy_penalty,
+            ) = self._net_boss_payout(
+                discord_id, guild_id, base_reward, wager_profit
             )
 
             # Tunnel flip + JC payout + boss-echo refresh + audit log all
@@ -3128,17 +3126,7 @@ class BossCombatMixin:
             else 0 if forced_no_wager_phase
             else -BOSS_LOSS_REPAIR_BILL
         )
-        # Floor the debit at the player's current balance. The wager was only
-        # *validated* at start_boss_duel, never escrowed, so a player who
-        # spent JC during a mid-fight pause (or whose balance otherwise
-        # dropped below the wager) could be driven negative here. Re-read the
-        # live balance and clamp the debit to the player's *positive* balance:
-        # a loss can never push it below zero, and — crucially — must never
-        # CREDIT a player whose balance is already negative (in which case
-        # -current_balance would be positive, minting coins on a loss).
-        if jc_delta < 0:
-            current_balance = self.player_repo.get_balance(discord_id, guild_id)
-            jc_delta = max(jc_delta, -max(0, current_balance))
+        jc_delta = self._clamp_loss_debit(discord_id, guild_id, jc_delta)
         # Extended cooldown (stinger + flat loss penalty) pushes the timer forward.
         last_dig_effective = now + extra_cd + BOSS_LOSS_EXTRA_COOLDOWN_SECONDS
 

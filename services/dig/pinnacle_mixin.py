@@ -46,7 +46,6 @@ from services.dig_constants import (
     PLAYER_HIT_FLOOR,
     WAGERED_PLAYER_HIT_FLOOR,
     pinnacle_suffix_from_stats,
-    scale_positive_dig_jc,
 )
 
 
@@ -1122,16 +1121,11 @@ class PinnacleMixin:
                 base_mult = BOSS_PAYOUTS.get(PINNACLE_DEPTH, (2.0, 3.0, 6.0))[tier_index]
                 eff_mult = self._effective_wager_multiplier(base_mult, win_chance)
                 wager_payout = int(wager * (eff_mult - 1))
-            gross_base_reward = self._apply_daily_economy_reward(
-                guild_id, jc_reward
-            )
-            scaled_base_reward = scale_positive_dig_jc(gross_base_reward)
-            gross_payout = gross_base_reward + wager_payout
-            total_reward = scaled_base_reward + wager_payout
-            # Bankruptcy debuff: a penalized player keeps only the configured
-            # fraction of the pinnacle winnings; withheld share is a sink.
-            total_reward, pinnacle_bankruptcy_penalty = self._penalize_jc(
-                discord_id, guild_id, total_reward
+            (
+                gross_base_reward, scaled_base_reward, gross_payout,
+                total_reward, pinnacle_bankruptcy_penalty,
+            ) = self._net_boss_payout(
+                discord_id, guild_id, jc_reward, wager_payout
             )
             relic_drop = self._roll_pinnacle_relic(tunnel, pinnacle_id)
             boss_progress.pop(phase_key, None)
@@ -1225,15 +1219,9 @@ class PinnacleMixin:
                 if broken_ids:
                     gear_broken_names.append(armor_name)
         new_depth = max(0, depth - knockback)
-        jc_delta = -wager if wager > 0 else 0
-        # Floor the debit at the player's current balance, mirroring the
-        # regular-boss loss path: the carried wager was only *validated* when
-        # it was first placed, never escrowed, so a player who spent JC
-        # between phases or during a mid-fight pause could be driven negative
-        # here. Never credit a player whose balance is already negative.
-        if jc_delta < 0:
-            current_balance = self.player_repo.get_balance(discord_id, guild_id)
-            jc_delta = max(jc_delta, -max(0, current_balance))
+        jc_delta = self._clamp_loss_debit(
+            discord_id, guild_id, -wager if wager > 0 else 0
+        )
         self._persist_boss_hp_after_fight(
             boss_progress, phase_key, pinnacle_id,
             ending_hp=max(0, boss_hp), hp_max=boss_hp_max,

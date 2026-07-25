@@ -205,6 +205,48 @@ class DigService(
         )
         return info["penalized"], info["penalty_applied"]
 
+    def _net_boss_payout(
+        self,
+        discord_id: int,
+        guild_id,
+        base_reward: int,
+        wager_profit: int,
+    ) -> tuple[int, int, int, int, int]:
+        """Resolve a boss win's JC payout in one place.
+
+        Applies the daily economy event to the base reward, positive-JC
+        scaling, then the bankruptcy debuff on the combined total. Shared by
+        ``fight_boss``, ``_resolve_duel_outcome``, and
+        ``_finalize_pinnacle_outcome`` so the three win paths cannot drift.
+
+        Returns ``(gross_base, scaled_base, gross_payout, net_payout,
+        bankruptcy_penalty)``.
+        """
+        gross_base = self._apply_daily_economy_reward(guild_id, base_reward)
+        scaled_base = scale_positive_dig_jc(gross_base)
+        gross_payout = gross_base + wager_profit
+        net_payout, bankruptcy_penalty = self._penalize_jc(
+            discord_id, guild_id, scaled_base + wager_profit
+        )
+        return (
+            gross_base, scaled_base, gross_payout, net_payout,
+            bankruptcy_penalty,
+        )
+
+    def _clamp_loss_debit(self, discord_id: int, guild_id, jc_delta: int) -> int:
+        """Floor a boss-loss debit at the player's *positive* live balance.
+
+        The wager was only validated at fight start, never escrowed, so a
+        player who spent JC during a mid-fight pause (or between pinnacle
+        phases) could otherwise be driven negative. Never credits a player
+        whose balance is already negative (that would mint coins on a loss).
+        Shared by every boss-loss path.
+        """
+        if jc_delta < 0:
+            current_balance = self.player_repo.get_balance(discord_id, guild_id)
+            jc_delta = max(jc_delta, -max(0, current_balance))
+        return jc_delta
+
     def _get_mana_effects_snapshot(self, discord_id: int, guild_id):
         """Load one immutable mana-effects value for the current dig request."""
         if self.mana_effects_service is None:
