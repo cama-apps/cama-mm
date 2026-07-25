@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -5,7 +6,9 @@ import pytest
 from infrastructure.schema_manager import SchemaManager
 from rating_system import CamaRatingSystem
 from repositories.loan_repository import LoanRepository
+from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from tests.conftest import TEST_GUILD_ID
 
 
 def test_schema_manager_initializes_tables(tmp_path):
@@ -31,6 +34,7 @@ def test_schema_manager_initializes_tables(tmp_path):
         "schema_migrations",
         "economy_ledger_entries",
         "economy_ledger_context",
+        "wrapped_enrichment_facts",
     }
     assert required.issubset(tables)
     assert {"wheel_wars", "war_bets", "protected_hero_purchases"}.isdisjoint(tables)
@@ -106,6 +110,132 @@ def test_schema_manager_initialize_is_idempotent(tmp_path):
 
     assert applied == distinct
     assert applied > 0
+
+
+def test_wrapped_enrichment_facts_migration_backfills_safely_and_idempotently(
+    repo_db_path,
+):
+    """Backfill valid payloads once, preserve unmatched semantics, skip corruption."""
+    with sqlite3.connect(repo_db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO players (
+                discord_id, guild_id, discord_username, steam_id
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (100, TEST_GUILD_ID, "matched", 99999),
+                (200, TEST_GUILD_ID, "unmatched", None),
+                (300, TEST_GUILD_ID, "malformed", None),
+            ],
+        )
+        # The junction ID takes precedence over the stale legacy players.steam_id.
+        conn.execute(
+            """
+            INSERT INTO player_steam_ids (
+                discord_id, steam_id, is_primary, added_at
+            ) VALUES (?, ?, 1, 1)
+            """,
+            (100, 12345),
+        )
+
+    repo = MatchRepository(repo_db_path)
+    valid_match_id = repo.record_match(
+        [100],
+        [200],
+        winning_team=1,
+        guild_id=TEST_GUILD_ID,
+    )
+    malformed_match_id = repo.record_match(
+        [300],
+        [],
+        winning_team=1,
+        guild_id=TEST_GUILD_ID,
+    )
+    payload = {
+        "players": [
+            {
+                "account_id": 12345,
+                "actions_per_min": 321.5,
+                "courier_kills": 2,
+                "pings": 44,
+                "lane_role": 2,
+                "purchase_log": [
+                    {"key": "rapier"},
+                    {"key": "ward_observer"},
+                    {"key": "rapier"},
+                ],
+            }
+        ],
+        "comeback": 9000,
+        "throw": 4000,
+    }
+    with sqlite3.connect(repo_db_path) as conn:
+        conn.execute(
+            "UPDATE matches SET enrichment_data = ? WHERE match_id = ?",
+            (json.dumps(payload), valid_match_id),
+        )
+        conn.execute(
+            "UPDATE matches SET enrichment_data = ? WHERE match_id = ?",
+            ("{not-json", malformed_match_id),
+        )
+        # Recreate the pre-migration state so initialize exercises the real
+        # schema-ledger path, not merely the migration helper in isolation.
+        conn.execute("DROP TABLE wrapped_enrichment_facts")
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("create_wrapped_enrichment_facts",),
+        )
+
+    manager = SchemaManager(repo_db_path)
+    manager.initialize()
+
+    def load_facts():
+        with sqlite3.connect(repo_db_path) as conn:
+            return conn.execute(
+                """
+                SELECT
+                    discord_id, actions_per_min, courier_kills, pings,
+                    rapier_count, lane_role, comeback, throw
+                FROM wrapped_enrichment_facts
+                WHERE guild_id = ? AND match_id = ?
+                ORDER BY discord_id
+                """,
+                (TEST_GUILD_ID, valid_match_id),
+            ).fetchall()
+
+    expected = [
+        (100, 321.5, 2, 44, 2, 2, 9000, 4000),
+        (200, None, None, None, 0, None, 9000, 4000),
+    ]
+    assert load_facts() == expected
+    with sqlite3.connect(repo_db_path) as conn:
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM wrapped_enrichment_facts
+            WHERE match_id = ?
+            """,
+            (malformed_match_id,),
+        ).fetchone()[0] == 0
+
+        # A repeated migration rebuilds the projection instead of duplicating
+        # or preserving stale derived values.
+        conn.execute(
+            """
+            UPDATE wrapped_enrichment_facts
+            SET actions_per_min = -1
+            WHERE guild_id = ? AND match_id = ? AND discord_id = 100
+            """,
+            (TEST_GUILD_ID, valid_match_id),
+        )
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("create_wrapped_enrichment_facts",),
+        )
+
+    manager.initialize()
+    assert load_facts() == expected
 
 
 def test_prediction_probability_migration_recomputes_history_symmetrically(repo_db_path):

@@ -118,6 +118,83 @@ class TestMatchEnrichmentService:
         # via apply_enrichment_atomic (single call instead of two).
         match_repo.apply_enrichment_atomic.assert_called_once()
 
+    def test_enrich_match_projects_wrapped_facts_for_every_participant(
+        self, mock_repos, mock_opendota_api
+    ):
+        """A valid payload keeps match facts even when one player is unmatched."""
+        match_repo, player_repo = mock_repos
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": 100, "side": "radiant"},
+            {"discord_id": 200, "side": "dire"},
+        ]
+        player_repo.get_steam_ids_bulk.return_value = {
+            100: [12345],
+            200: [67890],
+        }
+        mock_opendota_api.get_match_details.return_value = {
+            "match_id": 8181518332,
+            "duration": 2400,
+            "radiant_win": True,
+            "comeback": 9000,
+            "throw": 4000,
+            "players": [
+                {
+                    "account_id": 12345,
+                    "player_slot": 0,
+                    "hero_id": 1,
+                    "actions_per_min": 321,
+                    "courier_kills": 2,
+                    "pings": 44,
+                    "lane_role": 2,
+                    "purchase_log": [
+                        {"key": "rapier"},
+                        {"key": "ward_observer"},
+                        {"key": "rapier"},
+                    ],
+                }
+            ],
+        }
+
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+        result = service.enrich_match(
+            1,
+            8181518332,
+            skip_validation=True,
+            guild_id=TEST_GUILD_ID,
+        )
+
+        assert result["success"] is True
+        assert result["players_enriched"] == 1
+        player_repo.get_steam_ids_bulk.assert_called_once_with(
+            [100, 200],
+            guild_id=TEST_GUILD_ID,
+        )
+        call_kwargs = match_repo.apply_enrichment_atomic.call_args.kwargs
+        assert call_kwargs["guild_id"] == TEST_GUILD_ID
+        assert call_kwargs["wrapped_facts"] == [
+            {
+                "discord_id": 100,
+                "actions_per_min": 321,
+                "courier_kills": 2,
+                "pings": 44,
+                "rapier_count": 2,
+                "lane_role": 2,
+                "comeback": 9000,
+                "throw": 4000,
+            },
+            {
+                "discord_id": 200,
+                "actions_per_min": None,
+                "courier_kills": None,
+                "pings": None,
+                "rapier_count": 0,
+                "lane_role": None,
+                "comeback": 9000,
+                "throw": 4000,
+            },
+        ]
+
     def test_enrich_match_api_failure(self, mock_repos, mock_opendota_api):
         """Test enrichment when OpenDota API fails."""
         match_repo, player_repo = mock_repos

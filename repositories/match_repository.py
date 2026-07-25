@@ -9,6 +9,7 @@ import time
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IMatchRepository
 from utils.match_bans import extract_match_bans
+from utils.wrapped_enrichment import extract_wrapped_enrichment_facts
 
 logger = logging.getLogger("cama_bot.repositories.match")
 
@@ -28,6 +29,132 @@ def _replace_match_bans(cursor, match_id: int, enrichment_data: str | None) -> N
                 for ban_index, team, hero_id in bans
             ],
         )
+
+
+def _replace_wrapped_enrichment_facts(
+    cursor,
+    *,
+    match_id: int,
+    guild_id: int,
+    facts_by_player: list[dict],
+) -> None:
+    """Replace Wrapped's compact OpenDota projection in the active transaction."""
+    cursor.execute(
+        """
+        DELETE FROM wrapped_enrichment_facts
+        WHERE guild_id = ? AND match_id = ?
+        """,
+        (guild_id, match_id),
+    )
+    if not facts_by_player:
+        return
+
+    cursor.execute(
+        """
+        SELECT discord_id
+        FROM match_participants
+        WHERE guild_id = ? AND match_id = ?
+        """,
+        (guild_id, match_id),
+    )
+    participant_ids = {row["discord_id"] for row in cursor.fetchall()}
+    valid_facts = [
+        facts
+        for facts in facts_by_player
+        if isinstance(facts, dict)
+        and facts.get("discord_id") in participant_ids
+    ]
+    if not valid_facts:
+        return
+
+    cursor.executemany(
+        """
+        INSERT INTO wrapped_enrichment_facts (
+            guild_id, match_id, discord_id,
+            actions_per_min, courier_kills, pings, rapier_count,
+            lane_role, comeback, throw
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(guild_id, match_id, discord_id) DO UPDATE SET
+            actions_per_min = excluded.actions_per_min,
+            courier_kills = excluded.courier_kills,
+            pings = excluded.pings,
+            rapier_count = excluded.rapier_count,
+            lane_role = excluded.lane_role,
+            comeback = excluded.comeback,
+            throw = excluded.throw
+        """,
+        [
+            (
+                guild_id,
+                match_id,
+                facts["discord_id"],
+                facts.get("actions_per_min"),
+                facts.get("courier_kills"),
+                facts.get("pings"),
+                facts.get("rapier_count") or 0,
+                facts.get("lane_role"),
+                facts.get("comeback"),
+                facts.get("throw"),
+            )
+            for facts in valid_facts
+        ],
+    )
+
+
+def _derive_wrapped_enrichment_facts(
+    cursor,
+    *,
+    match_id: int,
+    guild_id: int,
+    enrichment_data: str | None,
+) -> list[dict]:
+    """Project legacy enrichment writes without re-reading JSON in Wrapped."""
+    if not enrichment_data:
+        return []
+    try:
+        match_data = json.loads(enrichment_data)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(match_data, dict):
+        return []
+
+    rows = cursor.execute(
+        """
+        SELECT
+            mp.discord_id,
+            psi.steam_id AS junction_steam_id,
+            p.steam_id AS legacy_steam_id
+        FROM match_participants mp
+        LEFT JOIN player_steam_ids psi
+          ON psi.discord_id = mp.discord_id
+        LEFT JOIN players p
+          ON p.discord_id = mp.discord_id
+         AND p.guild_id = mp.guild_id
+        WHERE mp.match_id = ? AND mp.guild_id = ?
+        ORDER BY mp.discord_id, psi.is_primary DESC, psi.added_at ASC
+        """,
+        (match_id, guild_id),
+    ).fetchall()
+
+    steam_ids_by_discord: dict[int, set[int]] = {}
+    legacy_steam_ids: dict[int, int] = {}
+    for row in rows:
+        discord_id = row["discord_id"]
+        steam_ids_by_discord.setdefault(discord_id, set())
+        if row["junction_steam_id"] is not None:
+            steam_ids_by_discord[discord_id].add(row["junction_steam_id"])
+        if row["legacy_steam_id"] is not None:
+            legacy_steam_ids[discord_id] = row["legacy_steam_id"]
+
+    result = []
+    for discord_id, steam_ids in steam_ids_by_discord.items():
+        if not steam_ids and discord_id in legacy_steam_ids:
+            steam_ids = {legacy_steam_ids[discord_id]}
+        facts = extract_wrapped_enrichment_facts(match_data, steam_ids)
+        if facts is not None:
+            result.append({"discord_id": discord_id, **facts})
+    return result
 
 
 class MatchRepository(BaseRepository, IMatchRepository):
@@ -1634,6 +1761,24 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             if cursor.rowcount:
                 _replace_match_bans(cursor, match_id, enrichment_data)
+                guild_row = cursor.execute(
+                    "SELECT guild_id FROM matches WHERE match_id = ?",
+                    (match_id,),
+                ).fetchone()
+                if guild_row:
+                    guild_id = guild_row["guild_id"]
+                    facts_by_player = _derive_wrapped_enrichment_facts(
+                        cursor,
+                        match_id=match_id,
+                        guild_id=guild_id,
+                        enrichment_data=enrichment_data,
+                    )
+                    _replace_wrapped_enrichment_facts(
+                        cursor,
+                        match_id=match_id,
+                        guild_id=guild_id,
+                        facts_by_player=facts_by_player,
+                    )
 
     def update_participant_stats(
         self,
@@ -1740,6 +1885,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
         enrichment_source: str | None,
         enrichment_confidence: float | None,
         participant_updates: list[dict],
+        guild_id: int | None = None,
+        wrapped_facts: list[dict] | None = None,
     ) -> int:
         """Apply match-level enrichment and per-participant stats in one txn.
 
@@ -1751,8 +1898,18 @@ class MatchRepository(BaseRepository, IMatchRepository):
         """
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            normalized_guild = (
+                self.normalize_guild_id(guild_id)
+                if guild_id is not None
+                else None
+            )
+            match_filter = "WHERE match_id = ?"
+            match_params: tuple = (match_id,)
+            if normalized_guild is not None:
+                match_filter += " AND guild_id = ?"
+                match_params = (match_id, normalized_guild)
             cursor.execute(
-                """
+                f"""
                 UPDATE matches
                 SET valve_match_id = ?,
                     duration_seconds = ?,
@@ -1762,7 +1919,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     enrichment_data = ?,
                     enrichment_source = ?,
                     enrichment_confidence = ?
-                WHERE match_id = ?
+                {match_filter}
                 """,
                 (
                     valve_match_id,
@@ -1773,11 +1930,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     enrichment_data,
                     enrichment_source,
                     enrichment_confidence,
-                    match_id,
+                    *match_params,
                 ),
             )
-            if cursor.rowcount:
-                _replace_match_bans(cursor, match_id, enrichment_data)
+            if cursor.rowcount == 0:
+                return 0
+
+            _replace_match_bans(cursor, match_id, enrichment_data)
+            if normalized_guild is None:
+                guild_row = cursor.execute(
+                    "SELECT guild_id FROM matches WHERE match_id = ?",
+                    (match_id,),
+                ).fetchone()
+                if not guild_row:
+                    return 0
+                normalized_guild = guild_row["guild_id"]
+
+            facts_by_player = wrapped_facts
+            if facts_by_player is None:
+                facts_by_player = _derive_wrapped_enrichment_facts(
+                    cursor,
+                    match_id=match_id,
+                    guild_id=normalized_guild,
+                    enrichment_data=enrichment_data,
+                )
+            _replace_wrapped_enrichment_facts(
+                cursor,
+                match_id=match_id,
+                guild_id=normalized_guild,
+                facts_by_player=facts_by_player,
+            )
 
             if not participant_updates:
                 return 0
@@ -2180,6 +2362,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "DELETE FROM match_bans WHERE match_id = ?",
                 (match_id,),
             )
+            if guild_id is None:
+                cursor.execute(
+                    "DELETE FROM wrapped_enrichment_facts WHERE match_id = ?",
+                    (match_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    DELETE FROM wrapped_enrichment_facts
+                    WHERE match_id = ? AND guild_id = ?
+                    """,
+                    (match_id, self.normalize_guild_id(guild_id)),
+                )
 
             return True
 
@@ -2190,7 +2385,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         Returns count of matches wiped.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
             # Get match IDs that are auto-discovered
@@ -2257,6 +2452,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 f"DELETE FROM match_bans WHERE match_id IN ({placeholders})",
                 match_ids,
             )
+            cursor.execute(
+                f"""
+                DELETE FROM wrapped_enrichment_facts
+                WHERE guild_id = ? AND match_id IN ({placeholders})
+                """,
+                (normalized_guild, *match_ids),
+            )
 
             return len(match_ids)
 
@@ -2289,7 +2491,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         Returns count of matches wiped.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
             # Get match IDs that are enriched
@@ -2355,6 +2557,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 f"DELETE FROM match_bans WHERE match_id IN ({placeholders})",
                 match_ids,
+            )
+            cursor.execute(
+                f"""
+                DELETE FROM wrapped_enrichment_facts
+                WHERE guild_id = ? AND match_id IN ({placeholders})
+                """,
+                (normalized_guild, *match_ids),
             )
 
             return len(match_ids)

@@ -383,7 +383,7 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
             end_ts: End Unix timestamp
 
         Returns:
-            List of dicts with per-match stats including enrichment_data
+            List of dicts with per-match stats and compact Wrapped facts
         """
         guild_id = self.normalize_guild_id(guild_id)
         # Jan 1 of year at 00:00 UTC
@@ -414,13 +414,24 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
                     m.match_date,
                     m.duration_seconds,
                     m.valve_match_id,
-                    m.enrichment_data,
                     mp.team_number,
                     mp.side,
                     m.radiant_score,
-                    m.dire_score
+                    m.dire_score,
+                    wf.match_id AS wrapped_facts_match_id,
+                    wf.actions_per_min,
+                    wf.courier_kills,
+                    wf.pings,
+                    wf.rapier_count,
+                    wf.lane_role AS wrapped_lane_role,
+                    wf.comeback,
+                    wf.throw
                 FROM match_participants mp
                 JOIN matches m ON mp.match_id = m.match_id
+                LEFT JOIN wrapped_enrichment_facts wf
+                  ON wf.guild_id = m.guild_id
+                 AND wf.match_id = mp.match_id
+                 AND wf.discord_id = mp.discord_id
                 WHERE mp.discord_id = ?
                   AND m.guild_id = ?
                   AND m.winning_team IS NOT NULL
