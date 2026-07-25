@@ -229,3 +229,18 @@ def draw_x_axis_labels(
             fill=DISCORD_GREY,
             font=value_font,
         )
+
+
+def get_pyplot():
+    """Import pyplot lazily with the headless Agg backend forced.
+
+    The bot renders charts to PNG bytes only; without pinning the backend,
+    matplotlib may pick an interactive one (e.g. TkAgg) and crash on hosts
+    without a display or Tk installed.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt

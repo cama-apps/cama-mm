@@ -17,6 +17,7 @@ from utils.drawing._common import (
     DISCORD_YELLOW,
     _get_font,
     _get_text_size,
+    get_pyplot,
 )
 
 
@@ -249,7 +250,7 @@ def draw_rating_distribution(
     Returns:
         BytesIO containing the PNG image
     """
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
     import numpy as np
     from scipy import stats
 
@@ -384,7 +385,7 @@ def draw_calibration_curve(
     Returns:
         BytesIO containing the PNG image
     """
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
 
     fig, ax = plt.subplots(figsize=(6.5, 5), facecolor=DISCORD_BG)
     ax.set_facecolor(DISCORD_DARKER)
@@ -452,7 +453,7 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
     Returns:
         BytesIO containing the PNG image
     """
-    import matplotlib.pyplot as plt
+    plt = get_pyplot()
 
     if "error" in comparison_data:
         # Return error image
