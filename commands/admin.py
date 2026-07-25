@@ -13,7 +13,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
-from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES, INITIAL_GLICKO_RD
+from config import (
+    ADMIN_RATING_ADJUSTMENT_MAX_GAMES,
+    ADMIN_RATING_MAX,
+    INITIAL_GLICKO_RD,
+)
 from services.monitoring_service import format_health_snapshot
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS, format_betting_display
@@ -785,7 +789,7 @@ class AdminCommands(commands.Cog):
     @admin.command(name="setrating", description="Set initial rating for a player")
     @app_commands.describe(
         user="Player to adjust (must have few games)",
-        rating="Initial rating (0 or higher)",
+        rating=f"Initial rating (0-{ADMIN_RATING_MAX:.0f})",
     )
     @require_guild
     async def setinitialrating(
@@ -799,9 +803,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        if rating < 0:
+        if rating < 0 or rating > ADMIN_RATING_MAX:
             await interaction.response.send_message(
-                "❌ Rating must be 0 or higher.",
+                f"❌ Rating must be between 0 and {ADMIN_RATING_MAX:.0f}.",
                 ephemeral=True,
             )
             return
@@ -854,7 +858,7 @@ class AdminCommands(commands.Cog):
     @adjust.command(name="rating", description="Set a player's Glicko rating (Admin only)")
     @app_commands.describe(
         user="Player to adjust",
-        rating="New rating (0 or higher)",
+        rating=f"New rating (0-{ADMIN_RATING_MAX:.0f})",
     )
     @require_guild
     async def adjust_rating(
@@ -868,9 +872,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        if rating < 0:
+        if rating < 0 or rating > ADMIN_RATING_MAX:
             await interaction.response.send_message(
-                "❌ Rating must be 0 or higher.",
+                f"❌ Rating must be between 0 and {ADMIN_RATING_MAX:.0f}.",
                 ephemeral=True,
             )
             return
