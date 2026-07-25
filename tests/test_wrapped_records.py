@@ -53,7 +53,7 @@ def _make_match_row(
     dire_score=20,
     discord_id=111,
 ):
-    return {
+    row = {
         "match_id": match_id,
         "discord_id": discord_id,
         "hero_id": hero_id,
@@ -80,7 +80,37 @@ def _make_match_row(
         "side": side,
         "radiant_score": radiant_score,
         "dire_score": dire_score,
+        "wrapped_facts_match_id": None,
+        "actions_per_min": None,
+        "courier_kills": None,
+        "pings": None,
+        "rapier_count": None,
+        "wrapped_lane_role": None,
+        "comeback": None,
+        "throw": None,
     }
+    if enrichment_data:
+        data = json.loads(enrichment_data)
+        players = data.get("players") or []
+        player = players[0] if players else {}
+        purchase_log = player.get("purchase_log")
+        row.update(
+            {
+                "wrapped_facts_match_id": match_id,
+                "actions_per_min": player.get("actions_per_min"),
+                "courier_kills": player.get("courier_kills"),
+                "pings": player.get("pings"),
+                "rapier_count": (
+                    sum(1 for item in purchase_log if item.get("key") == "rapier")
+                    if isinstance(purchase_log, list)
+                    else 0
+                ),
+                "wrapped_lane_role": player.get("lane_role"),
+                "comeback": data.get("comeback"),
+                "throw": data.get("throw"),
+            }
+        )
+    return row
 
 
 def _make_enrichment_json(

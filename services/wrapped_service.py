@@ -4,7 +4,6 @@ Service for Cama Wrapped yearly summary generation.
 Aggregates stats and generates awards for a "Spotify Wrapped" style year-in-review.
 """
 
-import json
 import logging
 import random
 from dataclasses import dataclass, field
@@ -738,57 +737,24 @@ class WrappedService:
         return discord_id is None or snapshot.discord_id == discord_id
 
     @staticmethod
-    def _extract_player_enrichment_facts(
+    def _player_enrichment_facts_from_rows(
         rows: list[dict],
-        steam_ids: set[int],
     ) -> list[PlayerMatchEnrichment | None]:
-        """Decode each enrichment payload once and retain only needed fields."""
+        """Hydrate the compact per-player facts loaded by WrappedRepository."""
         facts: list[PlayerMatchEnrichment | None] = []
         for row in rows:
-            raw = row.get("enrichment_data")
-            if not raw:
+            if row.get("wrapped_facts_match_id") is None:
                 facts.append(None)
                 continue
-            try:
-                data = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                facts.append(None)
-                continue
-            if not isinstance(data, dict):
-                facts.append(None)
-                continue
-
-            players = data.get("players")
-            if not isinstance(players, list):
-                players = []
-            player_data = next(
-                (
-                    player
-                    for player in players
-                    if isinstance(player, dict)
-                    and player.get("account_id") in steam_ids
-                ),
-                None,
-            )
-            purchase_log = player_data.get("purchase_log") if player_data else None
-            rapier_count = (
-                sum(
-                    1
-                    for item in purchase_log
-                    if isinstance(item, dict) and item.get("key") == "rapier"
-                )
-                if isinstance(purchase_log, list)
-                else 0
-            )
             facts.append(
                 PlayerMatchEnrichment(
-                    actions_per_min=(player_data.get("actions_per_min") if player_data else None),
-                    courier_kills=(player_data.get("courier_kills") if player_data else None),
-                    pings=player_data.get("pings") if player_data else None,
-                    rapier_count=rapier_count,
-                    lane_role=player_data.get("lane_role") if player_data else None,
-                    comeback=data.get("comeback"),
-                    throw=data.get("throw"),
+                    actions_per_min=row.get("actions_per_min"),
+                    courier_kills=row.get("courier_kills"),
+                    pings=row.get("pings"),
+                    rapier_count=row.get("rapier_count") or 0,
+                    lane_role=row.get("wrapped_lane_role"),
+                    comeback=row.get("comeback"),
+                    throw=row.get("throw"),
                 )
             )
         return facts
@@ -806,7 +772,6 @@ class WrappedService:
         player_year_matches = self.wrapped_repo.get_player_year_matches(
             discord_id, guild_id, year, end_ts
         )
-        steam_ids = set(self.player_repo.get_steam_ids(discord_id))
         return WrappedStorySnapshot(
             discord_id=discord_id,
             guild_id=self._normalized_guild_id(guild_id),
@@ -814,9 +779,8 @@ class WrappedService:
             match_stats=match_stats,
             player_heroes=player_heroes,
             player_year_matches=player_year_matches,
-            enrichment_facts=self._extract_player_enrichment_facts(
-                player_year_matches,
-                steam_ids,
+            enrichment_facts=self._player_enrichment_facts_from_rows(
+                player_year_matches
             ),
         )
 
@@ -1060,8 +1024,11 @@ class WrappedService:
         if not player:
             return None
 
-        enrichment_facts = shared_snapshot.enrichment_facts if shared_snapshot else None
-        steam_ids = set() if shared_snapshot else set(self.player_repo.get_steam_ids(discord_id))
+        enrichment_facts = (
+            shared_snapshot.enrichment_facts
+            if shared_snapshot
+            else self._player_enrichment_facts_from_rows(rows)
+        )
 
         records: list[PersonalRecord] = []
 
@@ -1192,7 +1159,6 @@ class WrappedService:
         # --- Enrichment-data stats ---
         enrichment_stats = self._extract_enrichment_records(
             rows,
-            steam_ids,
             enrichment_facts=enrichment_facts,
         )
         records.extend(enrichment_stats)
@@ -1261,14 +1227,13 @@ class WrappedService:
     def _extract_enrichment_records(
         self,
         rows: list[dict],
-        steam_ids: set[int],
         *,
         enrichment_facts: list[PlayerMatchEnrichment | None] | None = None,
     ) -> list[PersonalRecord]:
-        """Extract records from enrichment_data JSON for each match."""
+        """Extract records from the compact per-match Wrapped facts."""
         records: list[PersonalRecord] = []
         if enrichment_facts is None:
-            enrichment_facts = self._extract_player_enrichment_facts(rows, steam_ids)
+            enrichment_facts = self._player_enrichment_facts_from_rows(rows)
 
         # Track best per enrichment stat: stat_key -> (value, row)
         best_apm: tuple[float, dict] | None = None
@@ -1780,10 +1745,7 @@ class WrappedService:
         enrichment_facts = (
             shared_snapshot.enrichment_facts
             if shared_snapshot
-            else self._extract_player_enrichment_facts(
-                rows,
-                set(self.player_repo.get_steam_ids(discord_id)),
-            )
+            else self._player_enrichment_facts_from_rows(rows)
         )
 
         pos_freq: dict[int, int] = {}

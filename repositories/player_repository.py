@@ -10,8 +10,131 @@ from config import NEW_PLAYER_EXCLUSION_BOOST
 from domain.models.player import Player
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IPlayerRepository
+from utils.wrapped_enrichment import extract_wrapped_enrichment_facts
 
 logger = logging.getLogger("cama_bot.repositories.player")
+
+
+def _refresh_wrapped_enrichment_facts(
+    cursor,
+    discord_ids: list[int] | set[int],
+) -> None:
+    """Rebuild historical Wrapped facts after effective Steam-ID changes.
+
+    Junction-table IDs are global and authoritative. A participant falls back
+    to the legacy ``players.steam_id`` only when they have no junction rows,
+    and that fallback is resolved in the participant's guild. Matches shared
+    by multiple affected players are decoded once.
+    """
+    unique_ids = list(dict.fromkeys(discord_ids))
+    if not unique_ids:
+        return
+
+    steam_ids_by_discord: dict[int, set[int]] = {
+        discord_id: set() for discord_id in unique_ids
+    }
+    affected_matches: dict[tuple[int, int], dict] = {}
+
+    for offset in range(0, len(unique_ids), 900):
+        chunk = unique_ids[offset : offset + 900]
+        placeholders = ",".join("?" for _ in chunk)
+
+        # Delete first so malformed/removed payload attribution cannot survive
+        # a membership change. Any later error rolls this back with the Steam
+        # mutation because the caller owns one transaction.
+        cursor.execute(
+            f"""
+            DELETE FROM wrapped_enrichment_facts
+            WHERE discord_id IN ({placeholders})
+            """,
+            chunk,
+        )
+        cursor.execute(
+            f"""
+            SELECT discord_id, steam_id
+            FROM player_steam_ids
+            WHERE discord_id IN ({placeholders})
+            """,
+            chunk,
+        )
+        for row in cursor.fetchall():
+            steam_ids_by_discord[row["discord_id"]].add(row["steam_id"])
+
+        cursor.execute(
+            f"""
+            SELECT
+                m.guild_id,
+                m.match_id,
+                m.enrichment_data,
+                mp.discord_id,
+                p.steam_id AS legacy_steam_id
+            FROM match_participants mp
+            JOIN matches m
+              ON m.match_id = mp.match_id
+             AND m.guild_id = mp.guild_id
+            LEFT JOIN players p
+              ON p.discord_id = mp.discord_id
+             AND p.guild_id = mp.guild_id
+            WHERE mp.discord_id IN ({placeholders})
+              AND m.enrichment_data IS NOT NULL
+            ORDER BY m.match_id, mp.discord_id
+            """,
+            chunk,
+        )
+        for row in cursor.fetchall():
+            key = (row["guild_id"], row["match_id"])
+            match = affected_matches.setdefault(
+                key,
+                {
+                    "enrichment_data": row["enrichment_data"],
+                    "participants": {},
+                },
+            )
+            match["participants"][row["discord_id"]] = row["legacy_steam_id"]
+
+    fact_rows = []
+    for (guild_id, match_id), match in affected_matches.items():
+        try:
+            match_data = json.loads(match["enrichment_data"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(match_data, dict):
+            continue
+
+        for discord_id, legacy_steam_id in match["participants"].items():
+            steam_ids = steam_ids_by_discord[discord_id]
+            if not steam_ids and legacy_steam_id is not None:
+                steam_ids = {legacy_steam_id}
+            facts = extract_wrapped_enrichment_facts(match_data, steam_ids)
+            if facts is None:
+                continue
+            fact_rows.append(
+                (
+                    guild_id,
+                    match_id,
+                    discord_id,
+                    facts["actions_per_min"],
+                    facts["courier_kills"],
+                    facts["pings"],
+                    facts["rapier_count"],
+                    facts["lane_role"],
+                    facts["comeback"],
+                    facts["throw"],
+                )
+            )
+
+    if fact_rows:
+        cursor.executemany(
+            """
+            INSERT INTO wrapped_enrichment_facts (
+                guild_id, match_id, discord_id,
+                actions_per_min, courier_kills, pings, rapier_count,
+                lane_role, comeback, throw
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            fact_rows,
+        )
 
 
 class PlayerRepository(BaseRepository, IPlayerRepository):
@@ -2236,12 +2359,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return row["steam_id"] if row and row["steam_id"] else None
 
-    def get_steam_ids_bulk(self, discord_ids: list[int]) -> dict[int, list[int]]:
+    def get_steam_ids_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None = None,
+    ) -> dict[int, list[int]]:
         """
         Get all steam_ids for multiple players in one query.
 
         Args:
             discord_ids: List of Discord user IDs
+            guild_id: Guild used for legacy-column fallback. When omitted,
+                preserves the historical cross-guild fallback for callers that
+                do not have guild context.
 
         Returns:
             Dict mapping discord_id to list of steam_ids (primary first)
@@ -2281,9 +2411,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             for offset in range(0, len(missing), 900):
                 chunk = missing[offset : offset + 900]
                 placeholders = ",".join("?" for _ in chunk)
+                guild_filter = ""
+                params: list[int] = chunk
+                if guild_id is not None:
+                    guild_filter = " AND guild_id = ?"
+                    params = [*chunk, self.normalize_guild_id(guild_id)]
                 cursor.execute(
-                    f"SELECT discord_id, steam_id FROM players WHERE discord_id IN ({placeholders})",
-                    chunk,
+                    f"""
+                    SELECT discord_id, steam_id
+                    FROM players
+                    WHERE discord_id IN ({placeholders})
+                    {guild_filter}
+                    """,
+                    params,
                 )
                 for row in cursor.fetchall():
                     did = row["discord_id"]
@@ -2305,8 +2445,17 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         import time
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1
+                FROM player_steam_ids
+                WHERE discord_id = ? AND steam_id = ?
+                """,
+                (discord_id, steam_id),
+            )
+            membership_added = cursor.fetchone() is None
 
             # Update legacy column for backward compatibility
             cursor.execute(
@@ -2333,6 +2482,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 (discord_id, steam_id, int(time.time())),
             )
+            if membership_added:
+                _refresh_wrapped_enrichment_facts(cursor, [discord_id])
 
     def get_all_with_dotabuff_no_steam_id(self) -> list[dict]:
         """
@@ -3251,7 +3402,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         import time
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
             # Check if steam_id is already linked to another player
@@ -3262,6 +3413,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             existing = cursor.fetchone()
             if existing and existing["discord_id"] != discord_id:
                 raise ValueError(f"Steam ID {steam_id} is already linked to another player")
+            membership_added = existing is None
 
             # Also check legacy column
             cursor.execute(
@@ -3294,6 +3446,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     "UPDATE players SET steam_id = ?, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
                     (steam_id, discord_id),
                 )
+            if membership_added:
+                _refresh_wrapped_enrichment_facts(cursor, [discord_id])
 
     def add_steam_ids_bulk(
         self, steam_ids: list[tuple[int, int]]
@@ -3364,6 +3518,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 )
 
             results: list[dict[str, bool | str]] = []
+            affected_discord_ids: set[int] = set()
             for discord_id, steam_id in steam_ids:
                 junction_owner = junction_owners.get(steam_id)
                 legacy_conflict = any(
@@ -3383,6 +3538,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     })
                     continue
 
+                membership_added = junction_owner is None
                 is_primary = discord_id not in players_with_ids
                 if is_primary:
                     cursor.execute(
@@ -3418,10 +3574,14 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 junction_owners[steam_id] = discord_id
                 if is_primary:
                     legacy_owners.setdefault(steam_id, set()).add(discord_id)
+                if membership_added:
+                    affected_discord_ids.add(discord_id)
                 results.append({
                     "success": True,
                     "is_primary": is_primary,
                 })
+
+            _refresh_wrapped_enrichment_facts(cursor, affected_discord_ids)
 
         return results
 
@@ -3436,7 +3596,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             True if removed, False if not found
         """
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
             # Check if this was the primary
@@ -3463,7 +3623,10 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     "WHERE discord_id = ? AND steam_id = ?",
                     (discord_id, steam_id),
                 )
-                return cursor.rowcount > 0
+                removed = cursor.rowcount > 0
+                if removed:
+                    _refresh_wrapped_enrichment_facts(cursor, [discord_id])
+                return removed
 
             # If it was primary, promote another steam_id or clear legacy column
             if was_primary:
@@ -3494,7 +3657,31 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                         "UPDATE players SET steam_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
                         (discord_id,),
                     )
+            else:
+                # A lone junction row can legitimately be non-primary (for
+                # example, add_steam_id(..., is_primary=False)). Do not let a
+                # stale legacy copy resurrect the ID after its junction row is
+                # removed and fallback becomes active again.
+                cursor.execute(
+                    """
+                    SELECT 1
+                    FROM player_steam_ids
+                    WHERE discord_id = ?
+                    LIMIT 1
+                    """,
+                    (discord_id,),
+                )
+                if cursor.fetchone() is None:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET steam_id = NULL, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND steam_id = ?
+                        """,
+                        (discord_id, steam_id),
+                    )
 
+            _refresh_wrapped_enrichment_facts(cursor, [discord_id])
             return True
 
     def set_primary_steam_id(self, discord_id: int, steam_id: int) -> bool:

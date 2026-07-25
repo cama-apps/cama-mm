@@ -8,6 +8,7 @@ import sqlite3
 import time
 
 from utils.match_bans import extract_match_bans
+from utils.wrapped_enrichment import extract_wrapped_enrichment_facts
 
 logger = logging.getLogger("cama_bot.schema")
 
@@ -604,9 +605,129 @@ class SchemaManager:
                 "recompute_symmetric_glicko_predictions",
                 self._migration_recompute_glicko_prediction_probabilities,
             ),
+            # Wrapped reads a compact projection instead of loading and parsing
+            # the complete OpenDota payload for every player match.
+            (
+                "create_wrapped_enrichment_facts",
+                self._migration_create_wrapped_enrichment_facts,
+            ),
         ]
 
     # --- Migrations ---
+
+    def _migration_create_wrapped_enrichment_facts(self, cursor) -> None:
+        """Persist the seven OpenDota facts consumed by Cama Wrapped."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wrapped_enrichment_facts (
+                guild_id       INTEGER NOT NULL,
+                match_id       INTEGER NOT NULL,
+                discord_id     INTEGER NOT NULL,
+                actions_per_min NUMERIC,
+                courier_kills  INTEGER,
+                pings          INTEGER,
+                rapier_count   INTEGER NOT NULL DEFAULT 0,
+                lane_role      INTEGER,
+                comeback       NUMERIC,
+                throw          NUMERIC,
+                PRIMARY KEY (guild_id, match_id, discord_id),
+                FOREIGN KEY (match_id, discord_id)
+                    REFERENCES match_participants(match_id, discord_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+
+        # Rebuilding from source makes the migration body itself idempotent,
+        # while schema_migrations remains the normal one-shot guard.
+        cursor.execute("DELETE FROM wrapped_enrichment_facts")
+        match_rows = cursor.connection.execute(
+            """
+            SELECT match_id, guild_id, enrichment_data
+            FROM matches
+            WHERE enrichment_data IS NOT NULL
+            ORDER BY match_id
+            """
+        )
+        for match_row in match_rows:
+            try:
+                match_data = json.loads(match_row["enrichment_data"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(match_data, dict):
+                continue
+
+            participant_rows = cursor.connection.execute(
+                """
+                SELECT
+                    mp.discord_id,
+                    psi.steam_id AS junction_steam_id,
+                    p.steam_id AS legacy_steam_id
+                FROM match_participants mp
+                LEFT JOIN player_steam_ids psi
+                  ON psi.discord_id = mp.discord_id
+                LEFT JOIN players p
+                  ON p.discord_id = mp.discord_id
+                 AND p.guild_id = mp.guild_id
+                WHERE mp.match_id = ? AND mp.guild_id = ?
+                ORDER BY mp.discord_id, psi.is_primary DESC, psi.added_at ASC
+                """,
+                (match_row["match_id"], match_row["guild_id"]),
+            )
+            steam_ids_by_discord: dict[int, set[int]] = {}
+            legacy_steam_ids: dict[int, int] = {}
+            for participant_row in participant_rows:
+                discord_id = participant_row["discord_id"]
+                steam_ids_by_discord.setdefault(discord_id, set())
+                junction_steam_id = participant_row["junction_steam_id"]
+                if junction_steam_id is not None:
+                    steam_ids_by_discord[discord_id].add(junction_steam_id)
+                legacy_steam_id = participant_row["legacy_steam_id"]
+                if legacy_steam_id is not None:
+                    legacy_steam_ids[discord_id] = legacy_steam_id
+
+            fact_rows = []
+            for discord_id, steam_ids in steam_ids_by_discord.items():
+                if not steam_ids and discord_id in legacy_steam_ids:
+                    steam_ids = {legacy_steam_ids[discord_id]}
+                facts = extract_wrapped_enrichment_facts(match_data, steam_ids)
+                if facts is None:
+                    continue
+                fact_rows.append(
+                    (
+                        match_row["guild_id"],
+                        match_row["match_id"],
+                        discord_id,
+                        facts["actions_per_min"],
+                        facts["courier_kills"],
+                        facts["pings"],
+                        facts["rapier_count"],
+                        facts["lane_role"],
+                        facts["comeback"],
+                        facts["throw"],
+                    )
+                )
+
+            if fact_rows:
+                cursor.executemany(
+                    """
+                    INSERT INTO wrapped_enrichment_facts (
+                        guild_id, match_id, discord_id,
+                        actions_per_min, courier_kills, pings, rapier_count,
+                        lane_role, comeback, throw
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(guild_id, match_id, discord_id) DO UPDATE SET
+                        actions_per_min = excluded.actions_per_min,
+                        courier_kills = excluded.courier_kills,
+                        pings = excluded.pings,
+                        rapier_count = excluded.rapier_count,
+                        lane_role = excluded.lane_role,
+                        comeback = excluded.comeback,
+                        throw = excluded.throw
+                    """,
+                    fact_rows,
+                )
 
     def _migration_recompute_glicko_prediction_probabilities(self, cursor) -> None:
         """Rewrite historical prediction snapshots with the symmetric formula."""

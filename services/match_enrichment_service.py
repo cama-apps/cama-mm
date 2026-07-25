@@ -10,6 +10,7 @@ import logging
 
 from config import ENRICHMENT_MIN_PLAYER_MATCH
 from opendota_integration import OpenDotaAPI
+from utils.wrapped_enrichment import extract_wrapped_enrichment_facts
 
 logger = logging.getLogger("cama_bot.services.match_enrichment")
 
@@ -254,7 +255,11 @@ class MatchEnrichmentService:
         # Now supports multiple steam_ids per player
         participants = self.match_repo.get_match_participants(internal_match_id, guild_id)
         discord_ids = [p["discord_id"] for p in participants]
-        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
+        lookup_guild_id = guild_id if guild_id is not None else 0
+        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(
+            discord_ids,
+            guild_id=lookup_guild_id,
+        )
 
         # Build reverse mapping: any steam_id -> discord_id
         # This allows matching when a player uses an alternate account
@@ -287,11 +292,15 @@ class MatchEnrichmentService:
         radiant_fantasy = 0.0
         dire_fantasy = 0.0
         participant_updates = []  # Collected first; applied atomically with match-level data below
+        wrapped_facts = []
 
         # Match each participant - try all their steam_ids
         for participant in participants:
             discord_id = participant["discord_id"]
             player_steam_ids = discord_to_steam_ids.get(discord_id, [])
+            facts = extract_wrapped_enrichment_facts(match_data, player_steam_ids)
+            if facts is not None:
+                wrapped_facts.append({"discord_id": discord_id, **facts})
 
             if not player_steam_ids:
                 logger.warning(f"Player {discord_id} has no steam_id, cannot enrich")
@@ -383,6 +392,8 @@ class MatchEnrichmentService:
             enrichment_source=source,
             enrichment_confidence=confidence,
             participant_updates=participant_updates,
+            guild_id=guild_id,
+            wrapped_facts=wrapped_facts,
         )
 
         logger.info(

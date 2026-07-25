@@ -201,6 +201,15 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def get_steam_ids_bulk(
+        self,
+        discord_ids: list[int],
+        guild_id: int | None = None,
+    ) -> dict[int, list[int]]:
+        """Get Steam IDs for multiple players, with guild-scoped legacy fallback."""
+        ...
+
+    @abstractmethod
     def add_steam_id(self, discord_id: int, steam_id: int, is_primary: bool = False) -> None:
         """Add a Steam ID to a player."""
         ...
@@ -602,6 +611,8 @@ class IMatchRepository(ABC):
         enrichment_source: str | None,
         enrichment_confidence: float | None,
         participant_updates: list[dict],
+        guild_id: int | None = None,
+        wrapped_facts: list[dict] | None = None,
     ) -> int: ...
 
     @abstractmethod

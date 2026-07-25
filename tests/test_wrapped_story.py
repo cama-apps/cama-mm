@@ -15,7 +15,6 @@ Covers:
 """
 
 import io
-import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -272,11 +271,9 @@ class TestGetPersonalSummaryWrapped:
 # ===========================================================================
 
 
-def test_wrapped_story_snapshot_reuses_queries_and_decoded_enrichment():
+def test_wrapped_story_snapshot_reuses_queries_and_compact_enrichment():
     svc, wrapped_repo, player_repo = _build_service()
-    steam_id = 76561198000000001
     player_repo.get_by_id.return_value = SimpleNamespace(name="TestPlayer")
-    player_repo.get_steam_ids.return_value = [steam_id]
     wrapped_repo.get_player_rating_change.return_value = 0
     wrapped_repo.get_month_match_stats.return_value = [
         {
@@ -315,64 +312,54 @@ def test_wrapped_story_snapshot_reuses_queries_and_decoded_enrichment():
                 "kills": match_id,
                 "deaths": 1,
                 "assists": 2,
-                "enrichment_data": json.dumps(
-                    {
-                        "players": [
-                            {
-                                "account_id": steam_id,
-                                "lane_role": lane_role,
-                                "actions_per_min": 100 + match_id,
-                            }
-                        ]
-                    }
-                ),
+                "wrapped_facts_match_id": match_id,
+                "actions_per_min": 100 + match_id,
+                "courier_kills": None,
+                "pings": None,
+                "rapier_count": 0,
+                "wrapped_lane_role": lane_role,
+                "comeback": None,
+                "throw": None,
             }
         )
     wrapped_repo.get_player_year_matches.return_value = rows
 
-    json_loads = MagicMock(wraps=json.loads)
-    json_adapter = SimpleNamespace(
-        loads=json_loads,
-        JSONDecodeError=json.JSONDecodeError,
+    snapshot = svc.build_wrapped_story_snapshot(111, 2026, guild_id=0)
+    summary = svc.get_personal_summary_wrapped(
+        111,
+        2026,
+        guild_id=0,
+        snapshot=snapshot,
     )
-    with patch("services.wrapped_service.json", json_adapter):
-        snapshot = svc.build_wrapped_story_snapshot(111, 2026, guild_id=0)
-        summary = svc.get_personal_summary_wrapped(
-            111,
-            2026,
-            guild_id=0,
-            snapshot=snapshot,
-        )
-        records = svc.get_player_records_wrapped(
-            111,
-            2026,
-            guild_id=0,
-            snapshot=snapshot,
-        )
-        spotlight = svc.get_hero_spotlight_wrapped(
-            111,
-            2026,
-            guild_id=0,
-            snapshot=snapshot,
-        )
-        roles = svc.get_role_breakdown_wrapped(
-            111,
-            2026,
-            guild_id=0,
-            snapshot=snapshot,
-        )
+    records = svc.get_player_records_wrapped(
+        111,
+        2026,
+        guild_id=0,
+        snapshot=snapshot,
+    )
+    spotlight = svc.get_hero_spotlight_wrapped(
+        111,
+        2026,
+        guild_id=0,
+        snapshot=snapshot,
+    )
+    roles = svc.get_role_breakdown_wrapped(
+        111,
+        2026,
+        guild_id=0,
+        snapshot=snapshot,
+    )
 
     assert summary is not None
     assert records is not None
     assert spotlight is not None
     assert roles is not None
     assert roles.lane_freq == {1: 2, 2: 1}
-    assert json_loads.call_count == len(rows)
     wrapped_repo.get_month_match_stats.assert_called_once()
     wrapped_repo.get_month_player_heroes.assert_called_once()
     wrapped_repo.get_player_year_matches.assert_called_once()
     wrapped_repo.get_month_player_match_details.assert_not_called()
-    player_repo.get_steam_ids.assert_called_once_with(111)
+    player_repo.get_steam_ids.assert_not_called()
 
 
 # ===========================================================================
@@ -760,9 +747,12 @@ class TestGetRoleBreakdownWrapped:
     def test_returns_result_with_no_enrichment_data(self):
         svc, wrapped_repo, player_repo = _build_service()
         player_repo.get_steam_ids.return_value = []
-        # Matches exist but have no enrichment data
+        # Matches exist but have no compact enrichment facts.
         wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-02-05 20:00:00", "enrichment_data": None},
+            {
+                "match_date": "2026-02-05 20:00:00",
+                "wrapped_facts_match_id": None,
+            },
         ]
         result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
         # Year-scoped: matches exist so result is returned, but no role data
@@ -772,18 +762,24 @@ class TestGetRoleBreakdownWrapped:
         assert result.total_games == 0
 
     def test_returns_role_freq_from_enrichment(self):
-        svc, wrapped_repo, player_repo = _build_service()
-        steam_id = 76561198000000001
-        player_repo.get_steam_ids.return_value = [steam_id]
-
-        enrichment1 = json.dumps({"players": [{"account_id": steam_id, "lane_role": 1}]})
-        enrichment2 = json.dumps({"players": [{"account_id": steam_id, "lane_role": 2}]})
-        enrichment3 = json.dumps({"players": [{"account_id": steam_id, "lane_role": 1}]})
+        svc, wrapped_repo, _ = _build_service()
 
         wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": enrichment1},
-            {"match_date": "2026-01-10 20:00:00", "enrichment_data": enrichment2},
-            {"match_date": "2026-01-15 20:00:00", "enrichment_data": enrichment3},
+            {
+                "match_date": "2026-01-05 20:00:00",
+                "wrapped_facts_match_id": 1,
+                "wrapped_lane_role": 1,
+            },
+            {
+                "match_date": "2026-01-10 20:00:00",
+                "wrapped_facts_match_id": 2,
+                "wrapped_lane_role": 2,
+            },
+            {
+                "match_date": "2026-01-15 20:00:00",
+                "wrapped_facts_match_id": 3,
+                "wrapped_lane_role": 1,
+            },
         ]
 
         result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
@@ -797,8 +793,14 @@ class TestGetRoleBreakdownWrapped:
         player_repo.get_steam_ids.return_value = []
 
         wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": None},
-            {"match_date": "2026-01-10 20:00:00", "enrichment_data": None},
+            {
+                "match_date": "2026-01-05 20:00:00",
+                "wrapped_facts_match_id": None,
+            },
+            {
+                "match_date": "2026-01-10 20:00:00",
+                "wrapped_facts_match_id": None,
+            },
         ]
 
         result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
@@ -809,14 +811,14 @@ class TestGetRoleBreakdownWrapped:
         assert result.lane_freq == {}
 
     def test_skips_lane_role_zero(self):
-        svc, wrapped_repo, player_repo = _build_service()
-        steam_id = 76561198000000001
-        player_repo.get_steam_ids.return_value = [steam_id]
-
-        enrichment = json.dumps({"players": [{"account_id": steam_id, "lane_role": 0}]})
+        svc, wrapped_repo, _ = _build_service()
 
         wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": enrichment},
+            {
+                "match_date": "2026-01-05 20:00:00",
+                "wrapped_facts_match_id": 1,
+                "wrapped_lane_role": 0,
+            },
         ]
 
         result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
@@ -825,16 +827,19 @@ class TestGetRoleBreakdownWrapped:
 
     def test_skips_jungle_lane_role_4(self):
         """Jungle (lane_role=4) is intentionally excluded from lane breakdown."""
-        svc, wrapped_repo, player_repo = _build_service()
-        steam_id = 76561198000000001
-        player_repo.get_steam_ids.return_value = [steam_id]
-
-        enrichment_jungle = json.dumps({"players": [{"account_id": steam_id, "lane_role": 4}]})
-        enrichment_mid = json.dumps({"players": [{"account_id": steam_id, "lane_role": 2}]})
+        svc, wrapped_repo, _ = _build_service()
 
         wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": enrichment_jungle},
-            {"match_date": "2026-01-06 20:00:00", "enrichment_data": enrichment_mid},
+            {
+                "match_date": "2026-01-05 20:00:00",
+                "wrapped_facts_match_id": 1,
+                "wrapped_lane_role": 4,
+            },
+            {
+                "match_date": "2026-01-06 20:00:00",
+                "wrapped_facts_match_id": 2,
+                "wrapped_lane_role": 2,
+            },
         ]
 
         result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)

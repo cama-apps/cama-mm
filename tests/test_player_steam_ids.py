@@ -179,6 +179,24 @@ class TestPlayerSteamIds:
         assert player_repository.get_steam_ids(12345) == []
         assert player_repository.get_steam_id(12345) is None
 
+    def test_remove_lone_nonprimary_does_not_resurrect_legacy_id(
+        self, player_repository
+    ):
+        """A stale primary flag must not make legacy fallback undo an unlink."""
+        player_repository.add(
+            discord_id=12345,
+            discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
+        )
+        player_repository.add_steam_id(12345, 100001, is_primary=True)
+        # Re-adding the same membership as non-primary leaves the historical
+        # legacy column populated but clears the junction primary flag.
+        player_repository.add_steam_id(12345, 100001, is_primary=False)
+
+        assert player_repository.remove_steam_id(12345, 100001) is True
+        assert player_repository.get_steam_ids(12345) == []
+        assert player_repository.get_steam_id(12345) is None
+
     def test_remove_nonexistent_steam_id(self, player_repository):
         """Test removing a Steam ID that doesn't exist."""
         player_repository.add(
@@ -214,6 +232,32 @@ class TestPlayerSteamIds:
 
         assert result[2] == [200001]
         assert result[3] == []
+
+    def test_get_steam_ids_bulk_scopes_legacy_fallback_to_guild(
+        self, player_repository
+    ):
+        """The same Discord user may have different unmigrated IDs per guild."""
+        player_repository.add(
+            discord_id=12345,
+            discord_username="Guild A",
+            guild_id=TEST_GUILD_ID,
+            steam_id=100001,
+        )
+        player_repository.add(
+            discord_id=12345,
+            discord_username="Guild B",
+            guild_id=99999,
+            steam_id=200001,
+        )
+
+        assert player_repository.get_steam_ids_bulk(
+            [12345],
+            guild_id=TEST_GUILD_ID,
+        ) == {12345: [100001]}
+        assert player_repository.get_steam_ids_bulk(
+            [12345],
+            guild_id=99999,
+        ) == {12345: [200001]}
 
     def test_set_steam_id_updates_junction_table(self, player_repository):
         """Test that set_steam_id adds to junction table as primary."""
