@@ -113,6 +113,21 @@ if _dig_channel_raw:
 # Dedicated mafia channel. Public mafia embeds post here and /mafia commands
 # are gated to it (threads under it inherit). Hardcoded rather than env-driven.
 MAFIA_CHANNEL_ID: int = 1514997325385306132
+
+# Dedicated pets channel - if set, hatch announcements, obituaries, and weekly
+# refund summaries are posted here. If unset, pets stay fully quiet in public.
+PET_CHANNEL_ID: int | None = None
+_pet_channel_raw = os.getenv("PET_CHANNEL_ID")
+if _pet_channel_raw:
+    try:
+        PET_CHANNEL_ID = int(_pet_channel_raw.strip())
+    except ValueError:
+        PET_CHANNEL_ID = None
+
+# Base pet hunger decay in points per day (100-point scale). 20/day means a
+# fully fed pet starves after 5 days of total neglect. Species quirks apply
+# multipliers on top; balance tables live in domain/pet_constants.py.
+PET_HUNGER_DECAY_PER_DAY = _parse_int("PET_HUNGER_DECAY_PER_DAY", 20)
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.02)  # 2% chance per shuffle
 
