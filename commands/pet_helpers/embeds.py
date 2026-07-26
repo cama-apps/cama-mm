@@ -19,6 +19,7 @@ from domain.pet_constants import (
 )
 from utils.embeds import COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_RED
 from utils.formatting import JOPACOIN_EMOTE
+from utils.game_date import game_date_for_timestamp
 from utils.pet_assets import get_egg_card, get_pet_card, get_tombstone_card
 
 COLOR_EGG = 0xF1C40F  # warm gold
@@ -186,7 +187,8 @@ def _build_living_embed(
     embed.add_field(
         name="Supplies", value=supplies_line(status.supplies), inline=False
     )
-    feeds_left = max(0, FEED_CAP_PER_DAY - pet.feeds_today)
+    feeds_used = pet.feeds_used_on(game_date_for_timestamp(now))
+    feeds_left = max(0, FEED_CAP_PER_DAY - feeds_used)
     embed.set_footer(text=f"{feeds_left}/{FEED_CAP_PER_DAY} feeds left today")
     file = get_pet_card(pet.species, (status.stage or PetStage.BABY).value,
                         pet.art_mood(now, decay_per_day), pet.pet_id)

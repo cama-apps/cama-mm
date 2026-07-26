@@ -158,6 +158,10 @@ class Pet:
         boosted = restore * get_species(self.species).restore_pct // 100
         return min(MAX_HUNGER, self.current_hunger(now, decay_per_day) + boosted)
 
+    def feeds_used_on(self, game_date: str) -> int:
+        """Feed-cap usage for a game date; a stale feed_date means a fresh day."""
+        return self.feeds_today if self.feed_date == game_date else 0
+
     def consumed_in_week(self, week_key: str) -> int:
         """Care JC consumed during the given week (current or previous slot)."""
         if self.week_key == week_key:

@@ -409,17 +409,28 @@ class ProfileCommands(commands.Cog):
                     )
                 ).value
                 if pet_status.pet is not None and pet_status.mood is not None:
+                    from domain.models.pet import PetStage
                     from domain.pet_constants import get_species
 
-                    species_name = get_species(pet_status.pet.species).display_name
-                    embed.add_field(
-                        name="Pet",
-                        value=(
-                            f"🦙 {pet_status.pet.name} the {species_name} — "
-                            f"{pet_status.mood.value}"
-                        ),
-                        inline=True,
-                    )
+                    if pet_status.stage == PetStage.EGG:
+                        # Species stays hidden until the hatch reveal.
+                        embed.add_field(
+                            name="Pet",
+                            value=f"🥚 {pet_status.pet.name} (unhatched egg)",
+                            inline=True,
+                        )
+                    else:
+                        species_name = get_species(
+                            pet_status.pet.species
+                        ).display_name
+                        embed.add_field(
+                            name="Pet",
+                            value=(
+                                f"🦙 {pet_status.pet.name} the {species_name} — "
+                                f"{pet_status.mood.value}"
+                            ),
+                            inline=True,
+                        )
             except Exception as e:
                 logger.debug(f"Could not fetch pet status: {e}")
 

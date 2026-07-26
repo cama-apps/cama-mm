@@ -160,8 +160,12 @@ class ReminderService:
         if not preference_enabled:
             self._cancel_task(discord_id, guild_id, "pet")
             return
-        delay = max(0.0, warning_at - time.time())
         self._cancel_task(discord_id, guild_id, "pet")
+        delay = warning_at - time.time()
+        if delay <= 0:
+            # Already at/below the warning band — the owner is looking at the
+            # pet right now, so there is no future crossing to warn about.
+            return
         task = asyncio.create_task(
             self._send_dm_after_delay(
                 delay=delay,
@@ -174,6 +178,10 @@ class ReminderService:
             )
         )
         self._register_task((discord_id, guild_id, "pet"), task)
+
+    def cancel_pet_reminder(self, discord_id: int, guild_id: int | None) -> None:
+        """Drop a pending hungry-warning (e.g. when the pet has died)."""
+        self._cancel_task(discord_id, 0 if guild_id is None else guild_id, "pet")
 
     def cancel_dig_reminder(self, discord_id: int, guild_id: int) -> None:
         guild_id = 0 if guild_id is None else guild_id

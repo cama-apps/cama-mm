@@ -194,6 +194,11 @@ class TestConstantsAndRows:
 
         assert sum(s.weight for s in SPECIES.values()) == SPECIES_WEIGHT_TOTAL
 
+    def test_feeds_used_on_resets_across_game_days(self):
+        pet = make_pet(feeds_today=4, feed_date="2026-07-25")
+        assert pet.feeds_used_on("2026-07-25") == 4
+        assert pet.feeds_used_on("2026-07-26") == 0  # fresh day, cap reset
+
     def test_from_row_round_trip(self):
         pet = make_pet()
         row = {

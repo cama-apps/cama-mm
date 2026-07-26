@@ -82,7 +82,8 @@ class PetStatusView(discord.ui.View):
         else:
             await interaction.response.edit_message(**kwargs)
             message = await interaction.original_response()
-        view.message = message
+        if view is not None:  # no view when the pet just died (memorial embed)
+            view.message = message
 
 
 class _FeedButton(discord.ui.Button):
@@ -104,16 +105,18 @@ class _FeedButton(discord.ui.Button):
         if not result.success:
             await interaction.response.send_message(f"❌ {result.error}", ephemeral=True)
             return
-        if result.value.spat:
-            await interaction.response.send_message(
-                f"💢 **{result.value.pet.name}** spat the "
+        # Refresh consumes the component response (edit_message on the panel);
+        # the spat notice goes out as a followup so the panel stays live.
+        spat = result.value.spat
+        pet_name = result.value.pet.name
+        await view.refresh(interaction)
+        if spat:
+            await interaction.followup.send(
+                f"💢 **{pet_name}** spat the "
                 f"{FOOD_ITEMS[self.item_id].display_name} straight back at you. "
                 "The temperament of legends.",
                 ephemeral=True,
             )
-            await view.refresh(interaction)
-            return
-        await view.refresh(interaction)
 
 
 class _BuyButton(discord.ui.Button):

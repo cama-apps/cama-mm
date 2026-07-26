@@ -15,6 +15,7 @@ Core invariants enforced here:
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import logging
 import random
@@ -94,9 +95,11 @@ class PetService:
         that same moment — and may then starve again before `now`.
         """
         current = pet
-        for _ in range(3):  # aegis revive can chain into a second starvation
-            if current is None or current.died_at is not None:
-                return None if current is None or current.died_at else current
+        for _ in range(4):  # aegis/lost-claim re-reads can chain
+            if current is None:
+                return None
+            if current.died_at is not None:
+                return None
             if not current.is_starved(now, self.decay_per_day):
                 return current
             died_at = current.starvation_time(self.decay_per_day)
@@ -107,6 +110,8 @@ class PetService:
                     current.guild_id,
                     revived_last_fed_at=died_at,
                     revive_hunger=AEGIS_REVIVE_HUNGER,
+                    expected_last_fed_at=current.last_fed_at,
+                    expected_hunger=current.hunger_at_last_fed,
                 ):
                     logger.info(
                         "Pet %s burned its Aegis at %s", current.pet_id, died_at
@@ -116,10 +121,17 @@ class PetService:
                     current.pet_id, current.guild_id
                 )
                 continue
-            self.pet_repo.claim_death(
-                current.pet_id, current.guild_id, died_at=died_at
-            )
-            return None
+            if self.pet_repo.claim_death(
+                current.pet_id,
+                current.guild_id,
+                died_at=died_at,
+                expected_last_fed_at=current.last_fed_at,
+                expected_hunger=current.hunger_at_last_fed,
+            ):
+                return None
+            # Lost the claim: the pet was fed/topped-up (or killed) after our
+            # snapshot. Re-read and re-derive rather than trusting stale math.
+            current = self.pet_repo.get_pet_by_id(current.pet_id, current.guild_id)
         return None
 
     def _living_pet(self, discord_id: int, guild_id: int | None, now: int) -> Pet | None:
@@ -168,6 +180,13 @@ class PetService:
                 code=error_codes.PLAYER_NOT_FOUND,
             )
         now = self._now()
+        # Resolve a pending starvation first so a long-dead-on-paper pet does
+        # not block adoption, and the fee tier reflects that death.
+        if self._living_pet(discord_id, guild_id, now) is not None:
+            return Result.fail(
+                "You already have a pet. One cama per household.",
+                code=error_codes.ALREADY_HAS_PET,
+            )
         prior_deaths = self.pet_repo.count_dead_pets(discord_id, guild_id)
         fee = adoption_fee(prior_deaths)
         species_ids = list(SPECIES)
@@ -383,7 +402,18 @@ class PetService:
                     new_hunger=new_hunger,
                 )
                 if applied:
-                    results.append((living, amount))
+                    # Return the post-top-up anchors so callers (warning
+                    # re-arm) see the pet's real state.
+                    results.append(
+                        (
+                            dataclasses.replace(
+                                living,
+                                last_fed_at=now,
+                                hunger_at_last_fed=new_hunger,
+                            ),
+                            amount,
+                        )
+                    )
         except Exception:
             logger.exception("Pet match-win hook failed; match flow unaffected")
         return results
@@ -437,21 +467,28 @@ class PetService:
         self.pet_repo.mark_hatch_announced(pet.pet_id, pet.guild_id, self._now())
 
     def _sweep_refunds(self, now: int) -> list[RefundNotice]:
-        week_key = _prev_week_key_for_timestamp(now)
+        # Look back two weeks, oldest first: the two-slot care accumulator can
+        # still substantiate both, so an outage spanning a week boundary does
+        # not silently forfeit the older window.
+        week_keys = [
+            _week_key_for_timestamp(now - 14 * 86400),
+            _week_key_for_timestamp(now - 7 * 86400),
+        ]
         notices: list[RefundNotice] = []
         for guild_id in self.pet_repo.list_pet_guild_ids():
-            try:
-                notice = self._pay_guild_refunds(guild_id, week_key, now)
-            except ValueError as exc:
-                if str(exc) == "fund_short":
-                    logger.warning(
-                        "Pet refund fund_short for guild %s %s; retrying next tick",
-                        guild_id, week_key,
-                    )
-                    continue
-                raise
-            if notice is not None:
-                notices.append(notice)
+            for week_key in week_keys:
+                try:
+                    notice = self._pay_guild_refunds(guild_id, week_key, now)
+                except ValueError as exc:
+                    if str(exc) == "fund_short":
+                        logger.warning(
+                            "Pet refund fund_short for guild %s %s; retrying next tick",
+                            guild_id, week_key,
+                        )
+                        continue
+                    raise
+                if notice is not None:
+                    notices.append(notice)
         return notices
 
     def _pay_guild_refunds(
@@ -490,6 +527,15 @@ class PetService:
                 )
                 for p in payouts
             ]
+            payouts = [p for p in payouts if p.amount > 0]
+            if not payouts:
+                # Fund is empty: leave the window UNCLAIMED so a later top-up
+                # can still pay this week (mirrors the fund_short retry path).
+                logger.warning(
+                    "Pet refund fund empty for guild %s %s; retrying next tick",
+                    guild_id, week_key,
+                )
+                return None
         paid = self.pet_repo.pay_refunds_atomic(
             guild_id,
             week_key,
