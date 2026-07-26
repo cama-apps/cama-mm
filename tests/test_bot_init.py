@@ -27,6 +27,8 @@ def test_bot_commands_registered(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
     env["DB_PATH"] = str(tmp_path / "bot-smoke.db")
+    # Pets are channel-gated; enable them so the smoke test covers the cog.
+    env["PET_CHANNEL_ID"] = "123456789"
     script = textwrap.dedent(
         """
         import asyncio

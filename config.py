@@ -114,8 +114,10 @@ if _dig_channel_raw:
 # are gated to it (threads under it inherit). Hardcoded rather than env-driven.
 MAFIA_CHANNEL_ID: int = 1514997325385306132
 
-# Dedicated pets channel - if set, hatch announcements, obituaries, and weekly
-# refund summaries are posted here. If unset, pets stay fully quiet in public.
+# Dedicated pets channel. The ENTIRE pets feature is gated on this: until the
+# channel exists and its id is configured here, the /pet cog is not loaded,
+# no pet service is created, and the match/profile pet hooks no-op. When set,
+# hatch announcements, obituaries, and weekly refund summaries post here.
 PET_CHANNEL_ID: int | None = None
 _pet_channel_raw = os.getenv("PET_CHANNEL_ID")
 if _pet_channel_raw:

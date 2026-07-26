@@ -476,5 +476,9 @@ class PetCommands(commands.Cog):
 async def setup(bot: commands.Bot):
     pet_service = getattr(bot, "pet_service", None)
     if pet_service is None:
-        raise RuntimeError("Pet service not registered on bot.")
+        # Feature is channel-gated: without PET_CHANNEL_ID the container
+        # leaves the service unset and pets stay entirely off — no commands,
+        # no sweep loop, no announcements.
+        logger.info("Pets disabled (PET_CHANNEL_ID not configured); skipping cog")
+        return
     await bot.add_cog(PetCommands(bot, pet_service))

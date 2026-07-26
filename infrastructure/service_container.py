@@ -537,11 +537,21 @@ class ServiceContainer:
         )
 
     def _init_pet_service(self) -> None:
-        """Cama pets (tamagotchi) vertical."""
+        """Cama pets (tamagotchi) vertical.
+
+        The whole feature is gated on a dedicated channel: until
+        PET_CHANNEL_ID is configured the service stays None, the /pet cog
+        skips loading, and the match/profile hooks no-op.
+        """
         import config
-        from services.pet_service import PetService
 
         c = self._components
+        if not config.PET_CHANNEL_ID:
+            c["pet_service"] = None
+            logger.info("Pet service disabled (PET_CHANNEL_ID not configured)")
+            return
+        from services.pet_service import PetService
+
         c["pet_service"] = PetService(
             c["pet_repo"],
             c["player_repo"],
