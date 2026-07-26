@@ -200,25 +200,21 @@ class ReminderService:
         """
         if self._pet_service is None or not subscribers:
             return
-        from domain.pet_constants import WARNING_HUNGER
-
         for discord_id in subscribers:
             try:
-                pet = await asyncio.to_thread(
-                    self._pet_service.pet_repo.get_active_pet, discord_id, guild_id
+                crossing_info = await asyncio.to_thread(
+                    self._pet_service.get_warning_crossing, discord_id, guild_id
                 )
-                if pet is None:
+                if crossing_info is None:
                     continue
-                crossing = pet.hunger_crossing_time(
-                    WARNING_HUNGER, self._pet_service.decay_per_day
-                )
+                crossing, pet_name = crossing_info
                 if crossing > now:
                     self.schedule_pet_reminder(
                         bot,
                         discord_id,
                         guild_id,
                         crossing,
-                        pet_name=pet.name,
+                        pet_name=pet_name,
                         preference_enabled=True,
                     )
             except Exception:

@@ -28,7 +28,6 @@ from domain.pet_constants import (
     MAX_BUY_QTY,
     RENAME_COST,
     SALT_LICK,
-    WARNING_HUNGER,
 )
 from utils.formatting import JOPACOIN_EMOTE
 from utils.game_date import game_date_for_timestamp
@@ -128,9 +127,7 @@ class PetCommands(commands.Cog):
         if reminder_svc is None or pet is None:
             return
         try:
-            crossing = pet.hunger_crossing_time(
-                WARNING_HUNGER, self.pet_service.decay_per_day
-            )
+            crossing = self.pet_service.warning_crossing_for(pet)
             prefs = await asyncio.to_thread(
                 reminder_svc.get_preferences, pet.discord_id, pet.guild_id or 0
             )
