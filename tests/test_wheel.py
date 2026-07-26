@@ -697,22 +697,19 @@ def test_wheel_wedges_distribution():
     assert special_count == 6, f"Expected 6 special wedges, got {special_count}"
 
 
-def test_wheel_hazard_ranges_are_wider_and_ten_percent_stronger():
-    """Hazard floors stay stable while wider ranges raise average impact by 10%."""
-    assert (WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX) == (15, 29)
-    assert (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) == (10, 23)
+def test_wheel_hazard_ceilings_are_ten_percent_stronger_again():
+    """Hazard floors stay stable while each current ceiling increases by 10%."""
+    assert (WHEEL_BANANA_PEEL_LOSS_MIN, WHEEL_BANANA_PEEL_LOSS_MAX) == (15, 32)
+    assert (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN, WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) == (10, 25)
     assert pytest.approx((0.02, 0.057)) == (LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
 
     banana_mean = (WHEEL_BANANA_PEEL_LOSS_MIN + WHEEL_BANANA_PEEL_LOSS_MAX) / 2
     bomb_mean = (WHEEL_BOMB_OMB_VICTIM_LOSS_MIN + WHEEL_BOMB_OMB_VICTIM_LOSS_MAX) / 2
-    bolt_mean = (LIGHTNING_BOLT_PCT_MIN + LIGHTNING_BOLT_PCT_MAX) / 2
 
-    assert banana_mean == pytest.approx(20 * 1.10)
-    assert bomb_mean == pytest.approx(15 * 1.10)
-    assert bolt_mean == pytest.approx(0.035 * 1.10)
+    assert round(29 * 1.10) == WHEEL_BANANA_PEEL_LOSS_MAX
+    assert round(23 * 1.10) == WHEEL_BOMB_OMB_VICTIM_LOSS_MAX
     assert pytest.approx(-banana_mean) == WHEEL_BANANA_PEEL_EST_EV
     assert pytest.approx(-bomb_mean * WHEEL_BOMB_OMB_VICTIM_COUNT) == WHEEL_BOMB_OMB_EST_EV
-    assert pytest.approx(-55 * 1.10) == WHEEL_LIGHTNING_BOLT_EST_EV
 
 
 def test_wheel_expected_value_matches_config():
@@ -964,9 +961,9 @@ async def test_wheel_red_shell_steals_from_player_above():
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.get_player_above = MagicMock(return_value=player_above)
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 12,
-        "thief_new_balance": 62,
-        "victim_new_balance": 88,
+        "amount": 13,
+        "thief_new_balance": 63,
+        "victim_new_balance": 87,
     })
 
     message = MagicMock()
@@ -990,16 +987,16 @@ async def test_wheel_red_shell_steals_from_player_above():
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
             # First call: wedge selection, second call: raised flat upper bound.
-            mock_randint.side_effect = [red_shell_idx, 12]
+            mock_randint.side_effect = [red_shell_idx, 13]
             with patch(
-                "commands.betting.random.uniform", return_value=0.084
+                "commands.betting.random.uniform", return_value=0.0924
             ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await commands.gamba.callback(commands, interaction)
 
-    assert mock_randint.call_args_list[-1].args == (2, 12)
-    mock_uniform.assert_called_once_with(0.02, 0.084)
+    assert mock_randint.call_args_list[-1].args == (2, 13)
+    mock_uniform.assert_called_once_with(0.02, 0.0924)
 
     # Should call get_player_above
     player_service.get_player_above.assert_called_once_with(
@@ -1008,13 +1005,13 @@ async def test_wheel_red_shell_steals_from_player_above():
         min_balance=HOSTILE_LOSS_MIN_BALANCE,
     )
 
-    # Neutral scaling preserves max(pct=8, flat=12) at 12 JC.
+    # Neutral scaling preserves max(pct=9, flat=13) at 13 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1010,
         victim_discord_id=2001,
         guild_id=123,
-        amount=12,
+        amount=13,
     )
 
 
@@ -1106,9 +1103,9 @@ async def test_wheel_blue_shell_steals_from_richest():
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.get_leaderboard = MagicMock(return_value=[richest])
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 42,
-        "thief_new_balance": 92,
-        "victim_new_balance": 458,
+        "amount": 46,
+        "thief_new_balance": 96,
+        "victim_new_balance": 454,
     })
 
     message = MagicMock()
@@ -1132,27 +1129,27 @@ async def test_wheel_blue_shell_steals_from_richest():
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
             # First call: wedge selection, second call: raised flat upper bound.
-            mock_randint.side_effect = [blue_shell_idx, 24]
+            mock_randint.side_effect = [blue_shell_idx, 26]
             with patch(
-                "commands.betting.random.uniform", return_value=0.084
+                "commands.betting.random.uniform", return_value=0.0924
             ) as mock_uniform:
                 with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await commands.gamba.callback(commands, interaction)
 
-    assert mock_randint.call_args_list[-1].args == (4, 24)
-    mock_uniform.assert_called_once_with(0.02, 0.084)
+    assert mock_randint.call_args_list[-1].args == (4, 26)
+    mock_uniform.assert_called_once_with(0.02, 0.0924)
 
     # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
     player_service.get_leaderboard.assert_any_call(123, limit=1)
 
-    # Neutral scaling preserves max(pct=42, flat=24) at 42 JC.
+    # Neutral scaling preserves max(pct=46, flat=26) at 46 JC.
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
-        amount=42,
+        amount=46,
     )
 
 
@@ -2343,7 +2340,7 @@ async def test_banana_peel_burns_player_below():
     )
 
     banana_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BANANA_PEEL")
-    # side_effect: [wedge_idx, loss_roll] — pinning loss to 20 (within 15-29)
+    # side_effect: [wedge_idx, loss_roll] — pinning loss to 20 (within 15-32)
     with patch("commands.betting.random.randint", side_effect=[banana_idx, 20]):
         with patch("commands.betting.random.random", return_value=1.0):
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
@@ -2443,9 +2440,9 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
     # rejects them; the BOMB/GREEN victim filter doesn't need the spinner present.
     player_service.get_leaderboard = MagicMock(return_value=[victim])
     player_service.steal_atomic = MagicMock(return_value={
-        "amount": 30,
-        "thief_new_balance": 80,
-        "victim_new_balance": 70,
+        "amount": 33,
+        "thief_new_balance": 83,
+        "victim_new_balance": 67,
     })
 
     interaction = _make_wheel_interaction(spinner_id)
@@ -2456,20 +2453,20 @@ async def test_green_shell_steals_from_random_other_via_steal_atomic():
     green_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "GREEN_SHELL")
     # side_effect: [wedge_idx, steal_roll] — pinning the raised upper bound.
     with patch(
-        "commands.betting.random.randint", side_effect=[green_idx, 30]
+        "commands.betting.random.randint", side_effect=[green_idx, 33]
     ) as mock_randint:
         with patch("commands.betting.random.random", return_value=1.0):
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
                     await cmds.gamba.callback(cmds, interaction)
 
-    assert mock_randint.call_args_list[-1].args == (15, 30)
+    assert mock_randint.call_args_list[-1].args == (15, 33)
     _assert_gamba_steal_call(
         player_service.steal_atomic,
         thief_discord_id=spinner_id,
         victim_discord_id=8003,
         guild_id=123,
-        amount=30,
+        amount=33,
     )
     # steal_atomic handles both sides; adjust_balance must NOT be used here
     player_service.adjust_balance.assert_not_called()
