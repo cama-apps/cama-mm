@@ -42,6 +42,17 @@ NOT_IN_DEBT = "not_in_debt"
 # Prediction errors
 PREDICTION_RESOLVED = "prediction_resolved"
 
+# Pet errors
+ALREADY_HAS_PET = "already_has_pet"
+NO_PET = "no_pet"
+PET_DEAD = "pet_dead"
+PET_EGG = "pet_egg"
+PET_FULL = "pet_full"
+NO_SUPPLIES = "no_supplies"
+FEED_CAP = "feed_cap"
+ALREADY_PAMPERED = "already_pampered"
+STACK_CAP = "stack_cap"
+
 # Enrichment errors
 
 # Recalibration errors
