@@ -25,9 +25,29 @@ logger = logging.getLogger("cama_bot.repositories.pet")
 _PET_COLUMNS = (
     "pet_id, discord_id, guild_id, name, species, adopted_at, hatched_at, "
     "adopt_fee, last_fed_at, hunger_at_last_fed, times_fed, feeds_today, "
-    "feed_date, week_consumed_jc, week_key, pampered_until, aegis_used, "
+    "feed_date, week_consumed_jc, week_key, prev_week_consumed_jc, "
+    "prev_week_key, pampered_until, aegis_used, "
     "hatch_announced_at, died_at, death_cause, death_announced_at"
 )
+
+# Shared SET fragment: accumulate care JC into the current week, shifting the
+# old accumulator into the prev-week slot on rollover so the weekly refund
+# sweep can still read last week's consumption after the first new-week feed.
+# Parameter order: (week_key, week_key, week_key, consumed, consumed, week_key)
+_WEEK_ACCUMULATE_SQL = """
+    prev_week_key = CASE
+        WHEN week_key = ? OR week_key IS NULL THEN prev_week_key ELSE week_key END,
+    prev_week_consumed_jc = CASE
+        WHEN week_key = ? OR week_key IS NULL
+        THEN prev_week_consumed_jc ELSE week_consumed_jc END,
+    week_consumed_jc = CASE
+        WHEN week_key = ? THEN week_consumed_jc + ? ELSE ? END,
+    week_key = ?
+"""
+
+
+def _week_params(week_key: str, consumed: int) -> tuple:
+    return (week_key, week_key, week_key, consumed, consumed, week_key)
 
 
 def _row_to_pet(row: sqlite3.Row) -> Pet:
@@ -288,15 +308,13 @@ class PetRepository(BaseRepository):
                 metadata={"pet_id": pet_id},
             )
             cursor.execute(
-                """
+                f"""
                 UPDATE pets SET
                     pampered_until = ?,
-                    week_consumed_jc = CASE
-                        WHEN week_key = ? THEN week_consumed_jc + ? ELSE ? END,
-                    week_key = ?
+                    {_WEEK_ACCUMULATE_SQL}
                 WHERE pet_id = ? AND guild_id = ?
                 """,
-                (pampered_until, week_key, cost, cost, week_key, pet_id, gid),
+                (pampered_until, *_week_params(week_key, cost), pet_id, gid),
             )
             fresh = cursor.execute(
                 f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ?",
@@ -357,7 +375,7 @@ class PetRepository(BaseRepository):
             if cursor.rowcount == 0:
                 raise ValueError("no_supplies")
             cursor.execute(
-                """
+                f"""
                 UPDATE pets SET
                     last_fed_at = CASE WHEN ? THEN last_fed_at ELSE ? END,
                     hunger_at_last_fed = CASE
@@ -365,9 +383,7 @@ class PetRepository(BaseRepository):
                     times_fed = times_fed + (CASE WHEN ? THEN 0 ELSE 1 END),
                     feeds_today = ?,
                     feed_date = ?,
-                    week_consumed_jc = CASE
-                        WHEN week_key = ? THEN week_consumed_jc + ? ELSE ? END,
-                    week_key = ?
+                    {_WEEK_ACCUMULATE_SQL}
                 WHERE pet_id = ? AND guild_id = ?
                 """,
                 (
@@ -376,8 +392,7 @@ class PetRepository(BaseRepository):
                     spat,
                     feeds_today + 1,
                     feed_date,
-                    week_key, consumed_jc, consumed_jc,
-                    week_key,
+                    *_week_params(week_key, consumed_jc),
                     pet_id, gid,
                 ),
             )
@@ -524,14 +539,20 @@ class PetRepository(BaseRepository):
         return [row["guild_id"] for row in rows]
 
     def list_week_care(self, guild_id: int | None, week_key: str) -> list[Pet]:
-        """Living pets whose owners consumed care JC in the given week."""
+        """Living pets whose owners consumed care JC in the given week.
+
+        Checks both accumulator slots: pets fed since the week rolled over
+        carry last week's care in the prev-week slot.
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_PET_COLUMNS} FROM pets "
-                "WHERE guild_id = ? AND died_at IS NULL "
-                "AND week_key = ? AND week_consumed_jc > 0",
-                (gid, week_key),
+                "WHERE guild_id = ? AND died_at IS NULL AND ("
+                "  (week_key = ? AND week_consumed_jc > 0) OR "
+                "  (prev_week_key = ? AND prev_week_consumed_jc > 0)"
+                ")",
+                (gid, week_key, week_key),
             ).fetchall()
         return [_row_to_pet(row) for row in rows]
 

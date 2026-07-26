@@ -4413,6 +4413,9 @@ class SchemaManager:
                 week_consumed_jc INTEGER NOT NULL DEFAULT 0
                     CHECK (week_consumed_jc >= 0),
                 week_key TEXT,
+                prev_week_consumed_jc INTEGER NOT NULL DEFAULT 0
+                    CHECK (prev_week_consumed_jc >= 0),
+                prev_week_key TEXT,
                 pampered_until INTEGER,
                 aegis_used INTEGER NOT NULL DEFAULT 0 CHECK (aegis_used IN (0, 1)),
                 hatch_announced_at INTEGER,

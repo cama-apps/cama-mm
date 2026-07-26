@@ -68,6 +68,8 @@ class Pet:
     feed_date: str | None
     week_consumed_jc: int
     week_key: str | None
+    prev_week_consumed_jc: int
+    prev_week_key: str | None
     pampered_until: int | None
     aegis_used: int
     hatch_announced_at: int | None
@@ -155,6 +157,14 @@ class Pet:
         """New anchor hunger after feeding `restore` points (quirk-adjusted)."""
         boosted = restore * get_species(self.species).restore_pct // 100
         return min(MAX_HUNGER, self.current_hunger(now, decay_per_day) + boosted)
+
+    def consumed_in_week(self, week_key: str) -> int:
+        """Care JC consumed during the given week (current or previous slot)."""
+        if self.week_key == week_key:
+            return self.week_consumed_jc
+        if self.prev_week_key == week_key:
+            return self.prev_week_consumed_jc
+        return 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -230,6 +230,14 @@ class TestFeed:
         assert first.week_consumed_jc == 5
         assert second.week_consumed_jc == 5  # reset, not 10
         assert second.week_key == "2026-W31"
+        # Last week's care shifted into the prev slot for the refund sweep.
+        assert second.prev_week_key == WEEK
+        assert second.prev_week_consumed_jc == 5
+        assert second.consumed_in_week(WEEK) == 5
+        # And the refund sweep still finds the pet for last week.
+        assert [p.pet_id for p in pet_repo.list_week_care(TEST_GUILD_ID, WEEK)] == [
+            second.pet_id
+        ]
 
     def test_stale_anchor_rejected(self, pet_repo, rich_player):
         pet = adopt(pet_repo)
