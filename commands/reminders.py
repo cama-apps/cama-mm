@@ -14,6 +14,7 @@ _TYPE_LABELS = {
     "trivia": ("Trivia", "DM when your trivia cooldown expires"),
     "betting": ("Betting", "DM when a new match opens for betting"),
     "dig": ("Dig", "DM when your free dig cooldown expires"),
+    "pet": ("Pet", "DM when your cama gets dangerously hungry (and when it dies)"),
 }
 
 

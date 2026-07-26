@@ -28,6 +28,7 @@ from domain.pet_constants import (
     MAX_BUY_QTY,
     RENAME_COST,
     SALT_LICK,
+    WARNING_HUNGER,
 )
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -112,7 +113,23 @@ class PetCommands(commands.Cog):
                 species_id=status.pet.species,
                 can_feed=can_feed,
             )
+            self._rearm_warning(status.pet)
         return embed, file, view
+
+    def _rearm_warning(self, pet) -> None:
+        """(Re)schedule the opt-in hungry-DM for the pet's next warning crossing."""
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc is None or pet is None:
+            return
+        try:
+            crossing = pet.hunger_crossing_time(
+                WARNING_HUNGER, self.pet_service.decay_per_day
+            )
+            reminder_svc.schedule_pet_reminder(
+                self.bot, pet.discord_id, pet.guild_id, crossing, pet_name=pet.name
+            )
+        except Exception:
+            logger.debug("Pet warning re-arm failed", exc_info=True)
 
     # ────────────────────────────────────────────────────────────────────
     # Subcommands
@@ -157,6 +174,7 @@ class PetCommands(commands.Cog):
         if file:
             embed.set_image(url=f"attachment://{file.filename}")
         await safe_followup(interaction, embed=embed, file=file)
+        self._rearm_warning(adopted)
 
     @pet.command(name="status", description="Check on your cama (art, hunger, mood)")
     @app_commands.describe(
@@ -221,6 +239,7 @@ class PetCommands(commands.Cog):
                 f"{outcome.feeds_left_today} feeds left today"
             ),
         )
+        self._rearm_warning(outcome.pet)
 
     @pet.command(name="shop", description="Browse cama food and treats")
     @require_guild
@@ -397,7 +416,29 @@ class PetCommands(commands.Cog):
                 await channel.send(embed=embed, file=file)
             except discord.Forbidden:
                 pass
+        await self._dm_death_notice(pet)
         await asyncio.to_thread(self.pet_service.mark_death_announced, pet)
+
+    async def _dm_death_notice(self, pet) -> None:
+        """Best-effort opt-in death DM; never blocks announcement bookkeeping."""
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc is None:
+            return
+        try:
+            prefs = await asyncio.to_thread(
+                reminder_svc.get_preferences, pet.discord_id, pet.guild_id
+            )
+            if not prefs.get("pet_enabled"):
+                return
+            user = self.bot.get_user(pet.discord_id) or await self.bot.fetch_user(
+                pet.discord_id
+            )
+            embed, file = await asyncio.to_thread(pet_embeds.build_death_embed, pet)
+            await user.send(embed=embed, file=file)
+        except Exception:
+            logger.debug(
+                "Pet death DM failed for user %s", pet.discord_id, exc_info=True
+            )
 
     async def _deliver_refund(self, notice: RefundNotice) -> None:
         channel = self._pet_channel(notice.guild_id)
