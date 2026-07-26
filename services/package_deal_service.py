@@ -2,7 +2,11 @@
 Service layer for package deal operations.
 """
 
-from repositories.package_deal_repository import PackageDeal, PackageDealRepository
+from repositories.package_deal_repository import (
+    PackageDeal,
+    PackageDealPurchaseResult,
+    PackageDealRepository,
+)
 
 
 class PackageDealService:
@@ -24,9 +28,9 @@ class PackageDealService:
         cost: int = 0,
     ) -> PackageDeal:
         """
-        Create a new package deal or extend existing one.
+        Create a new package deal or top up an existing one.
 
-        If a deal already exists for this pair, adds games to games_remaining.
+        Deals can never have more than 10 games remaining.
 
         Args:
             guild_id: Guild ID
@@ -68,6 +72,26 @@ class PackageDealService:
             List of active PackageDeal objects
         """
         return self.package_deal_repo.get_active_deals_for_players(guild_id, player_ids)
+
+    def purchase_deal(
+        self,
+        guild_id: int | None,
+        buyer_id: int,
+        partner_id: int,
+        *,
+        games: int = 10,
+        no_active_cost: int,
+        active_cost: int,
+    ) -> PackageDealPurchaseResult:
+        """Atomically price, debit, and top up a paid package deal when allowed."""
+        return self.package_deal_repo.purchase_deal(
+            guild_id=guild_id,
+            buyer_id=buyer_id,
+            partner_id=partner_id,
+            games=games,
+            no_active_cost=no_active_cost,
+            active_cost=active_cost,
+        )
 
     def get_user_deals(
         self,

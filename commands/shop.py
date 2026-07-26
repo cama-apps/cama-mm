@@ -39,6 +39,7 @@ from config import (
     SHOP_WITCHS_CURSE_COST,
     WITCHS_CURSE_DURATION_DAYS,
 )
+from domain.package_deal_constants import PACKAGE_DEAL_MAX_GAMES
 from domain.soft_avoid_constants import SOFT_AVOID_GAMES
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
@@ -72,9 +73,13 @@ PINGEDKEVIN_TENOR_URL = (
     "https://tenor.com/view/in-trouble-mad-face-gif-10963449859613356314"
 )
 SOFT_AVOID_MIN_TEAMMATE_GAMES = 3
-SOFT_AVOID_MIN_COST = 250
+SOFT_AVOID_MIN_COST = 300
 SOFT_AVOID_WINRATE_COST_SCALE = 1500
 PACKAGE_DEAL_NO_ACTIVE_COST = 1
+
+
+def _package_deal_games_duration() -> int:
+    return min(PACKAGE_DEAL_GAMES_DURATION, PACKAGE_DEAL_MAX_GAMES)
 
 
 def _protection_result_int(result, field: str, default: int = 0) -> int:
@@ -260,7 +265,8 @@ class ShopCommands(commands.Cog):
             app_commands.Choice(
                 name=(
                     f"Package Deal ({PACKAGE_DEAL_NO_ACTIVE_COST} JC at 0 active, "
-                    f"{SHOP_PACKAGE_DEAL_BASE_COST}+ after for {PACKAGE_DEAL_GAMES_DURATION} games)"
+                    f"{SHOP_PACKAGE_DEAL_BASE_COST}+ after for "
+                    f"{_package_deal_games_duration()} games)"
                 ),
                 value="package_deal",
             ),
@@ -1529,67 +1535,67 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Check active deals to determine pricing
-        active_deals = await asyncio.to_thread(package_deal_service.get_user_deals, guild_id, user_id)
-        is_extend = any(d.partner_discord_id == target.id for d in active_deals)
-        cost = _calculate_package_deal_cost(
-            len(active_deals),
-            is_extend,
+        active_cost = _calculate_package_deal_cost(
+            1,
+            False,
             getattr(player, "glicko_rating", None),
             getattr(target_player, "glicko_rating", None),
         )
 
-        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-        if balance < cost:
-            if cost == PACKAGE_DEAL_NO_ACTIVE_COST and len(active_deals) == 0 and not is_extend:
-                cost_detail = "*(No active package deals: 1 jopacoin)*"
-            else:
-                cost_detail = (
-                    f"*(Base: {SHOP_PACKAGE_DEAL_BASE_COST} + "
-                    f"Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST})*"
-                )
-            await interaction.response.send_message(
-                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.\n"
-                f"{cost_detail}",
-                ephemeral=True,
-            )
-            return
         # Defer before deduction so we can't lose the response window after charging.
         if not await safe_defer(interaction, ephemeral=True):
             return
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
         try:
-            # Create or extend deal
-            deal = await asyncio.to_thread(
+            purchase = await asyncio.to_thread(
                 functools.partial(
-                    package_deal_service.create_or_extend_deal,
+                    package_deal_service.purchase_deal,
                     guild_id=guild_id,
                     buyer_id=user_id,
                     partner_id=target.id,
-                    games=PACKAGE_DEAL_GAMES_DURATION,
-                    cost=cost,
+                    games=_package_deal_games_duration(),
+                    no_active_cost=PACKAGE_DEAL_NO_ACTIVE_COST,
+                    active_cost=active_cost,
                 )
             )
         except Exception:
             logger.exception("Failed to create package deal purchase")
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
             await safe_followup(
                 interaction,
                 content=(
                     "Package deal purchase failed before it could be activated. "
-                    "Your jopacoin was refunded."
+                    "You were not charged."
                 ),
                 ephemeral=True,
             )
             return
 
+        if not purchase.success:
+            if purchase.reason == "already_full":
+                content = (
+                    f"Your Package Deal with **{target.display_name}** already has "
+                    f"{purchase.deal.games_remaining} games remaining. "
+                    "You were not charged."
+                )
+            else:
+                content = (
+                    f"You need {purchase.cost} {JOPACOIN_EMOTE} for this, but you only have "
+                    f"{purchase.balance}."
+                )
+            await safe_followup(interaction, content=content, ephemeral=True)
+            return
+
+        deal = purchase.deal
+        if deal is None:
+            raise RuntimeError("Package deal purchase succeeded without an activated deal")
+
         # Build confirmation embed (ephemeral)
-        cost_display = f"{cost} {JOPACOIN_EMOTE}"
+        cost_display = f"{purchase.cost} {JOPACOIN_EMOTE}"
         embed = discord.Embed(
             title="Package Deal Active",
             description=(
                 f"You have a Package Deal with **{target.display_name}**.\n\n"
+                f"**Games added:** {deal.games_added}\n"
                 f"**Games remaining:** {deal.games_remaining}\n"
                 f"**Cost:** {cost_display}\n\n"
                 f"When shuffling, the system will try to place you on the **same team**. "
@@ -1598,11 +1604,14 @@ class ShopCommands(commands.Cog):
             ),
             color=0x2ECC71,  # Green for partnership
         )
-        if cost == PACKAGE_DEAL_NO_ACTIVE_COST and len(active_deals) == 0 and not is_extend:
+        if purchase.active_deal_count == 0:
             embed.set_footer(text="No active package deals: 1 jopacoin")
         else:
             embed.set_footer(
-                text=f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST}"
+                text=(
+                    f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + "
+                    f"Rating bonus: {purchase.cost - SHOP_PACKAGE_DEAL_BASE_COST}"
+                )
             )
 
         # Ephemeral response (private - target not notified).

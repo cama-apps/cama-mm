@@ -143,7 +143,8 @@ class PackageDealView(discord.ui.View):
                 content=(
                     "The unearthed foreman's contract is "
                     f"signed with **{candidate.display_name}**: "
-                    f"**3 games added**, **{deal.games_remaining} games remaining**."
+                    f"**{deal.games_added} games added**, "
+                    f"**{deal.games_remaining} games remaining**."
                 ),
                 embed=None,
                 view=None,
