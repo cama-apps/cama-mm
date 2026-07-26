@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -469,6 +470,20 @@ async def _post_phase_transition_followup(
             inline=False,
         )
     _add_gear_broken_notice(transition_embed, result)
+    if getattr(result, "is_pinnacle", False):
+        event_flavor = getattr(result, "phase_event_flavor", "")
+        event_description = getattr(result, "phase_event_description", "")
+        event_lines = []
+        if event_flavor:
+            event_lines.append(f"*{event_flavor}*")
+        if event_description:
+            event_lines.append(event_description)
+        if event_lines:
+            transition_embed.add_field(
+                name="Phase shift",
+                value="\n".join(event_lines),
+                inline=False,
+            )
 
     # Phase-3 transitions (from the resume_boss_duel path) reach this helper
     # with phase3_incoming=True; pick the right asset key so the embed art
@@ -477,7 +492,7 @@ async def _post_phase_transition_followup(
     p2_file = None
     boundary = getattr(result, "boundary", None)
     boss_id = getattr(result, "boss_id", "") or boundary
-    if boss_id:
+    if boss_id and not getattr(result, "is_pinnacle", False):
         try:
             from utils.dig_assets import get_boss_art
             new_depth = getattr(result, "new_depth", 0)
@@ -512,9 +527,15 @@ async def _post_phase_transition_followup(
         return
 
     next_info = SimpleNamespace(**info_dict)
+    phase_number = 3 if getattr(result, "phase3_incoming", False) else 2
+    next_boss_id = getattr(next_info, "boss_id", "") or getattr(result, "boss_id", "")
+    display_name, display_dialogue, secret_phase = (
+        _resolve_boss_encounter_presentation(next_info, phase=phase_number)
+    )
+
     encounter_embed = discord.Embed(
-        title=f"Boss Encountered: {getattr(next_info, 'name', 'Unknown Boss')}!",
-        description=getattr(next_info, "dialogue", ""),
+        title=f"Boss Encountered: {display_name}!",
+        description=display_dialogue,
         color=0xFF0000,
     )
     _add_carried_wager_notice(encounter_embed, next_info)
@@ -530,9 +551,104 @@ async def _post_phase_transition_followup(
         dig_flavor_service=dig_flavor_service,
         on_boss_resolved=on_boss_resolved,
     )
-    msg = await channel.send(embed=encounter_embed, view=view)
+    phase_file = None
+    if getattr(next_info, "is_pinnacle", False) and next_boss_id:
+        depth_for_layer = getattr(result, "new_depth", 0) or boundary
+        layer = get_layer_def(depth_for_layer)
+        layer_name = layer.name if layer else "Dirt"
+        phase_file = await _load_boss_encounter_art(
+            next_info,
+            layer_name,
+            phase=phase_number,
+            secret=secret_phase,
+        )
+    if phase_file:
+        encounter_embed.set_image(url=f"attachment://{phase_file.filename}")
+        msg = await channel.send(embed=encounter_embed, view=view, file=phase_file)
+    else:
+        msg = await channel.send(embed=encounter_embed, view=view)
     if msg:
         view.message = msg
+
+
+def _resolve_boss_encounter_presentation(
+    boss_info,
+    *,
+    phase: int | None = None,
+) -> tuple[str, str, bool]:
+    """Return display copy and secret-state for one boss encounter."""
+    display_name = getattr(boss_info, "name", "Unknown Boss")
+    display_dialogue = getattr(boss_info, "dialogue", "")
+    boss_id = getattr(boss_info, "boss_id", "")
+    phase_number = phase or getattr(boss_info, "phase", 0)
+    if (
+        phase_number != 3
+        or not getattr(boss_info, "is_pinnacle", False)
+        or not boss_id
+    ):
+        return display_name, display_dialogue, False
+
+    try:
+        from services.dig_data.bosses import (
+            PINNACLE_BOSSES,
+            PINNACLE_SECRET_PHASE_CHANCE,
+        )
+
+        secret_rng = random.Random()
+        if secret_rng.random() >= PINNACLE_SECRET_PHASE_CHANCE:
+            return display_name, display_dialogue, False
+        phase_def = PINNACLE_BOSSES[boss_id].phases[2]
+        secret_title = getattr(phase_def, "secret_title", None)
+        secret_dialogue = getattr(phase_def, "secret_dialogue", ())
+        if not secret_title and not secret_dialogue:
+            return display_name, display_dialogue, False
+        if secret_dialogue:
+            display_dialogue = secret_rng.choice(secret_dialogue)
+        return secret_title or display_name, display_dialogue, True
+    except (KeyError, AttributeError, ImportError):
+        logger.debug("Pinnacle secret presentation unavailable", exc_info=True)
+        return display_name, display_dialogue, False
+
+
+async def _load_boss_encounter_art(
+    boss_info,
+    layer_name: str,
+    *,
+    phase: int | None = None,
+    secret: bool = False,
+) -> discord.File | None:
+    """Load static encounter art or generated pinnacle phase media."""
+    boundary = getattr(boss_info, "boundary", None)
+    boss_id = getattr(boss_info, "boss_id", "") or boundary
+    if not boss_id:
+        return None
+
+    try:
+        phase_number = phase or getattr(boss_info, "phase", 0)
+        if (
+            getattr(boss_info, "is_pinnacle", False)
+            and phase_number in (2, 3)
+        ):
+            from utils.dig_assets import get_pinnacle_phase_art
+
+            return await get_pinnacle_phase_art(
+                boss_id,
+                phase_number,
+                layer_name,
+                secret=secret,
+            )
+
+        from utils.dig_assets import get_boss_art
+
+        return await asyncio.to_thread(
+            get_boss_art,
+            boss_id,
+            "encounter",
+            layer_name,
+        )
+    except Exception:
+        logger.debug("Boss encounter art failed", exc_info=True)
+        return None
 
 
 async def _resolve_phase_fight_without_modal(

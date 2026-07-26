@@ -1,11 +1,15 @@
+import io
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import discord
 import pytest
 
 import commands.dig as dig_module
+import commands.dig_helpers.boss_views as boss_views
 from commands.dig import DigCommands
+from utils import dig_assets
 
 
 @pytest.mark.asyncio
@@ -167,3 +171,90 @@ async def test_boss_encounter_embed_surfaces_carried_wager(monkeypatch):
     )
     assert carried_field is not None
     assert "**1,500**" in carried_field.value
+
+
+@pytest.mark.parametrize(
+    (
+        "phase",
+        "roll",
+        "canonical_name",
+        "canonical_dialogue",
+        "expected_name",
+        "expected_dialogue",
+        "filename",
+    ),
+    [
+        (
+            2,
+            0.99,
+            "The Crowned Hunger",
+            "The crown burns.",
+            "The Crowned Hunger",
+            "The crown burns.",
+            "pinnacle_phase_2.png",
+        ),
+        (
+            3,
+            0.0,
+            "The Last Breath of Kings",
+            "Last breath.",
+            "The Crown Remembers",
+            "A king's last room opens behind the throne.",
+            "pinnacle_phase_3.gif",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resumed_pinnacle_encounter_uses_phase_presentation(
+    monkeypatch,
+    phase,
+    roll,
+    canonical_name,
+    canonical_dialogue,
+    expected_name,
+    expected_dialogue,
+    filename,
+):
+    class FixedRandom:
+        def random(self):
+            return roll
+
+        def choice(self, values):
+            return values[-1]
+
+    monkeypatch.setattr(boss_views.random, "Random", lambda: FixedRandom())
+    phase_art = discord.File(io.BytesIO(b"phase"), filename=filename)
+    monkeypatch.setattr(
+        dig_assets,
+        "get_pinnacle_phase_art",
+        AsyncMock(return_value=phase_art),
+    )
+    monkeypatch.setattr(dig_module, "BossEncounterView", Mock())
+
+    dig_service = SimpleNamespace(
+        has_scout_lantern=lambda user_id, guild_id: False,
+    )
+    cog = DigCommands(SimpleNamespace(), dig_service)
+    cog._send_public_dig = AsyncMock(return_value=None)
+    interaction = SimpleNamespace(user=SimpleNamespace(id=10001))
+    result = SimpleNamespace(
+        depth=350,
+        boss_info=SimpleNamespace(
+            boss_id="forgotten_king",
+            name=canonical_name,
+            dialogue=canonical_dialogue,
+            boundary=350,
+            phase=phase,
+            is_pinnacle=True,
+            luminosity_display=None,
+            wager_allowed=True,
+        ),
+    )
+
+    await cog._handle_boss_encounter(interaction, 12345, result)
+
+    sent = cog._send_public_dig.await_args.kwargs
+    assert sent["embed"].title == f"Boss Encountered: {expected_name}!"
+    assert sent["embed"].description == expected_dialogue
+    assert sent["embed"].image.url == f"attachment://{filename}"
+    assert sent["file"] is phase_art
