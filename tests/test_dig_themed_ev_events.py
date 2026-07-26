@@ -1,12 +1,10 @@
-"""Intent tests for the themed -EV /dig events (subtle GW1 / MTG flavor).
+"""Intent tests for themed negative-value /dig events.
 
-These four events were added to give the catalog deliberately negative-value
-encounters. Two are *digger taxes* (Sealed Reliquary, Grenth's Tithe) whose
-every branch loses coin in expectation — the low-variance branch is a
-guaranteed *toll*, not a free gain, so a smart player still bleeds. Two are
-*whale taxes* (Rhystic Tollgate, The Underworld Reclaims) that reach the
-guild's three richest balances: one steals the spoils to the digger, one burns
-them out of the economy.
+The original four events gave the catalog deliberately negative-value
+encounters: two *digger taxes* whose every branch loses coin in expectation,
+plus two *whale taxes* that reach the guild's three richest balances. The
+additional pressure trio keeps its safe branches costly, adds two more solo
+negative-EV gambles, and adds another richest-balance burn.
 
 The catalog-wide invariants in ``test_dig_event_balance.py`` already guard the
 structural rules (risky out-rewards safe, risky carries a downside). The tests
@@ -34,6 +32,12 @@ from utils.economy_scaling import (
 )
 
 TRAP_EVENT_IDS = ("sealed_reliquary", "grenths_tithe")
+NEW_PRESSURE_EVENT_IDS = (
+    "second_life_ledger",
+    "twin_scar_altar",
+    "ember_clearinghouse",
+)
+NEW_SOLO_TAX_EVENT_IDS = ("second_life_ledger", "twin_scar_altar")
 
 
 @pytest.fixture
@@ -91,6 +95,30 @@ def _seed_tunnel(dig_service, dig_repo, depth: int) -> None:
     random.seed(0)
     dig_service.dig(10001, 12345)
     dig_repo.update_tunnel(10001, 12345, depth=depth, luminosity=100)
+
+
+# ---------------------------------------------------------------------------
+# New pressure events: registered and inescapably costly on the safe branch
+# ---------------------------------------------------------------------------
+
+def test_new_pressure_events_are_registered():
+    event_ids = {event["id"] for event in EVENT_POOL}
+    assert event_ids.issuperset(NEW_PRESSURE_EVENT_IDS)
+
+
+@pytest.mark.parametrize("event_id", NEW_PRESSURE_EVENT_IDS)
+def test_new_pressure_safe_branch_is_a_guaranteed_loss(event_id):
+    safe = _event(event_id)["safe_option"]
+    assert safe["success_chance"] == 1.0
+    assert safe["failure"] is None
+    assert safe["success"]["jc"] < 0
+
+
+@pytest.mark.parametrize("event_id", NEW_SOLO_TAX_EVENT_IDS)
+def test_new_solo_tax_is_negative_ev_on_every_branch(event_id):
+    event = _event(event_id)
+    assert _branch_ev(event["safe_option"]) < 0
+    assert _branch_ev(event["risky_option"]) < 0
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +239,52 @@ def test_underworld_reclaims_burns_the_richest(
     digger_after = player_repository.get_balance(10001, 12345)
     assert digger_after - digger_before == r["jc_delta"]
     assert burned > r["jc_delta"] > 0
+
+
+def test_ember_clearinghouse_burns_only_the_three_richest(
+    dig_service, dig_repo, player_repository, monkeypatch,
+):
+    monkeypatch.setattr(time, "time", lambda: 1_000_000)
+    _register(player_repository, 10001, balance=500)
+    balances = {
+        10002: 1300,
+        10003: 1200,
+        10004: 1100,
+        10005: 1000,
+    }
+    for discord_id, balance in balances.items():
+        _register(player_repository, discord_id, balance=balance)
+    _seed_tunnel(dig_service, dig_repo, depth=80)
+    monkeypatch.setattr("services.dig.events_mixin.random.uniform", lambda a, b: 1.0)
+    monkeypatch.setattr("services.dig.events_mixin.random.random", lambda: 0.0)
+
+    before = {
+        discord_id: player_repository.get_balance(discord_id, 12345)
+        for discord_id in balances
+    }
+    digger_before = player_repository.get_balance(10001, 12345)
+
+    result = dig_service.resolve_event(
+        10001, 12345, "ember_clearinghouse", "risky",
+    )
+    assert result["success"] and result["succeeded"], result
+    assert result["splash"]["mode"] == "burn"
+
+    expected_burn = scale_deflationary_minigame_jc_delta(
+        strengthen_dig_event_penalty(18)
+    )
+    for discord_id in (10002, 10003, 10004):
+        assert (
+            before[discord_id]
+            - player_repository.get_balance(discord_id, 12345)
+            == expected_burn
+        )
+    assert player_repository.get_balance(10005, 12345) == before[10005]
+
+    total_burned = 3 * expected_burn
+    assert result["splash"]["total_burned"] == total_burned
+    digger_gain = (
+        player_repository.get_balance(10001, 12345) - digger_before
+    )
+    assert digger_gain == result["jc_delta"]
+    assert total_burned > digger_gain > 0
