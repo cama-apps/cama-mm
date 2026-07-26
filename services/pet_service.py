@@ -46,6 +46,7 @@ from domain.pet_constants import (
     SALT_LICK_DURATION_SECONDS,
     SPECIES,
     SUPPLY_STACK_CAP,
+    WARNING_HUNGER,
     adoption_fee,
     food_cost,
     get_species,
@@ -164,6 +165,24 @@ class PetService:
 
     def next_adoption_fee(self, discord_id: int, guild_id: int | None) -> int:
         return adoption_fee(self.pet_repo.count_dead_pets(discord_id, guild_id))
+
+    def warning_crossing_for(self, pet: Pet) -> int:
+        """Authoritative warning-DM moment for a pet (single source of truth
+        so callers never re-derive it against their own decay value)."""
+        return pet.hunger_crossing_time(WARNING_HUNGER, self.decay_per_day)
+
+    def get_warning_crossing(
+        self, discord_id: int, guild_id: int | None
+    ) -> tuple[int, str] | None:
+        """(crossing_ts, pet_name) for the living pet, or None.
+
+        Used by restart recovery so the reminder service never reaches into
+        the pet repository or duplicates hunger math.
+        """
+        pet = self.pet_repo.get_active_pet(discord_id, guild_id)
+        if pet is None:
+            return None
+        return self.warning_crossing_for(pet), pet.name
 
     # --- adopt / rename ---
 

@@ -215,11 +215,18 @@ def make_interaction(user_id=100, guild_id=TEST_GUILD_ID):
 
 
 @pytest.fixture
-def live_cog(repo_db_path):
+def live_cog(repo_db_path, monkeypatch):
     """A PetCommands cog over a REAL service/repository stack."""
     from repositories.pet_repository import PetRepository
     from repositories.player_repository import PlayerRepository
     from services.pet_service import PetService
+
+    # The process-global rate limiter would trip across tests sharing a
+    # worker (established convention: patch check per commands module).
+    monkeypatch.setattr(
+        "commands.pet.GLOBAL_RATE_LIMITER.check",
+        lambda **kwargs: MagicMock(allowed=True, retry_after_seconds=0),
+    )
 
     player_repo = PlayerRepository(repo_db_path)
     player_repo.add(100, "Owner", TEST_GUILD_ID)
@@ -449,10 +456,9 @@ class TestPetReminders:
             dig_service=None,
             pet_service=live_cog.pet_service,
         )
-        # Freeze "now" before the warning crossing so the timer re-arms.
-        monkeypatch.setattr(
-            "services.reminder_service.time.time", lambda: pet.hatched_at + 100
-        )
+        # No clock patching needed: the pet was just adopted, so its warning
+        # crossing (hatch + 3.5 days) is always in the future.
+        assert live_cog.pet_service.warning_crossing_for(pet) > pet.hatched_at
         await service.reschedule_all(MagicMock(), [TEST_GUILD_ID])
         key = (100, TEST_GUILD_ID, "pet")
         assert key in service._tasks
@@ -480,7 +486,7 @@ class TestPetReminders:
     @pytest.mark.asyncio
     async def test_rearm_warning_schedules_at_crossing(self):
         cog = make_cog()
-        cog.pet_service.decay_per_day = 20
+        cog.pet_service.warning_crossing_for = lambda p: p.hunger_crossing_time(30, 20)
         reminder_svc = MagicMock()
         reminder_svc.get_preferences.return_value = {"pet_enabled": True}
         cog.bot.reminder_service = reminder_svc
