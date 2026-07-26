@@ -47,17 +47,247 @@ class LobbyCommands(commands.Cog):
         self.player_service = player_service
         self._readycheck_shuffle_notified: dict[int, int] = {}
         self._readycheck_shuffle_notification_locks: dict[int, asyncio.Lock] = {}
+        self._readycheck_refresh_locks: dict[int, asyncio.Lock] = {}
 
-    def rebuild_readycheck_embed(self, guild_id: int | None = None) -> discord.Embed | None:
+    def rebuild_readycheck_embed(
+        self,
+        guild_id: int | None = None,
+        expected_message_id: int | None = None,
+    ) -> discord.Embed | None:
         """Rebuild the readycheck embed from stored data. Used by bot.py reaction handler."""
-        player_data = self.lobby_service.get_readycheck_player_data(guild_id=guild_id)
-        if not player_data:
+        if expected_message_id is None:
+            expected_message_id = self.lobby_service.get_readycheck_message_id(
+                guild_id=guild_id
+            )
+        if expected_message_id is None:
             return None
-        reacted = self.lobby_service.get_readycheck_reacted(guild_id=guild_id)
+
+        snapshot = self.lobby_service.get_readycheck_display_snapshot(
+            expected_message_id,
+            guild_id=guild_id,
+        )
+        if snapshot is None:
+            return None
+        player_data, reacted = snapshot
         embed, _ = build_readycheck_embed(
             player_data, reacted, ready_threshold=self.lobby_service.ready_threshold
         )
         return embed
+
+    async def _classify_readycheck_players(
+        self,
+        guild: discord.Guild,
+        lobby,
+        guild_id: int | None,
+    ) -> dict[int, dict]:
+        """Build the live readycheck classification for the current lobby roster."""
+        player_data: dict[int, dict] = {}
+        now = time.time()
+
+        for pid in list(lobby.players):
+            member = guild.get_member(pid)
+            if not member:
+                try:
+                    member = await guild.fetch_member(pid)
+                except Exception:
+                    player = await asyncio.to_thread(
+                        self.player_service.get_player,
+                        pid,
+                        guild_id,
+                    )
+                    fallback_name = player.name if player else f"User {pid}"
+                    player_data[pid] = {
+                        "group": "afk",
+                        "signals": "🔴",
+                        "name": fallback_name,
+                        "join_ts": lobby.player_join_times.get(pid),
+                        "is_member": False,
+                    }
+                    continue
+
+            join_ts = lobby.player_join_times.get(pid)
+            time_in_lobby = (now - join_ts) if join_ts else float("inf")
+            is_recent = time_in_lobby < RECENT_JOIN_THRESHOLD
+
+            signals = []
+            is_afk = False
+
+            in_voice = member.voice is not None
+            if in_voice:
+                is_deafened = bool(
+                    getattr(member.voice, "self_deaf", False)
+                    or getattr(member.voice, "deaf", False)
+                )
+                signals.append("🔇" if is_deafened else "🔊")
+
+            if _is_playing_dota(member):
+                signals.append("🎮")
+
+            status = member.status
+            if status in (discord.Status.online, discord.Status.dnd):
+                signals.append("🟢")
+            elif status == discord.Status.idle:
+                signals.append("🟡")
+                if not is_recent and not in_voice:
+                    is_afk = True
+            else:
+                signals.append("🔴")
+                if not is_recent and not in_voice:
+                    is_afk = True
+
+            player_data[pid] = {
+                "group": "afk" if is_afk else "active",
+                "signals": "".join(signals),
+                "name": member.display_name,
+                "join_ts": join_ts,
+                "is_member": True,
+            }
+
+        return player_data
+
+    async def _apply_readycheck_lobby_update(
+        self,
+        message,
+        player_data: dict[int, dict],
+        guild_id: int | None,
+        *,
+        auto_confirm_id: int | None = None,
+    ) -> tuple[bool, list[int]]:
+        """Apply one live-roster update to a specific readycheck generation."""
+        previous_snapshot = await asyncio.to_thread(
+            self.lobby_service.get_readycheck_display_snapshot,
+            message.id,
+            guild_id=guild_id,
+        )
+        if previous_snapshot is None:
+            return False, []
+        previous_player_data, previous_reacted = previous_snapshot
+        departed_confirmations = set(previous_reacted) - set(player_data)
+        new_unconfirmed_players = (
+            set(player_data) - set(previous_player_data) - set(previous_reacted)
+        )
+
+        for discord_id in departed_confirmations | new_unconfirmed_players:
+            try:
+                await message.remove_reaction("✅", discord.Object(id=discord_id))
+            except Exception as exc:
+                logger.warning(
+                    "Failed to clear departed readycheck reaction for %s: %s",
+                    discord_id,
+                    exc,
+                )
+                return False, []
+
+        removed_confirmations = await asyncio.to_thread(
+            self.lobby_service.update_readycheck_data,
+            set(player_data),
+            player_data,
+            guild_id=guild_id,
+            expected_message_id=message.id,
+        )
+        if removed_confirmations is None:
+            return False, []
+
+        if auto_confirm_id in player_data:
+            await asyncio.to_thread(
+                self.lobby_service.add_readycheck_reaction,
+                auto_confirm_id,
+                f"<@{auto_confirm_id}>",
+                guild_id=guild_id,
+                expected_message_id=message.id,
+            )
+
+        snapshot = await asyncio.to_thread(
+            self.lobby_service.get_readycheck_display_snapshot,
+            message.id,
+            guild_id=guild_id,
+        )
+        if snapshot is None:
+            return False, []
+        current_player_data, reacted = snapshot
+        embed, mention_ids = build_readycheck_embed(
+            current_player_data,
+            reacted,
+            ready_threshold=self.lobby_service.ready_threshold,
+        )
+
+        current_message_id = await asyncio.to_thread(
+            self.lobby_service.get_readycheck_message_id,
+            guild_id=guild_id,
+        )
+        if current_message_id != message.id:
+            return False, []
+
+        try:
+            await message.edit(embed=embed)
+        except Exception as exc:
+            logger.warning(
+                "Failed to edit readycheck display for guild %s: %s",
+                guild_id,
+                exc,
+            )
+            return False, []
+
+        return True, mention_ids
+
+    async def sync_readycheck_with_lobby(self, guild_id: int | None) -> bool:
+        """Refresh the active readycheck from the live lobby after roster changes."""
+        normalized_guild_id = guild_id or 0
+        refresh_lock = self._readycheck_refresh_locks.setdefault(
+            normalized_guild_id,
+            asyncio.Lock(),
+        )
+        async with refresh_lock:
+            message_id = await asyncio.to_thread(
+                self.lobby_service.get_readycheck_message_id,
+                guild_id=guild_id,
+            )
+            channel_id = await asyncio.to_thread(
+                self.lobby_service.get_readycheck_channel_id,
+                guild_id=guild_id,
+            )
+            if message_id is None or channel_id is None:
+                return False
+
+            guild = self.bot.get_guild(guild_id) if guild_id is not None else None
+            lobby = await asyncio.to_thread(
+                self.lobby_service.get_lobby,
+                guild_id=guild_id,
+            )
+            if guild is None or lobby is None:
+                return False
+
+            player_data = await self._classify_readycheck_players(
+                guild,
+                lobby,
+                guild_id,
+            )
+
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                message = channel.get_partial_message(message_id)
+                updated, _ = await self._apply_readycheck_lobby_update(
+                    message,
+                    player_data,
+                    guild_id,
+                )
+                return updated
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                logger.warning(
+                    "Failed to sync readycheck display for guild %s: %s",
+                    guild_id,
+                    exc,
+                )
+                return False
+            except Exception as exc:
+                logger.warning(
+                    "Unexpected readycheck display sync failure for guild %s: %s",
+                    guild_id,
+                    exc,
+                )
+                return False
 
     async def notify_readycheck_complete(
         self,
@@ -360,7 +590,13 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to update lobby message: {exc}")
 
-    async def _sync_lobby_displays(self, lobby, guild_id: int | None = None) -> None:
+    async def _sync_lobby_displays(
+        self,
+        lobby,
+        guild_id: int | None = None,
+        *,
+        sync_readycheck: bool = True,
+    ) -> None:
         """Update channel message embed (which is also the thread starter)."""
         embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 
@@ -381,6 +617,9 @@ class LobbyCommands(commands.Cog):
                 logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
             except Exception as exc:
                 logger.warning(f"Failed to update channel message: {exc}")
+
+        if sync_readycheck:
+            await self.sync_readycheck_with_lobby(guild_id)
 
     async def _update_thread_embed(self, lobby, embed=None, guild_id: int | None = None) -> None:
         """Update the pinned embed in the lobby thread."""
@@ -1146,68 +1385,12 @@ class LobbyCommands(commands.Cog):
         current_lobby_set = set(all_player_ids)
 
         # Classify every player — store structured data for later rebuilds
-        player_data: dict[int, dict] = {}
         now = time.time()
-
-        for pid in all_player_ids:
-            member = guild.get_member(pid)
-            if not member:
-                try:
-                    member = await guild.fetch_member(pid)
-                except Exception:
-                    # Can't fetch member - treat as AFK
-                    player = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
-                    fallback_name = player.name if player else f"User {pid}"
-                    player_data[pid] = {
-                        "group": "afk",
-                        "signals": "🔴",
-                        "name": fallback_name,
-                        "join_ts": lobby.player_join_times.get(pid),
-                        "is_member": False,
-                    }
-                    continue
-
-            # Get join time for classification
-            join_ts = lobby.player_join_times.get(pid)
-            time_in_lobby = (now - join_ts) if join_ts else float('inf')
-            is_recent = time_in_lobby < RECENT_JOIN_THRESHOLD
-
-            signals = []
-            is_afk = False
-
-            # Voice status - if in voice, they're definitely not AFK
-            in_voice = member.voice is not None
-            if in_voice:
-                is_deafened = bool(
-                    getattr(member.voice, "self_deaf", False)
-                    or getattr(member.voice, "deaf", False)
-                )
-                signals.append("🔇" if is_deafened else "🔊")
-
-            # Dota status
-            if _is_playing_dota(member):
-                signals.append("🎮")
-
-            # Presence status - determines AFK classification (unless in voice)
-            status = member.status
-            if status in (discord.Status.online, discord.Status.dnd):
-                signals.append("🟢")
-            elif status == discord.Status.idle:
-                signals.append("🟡")
-                if not is_recent and not in_voice:
-                    is_afk = True
-            else:  # offline/invisible
-                signals.append("🔴")
-                if not is_recent and not in_voice:
-                    is_afk = True
-
-            player_data[pid] = {
-                "group": "afk" if is_afk else "active",
-                "signals": "".join(signals),
-                "name": member.display_name,
-                "join_ts": join_ts,
-                "is_member": True,
-            }
+        player_data = await self._classify_readycheck_players(
+            guild,
+            lobby,
+            guild_id,
+        )
 
         # Check if refreshing an existing readycheck
         existing_msg_id = await asyncio.to_thread(
@@ -1269,7 +1452,11 @@ class LobbyCommands(commands.Cog):
                     lobby = await asyncio.to_thread(
                         self.lobby_service.get_lobby, guild_id=guild_id
                     )
-                    await self._sync_lobby_displays(lobby, guild_id)
+                    await self._sync_lobby_displays(
+                        lobby,
+                        guild_id,
+                        sync_readycheck=False,
+                    )
                 try:
                     await msg.delete()
                 except (discord.NotFound, discord.HTTPException) as e:
@@ -1277,32 +1464,34 @@ class LobbyCommands(commands.Cog):
                 msg = None
                 is_refresh = False
 
-        # On refresh: update data + prune reacted. On new: store fresh.
-        if is_refresh:
-            await asyncio.to_thread(
-                self.lobby_service.update_readycheck_data,
-                current_lobby_set,
-                player_data,
-                guild_id=guild_id,
+        if is_refresh and msg:
+            refresh_lock = self._readycheck_refresh_locks.setdefault(
+                guild_id or 0,
+                asyncio.Lock(),
             )
-        reacted = (
-            await asyncio.to_thread(
-                self.lobby_service.get_readycheck_reacted, guild_id=guild_id
-            )
-            if is_refresh
-            else {}
-        )
-        # Running the check counts the trigger-er as ready (if they're in the
-        # lobby). Reflected in the embed now; persisted to the stored reacted
-        # set after the message is saved below.
-        if invoker_id in current_lobby_set:
-            reacted = dict(reacted)
-            reacted[invoker_id] = f"<@{invoker_id}>"
+            async with refresh_lock:
+                updated, mention_ids = await self._apply_readycheck_lobby_update(
+                    msg,
+                    player_data,
+                    guild_id,
+                    auto_confirm_id=invoker_id,
+                )
+            if not updated:
+                return "error", {}
+            embed = None
+        else:
+            reacted = {}
+            # Running the check counts the trigger-er as ready (if they're in
+            # the lobby). Reflected in the new embed now and persisted after
+            # the message is saved below.
+            if invoker_id in current_lobby_set:
+                reacted[invoker_id] = f"<@{invoker_id}>"
 
-        # Build embed from stored data (excludes reacted from Active/AFK)
-        embed, mention_ids = build_readycheck_embed(
-            player_data, reacted, ready_threshold=self.lobby_service.ready_threshold
-        )
+            embed, mention_ids = build_readycheck_embed(
+                player_data,
+                reacted,
+                ready_threshold=self.lobby_service.ready_threshold,
+            )
 
         # Resolve target channel - lobby thread only
         target_channel = None
@@ -1330,21 +1519,6 @@ class LobbyCommands(commands.Cog):
             ping_content = f"⚔️ **Ready check!** {tags}"
 
         if is_refresh and msg:
-            await msg.edit(embed=embed)
-            await asyncio.to_thread(
-                self.lobby_service.update_readycheck_data,
-                current_lobby_set,
-                player_data,
-                guild_id=guild_id,
-            )
-            if invoker_id in current_lobby_set:
-                await asyncio.to_thread(
-                    self.lobby_service.add_readycheck_reaction,
-                    invoker_id,
-                    f"<@{invoker_id}>",
-                    guild_id=guild_id,
-                    expected_message_id=msg.id,
-                )
             await self.notify_readycheck_completion_if_ready(
                 guild_id or 0,
                 msg.id,

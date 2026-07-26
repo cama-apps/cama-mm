@@ -169,10 +169,14 @@ class LobbyService:
         lobby_ids: set[int],
         player_data: dict[int, dict],
         guild_id: int | None = None,
-    ) -> None:
+        expected_message_id: int | None = None,
+    ) -> set[int] | None:
         """Update classification data on refresh (preserves reacted)."""
-        self.lobby_manager.update_readycheck_data(
-            lobby_ids, player_data, guild_id=guild_id
+        return self.lobby_manager.update_readycheck_data(
+            lobby_ids,
+            player_data,
+            guild_id=guild_id,
+            expected_message_id=expected_message_id,
         )
 
     def get_readycheck_message_id(self, guild_id: int | None = None) -> int | None:
@@ -212,6 +216,16 @@ class LobbyService:
         self, guild_id: int | None = None
     ) -> dict[int, dict]:
         return self.lobby_manager.get_readycheck_player_data(guild_id=guild_id)
+
+    def get_readycheck_display_snapshot(
+        self,
+        message_id: int,
+        guild_id: int | None = None,
+    ) -> tuple[dict[int, dict], dict[int, str]] | None:
+        return self.lobby_manager.get_readycheck_display_snapshot(
+            message_id,
+            guild_id=guild_id,
+        )
 
     def add_readycheck_reaction(
         self,
