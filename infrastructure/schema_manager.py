@@ -619,6 +619,11 @@ class SchemaManager:
                 "create_wrapped_enrichment_facts",
                 self._migration_create_wrapped_enrichment_facts,
             ),
+            # Persistent guild-scoped opt-in for lobby-filling notifications.
+            (
+                "add_lobby_enabled_to_reminder_preferences",
+                self._migration_add_lobby_enabled_to_reminder_preferences,
+            ),
         ]
 
     # --- Migrations ---
@@ -4326,6 +4331,18 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_dig "
             "ON reminder_preferences(guild_id, dig_enabled)"
+        )
+
+    def _migration_add_lobby_enabled_to_reminder_preferences(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor,
+            "reminder_preferences",
+            "lobby_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_lobby "
+            "ON reminder_preferences(guild_id, lobby_enabled)"
         )
 
     def _migration_drop_mana_shop_items_table(self, cursor) -> None:

@@ -44,3 +44,28 @@ def test_openskill_shuffle_chance_defaults_to_two_percent():
     config_module = _load_config_without_env("OPENSKILL_SHUFFLE_CHANCE")
 
     assert config_module.OPENSKILL_SHUFFLE_CHANCE == 0.02
+
+
+def test_spectator_autobet_defaults_to_two_five_player_tiers():
+    config_module = _load_config_without_env(
+        "AUTO_SPECTATOR_BET_COUNT",
+        "AUTO_SPECTATOR_BET_TOP_COUNT",
+        "AUTO_SPECTATOR_BET_PERCENTAGE",
+        "AUTO_SPECTATOR_BET_TOP_PERCENTAGE",
+    )
+
+    assert config_module.AUTO_SPECTATOR_BET_COUNT == 10
+    assert config_module.AUTO_SPECTATOR_BET_TOP_COUNT == 5
+    assert config_module.AUTO_SPECTATOR_BET_TOP_PERCENTAGE == 0.02
+    assert config_module.AUTO_SPECTATOR_BET_PERCENTAGE == 0.01
+
+
+def test_spectator_autobet_count_override_remains_the_total_cap():
+    with patch.dict(os.environ, {
+        "AUTO_SPECTATOR_BET_COUNT": "7",
+        "AUTO_SPECTATOR_BET_TOP_COUNT": "3",
+    }):
+        config_module = _load_config_without_env()
+
+    assert config_module.AUTO_SPECTATOR_BET_COUNT == 7
+    assert config_module.AUTO_SPECTATOR_BET_TOP_COUNT == 3

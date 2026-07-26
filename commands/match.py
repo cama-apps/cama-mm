@@ -33,6 +33,7 @@ from utils.formatting import (
     ROLE_EMOJIS,
     ROLE_NAMES,
     format_betting_display,
+    format_spectator_autobet_summary,
     get_player_display_name,
 )
 from utils.guild import normalize_guild_id
@@ -927,12 +928,7 @@ class MatchCommands(commands.Cog):
                 embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
 
         if spectator_bets_result and spectator_bets_result["created"] > 0:
-            spectator_pct = f"{spectator_bets_result.get('percentage', 0) * 100:g}%"
-            spectator_note = (
-                f"**Rich spectator auto-wagers:** {spectator_bets_result['created']} spectators wagered {spectator_pct} of net worth\n"
-                f"🟢 Radiant: {spectator_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
-                f"🔴 Dire: {spectator_bets_result['total_dire']} {JOPACOIN_EMOTE}"
-            )
+            spectator_note = format_spectator_autobet_summary(spectator_bets_result)
             embed.add_field(name="💸 Spectator Auto-Wagers", value=spectator_note, inline=False)
 
         # Current wagers display

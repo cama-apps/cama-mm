@@ -223,15 +223,22 @@ def test_auto_spectators_share_transaction_and_ignore_failed_candidate_in_odds(
     bet_repo = BetRepository(repo_db_path)
     service = BettingService(bet_repo, player_repo)
     spectator_snapshots = [
-        {"discord_id": 301, "jopacoin_balance": 500},
-        {"discord_id": 302, "jopacoin_balance": 400},
-        {"discord_id": 303, "jopacoin_balance": 300},
-        {"discord_id": 304, "jopacoin_balance": 200},
-        {"discord_id": 305, "jopacoin_balance": 100},
+        {"discord_id": discord_id, "jopacoin_balance": balance}
+        for discord_id, balance in zip(
+            range(301, 313),
+            range(1200, 0, -100),
+            strict=True,
+        )
     ]
     _seed_players(
         player_repo,
-        {301: 500, 302: -1, 303: 300, 304: 200, 305: 100},
+        {
+            spectator["discord_id"]: (
+                -1 if spectator["discord_id"] == 302
+                else spectator["jopacoin_balance"]
+            )
+            for spectator in spectator_snapshots
+        },
     )
     monkeypatch.setattr(
         player_repo,
@@ -257,8 +264,14 @@ def test_auto_spectators_share_transaction_and_ignore_failed_candidate_in_odds(
     )
 
     assert connection_count == 2
-    assert result["created"] == 4
-    assert [bet["discord_id"] for bet in result["bets"]] == [301, 303, 304, 305]
+    assert result["created"] == 10
+    assert [bet["discord_id"] for bet in result["bets"]] == [
+        301, 303, 304, 305, 306, 307, 308, 309, 310, 311,
+    ]
+    assert [bet["percentage"] for bet in result["bets"]] == [
+        0.02, 0.02, 0.02, 0.02, 0.02,
+        0.01, 0.01, 0.01, 0.01, 0.01,
+    ]
     assert result["skipped"] == [{
         "discord_id": 302,
         "reason": "You cannot place bets while in debt. Win some games to pay it off!",
@@ -289,7 +302,7 @@ def test_auto_spectators_share_transaction_and_ignore_failed_candidate_in_odds(
         assert row["odds_at_placement"] == expected_odds
         running_totals[team] += bet["amount"]
 
-    assert set(rows_by_id) == {301, 303, 304, 305}
+    assert set(rows_by_id) == {301, 303, 304, 305, 306, 307, 308, 309, 310, 311}
     assert running_totals == {
         "radiant": result["total_radiant"],
         "dire": result["total_dire"],

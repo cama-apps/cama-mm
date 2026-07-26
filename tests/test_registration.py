@@ -93,6 +93,90 @@ class TestRegistrationCommandsConstructor:
         )
 
 
+class TestLobbyAutonotifyCommand:
+    """Tests for the guild-scoped /player lobby autonotify preference."""
+
+    @staticmethod
+    def _make_interaction(user_id: int = 123, guild_id: int = TEST_GUILD_ID):
+        interaction = Mock()
+        interaction.user.id = user_id
+        interaction.guild.id = guild_id
+        interaction.response = AsyncMock()
+        interaction.followup = AsyncMock()
+        return interaction
+
+    @pytest.mark.asyncio
+    async def test_no_option_enables_persistent_notifications(self):
+        reminder_service = Mock()
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+
+        await cog.lobby_autonotify.callback(cog, interaction)
+
+        reminder_service.set_preference.assert_called_once_with(
+            123,
+            TEST_GUILD_ID,
+            "lobby",
+            True,
+        )
+        interaction.followup.send.assert_awaited_once()
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "now **ON**" in kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_false_disables_persistent_notifications(self):
+        reminder_service = Mock()
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction(user_id=456, guild_id=789)
+
+        await cog.lobby_autonotify.callback(cog, interaction, False)
+
+        reminder_service.set_preference.assert_called_once_with(
+            456,
+            789,
+            "lobby",
+            False,
+        )
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "now **OFF**" in kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_missing_reminder_service_returns_ephemeral_error(self):
+        bot = Mock()
+        bot.reminder_service = None
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+
+        await cog.lobby_autonotify.callback(cog, interaction)
+
+        kwargs = interaction.followup.send.await_args.kwargs
+        assert kwargs["ephemeral"] is True
+        assert "unavailable" in kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_dm_invocation_is_rejected_before_persistence(self):
+        reminder_service = Mock()
+        bot = Mock()
+        bot.reminder_service = reminder_service
+        cog = RegistrationCommands(bot=bot, player_service=Mock())
+        interaction = self._make_interaction()
+        interaction.guild = None
+
+        await cog.lobby_autonotify.callback(cog, interaction)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "This command can only be used in a server.",
+            ephemeral=True,
+        )
+        reminder_service.set_preference.assert_not_called()
+
+
 class TestMMRPromptViewSignature:
     """Tests for the MMRPromptView button callback signature.
 

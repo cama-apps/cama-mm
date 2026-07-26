@@ -47,6 +47,8 @@ from commands.dig_helpers.boss_views import (
     BossWagerModal,
     _add_carried_wager_notice,
     _build_boss_fight_result_embed,
+    _load_boss_encounter_art,
+    _resolve_boss_encounter_presentation,
 )
 from commands.dig_helpers.dig_views import (
     ConfirmAbandonView,
@@ -691,9 +693,12 @@ class DigCommands(commands.Cog):
         has_lantern = await asyncio.to_thread(
             self.dig_service.has_scout_lantern, interaction.user.id, guild_id,
         )
+        display_name, display_dialogue, secret_phase = (
+            _resolve_boss_encounter_presentation(boss_info)
+        )
         embed = discord.Embed(
-            title=f"Boss Encountered: {getattr(boss_info, 'name', 'Unknown Boss')}!",
-            description=getattr(boss_info, "dialogue", "A fearsome guardian blocks your path!"),
+            title=f"Boss Encountered: {display_name}!",
+            description=display_dialogue or "A fearsome guardian blocks your path!",
             color=0xFF0000,
         )
 
@@ -701,14 +706,14 @@ class DigCommands(commands.Cog):
         boundary = getattr(boss_info, "boundary", None)
         boss_id = getattr(boss_info, "boss_id", "") or boundary
         if boss_id:
-            try:
-                from utils.dig_assets import get_boss_art
-                depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
-                ld = get_layer_def(depth or boundary)
-                ln = ld.name if ld else "Dirt"
-                boss_file = await asyncio.to_thread(get_boss_art, boss_id, "encounter", ln)
-            except Exception as e:
-                logger.debug("Boss encounter art failed: %s", e)
+            depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+            ld = get_layer_def(depth or boundary)
+            ln = ld.name if ld else "Dirt"
+            boss_file = await _load_boss_encounter_art(
+                boss_info,
+                ln,
+                secret=secret_phase,
+            )
 
         if boss_file:
             embed.set_image(url=f"attachment://{boss_file.filename}")

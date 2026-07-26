@@ -20,7 +20,12 @@ from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
 from services.permissions import has_admin_permission
 from utils.draft_embeds import format_player_row, format_roles
-from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
+from utils.formatting import (
+    JOPACOIN_EMOTE,
+    format_betting_display,
+    format_spectator_autobet_summary,
+    get_player_display_name,
+)
 from utils.interaction_safety import safe_defer
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.region import summarize_region
@@ -2256,12 +2261,7 @@ class DraftCommands(commands.Cog):
 
             spectator_bets = blind_bets.get("spectator_bets") if blind_bets else None
             if spectator_bets and spectator_bets.get("created", 0) > 0:
-                spectator_pct = f"{spectator_bets.get('percentage', 0) * 100:g}%"
-                spectator_note = (
-                    f"**Rich spectator auto-wagers:** {spectator_bets['created']} spectators wagered {spectator_pct} of net worth\n"
-                    f"🟢 Radiant: {spectator_bets['total_radiant']} {JOPACOIN_EMOTE} | "
-                    f"🔴 Dire: {spectator_bets['total_dire']} {JOPACOIN_EMOTE}"
-                )
+                spectator_note = format_spectator_autobet_summary(spectator_bets)
                 embed.add_field(name="💸 Spectator Auto-Wagers", value=spectator_note, inline=False)
 
             # Current wagers (same display as shuffle mode)

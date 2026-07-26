@@ -3,7 +3,7 @@ import time
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IReminderRepository
 
-_VALID_TYPES = {"wheel", "trivia", "betting", "dig"}
+_VALID_TYPES = {"wheel", "trivia", "betting", "dig", "lobby"}
 
 
 class NotificationRepository(BaseRepository, IReminderRepository):
@@ -12,7 +12,8 @@ class NotificationRepository(BaseRepository, IReminderRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT wheel_enabled, trivia_enabled, betting_enabled, dig_enabled "
+                "SELECT wheel_enabled, trivia_enabled, betting_enabled, dig_enabled, "
+                "lobby_enabled "
                 "FROM reminder_preferences WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, normalized),
             )
@@ -23,12 +24,14 @@ class NotificationRepository(BaseRepository, IReminderRepository):
                 "trivia_enabled": False,
                 "betting_enabled": False,
                 "dig_enabled": False,
+                "lobby_enabled": False,
             }
         return {
             "wheel_enabled": bool(row["wheel_enabled"]),
             "trivia_enabled": bool(row["trivia_enabled"]),
             "betting_enabled": bool(row["betting_enabled"]),
             "dig_enabled": bool(row["dig_enabled"]),
+            "lobby_enabled": bool(row["lobby_enabled"]),
         }
 
     def set_preference(

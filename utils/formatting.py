@@ -126,6 +126,40 @@ def format_betting_display(
         return "💰 House Betting (1:1)", totals_text
 
 
+def format_spectator_autobet_summary(result: dict) -> str:
+    """Format the compact shuffle/draft summary for rich spectator autobets."""
+    secondary_percentage = f"{float(result.get('percentage', 0)) * 100:g}%"
+    if (
+        "total_count" in result
+        and "top_count" in result
+        and "top_percentage" in result
+    ):
+        total_count = int(result["total_count"])
+        top_count = int(result["top_count"])
+        top_percentage = f"{float(result['top_percentage']) * 100:g}%"
+        rank_bands = []
+        if top_count > 0:
+            rank_bands.append(f"ranks 1–{top_count} at {top_percentage}")
+        if total_count > top_count:
+            rank_bands.append(
+                f"ranks {top_count + 1}–{total_count} at {secondary_percentage}"
+            )
+        headline = (
+            f"**Rich spectator auto-wagers:** {result.get('created', 0)} spectators "
+            f"({'; '.join(rank_bands)})"
+        )
+    else:
+        headline = (
+            f"**Rich spectator auto-wagers:** {result.get('created', 0)} spectators "
+            f"wagered {secondary_percentage} of net worth"
+        )
+    return (
+        f"{headline}\n"
+        f"🟢 Radiant: {result.get('total_radiant', 0)} {JOPACOIN_EMOTE} | "
+        f"🔴 Dire: {result.get('total_dire', 0)} {JOPACOIN_EMOTE}"
+    )
+
+
 def get_player_display_name(
     player,
     discord_id: int | None = None,

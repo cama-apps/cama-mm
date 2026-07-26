@@ -40,6 +40,7 @@ from services.dig_constants import (
     WIN_CHANCE_CAP,
     get_boss_pool_for_tier,
 )
+from services.dig_data import bosses as boss_data
 from services.dig_service import (
     DigService,
     _approx_duel_win_prob,
@@ -488,8 +489,58 @@ class TestDialogueV2:
 
 
 class TestPinnacleConstants:
-    def test_pinnacle_pool_size(self):
-        assert len(PINNACLE_POOL_IDS) == 3
+    def test_pinnacle_pool_has_exactly_six_depth_350_candidates(self):
+        assert PINNACLE_POOL_IDS == (
+            "forgotten_king", "hollowforged", "first_digger",
+            "bastion_below", "pale_surveyor", "lantern_engine",
+        )
+
+    def test_new_pinnacles_have_complete_phase_and_relic_data(self):
+        expected_relics = {
+            "bastion_below": "Standard",
+            "pale_surveyor": "Compass",
+            "lantern_engine": "Core",
+        }
+        for boss_id, relic_name in expected_relics.items():
+            boss = PINNACLE_BOSSES[boss_id]
+            assert boss.persona
+            assert boss.ascii_art
+            assert len(boss.phases) == 3
+            assert all(len(phase.mechanic_pool) == 2 for phase in boss.phases)
+            assert PINNACLE_RELIC_BASE_NAME[boss_id] == relic_name
+
+    def test_secret_phase_presentation_is_phase_three_only(self):
+        assert boss_data.PINNACLE_SECRET_PHASE_CHANCE == 0.10
+        for boss in PINNACLE_BOSSES.values():
+            for phase in boss.phases[:2]:
+                assert phase.secret_title is None
+                assert phase.secret_dialogue == ()
+            assert boss.phases[2].secret_title
+            assert boss.phases[2].secret_dialogue
+
+    def test_new_pinnacle_mechanics_are_registered(self):
+        expected_ids = {
+            "bastion_three_roads", "bastion_hidden_route", "bastion_fortify",
+            "bastion_counter_siege", "bastion_throne_race", "bastion_last_reserve",
+            "surveyor_marked_ground", "surveyor_false_landmark", "surveyor_memory_echo",
+            "surveyor_folded_arena", "surveyor_corruption_ring", "surveyor_unwritten_end",
+            "lantern_heat_cycle", "lantern_venting_protocol", "lantern_overclock",
+            "lantern_gearstorm", "lantern_critical_mass", "lantern_infinite_feedback",
+        }
+        assert expected_ids <= MECHANIC_REGISTRY.keys()
+        wired_ids = {
+            mechanic_id
+            for boss_id in ("bastion_below", "pale_surveyor", "lantern_engine")
+            for phase in PINNACLE_BOSSES[boss_id].phases
+            for mechanic_id in phase.mechanic_pool
+        }
+        assert wired_ids == expected_ids
+        for mechanic_id in expected_ids:
+            mechanic = MECHANIC_REGISTRY[mechanic_id]
+            assert len(mechanic.options) == 3
+            safe_option = mechanic.options[mechanic.safe_option_idx]
+            assert all(roll.status_effect is None for roll in safe_option.outcome_rolls)
+            assert all(roll.skip_next_round_for is None for roll in safe_option.outcome_rolls)
 
     def test_each_pinnacle_has_three_phases(self):
         for pinnacle in PINNACLE_BOSSES.values():
@@ -898,6 +949,82 @@ class TestPinnacleLock:
         pid2 = dig_service._ensure_pinnacle_locked(10001, TEST_GUILD_ID, tunnel2)
         assert pid == pid2
 
+    @pytest.mark.parametrize(
+        "boss_id", ("bastion_below", "pale_surveyor", "lantern_engine"),
+    )
+    def test_new_pinnacle_choice_is_locked_and_persisted(
+        self, boss_id, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+        monkeypatch.setattr(random.Random, "choice", lambda _rng, _pool: boss_id)
+
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        assert dig_service._ensure_pinnacle_locked(10001, TEST_GUILD_ID, tunnel) == boss_id
+
+        persisted = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        assert persisted["pinnacle_boss_id"] == boss_id
+        assert dig_service._ensure_pinnacle_locked(10001, TEST_GUILD_ID, persisted) == boss_id
+
+
+class TestPinnacleMechanicPolish:
+    def test_king_feast_safe_option_is_a_low_risk_positioning_choice(self):
+        mechanic = MECHANIC_REGISTRY["king_feast"]
+        safe = mechanic.options[mechanic.safe_option_idx]
+        assert mechanic.safe_option_idx == 2
+        feast_copy = " ".join(
+            f"{option.label} {option.flavor}" for option in mechanic.options
+        ).lower()
+        assert all(word not in feast_copy for word in ("pocket", "ration", "loaf", "inventory"))
+        assert [(roll.probability, roll.player_hp_delta, roll.boss_hp_delta) for roll in safe.outcome_rolls] == [
+            (0.75, 0, 0), (0.25, -1, -1),
+        ]
+
+    def test_existing_pinnacle_safe_choice_and_risk_regressions(self):
+        assert MECHANIC_REGISTRY["king_deathbed"].options[0].outcome_rolls[0].boss_hp_delta == -1
+        assert MECHANIC_REGISTRY["hollow_walls_close"].options[1].label.lower().startswith("risk")
+        assert MECHANIC_REGISTRY["digger_phasing"].safe_option_idx == 0
+        for mechanic_id in ("digger_pickaxe_duel", "digger_tunnel_collapse"):
+            high_risk = MECHANIC_REGISTRY[mechanic_id].options[2]
+            assert any(roll.player_hp_delta <= -3 for roll in high_risk.outcome_rolls)
+        assert MECHANIC_REGISTRY["digger_last_excavation"].trigger_round == 4
+
+    @pytest.mark.parametrize(
+        ("mechanic_id", "safe_option_idx"),
+        (("hollow_shape_shift", 1), ("hollow_many_voices", 2)),
+    )
+    def test_hollowforged_safe_options_minimize_expected_player_damage(
+        self, mechanic_id, safe_option_idx,
+    ):
+        mechanic = MECHANIC_REGISTRY[mechanic_id]
+        assert mechanic.safe_option_idx == safe_option_idx
+
+        expected_player_damage = [
+            sum(
+                roll.probability * -roll.player_hp_delta
+                for roll in option.outcome_rolls
+            )
+            for option in mechanic.options
+        ]
+        safe = mechanic.options[safe_option_idx]
+        assert all(
+            expected_player_damage[safe_option_idx] < damage
+            for option_idx, damage in enumerate(expected_player_damage)
+            if option_idx != safe_option_idx
+        )
+        assert all(roll.status_effect is None for roll in safe.outcome_rolls)
+
+    def test_pinnacle_barks_are_phase_neutral_and_king_streak_is_grammatical(self):
+        for boss_id in PINNACLE_POOL_IDS:
+            for lines in BOSS_DIALOGUE_V2[boss_id].values():
+                assert all("Round two" not in line for line in lines)
+        assert all(
+            "Streak {streak} days, you say? I have stood here {streak} centuries." not in line
+            for line in BOSS_DIALOGUE_V2["forgotten_king"]["after_defeat"]
+        )
+
 
 # --- Fight flow ------------------------------------------------------
 
@@ -975,6 +1102,7 @@ class TestPinnacleFight:
         assert resumed["success"]
         # Outcome is either won (True/False) — no longer pending.
         assert "pending_prompt" not in resumed
+        assert resumed["boss_id"] == "forgotten_king"
         # Active duel row was cleared.
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
 
@@ -1031,6 +1159,7 @@ class TestPinnacleFight:
         monkeypatch.setattr(random, "random", lambda: 0.999)
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=0)
         assert result["won"] is False
+        assert result["boss_id"] == "forgotten_king"
         assert result["boundary"] == PINNACLE_DEPTH
         # Phase HP persisted per-phase under f"{PINNACLE_DEPTH}:1"
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)

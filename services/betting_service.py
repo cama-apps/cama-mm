@@ -17,6 +17,8 @@ from config import (
     AUTO_SPECTATOR_BET_COUNT,
     AUTO_SPECTATOR_BET_ENABLED,
     AUTO_SPECTATOR_BET_PERCENTAGE,
+    AUTO_SPECTATOR_BET_TOP_COUNT,
+    AUTO_SPECTATOR_BET_TOP_PERCENTAGE,
     BOMB_POT_ANTE,
     BOMB_POT_BLIND_PERCENTAGE,
     BOMB_POT_PARTICIPATION_BONUS,
@@ -892,63 +894,79 @@ class BettingService:
         """
         Auto-wager for the richest spectators after shuffle.
 
-        Spectators are registered players who are not on either team. The top
-        configured positive-balance spectators wager the configured percentage
-        of their current balance. Team selection is deterministic pseudorandom
-        on ties, otherwise it chooses the side that leaves spectator auto-wager
-        totals closest to even.
+        Spectators are registered players who are not on either team. The
+        richest configured tier wagers the top percentage of current balance,
+        followed by an equally sized tier at the base percentage. Team
+        selection is deterministic pseudorandom on ties, otherwise it chooses
+        the side that leaves spectator auto-wager totals closest to even.
         """
+        top_count = (
+            min(
+                max(AUTO_SPECTATOR_BET_TOP_COUNT, 0),
+                max(AUTO_SPECTATOR_BET_COUNT, 0),
+            )
+            if AUTO_SPECTATOR_BET_TOP_PERCENTAGE > 0
+            else 0
+        )
         result: dict[str, Any] = {
             "created": 0,
             "total_radiant": 0,
             "total_dire": 0,
             "percentage": AUTO_SPECTATOR_BET_PERCENTAGE,
+            "top_percentage": AUTO_SPECTATOR_BET_TOP_PERCENTAGE,
+            "total_count": AUTO_SPECTATOR_BET_COUNT,
+            "top_count": top_count,
             "bets": [],
             "skipped": [],
         }
         if (
             not AUTO_SPECTATOR_BET_ENABLED
             or AUTO_SPECTATOR_BET_COUNT <= 0
-            or AUTO_SPECTATOR_BET_PERCENTAGE <= 0
+            or max(
+                AUTO_SPECTATOR_BET_TOP_PERCENTAGE,
+                AUTO_SPECTATOR_BET_PERCENTAGE,
+            ) <= 0
         ):
             return result
 
         participant_ids = set(radiant_ids) | set(dire_ids)
         candidates = self.player_repo.get_richest_players(
             guild_id,
-            limit=AUTO_SPECTATOR_BET_COUNT + len(participant_ids),
+            limit=(AUTO_SPECTATOR_BET_COUNT * 2) + len(participant_ids),
             min_balance=1,
         )
         spectators = [
             row for row in candidates
             if int(row["discord_id"]) not in participant_ids
-        ][:AUTO_SPECTATOR_BET_COUNT]
+        ]
         if not spectators:
             return result
 
         cached_totals = self.bet_repo.get_total_bets_by_guild(
             guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
         )
-        automatic_bets: list[tuple[int, dict, int, int]] = []
-        for index, spectator in enumerate(spectators):
-            discord_id = int(spectator["discord_id"])
-            balance = int(spectator.get("jopacoin_balance") or 0)
-            amount = round(balance * AUTO_SPECTATOR_BET_PERCENTAGE)
-            if amount < 1:
-                result["skipped"].append({
-                    "discord_id": discord_id,
-                    "reason": f"auto-wager amount {amount} < 1",
-                })
-                continue
-
-            automatic_bets.append((index, spectator, discord_id, amount))
-
-        if not automatic_bets:
-            return result
-
         spectator_totals = {"radiant": 0, "dire": 0}
         with self.bet_repo.automatic_bet_batch() as place_bet:
-            for index, spectator, discord_id, amount in automatic_bets:
+            for spectator in spectators:
+                if result["created"] >= AUTO_SPECTATOR_BET_COUNT:
+                    break
+
+                successful_rank = result["created"]
+                discord_id = int(spectator["discord_id"])
+                balance = int(spectator.get("jopacoin_balance") or 0)
+                percentage = (
+                    AUTO_SPECTATOR_BET_TOP_PERCENTAGE
+                    if successful_rank < top_count
+                    else AUTO_SPECTATOR_BET_PERCENTAGE
+                )
+                amount = round(balance * percentage)
+                if amount < 1:
+                    result["skipped"].append({
+                        "discord_id": discord_id,
+                        "reason": f"auto-wager amount {amount} < 1",
+                    })
+                    continue
+
                 team = self._choose_auto_spectator_team(
                     amount=amount,
                     spectator_totals=spectator_totals,
@@ -956,7 +974,7 @@ class BettingService:
                     discord_id=discord_id,
                     shuffle_timestamp=shuffle_timestamp,
                     pending_match_id=pending_match_id,
-                    index=index,
+                    index=successful_rank,
                 )
 
                 total_pool = cached_totals["radiant"] + cached_totals["dire"]
@@ -995,6 +1013,7 @@ class BettingService:
                     "team": team,
                     "amount": amount,
                     "networth": balance,
+                    "percentage": percentage,
                 })
                 cached_totals[team] += amount
                 spectator_totals[team] += amount
