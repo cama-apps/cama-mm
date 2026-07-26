@@ -329,151 +329,83 @@ assets/dig/pickaxes/void_touched.png
 ```
 ---
 
-## Pet Art — Nano Banana Prompts
+## Pet Art — Component Packs (Nano Banana Prompts)
 
 Cama pets are camel–llama hybrid creatures collected and raised by players. Same dark underground fantasy RPG aesthetic as the dig art above — but these are companions, not bosses: aim for **cute, expressive, collectible-creature appeal (think Neopets/Tamagotchi charm meets dark Dota bestiary)**.
 
-### Style Bible
+Pet cards are NOT shipped as full pre-rendered images. The bot composites each card at render time from **component layers**, filling any missing layer with built-in procedural pixel art — so packs can land one slot at a time and every generated part multiplies across the whole roster.
 
-- Painterly, pixel-art-adjacent creature portrait, single creature center-frame on a dark simple backdrop (stable, cave mouth, dusky desert) so the silhouette reads at Discord embed size.
-- **512x288** (16:9 landscape, fits Discord embed main image), RGBA PNG.
-- Big expressive eyes with highlights, soft rounded shapes, visible wool texture. Cool Dota references welcome, but the creature stays lovable.
-- Each species ships 6 variants — `{stage}` x `{mood}`:
-  - `baby`: chibi proportions — oversized head, ears, and eyes on a small round body
-  - `adult`: full-size, longer neck, fills more of the frame
-  - `happy`: bright open eyes, ears up, easy smile, blush marks
-  - `neutral`: flat mouth, half-lidded camelid indifference
-  - `hungry`: drooping ears and eyelids, sad frown, a single tear, deflated posture
+### Component Contract (read before generating anything)
 
-### Pet File Naming Convention
+- Every component is a **full-canvas 512x288 RGBA PNG with a transparent background**. Draw the part exactly where it belongs on the card; the compositor simply alpha-stacks layers in slot order. No anchor metadata needed.
+- Canvas layout guide: floor line at y=248; adult body occupies roughly x176–336, y120–248; adult head roughly x224–288, y40–88. Babies are chibi (bigger head ratio, body low and centered). Render a reference card with `utils/pet_drawing.render_pet_card` to trace exact positions per stage.
+- Layer slots, stacked back → front:
 
-All 62 files (10 species x 2 stages x 3 moods, plus the shared egg and tombstone):
+| slot | contents | notes |
+|---|---|---|
+| `backdrop` | scene behind the pet (stable, cave mouth, dusky desert) | opaque allowed |
+| `back` | behind-the-body features: ground shadow, Aegis shell dome, hump | |
+| `creature` | the full faceless animal: legs, body, neck, ears, head | the big one |
+| `detail` | on-wool features: coin speckles, saddlebags, royal blanket, hook glint, icicle fringe | |
+| `face` | eyes + muzzle + mouth, **mood-keyed** | one file per mood |
+| `front` | floating foreground features: the three orbs | |
+
+- Directory + naming: `assets/pets/components/{stage}/{slot}/{scope}_{...}{variant}.png`
+  - `{stage}`: `baby` or `adult`
+  - `{scope}`: a species id (used only by that species, as-authored) or `any` (shared by all species)
+  - `face` slot only: insert the mood — `{scope}_{mood}_{variant}.png`, mood in `happy` / `neutral` / `hungry`
+  - `{variant}`: `01`, `02`, ... — ship several! Each pet's id deterministically picks its variant, so variants = per-pet uniqueness for free.
+  - Examples: `adult/creature/any_01.png`, `adult/face/any_happy_02.png`, `adult/detail/rama_01.png`, `baby/front/invoker_cama_01.png`
+- **Tinting:** `any`-scoped parts in the `back`/`creature`/`detail` slots must be authored in **neutral grayscale** — the compositor remaps their luminance onto each species' palette (dark→mid→light ramp). One grayscale creature variant instantly becomes ten species-colored bodies. `any`-scoped `face`/`backdrop`/`front` parts are used as-authored, so keep them palette-neutral (outlines, whites, soft colors).
+- Species-scoped parts are never tinted; author them in the species' colors.
+
+### Highest-leverage first pack
+
+1. `adult/creature/any_01..03.png` + `baby/creature/any_01..03.png` — 3 grayscale body variants per stage = 30 distinct-looking species-colored bodies per stage.
+2. `adult/face/any_{mood}_01..02.png` + baby equivalents — the mood system comes alive.
+3. One `detail`/`back`/`front` file per species (below) — the signature silhouettes.
+4. `backdrop/any_01..03.png` — scene variety.
+
+### Creature prompt (any-scoped, grayscale)
 
 ```
-assets/pets/common_cama_baby_happy.png
-assets/pets/common_cama_baby_neutral.png
-assets/pets/common_cama_baby_hungry.png
-assets/pets/common_cama_adult_happy.png
-assets/pets/common_cama_adult_neutral.png
-assets/pets/common_cama_adult_hungry.png
-assets/pets/dromedary_cross_baby_happy.png
-assets/pets/dromedary_cross_baby_neutral.png
-assets/pets/dromedary_cross_baby_hungry.png
-assets/pets/dromedary_cross_adult_happy.png
-assets/pets/dromedary_cross_adult_neutral.png
-assets/pets/dromedary_cross_adult_hungry.png
-assets/pets/banana_ears_baby_happy.png
-assets/pets/banana_ears_baby_neutral.png
-assets/pets/banana_ears_baby_hungry.png
-assets/pets/banana_ears_adult_happy.png
-assets/pets/banana_ears_adult_neutral.png
-assets/pets/banana_ears_adult_hungry.png
-assets/pets/jopacama_baby_happy.png
-assets/pets/jopacama_baby_neutral.png
-assets/pets/jopacama_baby_hungry.png
-assets/pets/jopacama_adult_happy.png
-assets/pets/jopacama_adult_neutral.png
-assets/pets/jopacama_adult_hungry.png
-assets/pets/pudge_cama_baby_happy.png
-assets/pets/pudge_cama_baby_neutral.png
-assets/pets/pudge_cama_baby_hungry.png
-assets/pets/pudge_cama_adult_happy.png
-assets/pets/pudge_cama_adult_neutral.png
-assets/pets/pudge_cama_adult_hungry.png
-assets/pets/courier_cama_baby_happy.png
-assets/pets/courier_cama_baby_neutral.png
-assets/pets/courier_cama_baby_hungry.png
-assets/pets/courier_cama_adult_happy.png
-assets/pets/courier_cama_adult_neutral.png
-assets/pets/courier_cama_adult_hungry.png
-assets/pets/aegis_cama_baby_happy.png
-assets/pets/aegis_cama_baby_neutral.png
-assets/pets/aegis_cama_baby_hungry.png
-assets/pets/aegis_cama_adult_happy.png
-assets/pets/aegis_cama_adult_neutral.png
-assets/pets/aegis_cama_adult_hungry.png
-assets/pets/invoker_cama_baby_happy.png
-assets/pets/invoker_cama_baby_neutral.png
-assets/pets/invoker_cama_baby_hungry.png
-assets/pets/invoker_cama_adult_happy.png
-assets/pets/invoker_cama_adult_neutral.png
-assets/pets/invoker_cama_adult_hungry.png
-assets/pets/crystal_cama_baby_happy.png
-assets/pets/crystal_cama_baby_neutral.png
-assets/pets/crystal_cama_baby_hungry.png
-assets/pets/crystal_cama_adult_happy.png
-assets/pets/crystal_cama_adult_neutral.png
-assets/pets/crystal_cama_adult_hungry.png
-assets/pets/rama_baby_happy.png
-assets/pets/rama_baby_neutral.png
-assets/pets/rama_baby_hungry.png
-assets/pets/rama_adult_happy.png
-assets/pets/rama_adult_neutral.png
-assets/pets/rama_adult_hungry.png
-assets/pets/egg.png
-assets/pets/tombstone.png
+Cute camel-llama hybrid creature, faceless (no eyes or mouth — face is a separate layer), standing centered on a transparent background, painterly pixel-art-adjacent style, soft rounded wool, four sturdy legs, long gentle neck, round head with small ears, GRAYSCALE ONLY (neutral grays, full value range dark-to-light for palette remapping), 512x288 canvas, creature positioned with feet on an invisible floor line at 86% of canvas height. Variant hint: [stocky and fluffy / lean and elegant / extra round and woolly].
+Baby variant: chibi proportions — oversized round head low on a small plump body, tiny legs, no neck.
 ```
 
-One prompt per species — render all 6 stage/mood variants of it per the Style Bible.
+### Face prompts (any-scoped, per mood)
 
-### Common Cama (`common_cama`)
 ```
-A perfectly ordinary camel-llama hybrid with warm tan wool, a barely-there hump, long soft neck and big gentle eyes, standing in a dim lantern-lit stable, deliberately unremarkable and proud of it, cute collectible creature portrait, dark fantasy bestiary style, digital painting
-```
-
-### Dune Cama (`dromedary_cross`)
-```
-A sandy-gold camel-leaning cama with heroic long eyelashes, closable slit nostrils, and one modest fat hump on its back, standing before dusky desert dunes under early stars, serene and sturdy, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+Only the facial features of a cute creature on a fully transparent 512x288 canvas, positioned in the head zone (x224-288, y40-88 for adult): two big dark round eyes with bright white highlights, small pale muzzle with two nostril dots, and
+- happy: curved open smile, sparkly eyes, two soft pink blush marks
+- neutral: flat little mouth, half-lidded unimpressed camelid eyes
+- hungry: drooping eyelids, sad downturned mouth, one glossy tear under the left eye
+Painterly pixel-art-adjacent, no head or body — features only, floating where the face belongs.
 ```
 
-### Humming Cama (`banana_ears`)
+### Species signature components (species-scoped, authored in color)
+
+- `dromedary_cross` — `back`: a modest sandy hump peeking above the back line; heroic double eyelashes could ship as a species face pack.
+- `banana_ears` — `creature` (species-scoped full body): green-tinged wool with oversized curved banana ears tilted outward.
+- `jopacama` — `detail`: faint gold coin-shaped whorls mirrored across the wool.
+- `pudge_cama` — `detail`: one small gray butcher's hook glinting deep in the flank wool (subtle, mostly hidden).
+- `courier_cama` — `detail`: brown courier saddlebags on both flanks with lighter flaps and a tiny flag.
+- `aegis_cama` — `back`: a glowing golden Aegis shell dome arcing over the back, soft rim light.
+- `invoker_cama` — `front`: three small glowing orbs (ice blue, violet, ember orange) orbiting above the head.
+- `crystal_cama` — `detail`: ice glints in the wool plus a small icicle fringe hanging from the belly.
+- `rama` — `detail`: a small red royal blanket with gold trim across the back; species face packs should keep his permanent grumpy brows — Rama never looks fully happy (the real 1998 cama's documented temperament).
+- `common_cama` — deliberately no signature components. Its quirk is having none.
+
+### Egg & Tombstone (full cards, not components)
+
 ```
-A llama-leaning cama with pale green-tinged wool and enormous upright banana-curved ears, mid-hum with tiny faint music notes drifting around its head, standing in a dim stable, endearing and slightly mysterious, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+assets/pets/egg.png — A single mysterious speckled cream egg resting in a straw nest, warm lantern glow from above, dark cozy stable background, painterly pixel-art-adjacent style, gentle vignette, 512x288. No creature visible; the egg gives no hint of what is inside.
 ```
 
-### Gilded Cama (`jopacama`)
 ```
-A cama whose golden wool grows in faint coin-shaped whorls, a soft shimmer of gold dust and a couple of stray jopacoins at its hooves, smug aura of unexplained wealth, dim vault-like backdrop with warm glints, cute collectible creature portrait, dark fantasy bestiary style, digital painting
-```
-
-### Ravenous Cama (`pudge_cama`)
-```
-An extra-round, perpetually hungry cama with meaty red-brown wool, a rusty butcher's hook and chain tangled deep in the wool of its flank (a Pudge homage), a little drool, big pleading eyes, dark butcher-shop-adjacent stable backdrop, cute-but-unsettling collectible creature portrait, dark fantasy bestiary style, digital painting
+assets/pets/tombstone.png — A small rounded gravestone at twilight on a grassy mound, engraved area left blank/smooth (the bot writes the name), a few tiny colorful flowers at the base, moonlit dark blue sky with stars, painterly pixel-art-adjacent style, quiet and gentle rather than grim, 512x288.
 ```
 
-### Pack Cama (`courier_cama`)
-```
-A saddle-brown cama rigged as a Dota courier: bulging leather saddlebags stuffed with potions and wards, a tiny pennant flag on its back, big anxious eyes that say it lives to deliver, dim jungle path backdrop, cute collectible creature portrait, dark fantasy bestiary style, digital painting
-```
+### Full-card overrides (optional escape hatch)
 
-### Shellback Cama (`aegis_cama`)
-```
-A serene pale-yellow cama with a softly glowing Aegis of the Immortal fused as a golden shell dome across its back, gentle halo light rimming the shell, calm knowing eyes, dark Roshan-pit backdrop with warm glow, cute collectible creature portrait, dark fantasy bestiary style, digital painting
-```
-
-### Mystic Cama (`invoker_cama`)
-```
-A violet-wooled cama draped in a scholar's robe, three small glowing orbs orbiting its head — ice blue, storm violet-white, and ember orange (Quas Wex Exort) — an insufferably learned expression, dim arcane library backdrop, cute collectible creature portrait, dark fantasy bestiary style, digital painting
-```
-
-### Frostwool Cama (`crystal_cama`)
-```
-An ice-blue cama with frost-rimed glittering wool that never melts, tiny icicles fringing its belly, snowflake motes and a Crystal Maiden-style frost aura, cold breath fog, dim frozen cavern backdrop, cute collectible creature portrait, dark fantasy bestiary style, digital painting
-```
-
-### Rama the First (`rama`)
-```
-The original cama, bred in Dubai in 1998: regal white coat with a small red royal blanket trimmed in gold, standing on a stone dais, permanently furrowed grumpy brows and a famously terrible attitude (mid-spit when hungry), never fully happy-looking even when pleased, cute-yet-cranky collectible creature portrait, dark fantasy bestiary style, digital painting
-```
-
-Shared art, species-neutral:
-
-### Egg (`assets/pets/egg.png`)
-```
-A single large mysterious speckled egg resting in a warm straw nest, cream shell with earthy speckles and a faint inner glow hinting at the creature within, species-neutral, soft lantern light and gentle vignette in a dark stable, cozy and full of promise, cute collectible style, dark fantasy bestiary style, digital painting
-```
-
-### Tombstone (`assets/pets/tombstone.png`)
-```
-A small weathered gray tombstone on a grassy mound at soft twilight, blank smooth engraving panel (the bot overlays the pet's name), tiny wildflowers at the base and a tuft of wool snagged on one edge, gentle moonlight, stars, quiet and bittersweet rather than grim, dark fantasy bestiary style, digital painting
-```
+A complete card at `assets/pets/{species_id}_{stage}_{mood}.png` bypasses compositing entirely for that combination — useful for one-off hero images (a fully illustrated Rama, seasonal specials) without touching the component system.

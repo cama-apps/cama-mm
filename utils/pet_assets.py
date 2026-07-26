@@ -1,10 +1,12 @@
 """
 Asset loader for cama pet art.
 
-Fallback chain:
-  1. Custom art file on disk  (assets/pets/...)
-  2. PIL-generated pixel art  (pet_drawing helpers)
-  3. None                     (caller sends the embed without an image)
+Fallback chain for pet cards:
+  1. Full-card override on disk    (assets/pets/{species}_{stage}_{mood}.png)
+  2. Hybrid layer composite        (pet_compositor: disk component packs
+                                    wired together, procedural per missing slot)
+  3. Fully procedural pixel art    (pet_drawing, if compositing itself fails)
+  4. None                          (caller sends the embed without an image)
 
 discord.File objects are single-use (the buffer is consumed on send), so
 we cache raw *bytes* and mint a fresh File each call. Filenames are
@@ -73,19 +75,38 @@ def get_pet_card(
 ) -> discord.File | None:
     """Return a discord.File for a pet portrait card.
 
-    Fallback chain: custom file on disk → PIL pixel art → None.
-    Naming: assets/pets/{species_id}_{stage}_{mood}.png (or .gif)
+    Fallback chain: full-card file on disk → hybrid layer composite →
+    fully procedural render → None.
+    Full-card naming: assets/pets/{species_id}_{stage}_{mood}.png (or .gif)
     """
     base_name = f"{species_id}_{stage}_{mood}"
 
-    # 1. Custom art on disk
+    # 1. Full-card override on disk
     asset_path = _find_asset(ASSETS_DIR, base_name)
     if asset_path:
         data = _load_cached_bytes(asset_path)
         if data:
             return _file_from_bytes(data, f"pet_{base_name}{asset_path.suffix}")
 
-    # 2. PIL fallback
+    # 2. Hybrid composite (disk component packs + procedural per slot).
+    # Cache key carries the discovered-component token so tests (and any
+    # future hot-reload) never serve composites from a stale manifest.
+    try:
+        from utils import pet_compositor
+        cache_key = (
+            f"compose_{base_name}_{seed}_{pet_compositor.manifest_token()}"
+        )
+        data = _bytes_cache.get(cache_key)
+        if data is None:
+            data = pet_compositor.compose_pet_card(
+                species_id, stage, mood, seed
+            ).getvalue()
+            _bytes_cache[cache_key] = data
+        return _file_from_bytes(data, f"pet_{base_name}.png")
+    except Exception as e:
+        logger.warning("Pet card compositing failed, using pure fallback: %s", e)
+
+    # 3. Fully procedural last resort
     try:
         cache_key = f"render_{base_name}_{seed}"
         data = _bytes_cache.get(cache_key)
