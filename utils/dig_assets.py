@@ -12,6 +12,7 @@ we cache raw *bytes* and mint a fresh File each call.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from pathlib import Path
@@ -83,6 +84,9 @@ BOSS_SLUGS: dict[str, str] = {
     "forgotten_king": "forgotten_king",
     "hollowforged": "hollowforged",
     "first_digger": "first_digger",
+    "bastion_below": "bastion_below",
+    "pale_surveyor": "pale_surveyor",
+    "lantern_engine": "lantern_engine",
 }
 
 # Legacy depth → boss_id fallback so a caller with only the boundary depth
@@ -106,6 +110,18 @@ PICKAXE_SLUGS: list[str] = [
 # Module-level byte cache:  path-string -> bytes
 # Bounded by the finite asset set (~29 entries: 21 boss + 8 layer images).
 _bytes_cache: dict[str, bytes] = {}
+
+# Generated phase media is cached as reusable bytes. discord.File itself is
+# deliberately never cached because sending consumes its underlying buffer.
+_pinnacle_phase_art_cache: dict[tuple[str, int, bool], bytes] = {}
+_pinnacle_phase_art_inflight: dict[
+    tuple[str, int, bool], asyncio.Task[bytes]
+] = {}
+_pinnacle_phase_art_failures: set[tuple[str, int, bool]] = set()
+_PINNACLE_PHASE_ART_LIMITS = {
+    2: 512 * 1024,
+    3: 750 * 1024,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +209,114 @@ def get_boss_art(
     except Exception as e:
         logger.debug("PIL boss art fallback failed: %s", e)
         return None
+
+
+def _generate_pinnacle_phase_art(
+    boss_id: str,
+    phase: int,
+    *,
+    secret: bool,
+) -> bytes:
+    """Synchronously render a pinnacle phase from its encounter PNG."""
+    slug = BOSS_SLUGS.get(boss_id)
+    if not slug or phase not in _PINNACLE_PHASE_ART_LIMITS:
+        raise ValueError("unknown pinnacle phase")
+    source_path = ASSETS_DIR / "bosses" / f"{slug}_encounter.png"
+    source = _load_cached_bytes(source_path)
+    if not source:
+        raise FileNotFoundError(source_path)
+
+    from utils.dig_drawing import (
+        animate_pinnacle_phase3,
+        draw_pinnacle_phase2,
+    )
+
+    buf = (
+        draw_pinnacle_phase2(source, boss_id, secret=secret)
+        if phase == 2
+        else animate_pinnacle_phase3(source, boss_id, secret=secret)
+    )
+    return buf.getvalue()
+
+
+async def _render_pinnacle_phase_art(
+    key: tuple[str, int, bool],
+) -> bytes:
+    """Render and cache one phase, remembering permanent render failures."""
+    boss_id, phase, secret = key
+    try:
+        data = await asyncio.to_thread(
+            _generate_pinnacle_phase_art,
+            boss_id,
+            phase,
+            secret=secret,
+        )
+        if len(data) > _PINNACLE_PHASE_ART_LIMITS[phase]:
+            raise ValueError("generated pinnacle phase art is oversized")
+    except Exception:
+        _pinnacle_phase_art_failures.add(key)
+        raise
+    _pinnacle_phase_art_cache[key] = data
+    return data
+
+
+def _clear_finished_pinnacle_phase_task(
+    key: tuple[str, int, bool],
+    task: asyncio.Task[bytes],
+) -> None:
+    """Drop completed tasks and consume unobserved exceptions."""
+    if _pinnacle_phase_art_inflight.get(key) is task:
+        _pinnacle_phase_art_inflight.pop(key, None)
+    if not task.cancelled():
+        task.exception()
+
+
+async def get_pinnacle_phase_art(
+    boss_id: str,
+    phase: int,
+    layer_name: str,
+    *,
+    secret: bool = False,
+) -> discord.File | None:
+    """Return generated phase art, falling back to static encounter art.
+
+    Rendering runs on a worker thread and never writes to disk. Cached raw
+    bytes are wrapped in a fresh ``discord.File`` for every caller.
+    """
+    key = (boss_id, phase, secret)
+    data = _pinnacle_phase_art_cache.get(key)
+    if data is None and key not in _pinnacle_phase_art_failures:
+        loop = asyncio.get_running_loop()
+        task = _pinnacle_phase_art_inflight.get(key)
+        if task is not None and task.get_loop() is not loop:
+            _pinnacle_phase_art_inflight.pop(key, None)
+            task = None
+        if task is None:
+            task = loop.create_task(_render_pinnacle_phase_art(key))
+            _pinnacle_phase_art_inflight[key] = task
+            task.add_done_callback(
+                lambda done, render_key=key: _clear_finished_pinnacle_phase_task(
+                    render_key, done,
+                ),
+            )
+        try:
+            data = await asyncio.shield(task)
+        except Exception as exc:
+            logger.debug("Pinnacle phase art generation failed: %s", exc)
+        finally:
+            if task.done() and _pinnacle_phase_art_inflight.get(key) is task:
+                _pinnacle_phase_art_inflight.pop(key, None)
+
+    if data is not None:
+        try:
+            extension = "png" if phase == 2 else "gif"
+            return _file_from_bytes(data, f"pinnacle_phase_{phase}.{extension}")
+        except Exception as exc:
+            logger.debug("Pinnacle phase art file creation failed: %s", exc)
+
+    return await asyncio.to_thread(
+        get_boss_art, boss_id, "encounter", layer_name,
+    )
 
 
 def get_layer_thumbnail(layer_name: str) -> discord.File | None:

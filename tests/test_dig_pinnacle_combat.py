@@ -470,6 +470,7 @@ def test_pinnacle_victory_applies_bankruptcy_debuff(
     full = scale_positive_dig_jc(PINNACLE_BASE_JC_REWARD)
     assert result["success"]
     assert result["won"] is True
+    assert result["boss_id"] == "forgotten_king"
     assert result["pinnacle_defeated"] is True
     assert result["jc_delta"] == full // 2
     assert result["bankruptcy_penalty"] == full - full // 2

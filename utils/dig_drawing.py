@@ -47,6 +47,229 @@ PLAYER_COLOR = (255, 255, 100)  # Bright yellow @
 _cache: dict[str, Image.Image] = {}
 
 
+# Pinnacle phase presentation themes. The compact tuple values keep the
+# runtime renderer data-only while giving each boss a distinct motif.
+PINNACLE_PHASE_THEMES: dict[
+    str, tuple[str, tuple[int, int, int], tuple[int, int, int]]
+] = {
+    "forgotten_king": ("crown_fire", (210, 54, 28), (255, 208, 70)),
+    "hollowforged": ("crystal_choir", (48, 180, 202), (185, 255, 245)),
+    "first_digger": ("ghost_tunnel", (105, 112, 150), (225, 236, 255)),
+    "bastion_below": ("fortress_siege", (150, 66, 42), (255, 174, 80)),
+    "pale_surveyor": ("map_fold", (190, 172, 118), (255, 242, 190)),
+    "lantern_engine": ("heat_gear", (218, 92, 26), (255, 225, 92)),
+}
+
+
+def _draw_pinnacle_motif(
+    image: Image.Image,
+    theme: str,
+    accent: tuple[int, int, int],
+    highlight: tuple[int, int, int],
+    progress: float,
+    *,
+    secret: bool,
+) -> None:
+    """Draw one compact boss-specific phase motif onto an RGBA image."""
+    draw = ImageDraw.Draw(image, "RGBA")
+    w, h = image.size
+    alpha = 185 if secret else 150
+    accent_rgba = (*accent, alpha)
+    highlight_rgba = (*highlight, min(255, alpha + 45))
+    shift = int(progress * 24)
+
+    if theme == "crown_fire":
+        crown_y = 28 + shift // 3
+        draw.polygon(
+            [
+                (w // 2 - 82, crown_y + 42),
+                (w // 2 - 62, crown_y),
+                (w // 2 - 22, crown_y + 29),
+                (w // 2, crown_y - 10),
+                (w // 2 + 22, crown_y + 29),
+                (w // 2 + 62, crown_y),
+                (w // 2 + 82, crown_y + 42),
+            ],
+            fill=accent_rgba,
+            outline=highlight_rgba,
+        )
+        for x in range(42, w, 58):
+            flame_h = 22 + ((x + shift) % 28)
+            draw.polygon(
+                [(x - 10, h), (x, h - flame_h), (x + 11, h)],
+                fill=highlight_rgba,
+            )
+    elif theme == "crystal_choir":
+        for idx, x in enumerate(range(44, w, 70)):
+            peak = h - 42 - ((idx * 13 + shift) % 55)
+            draw.polygon(
+                [(x - 18, h), (x, peak), (x + 20, h)],
+                fill=accent_rgba,
+                outline=highlight_rgba,
+            )
+        radius = 42 + shift
+        draw.ellipse(
+            [w // 2 - radius, h // 2 - radius, w // 2 + radius, h // 2 + radius],
+            outline=highlight_rgba,
+            width=5,
+        )
+    elif theme == "ghost_tunnel":
+        for inset in range(24, 126, 24):
+            draw.arc(
+                [inset, 20 + inset // 3, w - inset, h + 90],
+                190,
+                350,
+                fill=highlight_rgba,
+                width=5,
+            )
+        ghost_x = 70 + int(progress * (w - 140))
+        draw.ellipse(
+            [ghost_x - 28, 62, ghost_x + 28, 126],
+            fill=accent_rgba,
+            outline=highlight_rgba,
+            width=4,
+        )
+        draw.rectangle([ghost_x - 28, 96, ghost_x + 28, 148], fill=accent_rgba)
+    elif theme == "fortress_siege":
+        wall_y = h - 78
+        draw.rectangle([20, wall_y, w - 20, h], fill=accent_rgba)
+        for x in range(20, w - 20, 52):
+            draw.rectangle([x, wall_y - 24, x + 28, wall_y], fill=accent_rgba)
+        for x in range(-60 + shift * 4, w, 118):
+            draw.line([x, 12, x + 96, wall_y], fill=highlight_rgba, width=6)
+            draw.ellipse([x - 6, 5, x + 10, 21], fill=highlight_rgba)
+    elif theme == "map_fold":
+        fold_x = w // 2 + int((progress - 0.5) * 70)
+        draw.polygon(
+            [(22, 28), (fold_x, 12), (fold_x - 18, h - 20), (30, h - 38)],
+            fill=accent_rgba,
+            outline=highlight_rgba,
+        )
+        draw.polygon(
+            [(fold_x, 12), (w - 28, 38), (w - 20, h - 28), (fold_x - 18, h - 20)],
+            fill=(*highlight, alpha // 2),
+            outline=highlight_rgba,
+        )
+        for y in range(54, h, 48):
+            draw.line([35, y, w - 35, y - 12], fill=highlight_rgba, width=3)
+    elif theme == "heat_gear":
+        cx, cy = w // 2, h // 2
+        radius = 62 + int(progress * 12)
+        draw.ellipse(
+            [cx - radius, cy - radius, cx + radius, cy + radius],
+            outline=highlight_rgba,
+            width=12,
+        )
+        draw.ellipse(
+            [cx - 25, cy - 25, cx + 25, cy + 25],
+            fill=accent_rgba,
+            outline=highlight_rgba,
+            width=5,
+        )
+        angle_offset = progress * math.tau
+        for tooth in range(10):
+            angle = angle_offset + tooth * math.tau / 10
+            x1 = cx + int((radius - 4) * math.cos(angle))
+            y1 = cy + int((radius - 4) * math.sin(angle))
+            x2 = cx + int((radius + 23) * math.cos(angle))
+            y2 = cy + int((radius + 23) * math.sin(angle))
+            draw.line([x1, y1, x2, y2], fill=accent_rgba, width=10)
+        for y in (36, 66, 96):
+            draw.arc([30, y, w - 30, y + 70], 195, 345, fill=highlight_rgba, width=4)
+
+    if secret:
+        for y in range(8, h, 22):
+            draw.line([0, y + shift % 9, w, y], fill=(*highlight, 42), width=2)
+
+
+def _pinnacle_phase_base(
+    source: bytes,
+    boss_id: str,
+    *,
+    secret: bool,
+) -> tuple[Image.Image, tuple[str, tuple[int, int, int], tuple[int, int, int]]]:
+    """Load and tint encounter art for a runtime pinnacle phase render."""
+    theme = PINNACLE_PHASE_THEMES[boss_id]
+    with Image.open(io.BytesIO(source)) as opened:
+        base = opened.convert("RGBA").resize((512, 288), Image.Resampling.LANCZOS)
+    effect, accent, highlight = theme
+    if secret:
+        accent, highlight = (117, 33, 170), (70, 255, 226)
+    color_layer = Image.new("RGBA", base.size, (*accent, 255))
+    base = Image.blend(ImageEnhance.Color(base).enhance(0.72), color_layer, 0.17)
+    base = ImageEnhance.Contrast(base).enhance(1.12)
+    return base, (effect, accent, highlight)
+
+
+def draw_pinnacle_phase2(
+    source: bytes,
+    boss_id: str,
+    *,
+    secret: bool = False,
+) -> io.BytesIO:
+    """Transform encounter art into an in-memory 512x288 RGBA phase-2 PNG."""
+    base, (effect, accent, highlight) = _pinnacle_phase_base(
+        source, boss_id, secret=secret,
+    )
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    _draw_pinnacle_motif(
+        overlay, effect, accent, highlight, 0.55, secret=secret,
+    )
+    rendered = Image.alpha_composite(base, overlay)
+    rendered = rendered.quantize(
+        colors=96,
+        method=Image.Quantize.FASTOCTREE,
+        dither=Image.Dither.NONE,
+    ).convert("RGBA")
+    buf = io.BytesIO()
+    rendered.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
+def animate_pinnacle_phase3(
+    source: bytes,
+    boss_id: str,
+    *,
+    secret: bool = False,
+) -> io.BytesIO:
+    """Create an eight-frame, play-once phase-3 enrage GIF in memory."""
+    base, (effect, accent, highlight) = _pinnacle_phase_base(
+        source, boss_id, secret=secret,
+    )
+    rgb_frames: list[Image.Image] = []
+    for frame_idx in range(8):
+        progress = frame_idx / 7
+        pulsed = ImageEnhance.Brightness(base).enhance(0.82 + progress * 0.28)
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        _draw_pinnacle_motif(
+            overlay, effect, accent, highlight, progress, secret=secret,
+        )
+        rgb_frames.append(Image.alpha_composite(pulsed, overlay).convert("RGB"))
+
+    palette = rgb_frames[0].quantize(
+        colors=48,
+        method=Image.Quantize.MEDIANCUT,
+        dither=Image.Dither.NONE,
+    )
+    frames = [
+        frame.quantize(palette=palette, dither=Image.Dither.NONE)
+        for frame in rgb_frames
+    ]
+    buf = io.BytesIO()
+    frames[0].save(
+        buf,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[95] * 7 + [1_500],
+        disposal=1,
+        optimize=True,
+    )
+    buf.seek(0)
+    return buf
+
+
 def _draw_tile(palette: tuple, variant: str = "wall", rng: random.Random | None = None) -> Image.Image:
     """Draw a single 16x16 tile with the given palette.
 
