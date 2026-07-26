@@ -1233,6 +1233,7 @@ async def on_raw_reaction_add(payload):
                             await asyncio.to_thread(
                                 cog.rebuild_readycheck_embed,
                                 guild_id=payload_guild_id,
+                                expected_message_id=rc_msg_id,
                             )
                             if cog
                             else None
@@ -1447,6 +1448,9 @@ async def on_raw_reaction_add(payload):
             return
 
         await update_lobby_message(message, lobby, payload.guild_id)
+        lobby_cog = bot.get_cog("LobbyCommands")
+        if lobby_cog:
+            await lobby_cog.sync_readycheck_with_lobby(payload.guild_id)
 
         # Mention user in thread to subscribe them
         thread_id = await asyncio.to_thread(
@@ -1496,7 +1500,11 @@ async def on_raw_reaction_remove(payload):
                 if removed:
                     cog = bot.get_cog("LobbyCommands")
                     embed = (
-                        await asyncio.to_thread(cog.rebuild_readycheck_embed, guild_id=payload_guild_id)
+                        await asyncio.to_thread(
+                            cog.rebuild_readycheck_embed,
+                            guild_id=payload_guild_id,
+                            expected_message_id=rc_msg_id,
+                        )
                         if cog
                         else None
                     )
@@ -1539,6 +1547,9 @@ async def on_raw_reaction_remove(payload):
 
         if left:
             await update_lobby_message(message, lobby, payload.guild_id)
+            lobby_cog = bot.get_cog("LobbyCommands")
+            if lobby_cog:
+                await lobby_cog.sync_readycheck_with_lobby(payload.guild_id)
 
             # Post leave message in thread
             thread_id = await asyncio.to_thread(

@@ -878,6 +878,7 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
     bot = FakeBot(channel=fake_channel)
 
     cog = LobbyCommands(bot, lobby_service, player_service)
+    cog.sync_readycheck_with_lobby = AsyncMock(return_value=True)
 
     # This should not raise UnboundLocalError or TypeError
     await cog._sync_lobby_displays(lobby, guild_id=TEST_GUILD_ID)
@@ -885,6 +886,7 @@ async def test_sync_lobby_displays_uses_guild_id(monkeypatch_safe_defer):
     assert fake_channel.fetch_message_calls == []
     assert fake_channel.partial_message_calls == [12345]
     assert len(fake_channel.message.edits) == 1
+    cog.sync_readycheck_with_lobby.assert_awaited_once_with(TEST_GUILD_ID)
 
 
 @pytest.mark.asyncio
