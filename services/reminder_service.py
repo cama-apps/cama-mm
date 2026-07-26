@@ -11,10 +11,11 @@ _READY_AT_UNSET = object()
 
 
 class ReminderService:
-    def __init__(self, notification_repo, player_repo, dig_service=None):
+    def __init__(self, notification_repo, player_repo, dig_service=None, pet_service=None):
         self._notification_repo = notification_repo
         self._player_repo = player_repo
         self._dig_service = dig_service
+        self._pet_service = pet_service
         self._tasks: dict[tuple[int, int, str], asyncio.Task] = {}
         self._dig_locks: dict[tuple[int, int, str], asyncio.Lock] = {}
         self._dig_reconcile_versions: dict[tuple[int, int, str], int] = {}
@@ -183,6 +184,50 @@ class ReminderService:
         """Drop a pending hungry-warning (e.g. when the pet has died)."""
         self._cancel_task(discord_id, 0 if guild_id is None else guild_id, "pet")
 
+    async def _reschedule_pet_warnings(
+        self,
+        bot: "commands.Bot",
+        guild_id: int,
+        subscribers: list[int],
+        now: int,
+    ) -> None:
+        """Restart recovery for pet hungry-warnings.
+
+        The warning task lives only in-process, so a restart drops it; re-arm
+        it from the pets' persisted anchors (same hardening the wheel/trivia/
+        dig types received). Dead-on-paper pets yield a past crossing, which
+        schedule_pet_reminder ignores — the sweep loop handles their deaths.
+        """
+        if self._pet_service is None or not subscribers:
+            return
+        from domain.pet_constants import WARNING_HUNGER
+
+        for discord_id in subscribers:
+            try:
+                pet = await asyncio.to_thread(
+                    self._pet_service.pet_repo.get_active_pet, discord_id, guild_id
+                )
+                if pet is None:
+                    continue
+                crossing = pet.hunger_crossing_time(
+                    WARNING_HUNGER, self._pet_service.decay_per_day
+                )
+                if crossing > now:
+                    self.schedule_pet_reminder(
+                        bot,
+                        discord_id,
+                        guild_id,
+                        crossing,
+                        pet_name=pet.name,
+                        preference_enabled=True,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to recover pet reminder for discord_id=%d guild_id=%d",
+                    discord_id,
+                    guild_id,
+                )
+
     def cancel_dig_reminder(self, discord_id: int, guild_id: int) -> None:
         guild_id = 0 if guild_id is None else guild_id
         self._cancel_task(discord_id, guild_id, "dig")
@@ -313,7 +358,7 @@ class ReminderService:
 
         for guild_id in guild_ids:
             guild_id = 0 if guild_id is None else guild_id
-            reminder_types = ("wheel", "trivia", "dig")
+            reminder_types = ("wheel", "trivia", "dig", "pet")
             try:
                 subscribers_by_type = await asyncio.to_thread(
                     self._notification_repo.get_enabled_users_by_type_bulk,
@@ -369,6 +414,10 @@ class ReminderService:
                             discord_id,
                             guild_id,
                         )
+
+            await self._reschedule_pet_warnings(
+                bot, guild_id, subscribers_by_type.get("pet", []), now
+            )
 
             if self._dig_service is None:
                 continue

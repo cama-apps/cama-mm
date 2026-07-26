@@ -595,6 +595,7 @@ class ServiceContainer:
             notification_repo=c["notification_repo"],
             player_repo=c["player_repo"],
             dig_service=c["dig_service"],
+            pet_service=c.get("pet_service"),
         )
 
     # ------------------------------------------------------------------

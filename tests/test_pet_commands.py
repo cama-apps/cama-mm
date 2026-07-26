@@ -199,6 +199,184 @@ class TestSetup:
         assert container._components["pet_service"] is not None
 
 
+def make_interaction(user_id=100, guild_id=TEST_GUILD_ID):
+    inter = MagicMock()
+    inter.user.id = user_id
+    inter.user.display_name = "Owner"
+    inter.guild.id = guild_id
+    inter.response.defer = AsyncMock()
+    inter.response.is_done = MagicMock(return_value=False)
+    inter.response.send_message = AsyncMock()
+    inter.response.edit_message = AsyncMock()
+    inter.followup.send = AsyncMock()
+    inter.edit_original_response = AsyncMock()
+    inter.original_response = AsyncMock()
+    return inter
+
+
+@pytest.fixture
+def live_cog(repo_db_path):
+    """A PetCommands cog over a REAL service/repository stack."""
+    from repositories.pet_repository import PetRepository
+    from repositories.player_repository import PlayerRepository
+    from services.pet_service import PetService
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(100, "Owner", TEST_GUILD_ID)
+    player_repo.update_balance(100, TEST_GUILD_ID, 1000)
+    service = PetService(
+        PetRepository(repo_db_path), player_repo, decay_per_day=20
+    )
+    bot = MagicMock()
+    bot.reminder_service = None  # keep the re-arm path quiet
+    cog = PetCommands.__new__(PetCommands)
+    cog.bot = bot
+    cog.pet_service = service
+    return cog
+
+
+async def adopt_via_handler(cog, name="Blep", user_id=100):
+    inter = make_interaction(user_id=user_id)
+    with patch("services.pet_service.random.choices", return_value=["common_cama"]):
+        await cog.adopt.callback(cog, inter, name)
+    return inter
+
+
+class TestCommandHandlers:
+    @pytest.mark.asyncio
+    async def test_adopt_happy_path_sends_egg_embed(self, live_cog):
+        inter = await adopt_via_handler(live_cog)
+        kwargs = inter.followup.send.await_args.kwargs
+        assert "mysterious egg" in kwargs["embed"].title.lower()
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        assert pet is not None and pet.name == "Blep"
+
+    @pytest.mark.asyncio
+    async def test_adopt_unregistered_reports_error(self, live_cog):
+        inter = make_interaction(user_id=999)
+        await live_cog.adopt.callback(live_cog, inter, "Ghost")
+        content = inter.followup.send.await_args.kwargs["content"]
+        assert content.startswith("❌")
+
+    @pytest.mark.asyncio
+    async def test_status_own_pet_returns_view_and_art(self, live_cog):
+        await adopt_via_handler(live_cog)
+        inter = make_interaction()
+        await live_cog.status.callback(live_cog, inter)
+        kwargs = inter.followup.send.await_args.kwargs
+        assert kwargs["embed"] is not None
+        assert kwargs["view"] is not None  # own pet gets the button panel
+        assert kwargs["file"] is not None  # procedural egg art attached
+        assert kwargs["ephemeral"] is True  # default is private
+
+    @pytest.mark.asyncio
+    async def test_status_other_user_has_no_buttons(self, live_cog):
+        await adopt_via_handler(live_cog)
+        inter = make_interaction(user_id=555)
+        member = MagicMock()
+        member.id = 100
+        member.display_name = "Owner"
+        await live_cog.status.callback(live_cog, inter, user=member)
+        assert inter.followup.send.await_args.kwargs.get("view") is None
+
+    @pytest.mark.asyncio
+    async def test_buy_and_feed_flow_through_handlers(self, live_cog, monkeypatch):
+        pet = None
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        inter = make_interaction()
+        await live_cog.buy.callback(live_cog, inter, "tango", 3)
+        assert "Bought 3× Tango" in inter.followup.send.await_args.kwargs["content"]
+        # Hatch + get hungry, then feed via the handler.
+        monkeypatch.setattr(
+            live_cog.pet_service, "_now", lambda: pet.hatched_at + 86400
+        )
+        inter2 = make_interaction()
+        await live_cog.feed.callback(live_cog, inter2, "tango")
+        content = inter2.followup.send.await_args.kwargs["content"]
+        assert "munches" in content and "2 left" in content
+
+    @pytest.mark.asyncio
+    async def test_feed_egg_rejected_via_handler(self, live_cog):
+        await adopt_via_handler(live_cog)
+        inter = make_interaction()
+        await live_cog.buy.callback(live_cog, inter, "tango", 1)
+        inter2 = make_interaction()
+        await live_cog.feed.callback(live_cog, inter2, "tango")
+        content = inter2.followup.send.await_args.kwargs["content"]
+        assert content.startswith("❌")
+
+    @pytest.mark.asyncio
+    async def test_shop_rename_graveyard_leaderboard_handlers(self, live_cog):
+        await adopt_via_handler(live_cog)
+        for handler, args in (
+            (live_cog.shop, ()),
+            (live_cog.rename, ("Sir Blep",)),
+            (live_cog.graveyard, ()),
+            (live_cog.leaderboard, ()),
+        ):
+            inter = make_interaction()
+            await handler.callback(live_cog, inter, *args)
+            assert inter.followup.send.await_count == 1
+        assert (
+            live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID).name
+            == "Sir Blep"
+        )
+
+
+class TestStatusViewButtons:
+    def make_view(self, cog, supplies=None, can_feed=True):
+        from commands.pet_helpers.views import PetStatusView
+
+        return PetStatusView(
+            cog, 100, TEST_GUILD_ID,
+            supplies=supplies or {}, species_id="common_cama", can_feed=can_feed,
+        )
+
+    @pytest.mark.asyncio
+    async def test_owner_check_blocks_other_users(self, live_cog):
+        view = self.make_view(live_cog)
+        inter = make_interaction(user_id=555)
+        assert not await view.interaction_check(inter)
+        msg = inter.response.send_message.await_args.args[0]
+        assert "not your cama" in msg.lower()
+        assert await view.interaction_check(make_interaction(user_id=100))
+
+    @pytest.mark.asyncio
+    async def test_feed_button_disabled_without_stock(self, live_cog):
+        view = self.make_view(live_cog, supplies={"tango": 0})
+        feed_buttons = [b for b in view.children if "Feed" in (b.label or "")]
+        assert feed_buttons and all(b.disabled for b in feed_buttons)
+
+    @pytest.mark.asyncio
+    async def test_buy_button_purchases_and_refreshes_panel(self, live_cog):
+        await adopt_via_handler(live_cog)
+        view = self.make_view(live_cog)
+        buy_tango = next(
+            b for b in view.children if (b.label or "").startswith("Buy Tango")
+        )
+        inter = make_interaction()
+        await buy_tango.callback(inter)
+        # Panel refreshed in place via the component response.
+        inter.response.edit_message.assert_awaited_once()
+        supplies = live_cog.pet_service.pet_repo.get_supplies(100, TEST_GUILD_ID)
+        assert supplies == {"tango": 1}
+
+    @pytest.mark.asyncio
+    async def test_feed_button_failure_reports_ephemerally(self, live_cog):
+        await adopt_via_handler(live_cog)
+        # Force stock display but no real stock: feed fails with no_supplies.
+        view = self.make_view(live_cog, supplies={"tango": 1})
+        feed_tango = next(
+            b for b in view.children if (b.label or "").startswith("Feed Tango")
+        )
+        inter = make_interaction()
+        await feed_tango.callback(inter)
+        msg = inter.response.send_message.await_args.args[0]
+        assert msg.startswith("❌")
+        inter.response.edit_message.assert_not_awaited()
+
+
 class TestPetReminders:
     def test_notification_repo_supports_pet_type(self, repo_db_path):
         from repositories.notification_repository import NotificationRepository
@@ -248,6 +426,56 @@ class TestPetReminders:
             MagicMock(), 111, TEST_GUILD_ID, 12345, pet_name="Blep"
         )
         assert (111, TEST_GUILD_ID, "pet") not in service._tasks
+
+    @pytest.mark.asyncio
+    async def test_reschedule_all_recovers_pet_warning_after_restart(
+        self, live_cog, monkeypatch
+    ):
+        """Restart recovery: reschedule_all must re-arm pending pet warnings
+        from persisted anchors (parity with wheel/trivia/dig hardening)."""
+        from services.reminder_service import ReminderService
+
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        notification_repo = MagicMock()
+        notification_repo.get_enabled_users_by_type_bulk.return_value = {
+            "wheel": [], "trivia": [], "dig": [], "pet": [100],
+        }
+        player_repo = MagicMock()
+        player_repo.get_reminder_timestamps_bulk.return_value = {}
+        service = ReminderService(
+            notification_repo=notification_repo,
+            player_repo=player_repo,
+            dig_service=None,
+            pet_service=live_cog.pet_service,
+        )
+        # Freeze "now" before the warning crossing so the timer re-arms.
+        monkeypatch.setattr(
+            "services.reminder_service.time.time", lambda: pet.hatched_at + 100
+        )
+        await service.reschedule_all(MagicMock(), [TEST_GUILD_ID])
+        key = (100, TEST_GUILD_ID, "pet")
+        assert key in service._tasks
+        service._tasks[key].cancel()
+
+    @pytest.mark.asyncio
+    async def test_reschedule_all_skips_pets_when_service_disabled(self):
+        from services.reminder_service import ReminderService
+
+        notification_repo = MagicMock()
+        notification_repo.get_enabled_users_by_type_bulk.return_value = {
+            "wheel": [], "trivia": [], "dig": [], "pet": [100],
+        }
+        player_repo = MagicMock()
+        player_repo.get_reminder_timestamps_bulk.return_value = {}
+        service = ReminderService(
+            notification_repo=notification_repo,
+            player_repo=player_repo,
+            dig_service=None,
+            pet_service=None,  # feature gated off
+        )
+        await service.reschedule_all(MagicMock(), [TEST_GUILD_ID])
+        assert (100, TEST_GUILD_ID, "pet") not in service._tasks
 
     @pytest.mark.asyncio
     async def test_rearm_warning_schedules_at_crossing(self):
