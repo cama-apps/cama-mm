@@ -168,6 +168,20 @@ class Pet:
 
 
 @dataclass(frozen=True, slots=True)
+class PetStatus:
+    """Composed view for status embeds: the living pet (if any) with its
+    derived state, the owner's supplies, and the most recent memorial."""
+
+    pet: Pet | None
+    hunger: int = 0
+    stage: PetStage | None = None
+    mood: PetMood | None = None
+    age_seconds: int = 0
+    supplies: dict[str, int] | None = None
+    last_dead: Pet | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class FeedOutcome:
     pet: Pet
     item_id: str
