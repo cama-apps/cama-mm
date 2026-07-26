@@ -64,6 +64,7 @@ class TestNotificationRepository:
             "betting_enabled": False,
             "dig_enabled": False,
             "lobby_enabled": False,
+            "pet_enabled": False,
         }
 
     def test_set_wheel_preference(self, notification_repo):

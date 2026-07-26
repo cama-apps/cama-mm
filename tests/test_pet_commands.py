@@ -175,6 +175,53 @@ class TestSetup:
             await setup(bot)
 
 
+class TestPetReminders:
+    def test_notification_repo_supports_pet_type(self, repo_db_path):
+        from repositories.notification_repository import NotificationRepository
+
+        repo = NotificationRepository(repo_db_path)
+        assert repo.get_preferences(111, TEST_GUILD_ID)["pet_enabled"] is False
+        repo.set_preference(111, TEST_GUILD_ID, "pet", True)
+        assert repo.get_preferences(111, TEST_GUILD_ID)["pet_enabled"] is True
+        assert repo.get_enabled_users_for_type(TEST_GUILD_ID, "pet") == [111]
+
+    @pytest.mark.asyncio
+    async def test_schedule_pet_reminder_is_pref_gated(self):
+        from services.reminder_service import ReminderService
+
+        notification_repo = MagicMock()
+        notification_repo.get_preferences.return_value = {"pet_enabled": False}
+        service = ReminderService(
+            notification_repo=notification_repo,
+            player_repo=MagicMock(),
+            dig_service=MagicMock(),
+        )
+        service.schedule_pet_reminder(
+            MagicMock(), 111, TEST_GUILD_ID, T0 + 1000, pet_name="Blep"
+        )
+        assert (111, TEST_GUILD_ID, "pet") not in service._tasks
+        notification_repo.get_preferences.return_value = {"pet_enabled": True}
+        service.schedule_pet_reminder(
+            MagicMock(), 111, TEST_GUILD_ID, T0 + 1000, pet_name="Blep"
+        )
+        key = (111, TEST_GUILD_ID, "pet")
+        assert key in service._tasks
+        service._tasks[key].cancel()
+
+    @pytest.mark.asyncio
+    async def test_rearm_warning_schedules_at_crossing(self):
+        cog = make_cog()
+        cog.pet_service.decay_per_day = 20
+        reminder_svc = MagicMock()
+        cog.bot.reminder_service = reminder_svc
+        pet = make_pet()
+        cog._rearm_warning(pet)
+        args, kwargs = reminder_svc.schedule_pet_reminder.call_args
+        # 100 -> 30 is 70 points at 20/day = 3.5 days after the anchor.
+        assert args[3] == pet.last_fed_at + 3 * 86400 + 43200
+        assert kwargs["pet_name"] == "Blep"
+
+
 class TestPetChannel:
     def test_returns_none_when_unconfigured(self):
         cog = make_cog()

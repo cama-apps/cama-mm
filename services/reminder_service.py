@@ -137,6 +137,44 @@ class ReminderService:
         )
         self._register_task((discord_id, guild_id, "dig"), task)
 
+    def schedule_pet_reminder(
+        self,
+        bot: "commands.Bot",
+        discord_id: int,
+        guild_id: int | None,
+        warning_at: int,
+        *,
+        pet_name: str,
+        preference_enabled: bool | None = None,
+    ) -> None:
+        """Warn the owner when derived hunger will cross the warning band.
+
+        Re-armed after every feed (the crossing moment moves), so at most one
+        task per (owner, guild) is live and it always reflects the newest
+        anchors.
+        """
+        guild_id = 0 if guild_id is None else guild_id
+        if preference_enabled is None:
+            prefs = self._notification_repo.get_preferences(discord_id, guild_id)
+            preference_enabled = bool(prefs.get("pet_enabled"))
+        if not preference_enabled:
+            self._cancel_task(discord_id, guild_id, "pet")
+            return
+        delay = max(0.0, warning_at - time.time())
+        self._cancel_task(discord_id, guild_id, "pet")
+        task = asyncio.create_task(
+            self._send_dm_after_delay(
+                delay=delay,
+                bot=bot,
+                discord_id=discord_id,
+                message=(
+                    f"🦙 **{pet_name}** is getting hungry! "
+                    "Check `/pet status` and feed it before it starves."
+                ),
+            )
+        )
+        self._register_task((discord_id, guild_id, "pet"), task)
+
     def cancel_dig_reminder(self, discord_id: int, guild_id: int) -> None:
         guild_id = 0 if guild_id is None else guild_id
         self._cancel_task(discord_id, guild_id, "dig")
