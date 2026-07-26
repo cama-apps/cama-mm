@@ -2,6 +2,7 @@
 
 import pytest
 
+from utils import formatting as formatting_utils
 from utils.formatting import (
     JOPACOIN_EMOTE,
     ROLE_EMOJIS,
@@ -108,3 +109,34 @@ class TestBettingDisplay:
         )
         assert "Betting closed" in field_value
         assert "<t:" not in field_value
+
+
+def test_format_spectator_autobet_summary_shows_both_compact_tiers():
+    summary = formatting_utils.format_spectator_autobet_summary({
+        "created": 10,
+        "total_count": 10,
+        "top_count": 5,
+        "top_percentage": 0.02,
+        "percentage": 0.01,
+        "total_radiant": 48,
+        "total_dire": 47,
+    })
+
+    assert (
+        "**Rich spectator auto-wagers:** 10 spectators "
+        "(ranks 1–5 at 2%; ranks 6–10 at 1%)"
+    ) in summary
+    assert f"Radiant: 48 {JOPACOIN_EMOTE}" in summary
+    assert f"Dire: 47 {JOPACOIN_EMOTE}" in summary
+
+
+def test_format_spectator_autobet_summary_preserves_legacy_pending_draft_copy():
+    summary = formatting_utils.format_spectator_autobet_summary({
+        "created": 5,
+        "percentage": 0.01,
+        "total_radiant": 8,
+        "total_dire": 7,
+    })
+
+    assert "**Rich spectator auto-wagers:** 5 spectators wagered 1% of net worth" in summary
+    assert "top 0" not in summary
