@@ -88,6 +88,7 @@ class ServiceContainer:
         self._init_mana_service()
         self._init_dig_service()
         self._init_mafia_service()
+        self._init_pet_service()
         self._init_extras()
         self._init_reminder_service()
 
@@ -126,6 +127,7 @@ class ServiceContainer:
         from repositories.notification_repository import NotificationRepository
         from repositories.package_deal_repository import PackageDealRepository
         from repositories.pairings_repository import PairingsRepository
+        from repositories.pet_repository import PetRepository
         from repositories.player_repository import PlayerRepository
         from repositories.player_trivia_repository import PlayerTriviaRepository
         from repositories.prediction_repository import PredictionRepository
@@ -171,6 +173,7 @@ class ServiceContainer:
             "dig_guild_modifier_repo": DigGuildModifierRepository(p),
             "dig_quest_repo": DigQuestRepository(p),
             "mafia_repo": MafiaRepository(p),
+            "pet_repo": PetRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -533,6 +536,18 @@ class ServiceContainer:
             vanity_tax_service=c["vanity_tax_service"],
         )
 
+    def _init_pet_service(self) -> None:
+        """Cama pets (tamagotchi) vertical."""
+        import config
+        from services.pet_service import PetService
+
+        c = self._components
+        c["pet_service"] = PetService(
+            c["pet_repo"],
+            c["player_repo"],
+            decay_per_day=config.PET_HUNGER_DECAY_PER_DAY,
+        )
+
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
         from services.neon_degen_service import NeonDegenService
@@ -631,6 +646,7 @@ class ServiceContainer:
         bot.curse_service = c["curse_service"]
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
+        bot.pet_service = c["pet_service"]
         bot.player_trivia_service = c["player_trivia_service"]
 
         # AI services (may be None)

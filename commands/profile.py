@@ -399,6 +399,30 @@ class ProfileCommands(commands.Cog):
         else:
             embed.add_field(name="Server", value="Not set", inline=True)
 
+        # Living cama pet flavor line (quiet if the pet service is missing)
+        pet_service = getattr(self.bot, "pet_service", None)
+        if pet_service is not None:
+            try:
+                pet_status = (
+                    await asyncio.to_thread(
+                        pet_service.get_status, target_discord_id, guild_id
+                    )
+                ).value
+                if pet_status.pet is not None and pet_status.mood is not None:
+                    from domain.pet_constants import get_species
+
+                    species_name = get_species(pet_status.pet.species).display_name
+                    embed.add_field(
+                        name="Pet",
+                        value=(
+                            f"🦙 {pet_status.pet.name} the {species_name} — "
+                            f"{pet_status.mood.value}"
+                        ),
+                        inline=True,
+                    )
+            except Exception as e:
+                logger.debug(f"Could not fetch pet status: {e}")
+
         # Hero stats from enriched matches
         if hero_stats:
             try:

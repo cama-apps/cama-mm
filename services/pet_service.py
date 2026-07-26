@@ -150,6 +150,9 @@ class PetService:
             )
         )
 
+    def next_adoption_fee(self, discord_id: int, guild_id: int | None) -> int:
+        return adoption_fee(self.pet_repo.count_dead_pets(discord_id, guild_id))
+
     # --- adopt / rename ---
 
     def adopt(self, discord_id: int, guild_id: int | None, name: str) -> Result[Pet]:
