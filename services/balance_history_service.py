@@ -195,14 +195,28 @@ class BalanceHistoryService:
         out: list[_Event] = []
         for row in rows:
             result = int(row["result"])
+            raw_metadata = row.get("outcome_metadata")
+            try:
+                metadata = (
+                    json.loads(raw_metadata)
+                    if isinstance(raw_metadata, str)
+                    else raw_metadata or {}
+                )
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+            vanity_tax = max(0, int(metadata.get("vanity_tax", 0) or 0))
+            net_result = result - vanity_tax
             if result == 0:
                 continue  # "lose a turn" — no balance change, skip
             out.append(
                 _Event(
                     time=int(row["spin_time"]),
-                    delta=result,
+                    delta=net_result,
                     source=SOURCE_WHEEL,
-                    detail={"outcome": "won" if result > 0 else "lost"},
+                    detail={
+                        "outcome": "won" if net_result > 0 else "lost",
+                        "vanity_tax": vanity_tax,
+                    },
                 )
             )
         return out

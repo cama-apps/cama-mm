@@ -1317,8 +1317,10 @@ class PlayerTriviaService:
         stats: dict[int, dict[str, int]] = defaultdict(
             lambda: {"bets": 0, "wins": 0, "losses": 0, "wagered": 0, "pnl": 0}
         )
+        taxed_settlements: set[tuple[int, int]] = set()
         for row in context.snapshot.get("bets", []):
             player_id = _as_int(row.get("discord_id"))
+            match_id = _as_int(row.get("match_id"))
             winning_team = _as_int(row.get("winning_team"))
             if player_id not in context.names or winning_team not in (1, 2):
                 continue
@@ -1335,7 +1337,12 @@ class PlayerTriviaService:
             player["wins"] += int(won)
             player["losses"] += int(not won)
             player["wagered"] += effective
-            player["pnl"] += payout - effective
+            vanity_tax = 0
+            tax_key = (player_id, match_id)
+            if won and tax_key not in taxed_settlements:
+                vanity_tax = _as_int(row.get("settlement_vanity_tax"))
+                taxed_settlements.add(tax_key)
+            player["pnl"] += payout - effective - vanity_tax
         bet_counts = {player_id: row["bets"] for player_id, row in stats.items()}
         wagered = {
             player_id: row["wagered"] for player_id, row in stats.items() if row["bets"] >= 5
@@ -1600,7 +1607,8 @@ class PlayerTriviaService:
                 row.get("no_cost_basis_total")
             )
             penalty = _as_int(row.get("bankruptcy_penalty"))
-            pnl = winning_contracts * PREDICTION_CONTRACT_VALUE - cost - penalty
+            vanity_tax = _as_int(row.get("vanity_tax"))
+            pnl = winning_contracts * PREDICTION_CONTRACT_VALUE - cost - penalty - vanity_tax
             descriptor = _safe_option(row.get("question"))[:190]
             name = (
                 f"Market #{prediction_id} — {descriptor}"

@@ -1124,6 +1124,7 @@ class PinnacleMixin:
             (
                 gross_base_reward, scaled_base_reward, gross_payout,
                 total_reward, pinnacle_bankruptcy_penalty,
+                pinnacle_vanity_tax,
             ) = self._net_boss_payout(
                 discord_id, guild_id, jc_reward, wager_payout
             )
@@ -1145,6 +1146,7 @@ class PinnacleMixin:
             relic_drop["db_id"] = self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=total_reward,
+                vanity_tax=pinnacle_vanity_tax,
                 add_relic_artifact_id=relic_drop["artifact_id"],
                 tunnel_updates={
                     "depth": new_depth,
@@ -1169,6 +1171,7 @@ class PinnacleMixin:
                     "scaled_base_jc": scaled_base_reward,
                     "wager_payout": wager_payout,
                     "bankruptcy_penalty": pinnacle_bankruptcy_penalty,
+                    "vanity_tax": pinnacle_vanity_tax,
                     "relic_id": relic_drop["artifact_id"],
                 }),
             )
@@ -1183,6 +1186,7 @@ class PinnacleMixin:
                 payout=total_reward,
                 gross_payout=gross_payout,
                 bankruptcy_penalty=pinnacle_bankruptcy_penalty,
+                vanity_tax=pinnacle_vanity_tax,
                 base_reward=jc_reward,
                 wager_payout=wager_payout,
                 new_depth=new_depth,

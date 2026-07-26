@@ -137,6 +137,7 @@ class TestServiceContainerBotExposure:
             "betting_service": "betting_service",
             "loan_service": "loan_service",
             "bankruptcy_service": "bankruptcy_service",
+            "vanity_tax_service": "vanity_tax_service",
             "prediction_service": "prediction_service",
             "lobby_service": "lobby_service",
             "lobby_manager": "lobby_manager",

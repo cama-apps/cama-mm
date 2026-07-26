@@ -187,6 +187,7 @@ class ServiceContainer:
         from services.recalibration_service import RecalibrationService
         from services.soft_avoid_service import SoftAvoidService
         from services.tip_service import TipService
+        from services.vanity_tax_service import VanityTaxService
 
         c = self._components
         c["duel_service"] = DuelService(c["duel_repo"])
@@ -197,6 +198,7 @@ class ServiceContainer:
         c["bankruptcy_service"] = BankruptcyService(
             c["bankruptcy_repo"], c["player_repo"]
         )
+        c["vanity_tax_service"] = VanityTaxService()
         c["loan_service"] = LoanService(c["loan_repo"], c["player_repo"])
         c["recalibration_service"] = RecalibrationService(
             c["recalibration_repo"], c["player_repo"]
@@ -233,6 +235,7 @@ class ServiceContainer:
             leverage_tiers=self.leverage_tiers,
             buff_service=None,
             economy_event_service=c["economy_event_service"],
+            vanity_tax_service=c["vanity_tax_service"],
         )
         c["disburse_service"] = DisburseService(
             c["disburse_repo"],
@@ -254,6 +257,7 @@ class ServiceContainer:
             admin_user_ids=self.admin_user_ids,
             bankruptcy_service=c["bankruptcy_service"],
             economy_event_service=c["economy_event_service"],
+            vanity_tax_service=c["vanity_tax_service"],
         )
         c["balance_history_service"] = BalanceHistoryService(
             bet_repo=c["bet_repo"],
@@ -469,6 +473,7 @@ class ServiceContainer:
             prediction_repo=c.get("prediction_repo"),
             curse_repo=c.get("curse_repo"),
             economy_event_service=c.get("economy_event_service"),
+            vanity_tax_service=c["vanity_tax_service"],
         )
         # Hostile dig splashes and sabotage are wired after both services exist.
         c["dig_service"].protection_service = c["protection_service"]
@@ -525,6 +530,7 @@ class ServiceContainer:
             hero_provider=HeroProvider(),
             max_debt=self.max_debt,
             bankruptcy_penalty_rate=c["bankruptcy_service"].penalty_rate,
+            vanity_tax_service=c["vanity_tax_service"],
         )
 
     def _init_extras(self) -> None:
@@ -591,6 +597,7 @@ class ServiceContainer:
         bot.betting_service = c["betting_service"]
         bot.loan_service = c["loan_service"]
         bot.bankruptcy_service = c["bankruptcy_service"]
+        bot.vanity_tax_service = c["vanity_tax_service"]
         bot.prediction_service = c["prediction_service"]
         bot.lobby_service = c["lobby_service"]
         bot.lobby_manager = c["lobby_manager"]

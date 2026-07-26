@@ -378,6 +378,18 @@ class VotingCorrectionMixin:
                 new_winning_bets,
                 guild_id,
                 pool_mode=(original_betting_mode == "pool"),
+                vanity_tax_rate=(
+                    self.betting_service.vanity_tax_service.TAX_RATE
+                    if self.betting_service.vanity_tax_service
+                    else 0.0
+                ),
+                vanity_taxable_ids=(
+                    self.betting_service.vanity_tax_service.taxable_ids(
+                        guild_id
+                    )
+                    if self.betting_service.vanity_tax_service
+                    else frozenset()
+                ),
             )
             bet_correction_summary = {
                 "bets_affected": all_bets_len,

@@ -48,12 +48,14 @@ class PredictionService:
         admin_user_ids: list[int] | None = None,
         bankruptcy_service=None,
         economy_event_service=None,
+        vanity_tax_service=None,
     ):
         self.prediction_repo = prediction_repo
         self.player_repo = player_repo
         self.admin_user_ids = set(admin_user_ids or [])
         self.bankruptcy_service = bankruptcy_service
         self.economy_event_service = economy_event_service
+        self.vanity_tax_service = vanity_tax_service
 
     def _get_prediction_effects(self, guild_id: int) -> tuple[float, float, int]:
         """Return payout/depth/spread modifiers for the guild's daily event.
@@ -466,6 +468,16 @@ class PredictionService:
             prediction_id, outcome, resolved_by=resolved_by,
             bankruptcy_penalty_rate=(
                 self.bankruptcy_service.penalty_rate if self.bankruptcy_service else None
+            ),
+            vanity_tax_rate=(
+                self.vanity_tax_service.TAX_RATE
+                if self.vanity_tax_service
+                else 0.0
+            ),
+            vanity_taxable_ids=(
+                self.vanity_tax_service.taxable_ids(int(pred["guild_id"]))
+                if self.vanity_tax_service
+                else frozenset()
             ),
             payout_multiplier=payout_multiplier,
         )

@@ -1561,6 +1561,51 @@ def test_bankruptcy_penalty_sinks_mafia_profit(
     assert total_delta == -sum(penalties.values()) - summary["nonprofit_overflow"]
 
 
+def test_finalize_day_resolution_applies_audited_vanity_tax(
+    mafia_repo, player_repo
+):
+    ids = [511, 512, 513, 514, 515]
+    for pid in ids:
+        _seed_player(player_repo, pid, balance=0)
+    gid = _new_game(
+        mafia_repo,
+        [
+            (511, MafiaRole.MAFIA, True),
+            (512, MafiaRole.TOWNIE, False),
+            (513, MafiaRole.DOCTOR, False),
+            (514, MafiaRole.DETECTIVE, False),
+            (515, MafiaRole.TOWNIE, False),
+        ],
+    )
+    _force_phase(mafia_repo, MafiaPhase.DAY)
+
+    result = mafia_repo.finalize_day_resolution(
+        game_id=gid,
+        winner=MafiaWinner.TOWN,
+        payout_per_winner=225,
+        mvp_id=None,
+        lynched_id=511,
+        payout_deltas={512: 225},
+        entry_fee=ENTRY_FEE,
+        vanity_tax_rate=0.01,
+        vanity_taxable_ids={512},
+    )
+
+    assert result["vanity_taxes"] == {512: 2}
+    assert player_repo.get_balance(512, TEST_GUILD_ID) == 223
+    with mafia_repo.connection() as conn:
+        row = conn.execute(
+            "SELECT delta, related_type, related_id "
+            "FROM economy_ledger_entries "
+            "WHERE guild_id = ? AND account_id = ? AND source = 'vanity_tax'",
+            (TEST_GUILD_ID, 512),
+        ).fetchone()
+    assert row is not None
+    assert row["delta"] == -2
+    assert row["related_type"] == "mafia_game"
+    assert row["related_id"] == str(gid)
+
+
 # ── Status & role views ───────────────────────────────────────────────────
 
 

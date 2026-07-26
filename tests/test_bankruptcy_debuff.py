@@ -191,6 +191,90 @@ class TestBettingDebuff:
         assert bettor not in dist.get("bankruptcy_penalties", {})
         assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 28  # full payout
 
+    def test_vanity_tax_only_docks_profit_and_preserves_stake(
+        self, repos, bankruptcy_service
+    ):
+        from types import SimpleNamespace
+
+        from services.vanity_tax_service import VanityTaxService
+
+        player_repo = repos["player"]
+        betting_service, _, pending = self._betting_setup(repos, bankruptcy_service)
+        bettor = pending.radiant_team_ids[2]
+        player_repo.add_balance(bettor, TEST_GUILD_ID, 500)
+
+        vanity_tax_service = VanityTaxService()
+        vanity_tax_service.refresh_guild(
+            TEST_GUILD_ID, [SimpleNamespace(id=bettor, nick=None)]
+        )
+        betting_service.vanity_tax_service = vanity_tax_service
+
+        betting_service.place_bet(
+            TEST_GUILD_ID, bettor, "radiant", 100, pending
+        )
+        dist = betting_service.settle_bets(
+            125, TEST_GUILD_ID, "radiant", pending_state=pending
+        )
+
+        # House payout is 200: the 100 stake is returned untaxed and 1% of
+        # the 100 profit is sunk.
+        assert dist["vanity_taxes"][bettor] == 1
+        assert player_repo.get_balance(bettor, TEST_GUILD_ID) == 602
+        with player_repo.connection() as conn:
+            row = conn.execute(
+                "SELECT delta FROM economy_ledger_entries "
+                "WHERE guild_id = ? AND account_id = ? "
+                "AND source = 'vanity_tax'",
+                (TEST_GUILD_ID, bettor),
+            ).fetchone()
+        assert row is not None
+        assert row["delta"] == -1
+
+    def test_vanity_tax_is_included_in_bet_history_and_aggregate_pnl(
+        self, repos, bankruptcy_service
+    ):
+        from types import SimpleNamespace
+
+        from services.vanity_tax_service import VanityTaxService
+
+        player_repo = repos["player"]
+        bet_repo = repos["bet"]
+        betting_service, match_service, pending = self._betting_setup(
+            repos, bankruptcy_service
+        )
+        bettor = pending.radiant_team_ids[3]
+        player_repo.add_balance(bettor, TEST_GUILD_ID, 500)
+
+        vanity_tax_service = VanityTaxService()
+        vanity_tax_service.refresh_guild(
+            TEST_GUILD_ID, [SimpleNamespace(id=bettor, nick=None)]
+        )
+        betting_service.vanity_tax_service = vanity_tax_service
+
+        betting_service.place_bet(
+            TEST_GUILD_ID, bettor, "radiant", 100, pending
+        )
+        match_service.add_record_submission(
+            TEST_GUILD_ID, 99999, "radiant", is_admin=True
+        )
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+
+        history = bet_repo.get_player_bet_history(bettor, TEST_GUILD_ID)
+        assert sum(row["profit"] for row in history) == 99
+
+        metrics = bet_repo.get_bulk_gambling_metrics(
+            TEST_GUILD_ID, [bettor]
+        )
+        assert metrics[bettor]["net_pnl"] == 99
+
+        summary = bet_repo.get_guild_gambling_summary(
+            TEST_GUILD_ID, min_bets=1
+        )
+        bettor_summary = next(
+            row for row in summary if row["discord_id"] == bettor
+        )
+        assert bettor_summary["net_pnl"] == 99
+
 
 # --------------------------------------------------------------------------- #
 # Prediction resolution
@@ -267,6 +351,51 @@ class TestDigDebuff:
         assert dig_service._penalize_jc(plain, TEST_GUILD_ID, 100) == (100, 0)
         # Non-positive yield is never penalized.
         assert dig_service._penalize_jc(pen, TEST_GUILD_ID, 0) == (0, 0)
+
+    def test_dig_profit_policies_apply_vanity_tax_independently(
+        self, repos, dig_service
+    ):
+        from types import SimpleNamespace
+
+        from services.vanity_tax_service import VanityTaxService
+
+        pid = 7003
+        _add_player(repos["player"], pid)
+        vanity_tax_service = VanityTaxService()
+        vanity_tax_service.refresh_guild(
+            TEST_GUILD_ID, [SimpleNamespace(id=pid, nick=None)]
+        )
+        dig_service.vanity_tax_service = vanity_tax_service
+
+        assert dig_service._apply_jc_profit_policies(
+            pid, TEST_GUILD_ID, 250
+        ) == (248, 0, 2)
+
+    def test_dig_atomic_credit_audits_vanity_tax(self, repos):
+        pid = 7004
+        _add_player(repos["player"], pid, balance=100)
+        before = repos["player"].get_balance(pid, TEST_GUILD_ID)
+
+        repos["dig"].atomic_tunnel_balance_update(
+            pid,
+            TEST_GUILD_ID,
+            balance_delta=248,
+            vanity_tax=2,
+        )
+
+        assert repos["player"].get_balance(pid, TEST_GUILD_ID) == before + 248
+        with repos["player"].connection() as conn:
+            rows = conn.execute(
+                "SELECT source, delta FROM economy_ledger_entries "
+                "WHERE guild_id = ? AND account_id = ? "
+                "AND source IN ('dig', 'vanity_tax') "
+                "ORDER BY ledger_id DESC LIMIT 2",
+                (TEST_GUILD_ID, pid),
+            ).fetchall()
+        assert [(row["source"], row["delta"]) for row in reversed(rows)] == [
+            ("dig", 250),
+            ("vanity_tax", -2),
+        ]
 
     def test_normal_dig_routes_yield_through_debuff(
         self, repos, bankruptcy_service, dig_service, monkeypatch

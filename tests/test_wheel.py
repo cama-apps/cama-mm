@@ -317,6 +317,80 @@ async def test_wheel_positive_no_debt_adds_directly():
 
 
 @pytest.mark.asyncio
+async def test_wheel_profit_applies_audited_vanity_tax():
+    from services.vanity_tax_service import VanityTaxService
+
+    user_id = 1004
+    guild_id = 123
+    balance = 50
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    bot.buff_service = None
+    vanity_tax_service = VanityTaxService()
+    vanity_tax_service.refresh_guild(
+        guild_id, [SimpleNamespace(id=user_id, nick=None)]
+    )
+    bot.vanity_tax_service = vanity_tax_service
+
+    player_service = MagicMock()
+    player_service.get_player.return_value = MagicMock(name="VanitySpinner")
+    player_service.get_last_wheel_spin.return_value = None
+    player_service.try_claim_wheel_spin.return_value = True
+    player_service.log_wheel_spin.return_value = 1
+    player_service.get_leaderboard.return_value = []
+
+    def get_balance(_discord_id, _guild_id):
+        return balance
+
+    def adjust_balance(_discord_id, _guild_id, delta, **_kwargs):
+        nonlocal balance
+        balance += delta
+        return balance
+
+    player_service.get_balance.side_effect = get_balance
+    player_service.adjust_balance.side_effect = adjust_balance
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = guild_id
+    interaction.user.id = user_id
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, MagicMock(), MagicMock(), player_service)
+    target_idx = next(
+        i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 100
+    )
+    with patch("commands.betting.random.randint", return_value=target_idx):
+        with patch("commands.betting.random.random", return_value=1.0):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                with patch.object(
+                    commands, "_create_wheel_gif_file", return_value=MagicMock()
+                ):
+                    await commands.gamba.callback(commands, interaction)
+
+    assert balance == 149
+    tax_call = player_service.adjust_balance.call_args_list[-1]
+    assert tax_call.args[:3] == (user_id, guild_id, -1)
+    assert tax_call.kwargs["source"] == "vanity_tax"
+    assert (
+        player_service.log_wheel_spin.call_args.kwargs["outcome_metadata"][
+            "vanity_tax"
+        ]
+        == 1
+    )
+    embed = message.edit.await_args.kwargs["embed"]
+    assert any(
+        field.name == "Vanity Tax" and "−1" in field.value
+        for field in embed.fields
+    )
+
+
+@pytest.mark.asyncio
 async def test_wheel_white_mana_animation_uses_capped_wedges():
     """Verify the wheel GIF uses the same capped wedges White mana rolls against."""
     bot = MagicMock()

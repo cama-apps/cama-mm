@@ -118,6 +118,7 @@ class MafiaService:
         rng: random.Random | None = None,
         max_debt: int = MAX_DEBT,
         bankruptcy_penalty_rate: float | None = None,
+        vanity_tax_service=None,
     ):
         self.repo = mafia_repo
         self.player_repo = player_repo
@@ -127,6 +128,7 @@ class MafiaService:
         self._rng = rng or random.Random()
         self.max_debt = max_debt
         self.bankruptcy_penalty_rate = bankruptcy_penalty_rate
+        self.vanity_tax_service = vanity_tax_service
 
     # ────────────────────────────────────────────────────────────────────
     # Lifecycle
@@ -451,6 +453,16 @@ class MafiaService:
             payout_deltas=deltas,
             entry_fee=entry_fee,
             bankruptcy_penalty_rate=self.bankruptcy_penalty_rate,
+            vanity_tax_rate=(
+                self.vanity_tax_service.TAX_RATE
+                if self.vanity_tax_service
+                else 0.0
+            ),
+            vanity_taxable_ids=(
+                self.vanity_tax_service.taxable_ids(game.guild_id)
+                if self.vanity_tax_service
+                else frozenset()
+            ),
             nonprofit_overflow=nonprofit_overflow,
         )
         if not finalize.get("applied"):
@@ -483,6 +495,7 @@ class MafiaService:
             "bounty": bounty,
             "cap_forced": cap_reached and not jester_win and alive_mafia > 0,
             "bankruptcy_penalties": finalize.get("bankruptcy_penalties", {}),
+            "vanity_taxes": finalize.get("vanity_taxes", {}),
             "vote_breakdown": self._vote_breakdown(valid_votes),
             "vote_detail": self._vote_detail(valid_votes),
             "twist": game.twist_event.value if game.twist_event else None,
@@ -572,6 +585,16 @@ class MafiaService:
             payout_deltas=deltas,
             entry_fee=entry_fee,
             bankruptcy_penalty_rate=self.bankruptcy_penalty_rate,
+            vanity_tax_rate=(
+                self.vanity_tax_service.TAX_RATE
+                if self.vanity_tax_service
+                else 0.0
+            ),
+            vanity_taxable_ids=(
+                self.vanity_tax_service.taxable_ids(game.guild_id)
+                if self.vanity_tax_service
+                else frozenset()
+            ),
             nonprofit_overflow=nonprofit_overflow,
         )
         if not finalize.get("applied"):
@@ -595,6 +618,8 @@ class MafiaService:
             "bookie_payout": deltas.get(bookie_id, 0) if bookie_id is not None else 0,
             "nonprofit_overflow": nonprofit_overflow,
             "forced_stop": True,
+            "bankruptcy_penalties": finalize.get("bankruptcy_penalties", {}),
+            "vanity_taxes": finalize.get("vanity_taxes", {}),
             "vote_breakdown": {},
             "twist": game.twist_event.value if game.twist_event else None,
         }

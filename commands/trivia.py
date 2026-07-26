@@ -269,6 +269,7 @@ class TriviaView(discord.ui.View):
                 # trivia), matching the other payout sources. The withheld JC is a
                 # coin sink — simply not minted.
                 bankruptcy_service = getattr(self.cog.bot, "bankruptcy_service", None)
+                gross_streak_bonus = streak_bonus_jc
                 if bankruptcy_service is not None:
                     try:
                         info = await asyncio.to_thread(
@@ -280,6 +281,18 @@ class TriviaView(discord.ui.View):
                         streak_bonus_jc = info["penalized"]
                     except Exception:
                         logger.exception("Failed to apply trivia bankruptcy debuff")
+                vanity_tax_service = getattr(
+                    self.cog.bot, "vanity_tax_service", None
+                )
+                if vanity_tax_service is not None:
+                    try:
+                        streak_bonus_jc -= vanity_tax_service.calculate_tax(
+                            self.session.user_id,
+                            self.session.guild_id,
+                            gross_streak_bonus,
+                        )
+                    except Exception:
+                        logger.exception("Failed to apply trivia vanity tax")
 
             jc += streak_bonus_jc
             jc = scale_minigame_jc_delta(jc)

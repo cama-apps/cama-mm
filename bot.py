@@ -1023,10 +1023,44 @@ def _log_command_registration(stage: str):
     return summary
 
 
+def _refresh_vanity_tax_memberships() -> None:
+    """Rebuild nickname eligibility from Discord's current member cache."""
+    service = getattr(bot, "vanity_tax_service", None)
+    if service is None:
+        return
+    for guild in bot.guilds:
+        service.refresh_guild(guild.id, guild.members)
+
+
+@bot.event
+async def on_member_join(member: discord.Member) -> None:
+    service = getattr(bot, "vanity_tax_service", None)
+    if service is not None:
+        service.update_member(member.guild.id, member.id, member.nick)
+
+
+@bot.event
+async def on_member_update(
+    before: discord.Member,
+    after: discord.Member,
+) -> None:
+    service = getattr(bot, "vanity_tax_service", None)
+    if service is not None:
+        service.update_member(after.guild.id, after.id, after.nick)
+
+
+@bot.event
+async def on_member_remove(member: discord.Member) -> None:
+    service = getattr(bot, "vanity_tax_service", None)
+    if service is not None:
+        service.remove_member(member.guild.id, member.id)
+
+
 @bot.event
 async def on_ready():
     """Called when bot is ready."""
     logger.info(f"{bot.user} connected. Guilds: {len(bot.guilds)}")
+    _refresh_vanity_tax_memberships()
 
     _log_command_registration("Pre-sync")
     logger.info(f"Loaded cogs: {list(bot.cogs.keys())}")

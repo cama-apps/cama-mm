@@ -8,6 +8,7 @@ re-applying with the correct winner.
 
 import sqlite3
 import time
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -19,6 +20,7 @@ from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
+from services.vanity_tax_service import VanityTaxService
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -435,6 +437,99 @@ class TestMatchCorrection:
         radiant_bet_after = next(b for b in bets_after if b["discord_id"] == radiant_ids[0])
         assert radiant_bet_after["payout"] is None, \
             "Former winner that lost the correction must have a NULL payout"
+
+    def test_correction_refunds_old_vanity_tax_and_taxes_new_winner(
+        self, correction_services
+    ):
+        match_service = correction_services["match_service"]
+        betting_service = correction_services["betting_service"]
+        player_repo = correction_services["player_repo"]
+        bet_repo = correction_services["bet_repo"]
+
+        player_ids = _create_players(player_repo, start_id=3200)
+        radiant_bettor = 3298
+        dire_bettor = 3299
+        for bettor in (radiant_bettor, dire_bettor):
+            player_repo.add(
+                discord_id=bettor,
+                discord_username=f"Spectator{bettor}",
+                guild_id=TEST_GUILD_ID,
+                initial_mmr=1500,
+            )
+            player_repo.add_balance(bettor, TEST_GUILD_ID, 200)
+
+        vanity_tax_service = VanityTaxService()
+        vanity_tax_service.refresh_guild(
+            TEST_GUILD_ID,
+            [
+                SimpleNamespace(id=radiant_bettor, nick=None),
+                SimpleNamespace(id=dire_bettor, nick=None),
+            ],
+        )
+        betting_service.vanity_tax_service = vanity_tax_service
+
+        match_service.shuffle_players(
+            player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool"
+        )
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
+        pending.bet_lock_until = int(time.time()) + 600
+        betting_service.place_bet(
+            TEST_GUILD_ID, radiant_bettor, "radiant", 100, pending
+        )
+        betting_service.place_bet(
+            TEST_GUILD_ID, dire_bettor, "dire", 100, pending
+        )
+
+        match_service.add_record_submission(
+            TEST_GUILD_ID, 99999, "radiant", is_admin=True
+        )
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
+        match_id = result["match_id"]
+
+        bets_before = bet_repo.get_settled_bets_for_match(match_id)
+        old_payout = next(
+            int(bet["payout"])
+            for bet in bets_before
+            if bet["discord_id"] == radiant_bettor
+        )
+        old_tax = int((old_payout - 100) * 0.01)
+        assert old_tax > 0
+        balances_before = {
+            bettor: player_repo.get_balance(bettor, TEST_GUILD_ID)
+            for bettor in (radiant_bettor, dire_bettor)
+        }
+
+        match_service.correct_match_result(
+            match_id=match_id,
+            new_winning_team="dire",
+            guild_id=TEST_GUILD_ID,
+            corrected_by=99999,
+        )
+
+        bets_after = bet_repo.get_settled_bets_for_match(match_id)
+        new_payout = next(
+            int(bet["payout"])
+            for bet in bets_after
+            if bet["discord_id"] == dire_bettor
+        )
+        new_tax = int((new_payout - 100) * 0.01)
+        assert new_tax > 0
+        assert player_repo.get_balance(
+            radiant_bettor, TEST_GUILD_ID
+        ) == balances_before[radiant_bettor] - old_payout + old_tax
+        assert player_repo.get_balance(
+            dire_bettor, TEST_GUILD_ID
+        ) == balances_before[dire_bettor] + new_payout - new_tax
+        radiant_history = bet_repo.get_player_bet_history(
+            radiant_bettor, TEST_GUILD_ID
+        )
+        dire_history = bet_repo.get_player_bet_history(
+            dire_bettor, TEST_GUILD_ID
+        )
+        assert sum(row["profit"] for row in radiant_history) == -100
+        assert sum(row["profit"] for row in dire_history) == (
+            new_payout - 100 - new_tax
+        )
 
     def test_correction_updates_pairings(self, correction_services):
         """Test that pairings statistics are properly reversed and updated."""

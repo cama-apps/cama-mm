@@ -107,6 +107,7 @@ def _build_resolution_announcement_chunks(
     outcome: str,
     participants: list[dict],
     bankruptcy_total: int,
+    vanity_tax_total: int,
 ) -> list[str]:
     # One consolidated line per participant showing what they spent (cost basis
     # across both sides), the yes/no contract split, what they won, and the net.
@@ -125,6 +126,8 @@ def _build_resolution_announcement_chunks(
     ]
     if bankruptcy_total > 0:
         lines.append(f"({bankruptcy_total} JC withheld from bankrupt winners.)")
+    if vanity_tax_total > 0:
+        lines.append(f"(−{vanity_tax_total} JC vanity tax.)")
     return _chunk_message_lines(lines)
 
 
@@ -1196,8 +1199,13 @@ class PredictionCommands(commands.Cog):
             default=None,
         )
         bankruptcy_total = sum(p.get("bankruptcy_penalty", 0) for p in participants)
+        vanity_tax_total = sum(p.get("vanity_tax", 0) for p in participants)
         announce_chunks = _build_resolution_announcement_chunks(
-            prediction_id, outcome.value, participants, bankruptcy_total
+            prediction_id,
+            outcome.value,
+            participants,
+            bankruptcy_total,
+            vanity_tax_total,
         )
         for chunk in announce_chunks:
             await safe_followup(interaction, content=chunk)

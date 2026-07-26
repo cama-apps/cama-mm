@@ -1311,7 +1311,10 @@ class MatchCommands(commands.Cog):
 
         # Assemble the result message body from focused formatting steps.
         distribution_text = self._format_bet_distribution(
-            winners, losers, distributions.get("bankruptcy_penalties", {})
+            winners,
+            losers,
+            distributions.get("bankruptcy_penalties", {}),
+            distributions.get("vanity_taxes", {}),
         )
         distribution_text += self._format_stake_distribution(record_result)
         distribution_text += self._format_streak_bonus(distributions)
@@ -1361,6 +1364,7 @@ class MatchCommands(commands.Cog):
     def _format_bet_distribution(
         self, winners: list[dict], losers: list[dict],
         bankruptcy_penalties: dict[int, int] | None = None,
+        vanity_taxes: dict[int, int] | None = None,
     ) -> str:
         """Format the winners/losers payout breakdown for the record message.
 
@@ -1379,6 +1383,7 @@ class MatchCommands(commands.Cog):
                 winners_by_user[uid].append(entry)
 
             penalties = bankruptcy_penalties or {}
+            taxes = vanity_taxes or {}
             for uid, user_bets in winners_by_user.items():
                 total_payout = sum(b["payout"] for b in user_bets)
                 multiplier = user_bets[0].get("multiplier")  # Same for all bets in pool mode
@@ -1386,8 +1391,14 @@ class MatchCommands(commands.Cog):
                 # Bankruptcy debuff (per-player): show the net the player kept,
                 # plus a concise note of the deduction.
                 penalty = int(penalties.get(uid, 0))
-                shown = total_payout - penalty
+                vanity_tax = int(taxes.get(uid, 0))
+                shown = total_payout - penalty - vanity_tax
                 pen_note = f" (−{penalty} {JOPACOIN_EMOTE} bankruptcy)" if penalty > 0 else ""
+                tax_note = (
+                    f" (−{vanity_tax} {JOPACOIN_EMOTE} vanity tax)"
+                    if vanity_tax > 0
+                    else ""
+                )
 
                 if len(user_bets) == 1:
                     # Single bet - original display
@@ -1397,12 +1408,14 @@ class MatchCommands(commands.Cog):
                     if multiplier:
                         distribution_lines.append(
                             f"<@{uid}> won {shown} {JOPACOIN_EMOTE} "
-                            f"(bet {bet['amount']}{leverage_text}, {multiplier:.2f}x){pen_note}"
+                            f"(bet {bet['amount']}{leverage_text}, {multiplier:.2f}x)"
+                            f"{pen_note}{tax_note}"
                         )
                     else:
                         distribution_lines.append(
                             f"<@{uid}> won {shown} {JOPACOIN_EMOTE} "
-                            f"(bet {bet['amount']}{leverage_text}){pen_note}"
+                            f"(bet {bet['amount']}{leverage_text})"
+                            f"{pen_note}{tax_note}"
                         )
                 else:
                     # Multiple bets - show breakdown
@@ -1417,11 +1430,13 @@ class MatchCommands(commands.Cog):
                     if multiplier:
                         distribution_lines.append(
                             f"<@{uid}> won {shown} {JOPACOIN_EMOTE} "
-                            f"(bets: {bets_str}, {multiplier:.2f}x){pen_note}"
+                            f"(bets: {bets_str}, {multiplier:.2f}x)"
+                            f"{pen_note}{tax_note}"
                         )
                     else:
                         distribution_lines.append(
-                            f"<@{uid}> won {shown} {JOPACOIN_EMOTE} (bets: {bets_str}){pen_note}"
+                            f"<@{uid}> won {shown} {JOPACOIN_EMOTE} "
+                            f"(bets: {bets_str}){pen_note}{tax_note}"
                         )
 
         # Group losers by user (supports multiple bets per user)
