@@ -1,12 +1,18 @@
 """
-Procedural fallback sprite renderer for cama pet cards.
+Procedural layer renderer for cama pet cards.
 
 Generates 512x288 pixel-art pet portraits with PIL in the coarse-cell
 style of utils/dig_drawing.py, tuned for collectible-creature charm:
 big highlight eyes, blush marks, and one distinctive silhouette feature
-per species. Every renderer is a pure function of its arguments —
-randomness comes only from random.Random(seed), never the global random
-module, so output bytes are deterministic.
+per species.
+
+The card is built from independent LAYER SLOTS (see SLOT_ORDER) so that
+utils/pet_compositor.py can swap any slot for a pre-generated component
+image from disk while the remaining slots stay procedural. Every renderer
+is a pure function of its arguments — randomness comes only from
+random.Random seeded per (seed, slot), never the global random module, so
+output bytes are deterministic and independent of which OTHER slots
+resolved from disk.
 """
 
 import io
@@ -20,6 +26,11 @@ from utils.fonts import get_font
 CARD_WIDTH = 512
 CARD_HEIGHT = 288
 FLOOR_Y = 248
+
+# Layer slots, back to front. Each renders independently on a transparent
+# canvas (backdrop is opaque) so the compositor can substitute any subset
+# with disk components.
+SLOT_ORDER = ("backdrop", "back", "creature", "detail", "face", "front")
 
 _BACKGROUND = (26, 22, 38)
 _FLOOR = (46, 39, 60)
@@ -299,22 +310,31 @@ def _draw_face(
         draw.line([mx - er, my, mx + er, my], fill=_OUTLINE, width=3)
 
 
-def _draw_creature(
+def _draw_front_features(draw: ImageDraw.ImageDraw, species_id: str, g: _Geo) -> None:
+    """Features floating in front of / above the creature."""
+    cell = g.cell
+    if species_id == "invoker_cama":  # Quas, Wex, Exort orbiting the head
+        orb_r = max(3, cell // 3)
+        for (ox, oy), color in (
+            ((g.hx + int(g.hw * 0.08), g.hy - int(1.1 * cell)), (130, 205, 255)),
+            ((g.hx + g.hw // 2, g.hy - int(1.7 * cell)), (205, 150, 255)),
+            ((g.hx + int(g.hw * 0.92), g.hy - int(1.1 * cell)), (255, 175, 80)),
+        ):
+            draw.ellipse([ox - orb_r, oy - orb_r, ox + orb_r, oy + orb_r], fill=color)
+            draw.point((ox - orb_r // 2, oy - orb_r // 2), fill=_EYE_WHITE)
+
+
+def _draw_creature_core(
     draw: ImageDraw.ImageDraw,
     rng: random.Random,
     species_id: str,
     g: _Geo,
     mood: str,
 ) -> None:
+    """Legs, body blob, neck, ears, and head — the faceless creature."""
     palette = SPECIES_PALETTES.get(species_id, _DEFAULT_PALETTE)
     dark, mid, light, _accent = palette
     cell = g.cell
-
-    draw.ellipse(
-        [g.x0 - cell, FLOOR_Y - cell // 2, g.x0 + g.body_w + cell, FLOOR_Y + cell // 2],
-        fill=(30, 25, 44),
-    )
-    _draw_back_features(draw, species_id, g)
 
     # Legs (mirrored pairs) with light hooves.
     leg_top = FLOOR_Y - g.leg_rows * cell
@@ -338,8 +358,6 @@ def _draw_creature(
             y = g.body_top + row * cell
             draw.rectangle([x, y, x + cell - 1, y + cell - 1], fill=color)
 
-    _draw_body_features(draw, rng, species_id, g, palette)
-
     if g.neck_rows:
         cx = CARD_WIDTH // 2
         draw.rectangle(
@@ -354,26 +372,68 @@ def _draw_creature(
         [g.hx + int(g.hw * 0.15), g.hy + 3, g.hx + int(g.hw * 0.85), g.hy + int(g.hh * 0.45)],
         fill=light,
     )
-    _draw_face(draw, species_id, g, mood, palette)
 
-    if species_id == "invoker_cama":  # Quas, Wex, Exort orbiting the head
-        orb_r = max(3, cell // 3)
-        for (ox, oy), color in (
-            ((g.hx + int(g.hw * 0.08), g.hy - int(1.1 * cell)), (130, 205, 255)),
-            ((g.hx + g.hw // 2, g.hy - int(1.7 * cell)), (205, 150, 255)),
-            ((g.hx + int(g.hw * 0.92), g.hy - int(1.1 * cell)), (255, 175, 80)),
-        ):
-            draw.ellipse([ox - orb_r, oy - orb_r, ox + orb_r, oy + orb_r], fill=color)
-            draw.point((ox - orb_r // 2, oy - orb_r // 2), fill=_EYE_WHITE)
+
+def _slot_rng(seed: int, slot: str) -> random.Random:
+    """Per-slot RNG so a slot's output never shifts when ANOTHER slot is
+    swapped for a disk component."""
+    return random.Random(f"{seed}:{slot}")
+
+
+def _blank_layer() -> Image.Image:
+    return Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (0, 0, 0, 0))
+
+
+def render_layer(
+    slot: str, species_id: str, stage: str, mood: str, seed: int
+) -> Image.Image | None:
+    """Render one procedural layer slot; None when the slot has no content
+    for this species (e.g. no front feature)."""
+    rng = _slot_rng(seed, slot)
+    g = _geometry(stage)
+    palette = SPECIES_PALETTES.get(species_id, _DEFAULT_PALETTE)
+    if slot == "backdrop":
+        return _card_base(rng)
+    img = _blank_layer()
+    draw = ImageDraw.Draw(img)
+    if slot == "back":
+        cell = g.cell
+        draw.ellipse(  # ground shadow anchors the creature to the floor
+            [g.x0 - cell, FLOOR_Y - cell // 2,
+             g.x0 + g.body_w + cell, FLOOR_Y + cell // 2],
+            fill=(30, 25, 44),
+        )
+        _draw_back_features(draw, species_id, g)
+    elif slot == "creature":
+        _draw_creature_core(draw, rng, species_id, g, mood)
+    elif slot == "detail":
+        _draw_body_features(draw, rng, species_id, g, palette)
+    elif slot == "face":
+        _draw_face(draw, species_id, g, mood, palette)
+    elif slot == "front":
+        _draw_front_features(draw, species_id, g)
+    else:
+        return None
+    return img
+
+
+def assemble_card(layers: list[Image.Image | None]) -> io.BytesIO:
+    """Stack layers back-to-front onto the card and finish with a vignette."""
+    img = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (*_BACKGROUND, 255))
+    for layer in layers:
+        if layer is None:
+            continue
+        if layer.size != (CARD_WIDTH, CARD_HEIGHT):
+            layer = layer.resize((CARD_WIDTH, CARD_HEIGHT))
+        img = Image.alpha_composite(img, layer.convert("RGBA"))
+    return _to_png(_vignette(img))
 
 
 def render_pet_card(species_id: str, stage: str, mood: str, seed: int) -> io.BytesIO:
-    """Render a deterministic 512x288 pet portrait PNG."""
-    rng = random.Random(seed)
-    img = _card_base(rng)
-    draw = ImageDraw.Draw(img)
-    _draw_creature(draw, rng, species_id, _geometry(stage), mood)
-    return _to_png(_vignette(img))
+    """Render a deterministic, fully procedural 512x288 pet portrait PNG."""
+    return assemble_card(
+        [render_layer(slot, species_id, stage, mood, seed) for slot in SLOT_ORDER]
+    )
 
 
 def render_egg_card(seed: int) -> io.BytesIO:
