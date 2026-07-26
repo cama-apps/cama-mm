@@ -100,14 +100,28 @@ async def test_shop_pricing_autocomplete_labels_show_soft_avoid_minimum():
     assert "FREE" not in labels["package_deal"]
     assert "0 active" in labels["package_deal"]
     assert "dynamic" in labels["soft_avoid"]
-    assert "minimum 250" in labels["soft_avoid"]
+    assert "minimum 300" in labels["soft_avoid"]
+
+
+@pytest.mark.asyncio
+async def test_package_deal_autocomplete_clamps_configured_duration_to_ten(monkeypatch):
+    monkeypatch.setattr("commands.shop.PACKAGE_DEAL_GAMES_DURATION", 25)
+    commands = ShopCommands(MagicMock(), MagicMock())
+
+    choices = await commands.item_autocomplete(_make_interaction(guild_id=9000), "")
+    package_deal_label = next(
+        choice.name for choice in choices if choice.value == "package_deal"
+    )
+
+    assert "for 10 games" in package_deal_label
+    assert "25 games" not in package_deal_label
 
 
 def test_soft_avoid_floor_applies_to_configured_default(monkeypatch):
     monkeypatch.setattr("commands.shop.SHOP_SOFT_AVOID_COST", 100)
 
-    assert _calculate_soft_avoid_cost(None) == 250
-    assert _calculate_soft_avoid_cost({"games_together": 2, "wins_together": 0}) == 250
+    assert _calculate_soft_avoid_cost(None) == 300
+    assert _calculate_soft_avoid_cost({"games_together": 2, "wins_together": 0}) == 300
 
 
 @pytest.mark.asyncio
@@ -772,7 +786,7 @@ async def test_handle_soft_avoid_charges_minimum_price_after_three_losses(monkey
         guild_id=interaction.guild.id,
         avoider_id=interaction.user.id,
         avoided_id=target.id,
-        cost=250,
+        cost=300,
         games=10,
     )
     safe_defer.assert_awaited_once_with(interaction, ephemeral=True)
@@ -863,7 +877,7 @@ async def test_handle_soft_avoid_handles_atomic_insufficient_balance(monkeypatch
     await commands._handle_soft_avoid(interaction, target=target)
 
     message = safe_followup.call_args.kwargs["content"].lower()
-    assert "need 250" in message
+    assert "need 300" in message
     assert "only have 200" in message
     player_service.adjust_balance.assert_not_called()
 
@@ -871,14 +885,21 @@ async def test_handle_soft_avoid_handles_atomic_insufficient_balance(monkeypatch
 @pytest.mark.asyncio
 async def test_handle_package_deal_costs_one_jopacoin_with_no_active_deals(monkeypatch):
     bot = MagicMock()
-    bot.package_deal_service.get_user_deals.return_value = []
-    bot.package_deal_service.create_or_extend_deal.return_value = SimpleNamespace(games_remaining=10)
+    bot.package_deal_service.purchase_deal.return_value = SimpleNamespace(
+        success=True,
+        reason=None,
+        balance=0,
+        deal=SimpleNamespace(games_remaining=10, games_added=10),
+        cost=1,
+        active_deal_count=0,
+    )
     player_service = MagicMock()
     player_service.get_player.side_effect = [
         SimpleNamespace(glicko_rating=1500),
         SimpleNamespace(glicko_rating=1500),
     ]
     player_service.get_balance.return_value = 1
+    normal_cost = SHOP_PACKAGE_DEAL_BASE_COST + int(3000 / SHOP_PACKAGE_DEAL_RATING_DIVISOR)
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
 
@@ -888,19 +909,23 @@ async def test_handle_package_deal_costs_one_jopacoin_with_no_active_deals(monke
 
     await commands._handle_package_deal(interaction, target=target)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id,
-        interaction.guild.id,
-        -1,
+    player_service.adjust_balance.assert_not_called()
+    bot.package_deal_service.purchase_deal.assert_called_once_with(
+        guild_id=interaction.guild.id,
+        buyer_id=interaction.user.id,
+        partner_id=target.id,
+        games=10,
+        no_active_cost=1,
+        active_cost=normal_cost,
     )
-    assert bot.package_deal_service.create_or_extend_deal.call_args.kwargs["cost"] == 1
+    bot.package_deal_service.get_user_deals.assert_not_called()
+    player_service.get_balance.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_handle_package_deal_refunds_one_jopacoin_when_create_fails(monkeypatch):
+async def test_handle_package_deal_does_not_charge_when_atomic_purchase_fails(monkeypatch):
     bot = MagicMock()
-    bot.package_deal_service.get_user_deals.return_value = []
-    bot.package_deal_service.create_or_extend_deal.side_effect = RuntimeError("db locked")
+    bot.package_deal_service.purchase_deal.side_effect = RuntimeError("db locked")
     player_service = MagicMock()
     player_service.get_player.side_effect = [
         SimpleNamespace(glicko_rating=1500),
@@ -917,29 +942,100 @@ async def test_handle_package_deal_refunds_one_jopacoin_when_create_fails(monkey
 
     await commands._handle_package_deal(interaction, target=target)
 
-    assert [call.args for call in player_service.adjust_balance.call_args_list] == [
-        (interaction.user.id, interaction.guild.id, -1),
-        (interaction.user.id, interaction.guild.id, 1),
-    ]
+    player_service.adjust_balance.assert_not_called()
     kwargs = safe_followup.call_args.kwargs
     assert kwargs["ephemeral"] is True
-    assert "refund" in kwargs["content"].lower()
+    assert "not charged" in kwargs["content"].lower()
 
 
 @pytest.mark.asyncio
 async def test_handle_package_deal_existing_active_deal_keeps_normal_price(monkeypatch):
     bot = MagicMock()
-    bot.package_deal_service.get_user_deals.return_value = [
-        SimpleNamespace(partner_discord_id=3003),
-    ]
-    bot.package_deal_service.create_or_extend_deal.return_value = SimpleNamespace(games_remaining=10)
+    normal_cost = SHOP_PACKAGE_DEAL_BASE_COST + int(3000 / SHOP_PACKAGE_DEAL_RATING_DIVISOR)
+    bot.package_deal_service.purchase_deal.return_value = SimpleNamespace(
+        success=True,
+        reason=None,
+        balance=0,
+        deal=SimpleNamespace(games_remaining=10, games_added=10),
+        cost=normal_cost,
+        active_deal_count=1,
+    )
     player_service = MagicMock()
     player_service.get_player.side_effect = [
         SimpleNamespace(glicko_rating=1500),
         SimpleNamespace(glicko_rating=1500),
     ]
-    normal_cost = SHOP_PACKAGE_DEAL_BASE_COST + int(3000 / SHOP_PACKAGE_DEAL_RATING_DIVISOR)
     player_service.get_balance.return_value = normal_cost
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_package_deal(interaction, target=target)
+
+    player_service.adjust_balance.assert_not_called()
+    assert bot.package_deal_service.purchase_deal.call_args.kwargs["active_cost"] == normal_cost
+    embed = safe_followup.call_args.kwargs["embed"]
+    assert f"**Cost:** {normal_cost} " in embed.description
+    bot.package_deal_service.get_user_deals.assert_not_called()
+    player_service.get_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_package_deal_partial_top_up_reports_games_added(monkeypatch):
+    bot = MagicMock()
+    normal_cost = SHOP_PACKAGE_DEAL_BASE_COST + int(3000 / SHOP_PACKAGE_DEAL_RATING_DIVISOR)
+    bot.package_deal_service.purchase_deal.return_value = SimpleNamespace(
+        success=True,
+        reason=None,
+        balance=200,
+        deal=SimpleNamespace(games_remaining=10, games_added=1),
+        cost=normal_cost,
+        active_deal_count=1,
+    )
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [
+        SimpleNamespace(glicko_rating=1500),
+        SimpleNamespace(glicko_rating=1500),
+    ]
+    player_service.get_balance.return_value = 1000
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_package_deal(interaction, target=target)
+
+    embed = safe_followup.call_args.kwargs["embed"]
+    assert "**Games added:** 1" in embed.description
+    assert "**Games remaining:** 10" in embed.description
+    assert f"**Cost:** {normal_cost} " in embed.description
+
+
+@pytest.mark.asyncio
+async def test_handle_package_deal_clamps_purchase_duration_to_ten(monkeypatch):
+    monkeypatch.setattr("commands.shop.PACKAGE_DEAL_GAMES_DURATION", 25)
+    bot = MagicMock()
+    bot.package_deal_service.purchase_deal.return_value = SimpleNamespace(
+        success=True,
+        reason=None,
+        balance=0,
+        deal=SimpleNamespace(games_remaining=10, games_added=10),
+        cost=1,
+        active_deal_count=0,
+    )
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [
+        SimpleNamespace(glicko_rating=1500),
+        SimpleNamespace(glicko_rating=1500),
+    ]
+    player_service.get_balance.return_value = 1
     monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.shop.safe_followup", AsyncMock())
 
@@ -949,12 +1045,76 @@ async def test_handle_package_deal_existing_active_deal_keeps_normal_price(monke
 
     await commands._handle_package_deal(interaction, target=target)
 
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id,
-        interaction.guild.id,
-        -normal_cost,
+    assert bot.package_deal_service.purchase_deal.call_args.kwargs["games"] == 10
+
+
+@pytest.mark.asyncio
+async def test_handle_package_deal_insufficient_balance_uses_atomic_quote(monkeypatch):
+    bot = MagicMock()
+    normal_cost = SHOP_PACKAGE_DEAL_BASE_COST + int(3000 / SHOP_PACKAGE_DEAL_RATING_DIVISOR)
+    bot.package_deal_service.purchase_deal.return_value = SimpleNamespace(
+        success=False,
+        reason="insufficient_balance",
+        balance=200,
+        deal=None,
+        cost=normal_cost,
+        active_deal_count=1,
     )
-    assert bot.package_deal_service.create_or_extend_deal.call_args.kwargs["cost"] == normal_cost
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [
+        SimpleNamespace(glicko_rating=1500),
+        SimpleNamespace(glicko_rating=1500),
+    ]
+    player_service.get_balance.return_value = 1000
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_package_deal(interaction, target=target)
+
+    message = safe_followup.call_args.kwargs["content"].lower()
+    assert f"need {normal_cost}" in message
+    assert "only have 200" in message
+    bot.package_deal_service.get_user_deals.assert_not_called()
+    player_service.get_balance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_package_deal_already_full_does_not_charge(monkeypatch):
+    bot = MagicMock()
+    bot.package_deal_service.purchase_deal.return_value = SimpleNamespace(
+        success=False,
+        reason="already_full",
+        balance=900,
+        deal=SimpleNamespace(games_remaining=10, games_added=0),
+        cost=800,
+        active_deal_count=1,
+    )
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [
+        SimpleNamespace(glicko_rating=1500),
+        SimpleNamespace(glicko_rating=1500),
+    ]
+    player_service.get_balance.return_value = 1000
+    monkeypatch.setattr("commands.shop.safe_defer", AsyncMock(return_value=True))
+    safe_followup = AsyncMock()
+    monkeypatch.setattr("commands.shop.safe_followup", safe_followup)
+
+    commands = ShopCommands(bot, player_service)
+    interaction = _make_interaction(guild_id=9000)
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
+
+    await commands._handle_package_deal(interaction, target=target)
+
+    player_service.adjust_balance.assert_not_called()
+    bot.package_deal_service.purchase_deal.assert_called_once()
+    message = safe_followup.call_args.kwargs["content"].lower()
+    assert "already has 10 games remaining" in message
+    assert "not charged" in message
 
 
 # --- New 20k Mystery Gift ---

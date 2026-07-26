@@ -523,6 +523,10 @@ class SchemaManager:
                 self._migration_create_economy_policy_tables,
             ),
             ("cap_soft_avoid_games_remaining", self._migration_cap_soft_avoid_games_remaining),
+            (
+                "cap_package_deal_games_remaining",
+                self._migration_cap_package_deal_games_remaining,
+            ),
             # Track whether a daily economy event was announced so a failed
             # announcement is retried on the next wake instead of lost.
             (
@@ -2658,6 +2662,30 @@ class SchemaManager:
     def _migration_cap_soft_avoid_games_remaining(self, cursor) -> None:
         """Cap durations accumulated by legacy repeat purchases."""
         cursor.execute("UPDATE soft_avoids SET games_remaining = 10 WHERE games_remaining > 10")
+
+    def _migration_cap_package_deal_games_remaining(self, cursor) -> None:
+        """Cap legacy durations and keep future writes at or below 10 games."""
+        cursor.execute("UPDATE package_deals SET games_remaining = 10 WHERE games_remaining > 10")
+        cursor.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_package_deals_games_remaining_insert_cap
+            BEFORE INSERT ON package_deals
+            WHEN NEW.games_remaining > 10
+            BEGIN
+                SELECT RAISE(ABORT, 'package deal games_remaining cannot exceed 10');
+            END
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_package_deals_games_remaining_update_cap
+            BEFORE UPDATE OF games_remaining ON package_deals
+            WHEN NEW.games_remaining > 10
+            BEGIN
+                SELECT RAISE(ABORT, 'package deal games_remaining cannot exceed 10');
+            END
+            """
+        )
 
     def _migration_add_player_join_times_to_lobby(self, cursor) -> None:
         """Add player_join_times column to lobby_state for ready check join timestamps."""

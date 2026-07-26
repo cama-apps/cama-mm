@@ -353,6 +353,76 @@ def test_soft_avoid_duration_migration_caps_legacy_stacks(tmp_path):
     assert games_remaining == 10
 
 
+def test_package_deal_duration_migration_caps_legacy_stacks(tmp_path):
+    db_path = str(tmp_path / "legacy-package-deal-stack.db")
+    manager = SchemaManager(db_path)
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DROP TRIGGER trg_package_deals_games_remaining_insert_cap")
+        conn.execute("DROP TRIGGER trg_package_deals_games_remaining_update_cap")
+        conn.execute(
+            """
+            INSERT INTO package_deals
+                (guild_id, buyer_discord_id, partner_discord_id, games_remaining, cost_paid, created_at, updated_at)
+            VALUES (123, 100, 200, 25, 500, 1, 1)
+            """
+        )
+        conn.execute(
+            "DELETE FROM schema_migrations WHERE name = ?",
+            ("cap_package_deal_games_remaining",),
+        )
+
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        games_remaining = conn.execute(
+            """
+            SELECT games_remaining
+            FROM package_deals
+            WHERE guild_id = 123 AND buyer_discord_id = 100 AND partner_discord_id = 200
+            """
+        ).fetchone()[0]
+
+    assert games_remaining == 10
+
+
+def test_package_deal_duration_cap_is_enforced_after_migrations(tmp_path):
+    db_path = str(tmp_path / "package-deal-duration-cap.db")
+    SchemaManager(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO package_deals
+                (guild_id, buyer_discord_id, partner_discord_id, games_remaining,
+                 cost_paid, created_at, updated_at)
+            VALUES (123, 100, 200, 10, 500, 1, 1)
+            """
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                INSERT INTO package_deals
+                    (guild_id, buyer_discord_id, partner_discord_id, games_remaining,
+                     cost_paid, created_at, updated_at)
+                VALUES (123, 300, 400, 11, 500, 1, 1)
+                """
+            )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                UPDATE package_deals
+                SET games_remaining = 11
+                WHERE guild_id = 123
+                  AND buyer_discord_id = 100
+                  AND partner_discord_id = 200
+                """
+            )
+
+
 def test_failed_pending_batch_rolls_back_all_schema_and_migration_rows(tmp_path):
     db_path = str(tmp_path / "failed-pending-batch.db")
     manager = SchemaManager(db_path)

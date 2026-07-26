@@ -1248,7 +1248,21 @@ class IPackageDealRepository(ABC):
         games: int = 10,
         cost: int = 0,
     ):
-        """Create a new package deal or extend existing one."""
+        """Create a new package deal or top one up without exceeding 10 games."""
+        ...
+
+    @abstractmethod
+    def purchase_deal(
+        self,
+        guild_id: int | None,
+        buyer_id: int,
+        partner_id: int,
+        *,
+        games: int = 10,
+        no_active_cost: int,
+        active_cost: int,
+    ):
+        """Atomically price, debit, and top up a paid package deal when allowed."""
         ...
 
     @abstractmethod

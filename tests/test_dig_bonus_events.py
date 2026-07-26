@@ -65,7 +65,7 @@ async def test_package_deal_view_creates_free_three_game_deal():
     ]
     package_service = SimpleNamespace(
         create_or_extend_deal=MagicMock(
-            return_value=SimpleNamespace(games_remaining=3),
+            return_value=SimpleNamespace(games_remaining=3, games_added=3),
         ),
     )
     view = PackageDealView(
@@ -130,7 +130,7 @@ async def test_package_deal_confirmation_reports_extension_total():
     candidate = SimpleNamespace(id=2, display_name="Player 2")
     package_service = SimpleNamespace(
         create_or_extend_deal=MagicMock(
-            return_value=SimpleNamespace(games_remaining=8),
+            return_value=SimpleNamespace(games_remaining=10, games_added=2),
         ),
     )
     view = PackageDealView(
@@ -147,8 +147,8 @@ async def test_package_deal_confirmation_reports_extension_total():
     await view.select_partner(interaction, candidate)
 
     content = interaction.response.edit_message.call_args.kwargs["content"]
-    assert "3 games added" in content
-    assert "8 games remaining" in content
+    assert "2 games added" in content
+    assert "10 games remaining" in content
 
 
 @pytest.mark.asyncio
@@ -197,7 +197,7 @@ async def test_package_deal_ignores_a_deleted_confirmation_message():
         candidates=[candidate],
         package_deal_service=SimpleNamespace(
             create_or_extend_deal=MagicMock(
-                return_value=SimpleNamespace(games_remaining=3),
+                return_value=SimpleNamespace(games_remaining=3, games_added=3),
             ),
         ),
     )
