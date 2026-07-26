@@ -640,6 +640,105 @@ def test_prediction_questions_include_market_descriptor_without_creator_metadata
     assert "secret meta" not in rendered
 
 
+def test_prediction_questions_subtract_vanity_tax_from_total_pnl():
+    positions = []
+    for player_id in range(1, 7):
+        for offset in range(3):
+            positions.append(
+                {
+                    "prediction_id": player_id * 10 + offset,
+                    "discord_id": player_id,
+                    "status": "resolved",
+                    "outcome": "yes",
+                    "yes_contracts": 1,
+                    "yes_cost_basis_total": 0 if player_id == 1 else player_id,
+                    "no_contracts": 0,
+                    "no_cost_basis_total": 0,
+                    "bankruptcy_penalty": 0,
+                    "vanity_tax": 5 if player_id == 1 else 0,
+                }
+            )
+
+    questions, _ = _generate(
+        {"players": _players(6), "prediction_positions": positions},
+    )
+
+    question = _by_key(questions)["predictions:best_total_pnl"]
+    assert _answer(question) == "<@2>"
+    assert "+24 JC" in question.explanation
+
+
+def test_betting_questions_subtract_vanity_tax_once_per_settlement():
+    rows = [
+        {
+            "bet_id": 1,
+            "discord_id": 1,
+            "match_id": 11,
+            "team_bet_on": "radiant",
+            "winning_team": 1,
+            "amount": 50,
+            "leverage": 1,
+            "effective_bet": 50,
+            "payout": 100,
+            "settlement_vanity_tax": 1,
+        },
+        {
+            "bet_id": 2,
+            "discord_id": 1,
+            "match_id": 11,
+            "team_bet_on": "radiant",
+            "winning_team": 1,
+            "amount": 50,
+            "leverage": 1,
+            "effective_bet": 50,
+            "payout": 100,
+            "settlement_vanity_tax": 1,
+        },
+        *[
+            {
+                "bet_id": index + 3,
+                "discord_id": 1,
+                "match_id": 12 + index,
+                "team_bet_on": "dire",
+                "winning_team": 1,
+                "amount": amount,
+                "leverage": 1,
+                "effective_bet": amount,
+                "payout": 0,
+                "settlement_vanity_tax": 0,
+            }
+            for index, amount in enumerate((34, 33, 33))
+        ],
+    ]
+    next_bet_id = 10
+    for player_id in range(2, 7):
+        for offset in range(5):
+            rows.append(
+                {
+                    "bet_id": next_bet_id,
+                    "discord_id": player_id,
+                    "match_id": player_id * 100 + offset,
+                    "team_bet_on": "radiant",
+                    "winning_team": 1,
+                    "amount": 1,
+                    "leverage": 1,
+                    "effective_bet": 1,
+                    "payout": 1,
+                    "settlement_vanity_tax": 0,
+                }
+            )
+            next_bet_id += 1
+
+    questions, _ = _generate(
+        {"players": _players(6), "bets": rows},
+        include_spicy=True,
+    )
+
+    question = _by_key(questions)["betting:largest_loss"]
+    assert _answer(question) == "<@1>"
+    assert "down 1 JC" in question.explanation
+
+
 def test_mafia_questions_use_only_resolved_non_cancelled_games():
     games = [
         {

@@ -272,6 +272,11 @@ class BossWagerModal(discord.ui.Modal):
                     embed.description += (
                         f"\n−{penalty} {JOPACOIN_EMOTE} withheld while bankrupt."
                     )
+                vanity_tax = getattr(self.result, "vanity_tax", 0) or 0
+                if vanity_tax > 0:
+                    embed.description += (
+                        f"\n−{vanity_tax} {JOPACOIN_EMOTE} vanity tax."
+                    )
                 if boss_narrative:
                     embed.add_field(name="​", value=f"*{boss_narrative}*", inline=False)
                 if getattr(self.result, "stat_point_awarded", False):
@@ -730,6 +735,11 @@ async def _resolve_phase_fight_without_modal(
             embed.description += (
                 f"\n−{penalty} {JOPACOIN_EMOTE} withheld while bankrupt."
             )
+        vanity_tax = getattr(result, "vanity_tax", 0) or 0
+        if vanity_tax > 0:
+            embed.description += (
+                f"\n−{vanity_tax} {JOPACOIN_EMOTE} vanity tax."
+            )
     else:
         loss = abs(getattr(result, "jc_delta", 0))
         knockback = getattr(result, "knockback", 0)
@@ -880,6 +890,11 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
         if penalty > 0:
             embed.description += (
                 f"\n−{penalty} {JOPACOIN_EMOTE} withheld while bankrupt."
+            )
+        vanity_tax = getattr(result, "vanity_tax", 0) or 0
+        if vanity_tax > 0:
+            embed.description += (
+                f"\n−{vanity_tax} {JOPACOIN_EMOTE} vanity tax."
             )
         if getattr(result, "stat_point_awarded", False):
             embed.add_field(

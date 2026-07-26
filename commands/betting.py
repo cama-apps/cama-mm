@@ -343,13 +343,15 @@ class BettingCommands(commands.Cog):
         reason: str,
         outcome: str,
         metadata: dict | None = None,
+        *,
+        source: str = "gamba",
     ) -> int:
         """Adjust a wheel balance with central-ledger context."""
         return self.player_service.adjust_balance(
             target_id,
             guild_id,
             delta,
-            source="gamba",
+            source=source,
             actor_id=actor_id,
             related_type="wheel_spin",
             related_id=outcome,
@@ -634,11 +636,14 @@ class BettingCommands(commands.Cog):
     def _wheel_explosion_embed(
         self, new_balance: int, garnished: int, next_spin_time: int,
         reward: int = WHEEL_EXPLOSION_REWARD, bankruptcy_penalty: int = 0,
+        vanity_tax: int = 0,
     ) -> discord.Embed:
         """Thin wrapper around build_wheel_explosion_embed."""
         return build_wheel_explosion_embed(
             new_balance, garnished, next_spin_time,
-            reward=reward, bankruptcy_penalty=bankruptcy_penalty,
+            reward=reward,
+            bankruptcy_penalty=bankruptcy_penalty,
+            vanity_tax=vanity_tax,
         )
 
     @app_commands.command(
@@ -707,6 +712,16 @@ class BettingCommands(commands.Cog):
         )
         gamba_win_multiplier, gamba_loss_multiplier = (
             await get_gamba_event_multipliers(self, guild_id)
+        )
+        from services.vanity_tax_service import VanityTaxService
+
+        candidate_vanity_tax_service = getattr(
+            self.bot, "vanity_tax_service", None
+        )
+        vanity_tax_service = (
+            candidate_vanity_tax_service
+            if isinstance(candidate_vanity_tax_service, VanityTaxService)
+            else None
         )
 
         # Check if player is registered
@@ -806,6 +821,7 @@ class BettingCommands(commands.Cog):
             )
             if bonus_spin:
                 explosion_reward = scale_positive_dig_jc(explosion_reward)
+            explosion_gross_profit = explosion_reward
             explosion_penalty = 0
             bankruptcy_service = getattr(self.bot, "bankruptcy_service", None)
             if bankruptcy_service:
@@ -814,6 +830,13 @@ class BettingCommands(commands.Cog):
                     user_id, explosion_reward, guild_id,
                 )
                 explosion_reward, explosion_penalty = info["penalized"], info["penalty_applied"]
+            explosion_vanity_tax = (
+                vanity_tax_service.calculate_tax(
+                    user_id, guild_id, explosion_gross_profit
+                )
+                if vanity_tax_service is not None
+                else 0
+            )
 
             new_balance, garnished_amount = await self._credit_gamba_outcome(
                 user_id,
@@ -827,6 +850,18 @@ class BettingCommands(commands.Cog):
                     "bankruptcy_penalty": explosion_penalty,
                 },
             )
+            if explosion_vanity_tax > 0:
+                new_balance = await asyncio.to_thread(
+                    self._adjust_gamba_balance,
+                    user_id,
+                    user_id,
+                    guild_id,
+                    -explosion_vanity_tax,
+                    "gamba vanity tax",
+                    "EXPLOSION",
+                    {"wheel_gain": explosion_gross_profit},
+                    source="vanity_tax",
+                )
 
             next_spin_time = (
                 await regular_next_spin_time()
@@ -858,8 +893,11 @@ class BettingCommands(commands.Cog):
                         "central_scaled_reward": central_explosion_reward,
                         "event_adjusted_reward": explosion_reward + explosion_penalty,
                         "event_win_multiplier": gamba_win_multiplier,
-                        "credited_reward": explosion_reward,
+                        "credited_reward": (
+                            explosion_reward - explosion_vanity_tax
+                        ),
                         "bankruptcy_penalty": explosion_penalty,
+                        "vanity_tax": explosion_vanity_tax,
                         "garnished_amount": garnished_amount,
                         **(
                             {
@@ -877,7 +915,9 @@ class BettingCommands(commands.Cog):
             await asyncio.sleep(0.5)
             result_embed = self._wheel_explosion_embed(
                 new_balance, garnished_amount, next_spin_time,
-                reward=explosion_reward, bankruptcy_penalty=explosion_penalty,
+                reward=explosion_reward - explosion_vanity_tax,
+                bankruptcy_penalty=explosion_penalty,
+                vanity_tax=explosion_vanity_tax,
             )
             if bonus_spin:
                 result_embed.add_field(
@@ -1346,6 +1386,7 @@ class BettingCommands(commands.Cog):
         player_repo = getattr(self.bot, "player_repo", None)
         track_wheel_gains = (
             bankruptcy_service is not None
+            or vanity_tax_service is not None
             or isinstance(buff_service, BuffService)
         )
         balance_before_outcome = None
@@ -1425,33 +1466,18 @@ class BettingCommands(commands.Cog):
         if bonus_spin:
             outcome_metadata["dig_reward_multiplier"] = DIG_POSITIVE_JC_MULTIPLIER
 
-        await asyncio.to_thread(
-            functools.partial(
-                self.player_service.log_wheel_spin,
-                discord_id=user_id,
-                guild_id=guild_id,
-                result=log_result,
-                spin_time=int(now),
-                is_bankrupt=is_eligible_for_bad_gamba,
-                is_golden=is_golden,
-                outcome_code=outcome_code,
-                is_bonus=bonus_spin,
-                event_id=wheel_event_id,
-                outcome_metadata=outcome_metadata,
-            )
-        )
-
         # Bankruptcy debuff: dock the configured share of the spinner's net wheel
         # winnings (any positive balance gain this spin). The wheel has no stake,
         # so the whole positive delta is winnings; it applies regardless of debt
         # and the penalty is a coin sink. Losses (gain <= 0) are untouched.
         wheel_bankruptcy_penalty = 0
-        if bankruptcy_service:
+        wheel_vanity_tax = 0
+        if balance_before_outcome is not None:
             current_balance = await asyncio.to_thread(
                 self.player_service.get_balance, user_id, guild_id
             )
             gain = current_balance - balance_before_outcome
-            if gain > 0:
+            if gain > 0 and bankruptcy_service:
                 _pen_info = await asyncio.to_thread(
                     bankruptcy_service.apply_penalty_to_winnings, user_id, gain, guild_id
                 )
@@ -1468,6 +1494,41 @@ class BettingCommands(commands.Cog):
                         {"wheel_gain": gain},
                     )
                     new_balance = current_balance - wheel_bankruptcy_penalty
+                    current_balance = new_balance
+            if gain > 0 and vanity_tax_service is not None:
+                wheel_vanity_tax = vanity_tax_service.calculate_tax(
+                    user_id, guild_id, gain
+                )
+                if wheel_vanity_tax > 0:
+                    new_balance = await asyncio.to_thread(
+                        self._adjust_gamba_balance,
+                        user_id,
+                        user_id,
+                        guild_id,
+                        -wheel_vanity_tax,
+                        "gamba vanity tax",
+                        str(result_wedge[0]),
+                        {"wheel_gain": gain},
+                        source="vanity_tax",
+                    )
+
+        if wheel_vanity_tax > 0:
+            outcome_metadata["vanity_tax"] = wheel_vanity_tax
+        await asyncio.to_thread(
+            functools.partial(
+                self.player_service.log_wheel_spin,
+                discord_id=user_id,
+                guild_id=guild_id,
+                result=log_result,
+                spin_time=int(now),
+                is_bankrupt=is_eligible_for_bad_gamba,
+                is_golden=is_golden,
+                outcome_code=outcome_code,
+                is_bonus=bonus_spin,
+                event_id=wheel_event_id,
+                outcome_metadata=outcome_metadata,
+            )
+        )
 
         if (
             isinstance(buff_service, BuffService)
@@ -1497,6 +1558,7 @@ class BettingCommands(commands.Cog):
         result_embed = self._wheel_result_embed(
             result_wedge, new_balance, garnished_amount, next_spin_time,
             bankruptcy_penalty=wheel_bankruptcy_penalty,
+            vanity_tax=wheel_vanity_tax,
             is_bankrupt=is_eligible_for_bad_gamba,
             is_golden=is_golden,
             **outcome_state.embed_kwargs(),

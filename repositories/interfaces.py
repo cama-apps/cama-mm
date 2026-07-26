@@ -330,6 +330,7 @@ class IPlayerRepository(ABC):
         guild_id: int | None,
         garnishment_rate: float,
         *,
+        vanity_tax_rates: dict[int, float] | None = None,
         source: str | None = None,
         actor_id: int | None = None,
         related_type: str | None = None,
@@ -457,6 +458,9 @@ class IBetRepository(ABC):
         house_payout_multiplier: float,
         betting_mode: str = "pool",
         pending_match_id: int | None = None,
+        bankruptcy_penalty_rate: float | None = None,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
         bet_seed_radiant: int = 0,
         bet_seed_dire: int = 0,
         bet_seed_bonus: int = 0,
@@ -1098,6 +1102,8 @@ class IPredictionRepository(ABC):
     def settle_prediction_orderbook(
         self, prediction_id: int, outcome: str, resolved_by: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
         payout_multiplier: float = 1.0,
     ) -> dict:
         """Settle by paying ``contracts × CONTRACT_VALUE`` per winning holder.
@@ -2027,6 +2033,7 @@ class IDigRepository(ABC):
         guild_id: int,
         *,
         balance_delta: int = 0,
+        vanity_tax: int = 0,
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
         add_relic_artifact_id: str | None = None,
@@ -2072,6 +2079,7 @@ class IDigRepository(ABC):
         discord_id: int,
         guild_id: int,
         jc_delta: int,
+        vanity_tax: int = 0,
         tunnel_updates: dict,
         require_tunnel_state: dict,
         boss_echo_boss_id: str,

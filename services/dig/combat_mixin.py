@@ -1424,7 +1424,7 @@ class BossCombatMixin:
                 wager_profit = 0
             (
                 gross_base_reward, scaled_base_reward, gross_payout,
-                payout_delta, boss_bankruptcy_penalty,
+                payout_delta, boss_bankruptcy_penalty, boss_vanity_tax,
             ) = self._net_boss_payout(
                 discord_id, guild_id, base_reward, wager_profit
             )
@@ -1437,6 +1437,7 @@ class BossCombatMixin:
                     discord_id=discord_id,
                     guild_id=guild_id,
                     jc_delta=payout_delta,
+                    vanity_tax=boss_vanity_tax,
                     tunnel_updates=tunnel_updates,
                     require_tunnel_state=boss_victory_guard,
                     boss_echo_boss_id=active_boss_id,
@@ -1450,6 +1451,7 @@ class BossCombatMixin:
                         "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                         "scaled_base_jc": scaled_base_reward,
                         "wager_profit": wager_profit,
+                        "vanity_tax": boss_vanity_tax,
                         "stat_point_awarded": stat_point_awarded,
                         "echo_applied": echo_applied,
                         "rounds": round_log,
@@ -1486,6 +1488,7 @@ class BossCombatMixin:
                 payout=payout_delta,
                 gross_payout=gross_payout,
                 bankruptcy_penalty=boss_bankruptcy_penalty,
+                vanity_tax=boss_vanity_tax,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 stat_point_awarded=stat_point_awarded,
@@ -2993,7 +2996,7 @@ class BossCombatMixin:
                 wager_profit = 0
             (
                 gross_base_reward, scaled_base_reward, gross_payout,
-                net_payout, boss_bankruptcy_penalty,
+                net_payout, boss_bankruptcy_penalty, boss_vanity_tax,
             ) = self._net_boss_payout(
                 discord_id, guild_id, base_reward, wager_profit
             )
@@ -3006,6 +3009,7 @@ class BossCombatMixin:
                     discord_id=discord_id,
                     guild_id=guild_id,
                     jc_delta=net_payout,
+                    vanity_tax=boss_vanity_tax,
                     tunnel_updates=tunnel_updates,
                     require_tunnel_state=boss_victory_guard,
                     boss_echo_boss_id=boss.boss_id if boss else "",
@@ -3019,6 +3023,7 @@ class BossCombatMixin:
                         "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                         "scaled_base_jc": scaled_base_reward,
                         "wager_profit": wager_profit,
+                        "vanity_tax": boss_vanity_tax,
                         "stat_point_awarded": stat_point_awarded,
                         "echo_applied": echo_applied,
                         "rounds": round_log,
@@ -3053,6 +3058,7 @@ class BossCombatMixin:
                 jc_delta=net_payout, payout=net_payout,
                 gross_payout=gross_payout,
                 bankruptcy_penalty=boss_bankruptcy_penalty,
+                vanity_tax=boss_vanity_tax,
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 stat_point_awarded=stat_point_awarded,

@@ -72,6 +72,7 @@ def build_wheel_result_embed(
     shield_absorbed_total: int = 0,
     shielded_count: int = 0,
     bankruptcy_penalty: int = 0,
+    vanity_tax: int = 0,
 ) -> discord.Embed:
     """Build the final result embed after the wheel stops."""
     label, value = result[0], result[1]  # (label, value, color)
@@ -512,6 +513,13 @@ def build_wheel_result_embed(
             inline=False,
         )
 
+    if vanity_tax > 0:
+        embed.add_field(
+            name="Vanity Tax",
+            value=f"−{vanity_tax} {JOPACOIN_EMOTE} vanity tax",
+            inline=False,
+        )
+
     if shield_absorbed_total > 0:
         embed.add_field(
             name="🌾 White Mana Shields",
@@ -540,6 +548,7 @@ def build_wheel_result_embed(
 def build_wheel_explosion_embed(
     new_balance: int, garnished: int, next_spin_time: int,
     reward: int = WHEEL_EXPLOSION_REWARD, bankruptcy_penalty: int = 0,
+    vanity_tax: int = 0,
 ) -> discord.Embed:
     """Build the result embed when the wheel explodes."""
     title = "💥 THE WHEEL EXPLODED! 💥"
@@ -565,6 +574,13 @@ def build_wheel_explosion_embed(
         embed.add_field(
             name="Bankruptcy Penalty",
             value=f"−{bankruptcy_penalty} {JOPACOIN_EMOTE} withheld while bankrupt",
+            inline=False,
+        )
+
+    if vanity_tax > 0:
+        embed.add_field(
+            name="Vanity Tax",
+            value=f"−{vanity_tax} {JOPACOIN_EMOTE} vanity tax",
             inline=False,
         )
 

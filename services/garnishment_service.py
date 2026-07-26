@@ -26,6 +26,7 @@ class GarnishmentService:
         guild_id: int | None = None,
         bankruptcy_penalty_rate: float = 0.0,
         *,
+        vanity_tax_rate: float = 0.0,
         source: str | None = None,
         actor_id: int | None = None,
         related_type: str | None = None,
@@ -60,7 +61,13 @@ class GarnishmentService:
             - bankruptcy_penalty: Amount debited for the penalty (0 if none)
         """
         if amount <= 0:
-            return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
+            return {
+                "gross": amount,
+                "garnished": 0,
+                "net": amount,
+                "bankruptcy_penalty": 0,
+                "vanity_tax": 0,
+            }
 
         return self.player_repo.add_balance_with_garnishment(
             discord_id,
@@ -68,6 +75,7 @@ class GarnishmentService:
             amount,
             self.garnishment_rate,
             bankruptcy_penalty_rate=bankruptcy_penalty_rate,
+            vanity_tax_rate=vanity_tax_rate,
             source=source,
             actor_id=actor_id,
             related_type=related_type,
@@ -82,6 +90,7 @@ class GarnishmentService:
         amount: int,
         guild_id: int | None = None,
         bankruptcy_penalty_rates: dict[int, float] | None = None,
+        vanity_tax_rates: dict[int, float] | None = None,
     ) -> list[dict[str, int]]:
         """Add the same income to multiple players in one transaction."""
         penalty_rates = bankruptcy_penalty_rates or {}
@@ -92,4 +101,5 @@ class GarnishmentService:
             ],
             guild_id,
             self.garnishment_rate,
+            vanity_tax_rates=vanity_tax_rates,
         )

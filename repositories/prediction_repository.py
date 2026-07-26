@@ -998,6 +998,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                        pp.no_contracts AS no_contracts,
                        pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
                        COALESCE(pp.bankruptcy_penalty, 0) AS penalty,
+                       COALESCE(pp.vanity_tax, 0) AS vanity_tax,
                        (SELECT COUNT(*)
                         FROM economy_ledger_entries e
                         WHERE e.guild_id = p.guild_id
@@ -1017,7 +1018,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         WHERE e.guild_id = p.guild_id
                           AND e.account_type = 'player'
                           AND e.account_id = pp.discord_id
-                          AND e.source = 'prediction_resolution'
+                          AND e.source IN ('prediction_resolution', 'vanity_tax')
                           AND e.related_type = 'prediction'
                           AND e.related_id = CAST(p.prediction_id AS TEXT)
                           AND e.ledger_id > COALESCE((
@@ -1047,7 +1048,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 # Legacy settlements predating the central ledger retain the
                 # original face-value calculation.
                 payout = (
-                    int(won) * PREDICTION_CONTRACT_VALUE - int(row["penalty"])
+                    int(won) * PREDICTION_CONTRACT_VALUE
+                    - int(row["penalty"])
+                    - int(row["vanity_tax"])
                 )
             pnl = payout - int(row["cost"])
             realized_pnl += pnl
@@ -1087,6 +1090,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                        pp.no_contracts AS no_contracts,
                        pp.yes_cost_basis_total + pp.no_cost_basis_total AS cost,
                        COALESCE(pp.bankruptcy_penalty, 0) AS penalty,
+                       COALESCE(pp.vanity_tax, 0) AS vanity_tax,
                        (SELECT COUNT(*)
                         FROM economy_ledger_entries e
                         WHERE e.guild_id = p.guild_id
@@ -1106,7 +1110,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         WHERE e.guild_id = p.guild_id
                           AND e.account_type = 'player'
                           AND e.account_id = pp.discord_id
-                          AND e.source = 'prediction_resolution'
+                          AND e.source IN ('prediction_resolution', 'vanity_tax')
                           AND e.related_type = 'prediction'
                           AND e.related_id = CAST(p.prediction_id AS TEXT)
                           AND e.ledger_id > COALESCE((
@@ -1133,7 +1137,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 payout = int(row["credited"] or 0)
             else:
                 payout = (
-                    int(won) * PREDICTION_CONTRACT_VALUE - int(row["penalty"])
+                    int(won) * PREDICTION_CONTRACT_VALUE
+                    - int(row["penalty"])
+                    - int(row["vanity_tax"])
                 )
             delta = payout - int(row["cost"])
             history.append(
@@ -1391,6 +1397,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
     def settle_prediction_orderbook(
         self, prediction_id: int, outcome: str, resolved_by: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
         payout_multiplier: float = 1.0,
     ) -> dict:
         """Atomic resolve: cancel levels, pay winners, mark resolved.
@@ -1471,6 +1479,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 # Penalty is 0 unless a still-penalized winner is credited below;
                 # hoisted so the per-participant record can net it out uniformly.
                 penalty = 0
+                vanity_tax = 0
                 # Use the unmodified contract payout to identify winners. An
                 # event may reduce their adjusted payout to zero, but they still
                 # need a durable settlement row for statistics and rollback.
@@ -1494,12 +1503,18 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         st = cursor.fetchone()
                         if st is not None and int(st["pg"]) > 0:
                             penalty = int(profit * (1 - bankruptcy_penalty_rate))
+                    if (
+                        profit > 0
+                        and p["discord_id"] in (vanity_taxable_ids or ())
+                    ):
+                        vanity_tax = int(profit * vanity_tax_rate)
                     settlement_metadata = {
                         "outcome": outcome,
                         "base_gross_payout": base_payout,
                         "gross_payout": payout,
                         "payout_multiplier": payout_multiplier,
                         "bankruptcy_penalty": penalty,
+                        "vanity_tax": vanity_tax,
                         "winning_contracts": winning_qty,
                     }
                     credited = payout - penalty
@@ -1564,6 +1579,30 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                                 now,
                             ),
                         )
+                    if vanity_tax > 0:
+                        self._set_economy_ledger_context(
+                            cursor,
+                            source="vanity_tax",
+                            related_type="prediction",
+                            related_id=prediction_id,
+                            reason="vanity tax on JC profit",
+                            metadata=settlement_metadata,
+                        )
+                        try:
+                            cursor.execute(
+                                """
+                                UPDATE players
+                                SET jopacoin_balance =
+                                        COALESCE(jopacoin_balance, 0) - ?,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE discord_id = ? AND guild_id = ?
+                                """,
+                                (vanity_tax, p["discord_id"], guild_id),
+                            )
+                            if cursor.rowcount != 1:
+                                raise ValueError("Winning player not found.")
+                        finally:
+                            self._clear_economy_ledger_context(cursor)
                     # Persist the withheld penalty on the position row so the
                     # realized-P&L stats / balance-chart reads net it out and
                     # match the JC actually credited (payout - penalty).
@@ -1574,15 +1613,24 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                             "WHERE prediction_id = ? AND discord_id = ?",
                             (penalty, prediction_id, p["discord_id"]),
                         )
+                    if vanity_tax:
+                        cursor.execute(
+                            "UPDATE prediction_positions "
+                            "SET vanity_tax = ? "
+                            "WHERE prediction_id = ? AND discord_id = ?",
+                            (vanity_tax, prediction_id, p["discord_id"]),
+                        )
                     total_payout += payout
                     winner = {
                         "discord_id": int(p["discord_id"]),
                         "contracts": winning_qty,
-                        "payout": credited,
-                        "profit": profit - penalty,
+                        "payout": credited - vanity_tax,
+                        "profit": profit - penalty - vanity_tax,
                     }
                     if penalty:
                         winner["bankruptcy_penalty"] = penalty
+                    if vanity_tax:
+                        winner["vanity_tax"] = vanity_tax
                     winners.append(winner)
                 if losing_qty > 0:
                     losers.append({
@@ -1596,7 +1644,11 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 # profit == net_payout - cost_basis holds for winners and losers
                 # alike (winning_basis + losing_basis always == yes_t + no_t).
                 cost_basis = yes_t + no_t
-                net_payout = (payout - penalty) if payout > 0 else 0
+                net_payout = (
+                    payout - penalty - vanity_tax
+                    if payout > 0
+                    else 0
+                )
                 participant = {
                     "discord_id": int(p["discord_id"]),
                     "yes_contracts": yes_c,
@@ -1608,6 +1660,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 }
                 if penalty:
                     participant["bankruptcy_penalty"] = penalty
+                if vanity_tax:
+                    participant["vanity_tax"] = vanity_tax
                 participants.append(participant)
 
             cursor.execute(
@@ -1681,7 +1735,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             cursor.execute(
                 """
                 SELECT discord_id, yes_contracts, no_contracts,
-                       COALESCE(bankruptcy_penalty, 0) AS bankruptcy_penalty
+                       COALESCE(bankruptcy_penalty, 0) AS bankruptcy_penalty,
+                       COALESCE(vanity_tax, 0) AS vanity_tax
                 FROM prediction_positions
                 WHERE prediction_id = ?
                 """,
@@ -1737,6 +1792,48 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 ),
             )
             settlement_rows = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT ledger_id, account_type, account_id, delta, metadata
+                FROM economy_ledger_entries
+                WHERE guild_id = ?
+                  AND source = 'vanity_tax'
+                  AND related_type = 'prediction'
+                  AND related_id = ?
+                  AND ledger_id > COALESCE((
+                      SELECT MAX(rollback.ledger_id)
+                      FROM economy_ledger_entries AS rollback
+                      WHERE rollback.guild_id = ?
+                        AND rollback.source = 'prediction_resolution_rollback'
+                        AND rollback.related_type = 'prediction'
+                        AND rollback.related_id = ?
+                  ), 0)
+                ORDER BY ledger_id
+                """,
+                (
+                    normalized_guild,
+                    str(prediction_id),
+                    normalized_guild,
+                    str(prediction_id),
+                ),
+            )
+            vanity_rows = cursor.fetchall()
+            vanity_by_account: dict[int, dict] = {}
+            for row in vanity_rows:
+                account_id = row["account_id"]
+                if row["account_type"] != "player" or account_id is None:
+                    raise ValueError("Vanity tax ledger is inconsistent.")
+                account_id = int(account_id)
+                if account_id in vanity_by_account:
+                    raise ValueError("Vanity tax ledger is inconsistent.")
+                position = positions_by_account.get(account_id)
+                if position is None or int(position[f"{outcome}_contracts"]) <= 0:
+                    raise ValueError("Vanity tax ledger is inconsistent.")
+                expected_tax = int(position["vanity_tax"])
+                if expected_tax <= 0 or int(row["delta"]) != -expected_tax:
+                    raise ValueError("Vanity tax ledger is inconsistent.")
+                vanity_by_account[account_id] = dict(row)
+
             settlements_by_account: dict[int, dict] = {}
             reversals: list[dict] = []
             total_gross_payout = 0
@@ -1767,6 +1864,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         "bankruptcy_penalty", position["bankruptcy_penalty"]
                     )
                 )
+                vanity_tax = int(position["vanity_tax"])
+                if (account_id in vanity_by_account) != (vanity_tax > 0):
+                    raise ValueError("Vanity tax ledger is inconsistent.")
                 delta = int(row["delta"])
                 if gross_payout < 0 or penalty < 0 or delta != gross_payout - penalty:
                     raise ValueError("Settlement ledger is inconsistent.")
@@ -1779,6 +1879,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         "discord_id": account_id,
                         "gross_payout": gross_payout,
                         "penalty": penalty,
+                        "vanity_tax": vanity_tax,
                         "payout_multiplier": metadata.get("payout_multiplier", 1.0),
                         "base_gross_payout": metadata.get(
                             "base_gross_payout", fallback_gross
@@ -1822,13 +1923,18 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 discord_id = reversal["discord_id"]
                 gross_payout = reversal["gross_payout"]
                 penalty = reversal["penalty"]
-                credited = int(settlements_by_account[discord_id]["delta"])
+                vanity_tax = reversal["vanity_tax"]
+                credited = (
+                    int(settlements_by_account[discord_id]["delta"])
+                    - vanity_tax
+                )
                 rollback_metadata = {
                     "outcome": outcome,
                     "base_gross_payout": reversal["base_gross_payout"],
                     "gross_payout": gross_payout,
                     "payout_multiplier": reversal["payout_multiplier"],
                     "bankruptcy_penalty": penalty,
+                    "vanity_tax": vanity_tax,
                 }
                 if credited == 0:
                     cursor.execute(
@@ -1890,7 +1996,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 affected_players += 1
 
             cursor.execute(
-                "UPDATE prediction_positions SET bankruptcy_penalty = 0 "
+                "UPDATE prediction_positions "
+                "SET bankruptcy_penalty = 0, vanity_tax = 0 "
                 "WHERE prediction_id = ?",
                 (prediction_id,),
             )

@@ -237,6 +237,7 @@ class PlayerTriviaRepository(BaseRepository):
                     b.amount * COALESCE(b.leverage, 1) AS effective_bet,
                     b.bet_time,
                     b.payout,
+                    COALESCE(bst.vanity_tax, 0) AS settlement_vanity_tax,
                     COALESCE(b.is_blind, 0) AS is_blind,
                     b.odds_at_placement,
                     m.match_date,
@@ -247,6 +248,10 @@ class PlayerTriviaRepository(BaseRepository):
                 JOIN matches m
                   ON m.match_id = b.match_id
                  AND m.guild_id = b.guild_id
+                LEFT JOIN bet_settlement_taxes bst
+                  ON bst.match_id = b.match_id
+                 AND bst.guild_id = b.guild_id
+                 AND bst.discord_id = b.discord_id
                 WHERE b.guild_id = ?
                   AND m.winning_team IN (1, 2)
                 ORDER BY b.bet_time ASC, b.bet_id ASC
@@ -265,6 +270,7 @@ class PlayerTriviaRepository(BaseRepository):
                     COALESCE(pp.no_contracts, 0) AS no_contracts,
                     COALESCE(pp.no_cost_basis_total, 0) AS no_cost_basis_total,
                     COALESCE(pp.bankruptcy_penalty, 0) AS bankruptcy_penalty,
+                    COALESCE(pp.vanity_tax, 0) AS vanity_tax,
                     p.status,
                     p.outcome,
                     p.created_at,

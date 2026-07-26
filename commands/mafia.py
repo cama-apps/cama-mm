@@ -1059,6 +1059,11 @@ class MafiaCommands(commands.Cog):
                 f"_{overflow} {JOPACOIN_EMOTE} over the +{MAX_WINNER_PAYOUT}/winner "
                 f"cap skimmed into the Jopacoin Reserve._"
             )
+        vanity_tax_total = sum(summary.get("vanity_taxes", {}).values())
+        if vanity_tax_total > 0:
+            body_lines.append(
+                f"−{vanity_tax_total} {JOPACOIN_EMOTE} vanity tax."
+            )
 
         breakdown = summary.get("vote_breakdown") or {}
         if breakdown:

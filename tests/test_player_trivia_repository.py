@@ -447,8 +447,8 @@ def _seed_snapshot_guild(trivia_repo, guild_id: int, base_id: int) -> dict[str, 
             """
             INSERT INTO prediction_positions (
                 prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
-                no_contracts, no_cost_basis_total, bankruptcy_penalty
-            ) VALUES (?, ?, 2, 100, 0, 0, 1)
+                no_contracts, no_cost_basis_total, bankruptcy_penalty, vanity_tax
+            ) VALUES (?, ?, 2, 100, 0, 0, 1, 2)
             """,
             (prediction_id, player1),
         )
@@ -606,6 +606,7 @@ def test_load_snapshot_is_complete_deterministic_private_and_guild_scoped(trivia
     assert snapshot["participants"][0]["match_id"] == ids["match_id"]
     assert snapshot["prediction_positions"][0]["prediction_id"] == ids["prediction_id"]
     assert snapshot["prediction_positions"][0]["question"] == "private market text"
+    assert snapshot["prediction_positions"][0]["vanity_tax"] == 2
     assert snapshot["mafia_players"][0]["game_id"] == ids["game_id"]
 
     assert "notes" not in snapshot["participants"][0]

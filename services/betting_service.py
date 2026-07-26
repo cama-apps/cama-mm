@@ -52,6 +52,7 @@ class BettingService:
         bankruptcy_service: "BankruptcyService | None" = None,
         buff_service=None,
         economy_event_service=None,
+        vanity_tax_service=None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
@@ -61,6 +62,7 @@ class BettingService:
         self.bankruptcy_service = bankruptcy_service
         self.buff_service = buff_service
         self.economy_event_service = economy_event_service
+        self.vanity_tax_service = vanity_tax_service
 
     def _economy_event_multiplier(self, guild_id: int | None, field: str) -> float:
         """Return one bounded daily-event multiplier, defaulting safely to 1x."""
@@ -320,6 +322,16 @@ class BettingService:
             bankruptcy_penalty_rate=(
                 self.bankruptcy_service.penalty_rate if self.bankruptcy_service else None
             ),
+            vanity_tax_rate=(
+                self.vanity_tax_service.TAX_RATE
+                if self.vanity_tax_service
+                else 0.0
+            ),
+            vanity_taxable_ids=(
+                self.vanity_tax_service.taxable_ids(guild_id)
+                if self.vanity_tax_service
+                else frozenset()
+            ),
             bet_seed_radiant=pending_state.bet_seed_radiant,
             bet_seed_dire=pending_state.bet_seed_dire,
             bet_seed_bonus=pending_state.bet_seed_bonus,
@@ -337,6 +349,7 @@ class BettingService:
             # aggregate profit per user and subtract their penalty first.
             pact_skims: dict[int, int] = {}
             penalties = distributions.get("bankruptcy_penalties", {})
+            vanity_taxes = distributions.get("vanity_taxes", {})
             profits: dict[int, int] = {}
             for w in distributions.get("winners", []):
                 pid = w["discord_id"]
@@ -353,7 +366,11 @@ class BettingService:
                     )
             pact_targets = self._get_blood_pact_targets(list(profits), guild_id)
             for pid, profit in profits.items():
-                net_profit = profit - int(penalties.get(pid, 0))
+                net_profit = (
+                    profit
+                    - int(penalties.get(pid, 0))
+                    - int(vanity_taxes.get(pid, 0))
+                )
                 if net_profit <= 0:
                     continue
                 skimmed = 0
@@ -565,12 +582,22 @@ class BettingService:
             )
             bankruptcy_penalty_rates = dict.fromkeys(penalized_ids, penalty_rate)
 
+        vanity_tax_rates: dict[int, float] = {}
+        if self.vanity_tax_service and reward_amount > 0:
+            taxable_ids = self.vanity_tax_service.taxable_ids(guild_id)
+            vanity_tax_rates = {
+                pid: self.vanity_tax_service.TAX_RATE
+                for pid in player_ids
+                if pid in taxable_ids
+            }
+
         if self.garnishment_service:
             award_results = self.garnishment_service.add_income_many(
                 player_ids,
                 reward_amount,
                 guild_id=guild_id,
                 bankruptcy_penalty_rates=bankruptcy_penalty_rates,
+                vanity_tax_rates=vanity_tax_rates,
             )
         else:
             award_results = self.player_repo.add_balances_with_garnishment(
@@ -584,6 +611,7 @@ class BettingService:
                 ],
                 guild_id,
                 garnishment_rate=0.0,
+                vanity_tax_rates=vanity_tax_rates,
             )
 
         for pid, garn in zip(player_ids, award_results, strict=True):
@@ -592,6 +620,7 @@ class BettingService:
                 "garnished": garn["garnished"],
                 "net": garn["net"],
                 "bankruptcy_penalty": garn["bankruptcy_penalty"],
+                "vanity_tax": garn["vanity_tax"],
             }
 
         return results

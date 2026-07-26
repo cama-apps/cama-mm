@@ -1104,6 +1104,7 @@ class DigRepository(BaseRepository, IDigRepository):
         guild_id: int,
         *,
         balance_delta: int = 0,
+        vanity_tax: int = 0,
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
         add_relic_artifact_id: str | None = None,
@@ -1148,17 +1149,21 @@ class DigRepository(BaseRepository, IDigRepository):
                 )
 
         gid = self.normalize_guild_id(guild_id)
+        vanity_tax = max(0, int(vanity_tax))
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            if balance_delta != 0:
+            gross_balance_delta = balance_delta + vanity_tax
+            if gross_balance_delta != 0:
                 self._set_economy_ledger_context(
                     cursor,
                     source="dig",
                     actor_id=discord_id,
                     related_type=log_action_type,
                     related_id=self._ledger_related_id(log_detail),
-                    reason=self._ledger_balance_reason(log_action_type, balance_delta),
+                    reason=self._ledger_balance_reason(
+                        log_action_type, gross_balance_delta
+                    ),
                     metadata=log_detail,
                 )
                 try:
@@ -1168,7 +1173,30 @@ class DigRepository(BaseRepository, IDigRepository):
                         SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
                         WHERE discord_id = ? AND guild_id = ?
                         """,
-                        (balance_delta, discord_id, gid),
+                        (gross_balance_delta, discord_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            if vanity_tax > 0:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="vanity_tax",
+                    actor_id=discord_id,
+                    related_type=log_action_type,
+                    related_id=self._ledger_related_id(log_detail),
+                    reason="vanity tax on JC profit",
+                    metadata=log_detail,
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (vanity_tax, discord_id, gid),
                     )
                 finally:
                     self._clear_economy_ledger_context(cursor)
@@ -1286,6 +1314,7 @@ class DigRepository(BaseRepository, IDigRepository):
         discord_id: int,
         guild_id: int,
         jc_delta: int,
+        vanity_tax: int = 0,
         tunnel_updates: dict,
         require_tunnel_state: dict,
         boss_echo_boss_id: str,
@@ -1315,6 +1344,7 @@ class DigRepository(BaseRepository, IDigRepository):
 
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())
+        vanity_tax = max(0, int(vanity_tax))
         weakened_until = now + int(boss_echo_window_seconds)
 
         with self.atomic_transaction() as conn:
@@ -1339,14 +1369,17 @@ class DigRepository(BaseRepository, IDigRepository):
                         f"boss state changed for guard {sorted(require_tunnel_state)}"
                     )
 
-            if jc_delta != 0:
+            gross_jc_delta = jc_delta + vanity_tax
+            if gross_jc_delta != 0:
                 self._set_economy_ledger_context(
                     cursor,
                     source="dig",
                     actor_id=discord_id,
                     related_type="boss_fight",
                     related_id=boss_echo_boss_id,
-                    reason=self._ledger_balance_reason("boss_fight", jc_delta),
+                    reason=self._ledger_balance_reason(
+                        "boss_fight", gross_jc_delta
+                    ),
                     metadata=log_detail,
                 )
                 try:
@@ -1356,7 +1389,30 @@ class DigRepository(BaseRepository, IDigRepository):
                         SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
                         WHERE discord_id = ? AND guild_id = ?
                         """,
-                        (jc_delta, discord_id, gid),
+                        (gross_jc_delta, discord_id, gid),
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            if vanity_tax > 0:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="vanity_tax",
+                    actor_id=discord_id,
+                    related_type="boss_fight",
+                    related_id=boss_echo_boss_id,
+                    reason="vanity tax on JC profit",
+                    metadata=log_detail,
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (vanity_tax, discord_id, gid),
                     )
                 finally:
                     self._clear_economy_ledger_context(cursor)

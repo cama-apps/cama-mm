@@ -1095,7 +1095,11 @@ class DigCoreMixin:
 
         # Bankruptcy debuff: keep only the configured fraction of yield while
         # penalized (applied last, before the credit; withheld share is a sink).
-        jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
+        (
+            jc_earned,
+            dig_bankruptcy_penalty,
+            dig_vanity_tax,
+        ) = self._apply_jc_profit_policies(discord_id, guild_id, jc_earned)
 
         # DB writes
         run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
@@ -1106,6 +1110,7 @@ class DigCoreMixin:
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc_earned,
+            vanity_tax=dig_vanity_tax,
             tunnel_updates={
                 "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                 "max_depth": max(prev_max_depth, new_depth),
@@ -1145,6 +1150,7 @@ class DigCoreMixin:
             advance=advance, jc_earned=jc_earned, nonstreak_jc=nonstreak_jc,
             overgrowth_bonus=overgrowth_bonus,
             bankruptcy_penalty=dig_bankruptcy_penalty,
+            vanity_tax=dig_vanity_tax,
             milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
             cave_in=False, cave_in_detail=None,
             boss_encounter=boss_encounter, boss_info=boss_info,
@@ -1511,7 +1517,11 @@ class DigCoreMixin:
 
             # Bankruptcy debuff: keep only the configured fraction of yield while
             # penalized (applied last, before the credit; withheld share is a sink).
-            jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
+            (
+                jc_earned,
+                dig_bankruptcy_penalty,
+                dig_vanity_tax,
+            ) = self._apply_jc_profit_policies(discord_id, guild_id, jc_earned)
 
             # DB writes
             run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
@@ -1522,6 +1532,7 @@ class DigCoreMixin:
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=jc_earned,
+                vanity_tax=dig_vanity_tax,
                 tunnel_updates={
                     "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                     "max_depth": max(prev_max_depth, new_depth),
@@ -1567,6 +1578,7 @@ class DigCoreMixin:
                 overgrowth_bonus=overgrowth_bonus,
                 nonstreak_jc=nonstreak_jc,
                 bankruptcy_penalty=dig_bankruptcy_penalty,
+                vanity_tax=dig_vanity_tax,
                 milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
                 cave_in=False, cave_in_detail=None,
                 boss_encounter=boss_encounter, boss_info=boss_info,

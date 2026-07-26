@@ -182,6 +182,24 @@ def test_wheel_lose_a_turn_results_are_skipped():
     assert totals == {SOURCE_WHEEL: 25}
 
 
+def test_wheel_history_subtracts_persisted_vanity_tax():
+    svc, repos = _build_service()
+    repos["player_repo"].get_wheel_spin_history.return_value = [
+        {
+            "spin_time": 1000,
+            "result": 100,
+            "outcome_metadata": json.dumps({"vanity_tax": 1}),
+        },
+    ]
+
+    series, totals = svc.get_balance_event_series(
+        discord_id=1, guild_id=123
+    )
+
+    assert [info["delta"] for _, _, info in series] == [99]
+    assert totals == {SOURCE_WHEEL: 99}
+
+
 def test_double_or_nothing_delta_from_balance_math():
     svc, repos = _build_service()
     repos["player_repo"].get_double_or_nothing_history.return_value = [

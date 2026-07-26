@@ -1316,6 +1316,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         garnishment_rate: float,
         bankruptcy_penalty_rate: float = 0.0,
         *,
+        vanity_tax_rate: float = 0.0,
         source: str | None = None,
         actor_id: int | None = None,
         related_type: str | None = None,
@@ -1360,7 +1361,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         if amount <= 0:
             # Nothing to credit => nothing to garnish and no "net" to base a
             # penalty on. Callers shouldn't be requesting a penalty here.
-            return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
+            return {
+                "gross": amount,
+                "garnished": 0,
+                "net": amount,
+                "bankruptcy_penalty": 0,
+                "vanity_tax": 0,
+            }
 
         with self.atomic_transaction() as conn:
             return self._add_balance_with_garnishment_cursor(
@@ -1370,6 +1377,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 amount,
                 garnishment_rate,
                 bankruptcy_penalty_rate,
+                vanity_tax_rate,
                 source=source,
                 actor_id=actor_id,
                 related_type=related_type,
@@ -1384,6 +1392,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         guild_id: int | None,
         garnishment_rate: float,
         *,
+        vanity_tax_rates: dict[int, float] | None = None,
         source: str | None = None,
         actor_id: int | None = None,
         related_type: str | None = None,
@@ -1402,6 +1411,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return []
 
         guild_id = self.normalize_guild_id(guild_id)
+        tax_rates = vanity_tax_rates or {}
         if all(amount <= 0 for _discord_id, amount, _penalty_rate in awards):
             return [
                 {
@@ -1409,6 +1419,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     "garnished": 0,
                     "net": amount,
                     "bankruptcy_penalty": 0,
+                    "vanity_tax": 0,
                 }
                 for _discord_id, amount, _penalty_rate in awards
             ]
@@ -1423,6 +1434,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     amount,
                     garnishment_rate,
                     bankruptcy_penalty_rate,
+                    tax_rates.get(discord_id, 0.0),
                     source=source,
                     actor_id=actor_id,
                     related_type=related_type,
@@ -1441,6 +1453,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         amount: int,
         garnishment_rate: float,
         bankruptcy_penalty_rate: float,
+        vanity_tax_rate: float,
         *,
         source: str | None,
         actor_id: int | None,
@@ -1451,7 +1464,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
     ) -> dict[str, int]:
         """Apply one award using a caller-owned transaction cursor."""
         if amount <= 0:
-            return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
+            return {
+                "gross": amount,
+                "garnished": 0,
+                "net": amount,
+                "bankruptcy_penalty": 0,
+                "vanity_tax": 0,
+            }
 
         cursor.execute(
             "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
@@ -1541,11 +1560,40 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 if has_context:
                     self._clear_economy_ledger_context(cursor)
 
+        vanity_tax = (
+            int(net_before_penalty * vanity_tax_rate)
+            if vanity_tax_rate > 0 and net_before_penalty > 0
+            else 0
+        )
+        if vanity_tax > 0:
+            self._set_economy_ledger_context(
+                cursor,
+                source="vanity_tax",
+                actor_id=actor_id,
+                related_type=related_type,
+                related_id=related_id,
+                reason="vanity tax on JC profit",
+                metadata=metadata,
+            )
+            try:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (vanity_tax, discord_id, guild_id),
+                )
+            finally:
+                self._clear_economy_ledger_context(cursor)
+
         return {
             "gross": amount,
             "garnished": garnished,
-            "net": net_before_penalty - penalty,
+            "net": net_before_penalty - penalty - vanity_tax,
             "bankruptcy_penalty": penalty,
+            "vanity_tax": vanity_tax,
         }
 
     def pay_debt_atomic(
@@ -3308,7 +3356,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT result, spin_time
+                SELECT result, spin_time, outcome_metadata
                 FROM wheel_spins
                 WHERE discord_id = ? AND guild_id = ?
                 ORDER BY spin_time ASC
@@ -3316,7 +3364,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
             return [
-                {"result": row["result"], "spin_time": row["spin_time"]}
+                {
+                    "result": row["result"],
+                    "spin_time": row["spin_time"],
+                    "outcome_metadata": row["outcome_metadata"],
+                }
                 for row in cursor.fetchall()
             ]
 

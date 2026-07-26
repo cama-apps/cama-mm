@@ -587,12 +587,15 @@ class MafiaRepository(BaseRepository):
         payout_deltas: dict[int, int],
         entry_fee: int,
         bankruptcy_penalty_rate: float | None = None,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
         nonprofit_overflow: int = 0,
         ended_at: int | None = None,
     ) -> dict[str, Any]:
         """Atomically apply lynch, payouts, bankruptcy sinks, and DAY -> RESOLVED."""
         ended = ended_at if ended_at is not None else int(time.time())
         penalties: dict[int, int] = {}
+        vanity_taxes: dict[int, int] = {}
         gid: int | None = None
 
         with self.atomic_transaction() as conn:
@@ -721,7 +724,45 @@ class MafiaRepository(BaseRepository):
                 finally:
                     self._clear_economy_ledger_context(cursor)
 
-            return {"applied": True, "bankruptcy_penalties": penalties, "guild_id": gid}
+            if vanity_tax_rate > 0 and vanity_taxable_ids:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="vanity_tax",
+                    related_type="mafia_game",
+                    related_id=game_id,
+                    reason="vanity tax on JC profit",
+                    metadata={"winner": winner.value, "entry_fee": entry_fee},
+                )
+                try:
+                    for discord_id, amount in payout_deltas.items():
+                        if discord_id not in vanity_taxable_ids:
+                            continue
+                        profit = max(0, int(amount) - entry_fee)
+                        tax = int(profit * vanity_tax_rate)
+                        if tax <= 0:
+                            continue
+                        cursor.execute(
+                            """
+                            UPDATE players
+                            SET jopacoin_balance =
+                                    COALESCE(jopacoin_balance, 0) - ?,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE discord_id = ? AND guild_id = ?
+                            """,
+                            (tax, discord_id, gid),
+                        )
+                        if cursor.rowcount != 1:
+                            raise ValueError("vanity_tax_player_missing")
+                        vanity_taxes[discord_id] = tax
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            return {
+                "applied": True,
+                "bankruptcy_penalties": penalties,
+                "vanity_taxes": vanity_taxes,
+                "guild_id": gid,
+            }
 
     # ── Players ─────────────────────────────────────────────────────────────
 

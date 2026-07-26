@@ -223,6 +223,52 @@ async def test_on_ready_retains_one_supervised_duel_worker(bot_module):
     assert reconcile_lobbies.await_count == 2
 
 
+def test_refresh_vanity_tax_memberships_uses_current_guild_members(bot_module):
+    service = MagicMock()
+    guilds = [
+        SimpleNamespace(id=42, members=[SimpleNamespace(id=7, nick=None)]),
+        SimpleNamespace(id=84, members=[SimpleNamespace(id=8, nick="Real Name")]),
+    ]
+
+    with (
+        patch.object(bot_module.bot, "vanity_tax_service", service, create=True),
+        patch.object(
+            type(bot_module.bot),
+            "guilds",
+            new_callable=lambda: property(lambda _self: guilds),
+        ),
+    ):
+        bot_module._refresh_vanity_tax_memberships()
+
+    assert service.refresh_guild.call_args_list == [
+        call(42, guilds[0].members),
+        call(84, guilds[1].members),
+    ]
+
+
+async def test_member_events_keep_vanity_tax_membership_current(bot_module):
+    service = MagicMock()
+    guild = SimpleNamespace(id=42)
+    before = SimpleNamespace(id=7, guild=guild, nick=None)
+    after = SimpleNamespace(id=7, guild=guild, nick="Real Name")
+
+    with patch.object(
+        bot_module.bot,
+        "vanity_tax_service",
+        service,
+        create=True,
+    ):
+        await bot_module.on_member_join(before)
+        await bot_module.on_member_update(before, after)
+        await bot_module.on_member_remove(after)
+
+    assert service.update_member.call_args_list == [
+        call(42, 7, None),
+        call(42, 7, "Real Name"),
+    ]
+    service.remove_member.assert_called_once_with(42, 7)
+
+
 async def test_reconcile_persisted_lobby_message_removes_legacy_frogling_reaction(
     bot_module,
 ):

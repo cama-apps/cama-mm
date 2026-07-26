@@ -789,6 +789,8 @@ class BetRepository(BaseRepository, IBetRepository):
         betting_mode: str = "pool",
         pending_match_id: int | None = None,
         bankruptcy_penalty_rate: float | None = None,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
         bet_seed_radiant: int = 0,
         bet_seed_dire: int = 0,
         bet_seed_bonus: int = 0,
@@ -917,6 +919,31 @@ class BetRepository(BaseRepository, IBetRepository):
                 if penalties:
                     distributions["bankruptcy_penalties"] = penalties
 
+            vanity_taxes = self._calculate_vanity_taxes(
+                distributions,
+                vanity_taxable_ids or frozenset(),
+                vanity_tax_rate,
+            )
+            if vanity_taxes:
+                distributions["vanity_taxes"] = vanity_taxes
+            cursor.execute(
+                "DELETE FROM bet_settlement_taxes "
+                "WHERE match_id = ? AND guild_id = ?",
+                (match_id, normalized_guild),
+            )
+            if vanity_taxes:
+                cursor.executemany(
+                    """
+                    INSERT INTO bet_settlement_taxes (
+                        match_id, guild_id, discord_id, vanity_tax
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (match_id, normalized_guild, discord_id, tax)
+                        for discord_id, tax in vanity_taxes.items()
+                    ],
+                )
+
             if balance_deltas:
                 self._set_economy_ledger_context(
                     cursor,
@@ -941,6 +968,42 @@ class BetRepository(BaseRepository, IBetRepository):
                         [
                             (delta, discord_id, normalized_guild)
                             for discord_id, delta in balance_deltas.items()
+                        ],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+
+            if vanity_taxes:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="vanity_tax",
+                    related_type=(
+                        "pending_match"
+                        if pending_match_id is not None
+                        else "bet_window"
+                    ),
+                    related_id=(
+                        pending_match_id
+                        if pending_match_id is not None
+                        else since_ts
+                    ),
+                    reason="vanity tax on JC profit",
+                    metadata={
+                        "winning_team": winning_team,
+                        "betting_mode": betting_mode,
+                    },
+                )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [
+                            (tax, discord_id, normalized_guild)
+                            for discord_id, tax in vanity_taxes.items()
                         ],
                     )
                 finally:
@@ -1130,6 +1193,40 @@ class BetRepository(BaseRepository, IBetRepository):
             balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) - penalty
             penalties[discord_id] = penalty
         return penalties
+
+    def _calculate_vanity_taxes(
+        self,
+        distributions: dict,
+        taxable_ids: frozenset[int] | set[int],
+        tax_rate: float,
+    ) -> dict[int, int]:
+        """Calculate a profit-only vanity tax without touching stake basis."""
+        if tax_rate <= 0 or not taxable_ids:
+            return {}
+        aggregate: dict[int, dict[str, int]] = {}
+        for winner in distributions.get("winners", []):
+            discord_id = int(winner["discord_id"])
+            if discord_id not in taxable_ids:
+                continue
+            item = aggregate.setdefault(discord_id, {"payout": 0, "stake": 0})
+            item["payout"] += int(winner.get("payout", 0))
+            item["stake"] += int(
+                winner.get("effective_bet", winner.get("amount", 0))
+            )
+        for loser in distributions.get("losers", []):
+            discord_id = int(loser["discord_id"])
+            if discord_id in aggregate:
+                aggregate[discord_id]["stake"] += int(
+                    loser.get("effective_bet", loser.get("amount", 0))
+                )
+
+        taxes: dict[int, int] = {}
+        for discord_id, item in aggregate.items():
+            profit = item["payout"] - item["stake"]
+            tax = int(profit * tax_rate) if profit > 0 else 0
+            if tax > 0:
+                taxes[discord_id] = tax
+        return taxes
 
     def _calculate_house_payouts(
         self,
@@ -1473,6 +1570,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     b.bet_time,
                     b.match_id,
                     b.payout,
+                    COALESCE(bst.vanity_tax, 0) AS settlement_vanity_tax,
                     CASE
                         WHEN m.winning_team = 1 AND b.team_bet_on = 'radiant' THEN 'won'
                         WHEN m.winning_team = 2 AND b.team_bet_on = 'dire' THEN 'won'
@@ -1480,6 +1578,10 @@ class BetRepository(BaseRepository, IBetRepository):
                     END as outcome
                 FROM bets b
                 JOIN matches m ON b.match_id = m.match_id
+                LEFT JOIN bet_settlement_taxes bst
+                  ON bst.match_id = b.match_id
+                 AND bst.guild_id = b.guild_id
+                 AND bst.discord_id = b.discord_id
                 WHERE b.discord_id = ? AND b.guild_id = ? AND b.match_id IS NOT NULL
                 ORDER BY b.bet_time ASC, b.bet_id ASC
                 """,
@@ -1487,9 +1589,20 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             rows = cursor.fetchall()
             results = []
+            taxed_matches: set[int] = set()
             for row in rows:
                 bet = dict(row)
                 effective_bet = bet["effective_bet"]
+                vanity_tax = 0
+                if (
+                    bet["outcome"] == "won"
+                    and bet["match_id"] not in taxed_matches
+                ):
+                    vanity_tax = int(bet.pop("settlement_vanity_tax", 0) or 0)
+                    taxed_matches.add(bet["match_id"])
+                else:
+                    bet.pop("settlement_vanity_tax", None)
+                bet["vanity_tax"] = vanity_tax
                 # Calculate profit: won = payout - effective_bet, lost = -effective_bet
                 if bet["outcome"] == "won":
                     # Use the stored payout when present. Only fall back to the
@@ -1497,7 +1610,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     # (unsettled/unknown) — a real stored 0 (a win that paid
                     # nothing) must not be treated as missing.
                     payout = bet["payout"] if bet["payout"] is not None else effective_bet * 2
-                    bet["profit"] = payout - effective_bet
+                    bet["profit"] = payout - effective_bet - vanity_tax
                 else:
                     bet["profit"] = -effective_bet
                 results.append(bet)
@@ -1662,6 +1775,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     WITH base AS (
                         SELECT
                             b.discord_id,
+                            b.guild_id,
                             b.bet_id,
                             b.match_id,
                             b.bet_time,
@@ -1705,7 +1819,12 @@ class BetRepository(BaseRepository, IBetRepository):
                                 THEN COALESCE(payout, effective_bet * 2) - effective_bet
                                 ELSE -effective_bet
                             END
-                        ) AS net_pnl,
+                        ) - COALESCE((
+                            SELECT SUM(bst.vanity_tax)
+                            FROM bet_settlement_taxes bst
+                            WHERE bst.guild_id = ordered.guild_id
+                              AND bst.discord_id = ordered.discord_id
+                        ), 0) AS net_pnl,
                         COUNT(DISTINCT match_id) AS unique_matches,
                         SUM(CASE WHEN leverage = 5 THEN 1 ELSE 0 END) AS five_x_bets,
                         SUM(
@@ -1769,7 +1888,12 @@ class BetRepository(BaseRepository, IBetRepository):
                         THEN COALESCE(b.payout, b.amount * COALESCE(b.leverage, 1) * 2)
                              - (b.amount * COALESCE(b.leverage, 1))
                         ELSE -(b.amount * COALESCE(b.leverage, 1))
-                    END) as net_pnl
+                    END) - COALESCE((
+                        SELECT SUM(bst.vanity_tax)
+                        FROM bet_settlement_taxes bst
+                        WHERE bst.guild_id = b.guild_id
+                          AND bst.discord_id = b.discord_id
+                    ), 0) as net_pnl
                 FROM bets b
                 JOIN matches m ON b.match_id = m.match_id
                 WHERE b.guild_id = ? AND b.match_id IS NOT NULL
@@ -2306,6 +2430,8 @@ class BetRepository(BaseRepository, IBetRepository):
         new_winners: list[dict],
         guild_id: int | None,
         pool_mode: bool = True,
+        vanity_tax_rate: float = 0.0,
+        vanity_taxable_ids: frozenset[int] | set[int] | None = None,
     ) -> dict[int, int]:
         """
         Apply a full bet-payout correction in ONE atomic transaction.
@@ -2341,6 +2467,23 @@ class BetRepository(BaseRepository, IBetRepository):
         new_deltas, payout_updates = self._compute_new_bet_payouts(
             match_id, new_winners, pool_mode=pool_mode, old_winners=old_winners,
         )
+        all_bets = self.get_settled_bets_for_match(match_id)
+        total_stakes: dict[int, int] = {}
+        for bet in all_bets:
+            discord_id = int(bet["discord_id"])
+            total_stakes[discord_id] = (
+                total_stakes.get(discord_id, 0)
+                + int(bet["effective_bet"])
+            )
+        taxable_ids = vanity_taxable_ids or frozenset()
+        new_vanity_taxes: dict[int, int] = {}
+        for discord_id, payout in new_deltas.items():
+            if discord_id not in taxable_ids:
+                continue
+            profit = int(payout) - total_stakes.get(discord_id, 0)
+            tax = int(profit * vanity_tax_rate) if profit > 0 else 0
+            if tax > 0:
+                new_vanity_taxes[discord_id] = tax
 
         # Merge reversal + new into the net per-player balance delta.
         combined_deltas: dict[int, int] = {}
@@ -2352,20 +2495,49 @@ class BetRepository(BaseRepository, IBetRepository):
         new_winner_bet_ids = {bet["bet_id"] for bet in new_winners}
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, vanity_tax
+                FROM bet_settlement_taxes
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, gid),
+            )
+            old_vanity_taxes = {
+                int(row["discord_id"]): int(row["vanity_tax"])
+                for row in cursor.fetchall()
+            }
+            for pid, tax in old_vanity_taxes.items():
+                combined_deltas[pid] = combined_deltas.get(pid, 0) + tax
+            for pid, tax in new_vanity_taxes.items():
+                combined_deltas[pid] = combined_deltas.get(pid, 0) - tax
 
             # 1+2. Apply net balance deltas to players in the SAME transaction
             # as the bets rewrite. Mirrors PlayerRepository.add_balance_many,
             # including lowest_balance_ever tracking for negative deltas.
             if combined_deltas:
-                cursor.executemany(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    [(delta, pid, gid) for pid, delta in combined_deltas.items()],
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="bet_correction",
+                    related_type="match",
+                    related_id=match_id,
+                    reason="corrected bet settlement",
                 )
+                try:
+                    cursor.executemany(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        [
+                            (delta, pid, gid)
+                            for pid, delta in combined_deltas.items()
+                        ],
+                    )
+                finally:
+                    self._clear_economy_ledger_context(cursor)
                 negative_ids = [pid for pid, delta in combined_deltas.items() if delta < 0]
                 if negative_ids:
                     placeholders = ",".join("?" * len(negative_ids))
@@ -2378,6 +2550,24 @@ class BetRepository(BaseRepository, IBetRepository):
                         """,
                         negative_ids + [gid],
                     )
+
+            cursor.execute(
+                "DELETE FROM bet_settlement_taxes "
+                "WHERE match_id = ? AND guild_id = ?",
+                (match_id, gid),
+            )
+            if new_vanity_taxes:
+                cursor.executemany(
+                    """
+                    INSERT INTO bet_settlement_taxes (
+                        match_id, guild_id, discord_id, vanity_tax
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        (match_id, gid, discord_id, tax)
+                        for discord_id, tax in new_vanity_taxes.items()
+                    ],
+                )
 
             # 3. Update payout column for new winners.
             if payout_updates:
@@ -2431,6 +2621,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     b.team_bet_on,
                     b.amount * COALESCE(b.leverage, 1) as effective_bet,
                     b.payout,
+                    COALESCE(bst.vanity_tax, 0) AS settlement_vanity_tax,
                     CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END as player_team,
                     m.winning_team,
                     CASE
@@ -2448,6 +2639,10 @@ class BetRepository(BaseRepository, IBetRepository):
                 JOIN bets b ON b.match_id = m.match_id
                     AND b.discord_id != ?
                     AND b.guild_id = ?
+                LEFT JOIN bet_settlement_taxes bst
+                    ON bst.match_id = b.match_id
+                    AND bst.guild_id = b.guild_id
+                    AND bst.discord_id = b.discord_id
                 WHERE mp.discord_id = ?
                     AND mp.guild_id = ?
                     AND m.winning_team IS NOT NULL
@@ -2458,13 +2653,24 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             rows = cursor.fetchall()
             results = []
+            taxed_settlements: set[tuple[int, int]] = set()
             for row in rows:
                 bet = dict(row)
                 effective_bet = bet["effective_bet"]
+                vanity_tax = 0
+                tax_key = (int(bet["bettor_id"]), int(bet["match_id"]))
+                if bet["won"] and tax_key not in taxed_settlements:
+                    vanity_tax = int(
+                        bet.pop("settlement_vanity_tax", 0) or 0
+                    )
+                    taxed_settlements.add(tax_key)
+                else:
+                    bet.pop("settlement_vanity_tax", None)
+                bet["vanity_tax"] = vanity_tax
                 # Calculate profit: won = payout - effective_bet, lost = -effective_bet
                 if bet["won"]:
                     payout = bet["payout"] if bet["payout"] else effective_bet * 2
-                    bet["profit"] = payout - effective_bet
+                    bet["profit"] = payout - effective_bet - vanity_tax
                 else:
                     bet["profit"] = -effective_bet
                 results.append(bet)

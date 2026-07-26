@@ -143,6 +143,7 @@ class DigService(
         protection_service=None,
         curse_repo=None,
         economy_event_service=None,
+        vanity_tax_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -157,6 +158,7 @@ class DigService(
         self.protection_service = protection_service
         self.curse_repo = curse_repo
         self.economy_event_service = economy_event_service
+        self.vanity_tax_service = vanity_tax_service
         # Sub-services for focused concerns. Defaults wire local instances so
         # existing callers (and tests that construct DigService directly) keep
         # working without having to pass anything new.
@@ -205,13 +207,29 @@ class DigService(
         )
         return info["penalized"], info["penalty_applied"]
 
+    def _apply_jc_profit_policies(
+        self, discord_id: int, guild_id, amount: int
+    ) -> tuple[int, int, int]:
+        """Apply bankruptcy and vanity deductions to the same gross profit."""
+        net, bankruptcy_penalty = self._penalize_jc(
+            discord_id, guild_id, amount
+        )
+        vanity_tax = (
+            self.vanity_tax_service.calculate_tax(
+                discord_id, guild_id, amount
+            )
+            if self.vanity_tax_service is not None
+            else 0
+        )
+        return net - vanity_tax, bankruptcy_penalty, vanity_tax
+
     def _net_boss_payout(
         self,
         discord_id: int,
         guild_id,
         base_reward: int,
         wager_profit: int,
-    ) -> tuple[int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int]:
         """Resolve a boss win's JC payout in one place.
 
         Applies the daily economy event to the base reward, positive-JC
@@ -225,12 +243,14 @@ class DigService(
         gross_base = self._apply_daily_economy_reward(guild_id, base_reward)
         scaled_base = scale_positive_dig_jc(gross_base)
         gross_payout = gross_base + wager_profit
-        net_payout, bankruptcy_penalty = self._penalize_jc(
-            discord_id, guild_id, scaled_base + wager_profit
+        net_payout, bankruptcy_penalty, vanity_tax = (
+            self._apply_jc_profit_policies(
+                discord_id, guild_id, scaled_base + wager_profit
+            )
         )
         return (
             gross_base, scaled_base, gross_payout, net_payout,
-            bankruptcy_penalty,
+            bankruptcy_penalty, vanity_tax,
         )
 
     def _clamp_loss_debit(self, discord_id: int, guild_id, jc_delta: int) -> int:
@@ -1241,7 +1261,11 @@ class DigService(
         # Bankruptcy debuff: a penalized digger keeps only the configured
         # fraction of their yield. Applied last (after all yield modifiers) and
         # before the credit; the withheld share is a coin sink.
-        jc_earned, dig_bankruptcy_penalty = self._penalize_jc(discord_id, guild_id, jc_earned)
+        (
+            jc_earned,
+            dig_bankruptcy_penalty,
+            dig_vanity_tax,
+        ) = self._apply_jc_profit_policies(discord_id, guild_id, jc_earned)
 
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
@@ -1389,11 +1413,13 @@ class DigService(
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc_earned,
+            vanity_tax=dig_vanity_tax,
             tunnel_updates=final_tunnel_updates,
             consume_inventory_item_ids=consumed_item_row_ids,
             log_detail={
                 "advance": advance, "jc": jc_earned,
                 "gross_jc": gross_jc,
+                "vanity_tax": dig_vanity_tax,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "overgrowth_bonus": overgrowth_bonus,
                 "depth_before": depth_before, "depth_after": new_depth,
@@ -1431,6 +1457,7 @@ class DigService(
             nonstreak_jc=nonstreak_jc,
             nonstreak_cap=base_cap,
             bankruptcy_penalty=dig_bankruptcy_penalty,
+            vanity_tax=dig_vanity_tax,
             milestone_bonus=milestone_bonus,
             streak_bonus=streak_bonus,
             cave_in=False,

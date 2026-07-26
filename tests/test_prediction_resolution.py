@@ -355,6 +355,85 @@ def test_resolve_orderbook_bankruptcy_penalty_is_netted_in_txn(
     assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == payout - penalty
 
 
+def test_resolve_orderbook_vanity_tax_is_audited_and_rollback_safe(
+    repo_db_path, player_repository
+):
+    from types import SimpleNamespace
+
+    from services.vanity_tax_service import VanityTaxService
+
+    vanity_tax_service = VanityTaxService()
+    vanity_tax_service.refresh_guild(
+        TEST_GUILD_ID, [SimpleNamespace(id=1, nick=None)]
+    )
+    prediction_repo = PredictionRepository(repo_db_path)
+    prediction_service = PredictionService(
+        prediction_repo=prediction_repo,
+        player_repo=player_repository,
+        admin_user_ids=[ADMIN_ID],
+        vanity_tax_service=vanity_tax_service,
+        economy_event_service=SimpleNamespace(
+            get_effects=lambda _guild_id: SimpleNamespace(
+                prediction_payout_multiplier=10.0
+            )
+        ),
+    )
+    _add_player(player_repository, 1, balance=1000)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID,
+        creator_id=1,
+        question="vanity tax?",
+        initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(
+        prediction_id=pid, discord_id=1, side="yes", contracts=5
+    )
+    cost = prediction_repo.get_position(pid, 1)["yes_cost_basis_total"]
+    pre = player_repository.get_balance(1, TEST_GUILD_ID)
+
+    result = prediction_service.resolve_orderbook(
+        prediction_id=pid, outcome="yes"
+    )
+
+    gross_payout = 5 * PREDICTION_CONTRACT_VALUE * 10
+    tax = int((gross_payout - cost) * 0.01)
+    assert tax > 0
+    winner = next(w for w in result["winners"] if w["discord_id"] == 1)
+    assert winner["vanity_tax"] == tax
+    assert winner["payout"] == gross_payout - tax
+    assert player_repository.get_balance(1, TEST_GUILD_ID) - pre == gross_payout - tax
+
+    stats = prediction_repo.get_user_orderbook_stats(1, TEST_GUILD_ID)
+    assert stats["realized_pnl"] == gross_payout - cost - tax
+    with prediction_repo.connection() as conn:
+        row = conn.execute(
+            "SELECT delta, related_type, related_id "
+            "FROM economy_ledger_entries "
+            "WHERE guild_id = ? AND account_id = ? AND source = 'vanity_tax'",
+            (TEST_GUILD_ID, 1),
+        ).fetchone()
+    assert row is not None
+    assert row["delta"] == -tax
+    assert row["related_type"] == "prediction"
+    assert row["related_id"] == str(pid)
+
+    rollback = prediction_service.rollback_orderbook(
+        prediction_id=pid,
+        guild_id=TEST_GUILD_ID,
+        rolled_back_by=ADMIN_ID,
+    )
+    assert rollback["total_reversed"] == gross_payout - tax
+    assert player_repository.get_balance(1, TEST_GUILD_ID) == pre
+    with prediction_repo.connection() as conn:
+        row = conn.execute(
+            "SELECT vanity_tax FROM prediction_positions "
+            "WHERE prediction_id = ? AND discord_id = ?",
+            (pid, 1),
+        ).fetchone()
+    assert row["vanity_tax"] == 0
+
+
 def test_orderbook_stats_net_bankruptcy_penalty_for_winner(
     repo_db_path, player_repository
 ):

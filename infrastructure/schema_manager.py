@@ -470,6 +470,14 @@ class SchemaManager:
             # realized-P&L stats / balance-chart deltas match the JC actually
             # credited (mirrors match_participants.bonus_jc).
             ("add_bankruptcy_penalty_to_prediction_positions", self._migration_add_bankruptcy_penalty_to_prediction_positions),
+            (
+                "add_vanity_tax_to_prediction_positions",
+                self._migration_add_vanity_tax_to_prediction_positions,
+            ),
+            (
+                "create_bet_settlement_taxes_table",
+                self._migration_create_bet_settlement_taxes_table,
+            ),
             # Immutable package-deal purchase log so year-in-review counts deals
             # even after they are consumed/deleted.
             ("create_package_deal_purchases_table", self._migration_create_package_deal_purchases_table),
@@ -2049,6 +2057,36 @@ class SchemaManager:
         instead of the gross figure. Mirrors match_participants.bonus_jc."""
         self._add_column_if_not_exists(
             cursor, "prediction_positions", "bankruptcy_penalty", "INTEGER NOT NULL DEFAULT 0"
+        )
+
+    def _migration_add_vanity_tax_to_prediction_positions(self, cursor) -> None:
+        """Snapshot vanity tax withheld from prediction profit for rollback."""
+        self._add_column_if_not_exists(
+            cursor,
+            "prediction_positions",
+            "vanity_tax",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+
+    def _migration_create_bet_settlement_taxes_table(self, cursor) -> None:
+        """Persist the current per-player tax for each settled match."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bet_settlement_taxes (
+                match_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                vanity_tax INTEGER NOT NULL DEFAULT 0
+                    CHECK (vanity_tax >= 0),
+                PRIMARY KEY (match_id, guild_id, discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_bet_settlement_taxes_player
+            ON bet_settlement_taxes(guild_id, discord_id)
+            """
         )
 
     def _migration_dig_boss_revamp_columns(self, cursor) -> None:

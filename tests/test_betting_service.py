@@ -1374,3 +1374,65 @@ def test_award_win_bonus_skims_blood_pact_on_net(services):
     assert results[pid]["net"] == expected_net - 1
     # Mock skim moves no coins: the player holds the credited net.
     assert player_repo.get_balance(pid, TEST_GUILD_ID) == expected_net
+
+
+def test_award_win_bonus_applies_vanity_tax_before_blood_pact(
+    services, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from services.vanity_tax_service import VanityTaxService
+
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+
+    pid = 9651
+    player_repo.add(
+        discord_id=pid,
+        discord_username="VanityWinner",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.update_balance(pid, TEST_GUILD_ID, 0)
+
+    vanity_tax_service = VanityTaxService()
+    vanity_tax_service.refresh_guild(
+        TEST_GUILD_ID, [SimpleNamespace(id=pid, nick=None)]
+    )
+    betting_service.vanity_tax_service = vanity_tax_service
+    bankruptcy_service = MagicMock()
+    bankruptcy_service.get_bulk_states.return_value = {
+        pid: SimpleNamespace(penalty_games_remaining=1)
+    }
+    bankruptcy_service.penalty_rate = 0.5
+    betting_service.bankruptcy_service = bankruptcy_service
+
+    buff_service = MagicMock()
+    buff_service.has_sanctuary_match_bonus.return_value = False
+    buff_service.buff_repo.active_for_many.return_value = {pid: []}
+    buff_service.get_blood_pact_targets.return_value = {pid}
+    buff_service.apply_blood_pact_skim.return_value = 1
+    betting_service.buff_service = buff_service
+    monkeypatch.setattr("services.betting_service.JOPACOIN_WIN_REWARD", 200)
+
+    results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
+
+    assert results[pid]["gross"] == 200
+    assert results[pid]["bankruptcy_penalty"] == 100
+    assert results[pid]["vanity_tax"] == 2
+    buff_service.apply_blood_pact_skim.assert_called_once_with(
+        pid, TEST_GUILD_ID, 98, player_repo
+    )
+    assert results[pid]["blood_pact_skimmed"] == 1
+    assert results[pid]["net"] == 97
+    # Mock skim moves no coins: the player holds the credited post-tax net.
+    assert player_repo.get_balance(pid, TEST_GUILD_ID) == 98
+    with player_repo.connection() as conn:
+        row = conn.execute(
+            "SELECT delta FROM economy_ledger_entries "
+            "WHERE guild_id = ? AND account_id = ? AND source = 'vanity_tax'",
+            (TEST_GUILD_ID, pid),
+        ).fetchone()
+    assert row is not None
+    assert row["delta"] == -2

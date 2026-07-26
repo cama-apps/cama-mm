@@ -44,21 +44,12 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
    uv sync --frozen
    ```
 
-3. **Set up Discord Bot:**
-   - Go to [Discord Developer Portal](https://discord.com/developers/applications)
-   - Create a new application
-   - Go to "Bot" section and create a bot
-   - Copy the bot token
-   - Enable the following Privileged Gateway Intents:
-     - MESSAGE CONTENT INTENT
-     - SERVER MEMBERS INTENT
+3. **Configure Discord:**
+   - In the [Developer Portal](https://discord.com/developers/applications), create the bot and enable the Message Content, Server Members, and Presence intents. Server Members supplies nickname updates; Manage Nicknames is not required.
+   - Under OAuth2 > URL Generator, select the `bot` and `applications.commands` scopes, then grant: View Channels, Send Messages, Manage Messages, Create Public Threads, Send Messages in Threads, Pin Messages, Manage Threads, Embed Links, Read Message History, Use External Emojis, Use External Stickers, and Add Reactions.
+   - Open the generated URL to invite the bot.
 
-4. **Configure Bot Permissions:**
-   - In the OAuth2 > URL Generator section, select:
-     - Scopes: `bot`, `applications.commands`
-     - Permissions: View Channels, Send Messages, Manage Messages, Create Public Threads, Send Messages in Threads, Pin Messages, Manage Threads, Embed Links, Read Message History, Use External Emojis, Use External Stickers, Add Reactions
-
-5. **Set up environment variables:**
+4. **Set up environment variables:**
    - Create a file named `.env` in the project root (same folder as `bot.py`)
    - Add your Discord bot token and admin allowlist (comma-separated Discord user IDs):
      ```
@@ -79,12 +70,6 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
    posts there. To also hide the slash commands from other channels, restrict
    the bot's integration in Discord: Server Settings → Integrations → Cama MM →
    Channels.
-
-6. **Invite bot to your server:**
-   - In Discord Developer Portal, go to OAuth2 > URL Generator
-   - Select scopes: `bot` and `applications.commands`
-   - Select bot permissions as listed in step 4
-   - Copy the generated URL and open it in your browser to invite the bot
 
 ## Running the Bot
 
