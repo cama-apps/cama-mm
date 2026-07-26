@@ -1743,11 +1743,11 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         prompt_description="His mouth is no longer a mouth. It is a question.",
         options=(
             MechanicOption(
-                label="Offer a ration",
-                flavor="You toss your last loaf into the maw.",
+                label="Throw a loose stone",
+                flavor="You skip a shard of rubble across the maw.",
                 outcome_rolls=(
-                    OutcomeRoll(0.65, 0, -2, None, None,        "He chews, distracted. You land two clean strikes."),
-                    OutcomeRoll(0.35, -1, -1, None, None,       "He swallows fast and lashes back. Trade."),
+                    OutcomeRoll(0.65, 0, -2, None, None,        "He snaps at the clatter. You land two clean strikes."),
+                    OutcomeRoll(0.35, -1, -1, None, None,       "He ignores the feint and lashes back. Trade."),
                 ),
             ),
             MechanicOption(
@@ -1759,11 +1759,11 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 ),
             ),
             MechanicOption(
-                label="Empty your pockets and run a step back",
-                flavor="Distraction by surplus.",
+                label="Hold the outer ring",
+                flavor="You keep a measured distance from the hunger.",
                 outcome_rolls=(
-                    OutcomeRoll(0.75, -1, 0, None, None,        "He stoops to scoop coins. You buy a breath."),
-                    OutcomeRoll(0.25, -2, -1, None, None,       "He sees through it but still bites a coin. You both bleed."),
+                    OutcomeRoll(0.75, 0, 0, None, None,         "You let the lunge fall short and keep your footing."),
+                    OutcomeRoll(0.25, -1, -1, None, None,       "His reach clips you, but your retreat opens his guard."),
                 ),
             ),
         ),
@@ -1780,7 +1780,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Listen — let him finish",
                 flavor="You lower your weapon. He nods.",
                 outcome_rolls=(
-                    OutcomeRoll(0.55, 0, -2, None, "reveal",     "He whispers a weakness in his armor. The crown brightens, then dims."),
+                    OutcomeRoll(0.55, 0, -1, None, "reveal",     "He whispers a weakness in his armor. The crown brightens, then dims."),
                     OutcomeRoll(0.45, -2, 0, None, None,         "His final word was a curse. You stagger."),
                 ),
             ),
@@ -1823,7 +1823,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 ),
             ),
             MechanicOption(
-                label="Brace and let it close",
+                label="Risk a brace against the crush",
                 flavor="You wedge your pick into the wall.",
                 outcome_rolls=(
                     OutcomeRoll(0.55, -1, -1, None, None,         "The squeeze stalls. Both of you stuck, both of you bleeding."),
@@ -1860,8 +1860,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Wait it out",
                 flavor="You hold ground and watch.",
                 outcome_rolls=(
-                    OutcomeRoll(0.70, -1, -1, None, None,         "Slow trade. You see the new shape and chip what you can."),
-                    OutcomeRoll(0.30, -2, 0, None, "bleed",       "It reshapes around your stillness. A spike grazes your side."),
+                    OutcomeRoll(0.75, 0, 0, None, None,           "You let the new shape settle before choosing your ground."),
+                    OutcomeRoll(0.25, -1, -1, None, None,         "A last edge catches you, but you chip it as you give ground."),
                 ),
             ),
             MechanicOption(
@@ -1895,19 +1895,19 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="You attack the air at random.",
                 outcome_rolls=(
                     OutcomeRoll(0.45, -1, -2, None, None,           "You hit something. Hard to say what."),
-                    OutcomeRoll(0.55, -2, 0, None, "bleed",         "The voices were a feint. The real strike came from behind."),
+                    OutcomeRoll(0.55, -2, 0, None, None,            "The voices were a feint. The real strike came from behind."),
                 ),
             ),
             MechanicOption(
                 label="Sing back",
                 flavor="You match their pitch with a curse of your own.",
                 outcome_rolls=(
-                    OutcomeRoll(0.50, -1, -2, None, None,           "The chorus stutters. You step in and chip the wall."),
-                    OutcomeRoll(0.50, -2, -1, None, None,           "Both of you mid-song, both of you bleeding."),
+                    OutcomeRoll(0.75, 0, -1, None, None,            "The chorus quiets around your steady note. You chip the wall."),
+                    OutcomeRoll(0.25, -1, 0, None, None,            "Your voice cracks, but the chorus loses its rhythm too."),
                 ),
             ),
         ),
-        safe_option_idx=0,
+        safe_option_idx=2,
     ),
 
     # ================================================================
@@ -1940,8 +1940,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Lock haft to haft, push him into the wall",
                 flavor="A wrestler's move underground.",
                 outcome_rolls=(
-                    OutcomeRoll(0.55, -1, -2, None, None,            "You out-leverage him. He cracks against stone."),
-                    OutcomeRoll(0.45, -2, -1, None, None,            "He's been at this for a century. You both stagger."),
+                    OutcomeRoll(0.35, 0, -4, None, None,              "You turn the lock and drive him hard into the wall."),
+                    OutcomeRoll(0.65, -4, 0, "player", "bleed",    "He has done this for centuries. The wall catches you instead."),
                 ),
             ),
         ),
@@ -1979,7 +1979,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 ),
             ),
         ),
-        safe_option_idx=1,
+        safe_option_idx=0,
     ),
     "digger_tunnel_collapse": BossMechanic(
         id="digger_tunnel_collapse",
@@ -2008,8 +2008,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Push deeper — into him",
                 flavor="If he is the tunnel, you can attack the tunnel.",
                 outcome_rolls=(
-                    OutcomeRoll(0.45, 0, -4, None, None,              "You strike the floor — and he flinches."),
-                    OutcomeRoll(0.55, -3, -1, None, None,             "The floor swallows you both. Painful for both of you."),
+                    OutcomeRoll(0.30, 0, -5, None, None,              "You strike the floor — and he flinches."),
+                    OutcomeRoll(0.70, -4, -1, "player", None,       "The floor swallows you both. Painful for both of you."),
                 ),
             ),
         ),
@@ -3138,12 +3138,147 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
     "digger_last_excavation": _variety_mechanic(
         mechanic_id="digger_last_excavation",
         archetype="environmental_collapse",
-        trigger_round=5,
+        trigger_round=4,
         title="The Digger Eternal begins the last excavation",
         description="Every wall peels backward toward a shaft older than the mine.",
         labels=("Brace the nearest wall", "Break his digging rhythm", "Dig toward him"),
         flavors=("You hold one piece of the chamber in place.", "You strike between the eternal blows.", "You race the first digger into the dark."),
         failure_status="bleed",
+    ),
+    # ================================================================
+    # PINNACLE — Bastion Below
+    # ================================================================
+    "bastion_three_roads": _variety_mechanic(
+        mechanic_id="bastion_three_roads", archetype="route_split", trigger_round=3,
+        title="The Bastion opens three roads", description="Each route has a gate, a watchtower, and an unseen cost.",
+        labels=("Take the quiet road", "Cut across the crossroads", "Sprint through the central gate"),
+        flavors=("You keep to the road with no banners.", "You cross before the watchtowers agree.", "You race the opening before it can close."),
+        failure_status="silence",
+    ),
+    "bastion_hidden_route": _variety_mechanic(
+        mechanic_id="bastion_hidden_route", archetype="ambush_route", trigger_round=4,
+        title="A hidden route turns beneath the wall", description="Stone stairs descend where the map says solid bedrock.",
+        labels=("Mark the turn and wait", "Break the false paving", "Descend without a lantern"),
+        flavors=("You leave yourself a way back.", "You crack the route's disguise.", "You take the stairs before they can vanish."),
+        failure_status="bleed",
+    ),
+    "bastion_fortify": _variety_mechanic(
+        mechanic_id="bastion_fortify", archetype="fortification", trigger_round=3,
+        title="The Lower Keep seals its breach", description="Masons of dust rebuild the wall between heartbeats.",
+        labels=("Watch the mortar line", "Strike the fresh keystone", "Climb the rising wall"),
+        flavors=("You track the one seam still settling.", "You hit before the stone learns its shape.", "You gamble on height and loose stone."),
+        failure_status="frostbite",
+    ),
+    "bastion_counter_siege": _variety_mechanic(
+        mechanic_id="bastion_counter_siege", archetype="siege_engine", trigger_round=4,
+        title="The Bastion answers with a counter-siege", description="A buried ram draws itself back along iron rails.",
+        labels=("Step out of the rail line", "Jam the ram's wheel", "Meet the ram head-on"),
+        flavors=("You give the mechanism room to miss.", "You cut for the axle at the last moment.", "You charge the iron before it gains speed."),
+        failure_status="burn",
+    ),
+    "bastion_throne_race": _variety_mechanic(
+        mechanic_id="bastion_throne_race", archetype="objective_race", trigger_round=3,
+        title="The command throne moves away", description="The fortress carries its commander toward a closing inner gate.",
+        labels=("Keep pace along the parapet", "Cut the support chain", "Leap for the moving throne"),
+        flavors=("You match the fortress step for step.", "You gamble on one loaded chain.", "You jump before the gate decides for you."),
+        failure_status="bleed",
+    ),
+    "bastion_last_reserve": _variety_mechanic(
+        mechanic_id="bastion_last_reserve", archetype="last_stand", trigger_round=4,
+        title="The last reserve marches from the wall", description="Empty armor fills itself with the sound of marching boots.",
+        labels=("Hold the narrow approach", "Break the standard bearer", "Charge the whole reserve"),
+        flavors=("You force the line into one careful lane.", "You aim for the force holding them together.", "You throw yourself into the marching metal."),
+        failure_status="silence",
+    ),
+    # ================================================================
+    # PINNACLE — Pale Surveyor
+    # ================================================================
+    "surveyor_marked_ground": _variety_mechanic(
+        mechanic_id="surveyor_marked_ground", archetype="ground_marker", trigger_round=3,
+        title="The Pale Surveyor marks the ground", description="White lines divide the arena into squares that begin to sink.",
+        labels=("Stand between the marks", "Erase a corner rune", "Cross every line at once"),
+        flavors=("You find the unmeasured strip of stone.", "You grind one corner into chalk dust.", "You bet the map cannot follow every footstep."),
+        failure_status="frostbite",
+    ),
+    "surveyor_false_landmark": _variety_mechanic(
+        mechanic_id="surveyor_false_landmark", archetype="false_telegraph", trigger_round=4,
+        title="A false landmark rises", description="A familiar tunnel mouth appears at the edge of the arena.",
+        labels=("Measure its shadow", "Break the painted arch", "Run for the familiar tunnel"),
+        flavors=("You trust the shadow over the doorway.", "You test the landmark with your pick.", "You chase the shape of an exit."),
+        failure_status="silence",
+    ),
+    "surveyor_memory_echo": _variety_mechanic(
+        mechanic_id="surveyor_memory_echo", archetype="echo_strike", trigger_round=3,
+        title="The arena repeats your last step", description="An echo of your own stance advances with a surveyor's precision.",
+        labels=("Change your footing slowly", "Strike the echo's knee", "Mirror the echo exactly"),
+        flavors=("You give the copy less to steal.", "You aim for the copied joint.", "You dare it to predict itself."),
+        failure_status="bleed",
+    ),
+    "surveyor_folded_arena": _variety_mechanic(
+        mechanic_id="surveyor_folded_arena", archetype="arena_fold", trigger_round=4,
+        title="The arena folds through itself", description="Opposite walls touch, then exchange places without moving.",
+        labels=("Follow the nearest seam", "Cut the fold's hinge", "Dive through the closing crease"),
+        flavors=("You take the shortest line you can still see.", "You strike where the room bends.", "You enter the crease before it becomes a wall."),
+        failure_status="burn",
+    ),
+    "surveyor_corruption_ring": _variety_mechanic(
+        mechanic_id="surveyor_corruption_ring", archetype="shrinking_ring", trigger_round=3,
+        title="A ring of black chalk closes", description="The Surveyor leaves no safe ground outside the tightening circle.",
+        labels=("Keep to the inner edge", "Smudge the ring open", "Dash through the black chalk"),
+        flavors=("You move with the boundary instead of against it.", "You strike at the weakest fresh mark.", "You cross before the ring finishes writing itself."),
+        failure_status="frostbite",
+    ),
+    "surveyor_unwritten_end": _variety_mechanic(
+        mechanic_id="surveyor_unwritten_end", archetype="delayed_verdict", trigger_round=4,
+        title="The Surveyor leaves the ending blank", description="Every line of the arena points to the same unfinished square.",
+        labels=("Wait outside the blank", "Write across the boundary", "Stand in the unfinished square"),
+        flavors=("You refuse to supply the final mark.", "You force a line of your own into the plan.", "You make yourself the answer to the map."),
+        failure_status="silence",
+    ),
+    # ================================================================
+    # PINNACLE — Lantern Engine
+    # ================================================================
+    "lantern_heat_cycle": _variety_mechanic(
+        mechanic_id="lantern_heat_cycle", archetype="heat_telegraph", trigger_round=3,
+        title="The Lantern Engine begins a heat cycle", description="Its blue furnace brightens in three measured pulses.",
+        labels=("Keep outside the glow", "Crack a furnace plate", "Step into the hottest pulse"),
+        flavors=("You count the pulses from a cool patch of stone.", "You attack the seam between pulses.", "You chase the heat into its source."),
+        failure_status="burn",
+    ),
+    "lantern_venting_protocol": _variety_mechanic(
+        mechanic_id="lantern_venting_protocol", archetype="pressure_release", trigger_round=4,
+        title="A venting protocol starts", description="Brass shutters open above you with a scream of steam.",
+        labels=("Shelter behind the casing", "Turn a vent vane", "Ride the steam upward"),
+        flavors=("You use the engine's bulk as cover.", "You risk a hand near the scalding valve.", "You let the pressure choose your path."),
+        failure_status="burn",
+    ),
+    "lantern_overclock": _variety_mechanic(
+        mechanic_id="lantern_overclock", archetype="overclock", trigger_round=3,
+        title="The Lantern Engine overclocks", description="Every gear turns too fast, then faster still.",
+        labels=("Track one steady gear", "Wedge the governor", "Grab the spinning core"),
+        flavors=("You watch the only rhythm that remains human.", "You force a tool into the control wheel.", "You reach for the engine's brightest moving part."),
+        failure_status="frostbite",
+    ),
+    "lantern_gearstorm": _variety_mechanic(
+        mechanic_id="lantern_gearstorm", archetype="projectile_storm", trigger_round=4,
+        title="A gearstorm tears across the chamber", description="Loose teeth of brass orbit the engine before flying free.",
+        labels=("Stay behind a stone fin", "Bat a gear into the engine", "Run through the storm"),
+        flavors=("You let the stone take the first impact.", "You time one sharp return throw.", "You gamble that speed can outpace metal."),
+        failure_status="bleed",
+    ),
+    "lantern_critical_mass": _variety_mechanic(
+        mechanic_id="lantern_critical_mass", archetype="critical_charge", trigger_round=3,
+        title="The core reaches critical mass", description="Light pools under the engine like liquid waiting to spill.",
+        labels=("Back away from the pool", "Ground the core with your pick", "Kick the core loose"),
+        flavors=("You keep one careful step beyond the light.", "You make your pick a reluctant conductor.", "You try to send the whole problem rolling."),
+        failure_status="burn",
+    ),
+    "lantern_infinite_feedback": _variety_mechanic(
+        mechanic_id="lantern_infinite_feedback", archetype="feedback_loop", trigger_round=4,
+        title="The Lantern Engine finds infinite feedback", description="Your shadow repeats in its lenses until the room fills with you.",
+        labels=("Cover the nearest lens", "Shatter the return mirror", "Strike every reflection"),
+        flavors=("You reduce the loop one image at a time.", "You aim for the brightest return path.", "You attack the whole multiplying chamber."),
+        failure_status="silence",
     ),
 }
 

@@ -8,9 +8,11 @@ path that resolves the same phase (and settles the wager) twice.
 from __future__ import annotations
 
 import asyncio
+import io
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import discord
 import pytest
 
 import commands.dig_helpers.boss_views as bv
@@ -310,6 +312,197 @@ def test_pinnacle_phase_transition_uses_next_phase_title(monkeypatch):
         assert transition_embed.title == "The Digger Eternal Emerges!"
         assert "**The Digger Eternal**" in transition_embed.description
         assert "???" not in transition_embed.description
+
+    asyncio.run(scenario())
+
+
+def test_pinnacle_transition_renders_event_text_and_attaches_phase_art_to_encounter(
+    monkeypatch,
+):
+    from utils import dig_assets
+
+    phase_art = discord.File(io.BytesIO(b"phase"), filename="pinnacle_phase_2.png")
+    load_phase_art = AsyncMock(return_value=phase_art)
+    monkeypatch.setattr(dig_assets, "get_pinnacle_phase_art", load_phase_art, raising=False)
+    monkeypatch.setattr(bv, "BossEncounterView", MagicMock(return_value=MagicMock()))
+
+    async def scenario():
+        service = MagicMock()
+        service.build_next_boss_encounter.return_value = {
+            "boss_id": "forgotten_king",
+            "name": "The Crowned Hunger",
+            "dialogue": "The crown burns.",
+            "is_pinnacle": True,
+            "phase": 2,
+        }
+        service.has_scout_lantern.return_value = False
+        channel = SimpleNamespace(send=AsyncMock(return_value=MagicMock()))
+
+        await bv._post_phase_transition_followup(
+            channel,
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            result=SimpleNamespace(
+                phase2_incoming=True,
+                is_pinnacle=True,
+                next_phase_title="The Crowned Hunger",
+                dialogue="The crown burns.",
+                boss_name="The Forgotten King",
+                boss_id="forgotten_king",
+                boundary=350,
+                new_depth=350,
+                wager=0,
+                phase_event_flavor="The old crown catches fire.",
+                phase_event_description="Ash falls upward through the chamber.",
+            ),
+        )
+
+        transition_call, encounter_call = channel.send.await_args_list
+        transition_embed = transition_call.kwargs["embed"]
+        rendered = "\n".join(
+            [transition_embed.description or ""]
+            + [field.value for field in transition_embed.fields]
+        )
+        assert "The old crown catches fire." in rendered
+        assert "Ash falls upward through the chamber." in rendered
+        assert "file" not in transition_call.kwargs
+
+        encounter_embed = encounter_call.kwargs["embed"]
+        assert encounter_call.kwargs["file"] is phase_art
+        assert encounter_embed.image.url == "attachment://pinnacle_phase_2.png"
+        load_phase_art.assert_awaited_once_with(
+            "forgotten_king", 2, "The Hollow", secret=False,
+        )
+
+    asyncio.run(scenario())
+
+
+def test_regular_transition_does_not_render_pinnacle_event_presentation(monkeypatch):
+    monkeypatch.setattr(bv, "BossEncounterView", MagicMock(return_value=MagicMock()))
+
+    async def scenario():
+        service = MagicMock()
+        service.build_next_boss_encounter.return_value = {
+            "name": "Regular Second Form",
+            "dialogue": "Again.",
+        }
+        service.has_scout_lantern.return_value = False
+        channel = SimpleNamespace(send=AsyncMock(return_value=MagicMock()))
+
+        await bv._post_phase_transition_followup(
+            channel,
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            result=SimpleNamespace(
+                phase2_incoming=True,
+                is_pinnacle=False,
+                phase2_name="Regular Second Form",
+                phase2_title="Transformed",
+                dialogue="Again.",
+                boss_name="Regular Boss",
+                wager=0,
+                phase_event_flavor="Pinnacle-only flavor.",
+                phase_event_description="Pinnacle-only description.",
+            ),
+        )
+
+        transition_embed = channel.send.await_args_list[0].kwargs["embed"]
+        assert transition_embed.title == "Transformed Emerges!"
+        assert "**Regular Second Form**" in transition_embed.description
+        assert all(field.name != "Phase shift" for field in transition_embed.fields)
+        assert "Pinnacle-only" not in transition_embed.description
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("roll", "expected_title", "expected_dialogue", "expected_secret"),
+    [
+        (0.05, "The King Behind the Crown", "No court remains.", True),
+        (0.50, "The Last Breath of Kings", "Last breath.", False),
+    ],
+)
+def test_phase3_secret_roll_changes_only_presentation(
+    monkeypatch, roll, expected_title, expected_dialogue, expected_secret,
+):
+    import services.dig_data.bosses as boss_data
+    from utils import dig_assets
+
+    class FixedRandom:
+        def random(self):
+            return roll
+
+        def choice(self, values):
+            return values[-1]
+
+    phases = (
+        SimpleNamespace(secret_title=None, secret_dialogue=()),
+        SimpleNamespace(secret_title=None, secret_dialogue=()),
+        SimpleNamespace(
+            secret_title="The King Behind the Crown",
+            secret_dialogue=("The crown remembers.", "No court remains."),
+        ),
+    )
+    monkeypatch.setattr(
+        boss_data,
+        "PINNACLE_BOSSES",
+        {"forgotten_king": SimpleNamespace(phases=phases)},
+    )
+    monkeypatch.setattr(
+        boss_data, "PINNACLE_SECRET_PHASE_CHANCE", 0.10, raising=False,
+    )
+    monkeypatch.setattr(bv.random, "Random", lambda: FixedRandom())
+    load_phase_art = AsyncMock(
+        side_effect=lambda *args, **kwargs: discord.File(
+            io.BytesIO(b"phase"), filename="pinnacle_phase_3.gif",
+        ),
+    )
+    monkeypatch.setattr(dig_assets, "get_pinnacle_phase_art", load_phase_art, raising=False)
+    encounter_factory = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(bv, "BossEncounterView", encounter_factory)
+
+    async def scenario():
+        service = MagicMock()
+        service.build_next_boss_encounter.return_value = {
+            "boss_id": "forgotten_king",
+            "name": "The Last Breath of Kings",
+            "dialogue": "Last breath.",
+            "is_pinnacle": True,
+            "phase": 3,
+        }
+        service.has_scout_lantern.return_value = False
+        channel = SimpleNamespace(send=AsyncMock(return_value=MagicMock()))
+
+        await bv._post_phase_transition_followup(
+            channel,
+            dig_service=service,
+            user_id=42,
+            guild_id=7,
+            result=SimpleNamespace(
+                phase3_incoming=True,
+                is_pinnacle=True,
+                next_phase_title="The Last Breath of Kings",
+                dialogue="Last breath.",
+                boss_name="The Crowned Hunger",
+                boss_id="forgotten_king",
+                boundary=350,
+                new_depth=350,
+                wager=0,
+            ),
+        )
+
+        encounter_call = channel.send.await_args_list[1]
+        encounter_embed = encounter_call.kwargs["embed"]
+        assert encounter_embed.title == f"Boss Encountered: {expected_title}!"
+        assert encounter_embed.description == expected_dialogue
+        load_phase_art.assert_awaited_once_with(
+            "forgotten_king", 3, "The Hollow", secret=expected_secret,
+        )
+        original_info = encounter_factory.call_args.args[3]
+        assert original_info.name == "The Last Breath of Kings"
+        assert original_info.dialogue == "Last breath."
 
     asyncio.run(scenario())
 

@@ -1729,7 +1729,7 @@ PHASE_TRANSITION_EVENTS: list[PhaseTransitionEvent] = [
 # ---------------------------------------------------------------------------
 # Pinnacle Boss (boss revamp)
 # ---------------------------------------------------------------------------
-# A new 8th boss boundary at depth 350 that gates prestige. One of three
+# A new 8th boss boundary at depth 350 that gates prestige. One of six
 # pinnacle candidates is rolled and locked per prestige cycle.
 # Always 3 phases. Drops a relic with 2 random rolls on victory.
 
@@ -1743,6 +1743,8 @@ class PinnaclePhaseDef:
     title: str
     transition_dialogue: list[str]
     mechanic_pool: tuple[str, ...] = ()
+    secret_title: str | None = None
+    secret_dialogue: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1795,6 +1797,11 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                     "I die slowly. You will witness.",
                 ],
                 mechanic_pool=("king_deathbed", "king_final_judgment"),
+                secret_title="The Crown Remembers",
+                secret_dialogue=(
+                    "The crown turns inward, remembering every head it has outlived.",
+                    "A king's last room opens behind the throne.",
+                ),
             ),
         ),
     ),
@@ -1824,19 +1831,24 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                 archetype="tank",
                 title="Hollowforged Reformed",
                 transition_dialogue=[
-                    "Reform. The mine has new walls now.",
-                    "The walls speak in a different dialect.",
+                    "It steals the shape you just made, then wears it better.",
+                    "Your footprint hardens beneath its new feet.",
                 ],
                 mechanic_pool=("hollow_shape_shift", "hollow_stolen_face"),
             ),
             PinnaclePhaseDef(
                 archetype="slippery",
-                title="Hollowforged Pluralized",
+                title="The Hollowforged Choir",
                 transition_dialogue=[
-                    "Plural. The depth is many things at once.",
-                    "We are the chamber and the wall and the air.",
+                    "The stolen shape splits into a choir of mineral throats.",
+                    "Every wall takes up the face it borrowed from you.",
                 ],
                 mechanic_pool=("hollow_many_voices", "hollow_silence_between"),
+                secret_title="The Choir Below the Choir",
+                secret_dialogue=(
+                    "A second harmony answers from stone you cannot see.",
+                    "The chamber sings with a mouth it did not have before.",
+                ),
             ),
         ),
     ),
@@ -1867,8 +1879,8 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                 archetype="slippery",
                 title="The Digger Unbound",
                 transition_dialogue=[
-                    "Unbound. The pickaxe is no longer needed.",
-                    "I dig with my hands now. Cleaner.",
+                    "His fingers pass through the pickaxe handle and leave it hanging in air.",
+                    "The Digger's hands lengthen into pale, digging things.",
                 ],
                 mechanic_pool=("digger_phasing", "digger_faultline_step"),
             ),
@@ -1876,16 +1888,160 @@ PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
                 archetype="glass_cannon",
                 title="The Digger Eternal",
                 transition_dialogue=[
-                    "Eternal. The tunnel is me. I am the tunnel.",
-                    "Last shift. Last dig. Last.",
+                    "His ribs open like a shaft; loose stone begins to orbit the hollow.",
+                    "The tunnel bends through him, and he bends back through it.",
                 ],
                 mechanic_pool=("digger_tunnel_collapse", "digger_last_excavation"),
+                secret_title="The First Hole",
+                secret_dialogue=(
+                    "For one breath, every tunnel points to the first strike.",
+                    "The Digger smiles through a doorway made of dark soil.",
+                ),
+            ),
+        ),
+    ),
+    "bastion_below": PinnacleBossDef(
+        boss_id="bastion_below",
+        name="The Bastion Below",
+        persona="a patient fortress commander guarding roads that should not meet",
+        ascii_art=(
+            "       |>>>|\n"
+            "   ____|___|____\n"
+            "  |  _     _   |\n"
+            "  | | |___| |  |\n"
+            "  |___|___|____|\n"
+            "     /  |  \\\n"
+            "    /___|___\\\n"
+        ),
+        phases=(
+            PinnaclePhaseDef(
+                archetype="tank",
+                title="The Three Roads",
+                transition_dialogue=[],
+                mechanic_pool=("bastion_three_roads", "bastion_hidden_route"),
+            ),
+            PinnaclePhaseDef(
+                archetype="bruiser",
+                title="The Lower Keep",
+                transition_dialogue=[
+                    "The roads fold shut behind you. A keep rises from their intersections.",
+                    "Its banners are stitched from maps that led nowhere.",
+                ],
+                mechanic_pool=("bastion_fortify", "bastion_counter_siege"),
+            ),
+            PinnaclePhaseDef(
+                archetype="glass_cannon",
+                title="The Last Standard",
+                transition_dialogue=[
+                    "The fortress lowers one final flag and opens every gate at once.",
+                    "A commander waits in the breach with no army left to command.",
+                ],
+                mechanic_pool=("bastion_throne_race", "bastion_last_reserve"),
+                secret_title="The Road Behind the Wall",
+                secret_dialogue=(
+                    "A fourth road appears where the fortress has no door.",
+                    "The standard points toward a place below the map.",
+                ),
+            ),
+        ),
+    ),
+    "pale_surveyor": PinnacleBossDef(
+        boss_id="pale_surveyor",
+        name="The Pale Surveyor",
+        persona="an arena architect who measures the living before redrawing the floor",
+        ascii_art=(
+            "      .----.\n"
+            "     / .--. \\\n"
+            "    | |  | | |\n"
+            "    | |__| | |\n"
+            "     \\_____/\n"
+            "   ___/|  |\\___\n"
+            "  /___/____\\___\\\n"
+        ),
+        phases=(
+            PinnaclePhaseDef(
+                archetype="slippery",
+                title="The Measured Ground",
+                transition_dialogue=[],
+                mechanic_pool=("surveyor_marked_ground", "surveyor_false_landmark"),
+            ),
+            PinnaclePhaseDef(
+                archetype="tank",
+                title="The Folded Arena",
+                transition_dialogue=[
+                    "Chalk lines rise into walls, then fold the room around you.",
+                    "The Surveyor erases your last safe step with one white finger.",
+                ],
+                mechanic_pool=("surveyor_memory_echo", "surveyor_folded_arena"),
+            ),
+            PinnaclePhaseDef(
+                archetype="glass_cannon",
+                title="The Unwritten End",
+                transition_dialogue=[
+                    "The arena's border blackens, leaving one page unmarked.",
+                    "The Surveyor lowers its instrument and waits for your final line.",
+                ],
+                mechanic_pool=("surveyor_corruption_ring", "surveyor_unwritten_end"),
+                secret_title="The Map That Maps You",
+                secret_dialogue=(
+                    "Your footsteps gather into a route you never walked.",
+                    "The last blank space has your name written in dust.",
+                ),
+            ),
+        ),
+    ),
+    "lantern_engine": PinnacleBossDef(
+        boss_id="lantern_engine",
+        name="The Lantern Engine",
+        persona="a magitech furnace that mistakes heat for a living will",
+        ascii_art=(
+            "      .-^- .\n"
+            "    .-=====-.\n"
+            "   /  o | o  \\\n"
+            "  |  .-+- .  |\n"
+            "  |  |###|   |\n"
+            "   \\_\\___/_/\n"
+            "     /_|_\\\n"
+        ),
+        phases=(
+            PinnaclePhaseDef(
+                archetype="bruiser",
+                title="The Heat Chamber",
+                transition_dialogue=[],
+                mechanic_pool=("lantern_heat_cycle", "lantern_venting_protocol"),
+            ),
+            PinnaclePhaseDef(
+                archetype="slippery",
+                title="The Gearstorm",
+                transition_dialogue=[
+                    "The casing opens; gears spill out and choose their own orbit.",
+                    "Blue flame learns the shape of a weather system.",
+                ],
+                mechanic_pool=("lantern_overclock", "lantern_gearstorm"),
+            ),
+            PinnaclePhaseDef(
+                archetype="glass_cannon",
+                title="The Infinite Circuit",
+                transition_dialogue=[
+                    "A bright thread connects every gear, then passes through your shadow.",
+                    "The engine asks the mine for one more turn of the world.",
+                ],
+                mechanic_pool=("lantern_critical_mass", "lantern_infinite_feedback"),
+                secret_title="The Unlit Lamp",
+                secret_dialogue=(
+                    "At its center, one small lamp refuses every current.",
+                    "The engine dims around a light that was never switched on.",
+                ),
             ),
         ),
     ),
 }
 
-PINNACLE_POOL_IDS: tuple[str, ...] = ("forgotten_king", "hollowforged", "first_digger")
+PINNACLE_POOL_IDS: tuple[str, ...] = (
+    "forgotten_king", "hollowforged", "first_digger",
+    "bastion_below", "pale_surveyor", "lantern_engine",
+)
+PINNACLE_SECRET_PHASE_CHANCE: float = 0.10
 
 
 # Pinnacle relic — random 2 stats from this pool, name = base + suffix.
@@ -1943,6 +2099,9 @@ PINNACLE_RELIC_BASE_NAME: dict[str, str] = {
     "forgotten_king": "Crown",
     "hollowforged":   "Heart",
     "first_digger":   "Pickaxe",
+    "bastion_below":  "Standard",
+    "pale_surveyor":  "Compass",
+    "lantern_engine": "Core",
 }
 
 # Flat JC reward layered on top of the relic drop.
@@ -2875,7 +3034,7 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         "after_defeat": [
             "You ended a king. Streak {streak} of kings, perhaps.",
             "I lost. Royalty does not lose, except when it does.",
-            "Round two. The crown is on tighter.",
+            "The crown settles tighter for the next audience.",
         ],
         "after_retreat": [
             "You leave royalty mid-audience. Bold.",
@@ -2900,7 +3059,7 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         ],
         "after_defeat": [
             "You broke a wall. The wall reforms. The wall is patient.",
-            "Round two. We have more walls.",
+            "The walls grow back with more to say.",
             "Streak {streak}. Walls also have streaks. Geological ones.",
         ],
         "after_retreat": [
@@ -2926,8 +3085,8 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         ],
         "after_defeat": [
             "You won. I lost. Wait. Did I want to lose?",
-            "{streak} days. Pretender. I have {streak} centuries.",
-            "Round two. I dug while you slept.",
+            "Your {streak}-day run is impressive. I have dug through centuries.",
+            "The tunnel remembers your hands. So do I.",
         ],
         "after_retreat": [
             "Going up? Don't. The light is wrong now.",
@@ -2942,6 +3101,72 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
         "after_scout": [
             "Watching me dig? Take notes. Mostly: don't.",
             "Inspect. Yes. Inspect the hole. The hole inspects you.",
+        ],
+    },
+    "bastion_below": {
+        "first_meet": [
+            "State your route. State your purpose. State why either should survive the gate.",
+            "The roads below remember every boot that chose wrongly.",
+        ],
+        "after_defeat": [
+            "The standard dips. The wall records your angle of attack.",
+            "A gate opens somewhere below the gate you entered.",
+        ],
+        "after_retreat": [
+            "Withdraw. The roads will still be waiting when you return.",
+            "A fortress does not chase. It simply rearranges the exits.",
+        ],
+        "after_close_win": [
+            "The breach nearly closed around you. Nearly is a kind of defense.",
+            "You found the line the wall could not hold.",
+        ],
+        "after_scout": [
+            "Count the towers. There is always one more than you counted.",
+            "The Bastion has marked your route in dust.",
+        ],
+    },
+    "pale_surveyor": {
+        "first_meet": [
+            "Stand still. The arena cannot measure a moving answer.",
+            "Every step is a line. Every line eventually becomes a wall.",
+        ],
+        "after_defeat": [
+            "The chalk breaks, but the measurement remains.",
+            "You crossed the blank place without writing your name there.",
+        ],
+        "after_retreat": [
+            "Leave the arena. It will redraw itself around your absence.",
+            "The Surveyor notes an unfinished route and waits.",
+        ],
+        "after_close_win": [
+            "The last square nearly took you. It is still waiting for a name.",
+            "A close measurement. The margin was thinner than chalk.",
+        ],
+        "after_scout": [
+            "Look at the floor carefully. It is looking back in sections.",
+            "The instrument makes no sound while it measures your breathing.",
+        ],
+    },
+    "lantern_engine": {
+        "first_meet": [
+            "HEAT DETECTED. WILL DETECTED. BEGINNING CALIBRATION.",
+            "The lantern was built to light a road. It found a mine instead.",
+        ],
+        "after_defeat": [
+            "The furnace cools by one impossible degree.",
+            "A gear stops. The rest remember how to turn without it.",
+        ],
+        "after_retreat": [
+            "CALIBRATION PAUSED. YOUR SHADOW REMAINS IN THE LENS.",
+            "The engine vents steam into the route you take upward.",
+        ],
+        "after_close_win": [
+            "The core almost chose you as its next component.",
+            "One more pulse and the chamber would have become a furnace.",
+        ],
+        "after_scout": [
+            "The lenses track your lantern flame with clinical interest.",
+            "A tiny brass hand adjusts a dial when you blink.",
         ],
     },
 }
