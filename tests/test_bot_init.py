@@ -98,7 +98,7 @@ def test_bot_commands_registered(tmp_path):
                     "matches recent",
                 }
                 assert expected_paths <= qualified_names
-                expected_top_level_count = 41 if "ask" in command_names else 40
+                expected_top_level_count = 42 if "ask" in command_names else 41
                 assert len(bot.bot.tree.get_commands()) == expected_top_level_count
                 assert len(bot.bot.tree.get_commands()) <= 100
                 for command in bot.bot.tree.walk_commands():

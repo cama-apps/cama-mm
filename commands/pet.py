@@ -1,0 +1,417 @@
+"""Cama pets: adopt, feed, and try to keep a camel-llama hybrid alive.
+
+Command surface is the /pet group (8 subcommands). A 10-minute background
+sweep detects hatches and starvation deaths (both computed lazily from
+anchors — the loop only announces) and pays the weekly nonprofit care refund.
+Public posts go to PET_CHANNEL_ID when configured; otherwise pets stay quiet
+and everything is revealed on the owner's next interaction.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import TYPE_CHECKING
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+from commands.checks import require_guild
+from commands.pet_helpers import embeds as pet_embeds
+from commands.pet_helpers.views import PetStatusView
+from config import PET_CHANNEL_ID
+from domain.models.pet import PetStage
+from domain.pet_constants import (
+    FEED_CAP_PER_DAY,
+    FOOD_ITEMS,
+    MAX_BUY_QTY,
+    RENAME_COST,
+    SALT_LICK,
+)
+from utils.formatting import JOPACOIN_EMOTE
+from utils.interaction_safety import safe_defer, safe_followup
+from utils.rate_limiter import GLOBAL_RATE_LIMITER
+
+if TYPE_CHECKING:
+    from domain.models.pet import DeathNotice, HatchNotice, RefundNotice
+    from services.pet_service import PetService
+
+logger = logging.getLogger("cama_bot.commands.pet")
+
+FOOD_CHOICES = [
+    app_commands.Choice(
+        name=f"{food.display_name} ({food.cost} JC, +{food.restore} hunger)",
+        value=item_id,
+    )
+    for item_id, food in FOOD_ITEMS.items()
+]
+BUY_CHOICES = FOOD_CHOICES + [
+    app_commands.Choice(
+        name=f"{SALT_LICK.display_name} ({SALT_LICK.cost} JC, pampers instantly)",
+        value=SALT_LICK.item_id,
+    )
+]
+
+
+class PetCommands(commands.Cog):
+    pet = app_commands.Group(
+        name="pet", description="Adopt and care for your cama (camel-llama hybrid)"
+    )
+
+    def __init__(self, bot: commands.Bot, pet_service: PetService):
+        self.bot = bot
+        self.pet_service = pet_service
+
+    async def cog_load(self) -> None:
+        self._pet_sweep_loop.start()
+
+    async def cog_unload(self) -> None:
+        self._pet_sweep_loop.cancel()
+
+    # ────────────────────────────────────────────────────────────────────
+    # Shared composition
+    # ────────────────────────────────────────────────────────────────────
+
+    async def compose_status(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        owner_name: str,
+        with_view: bool = True,
+    ) -> tuple[discord.Embed, discord.File | None, PetStatusView | None]:
+        status = (
+            await asyncio.to_thread(
+                self.pet_service.get_status, discord_id, guild_id
+            )
+        ).value
+        next_fee = await asyncio.to_thread(
+            self.pet_service.next_adoption_fee, discord_id, guild_id
+        )
+        now = self.pet_service._now()
+        embed, file = await asyncio.to_thread(
+            pet_embeds.build_status_embed,
+            status,
+            self.pet_service.decay_per_day,
+            now,
+            owner_name=owner_name,
+            next_fee=next_fee,
+        )
+        view = None
+        if with_view and status.pet is not None:
+            can_feed = (
+                status.stage != PetStage.EGG
+                and status.pet.feeds_today < FEED_CAP_PER_DAY
+            )
+            view = PetStatusView(
+                self,
+                discord_id,
+                guild_id,
+                supplies=status.supplies,
+                species_id=status.pet.species,
+                can_feed=can_feed,
+            )
+        return embed, file, view
+
+    # ────────────────────────────────────────────────────────────────────
+    # Subcommands
+    # ────────────────────────────────────────────────────────────────────
+
+    @pet.command(name="adopt", description="Adopt a mysterious cama egg")
+    @app_commands.describe(name="Your pet's name (you're naming an egg, brave)")
+    @require_guild
+    async def adopt(self, interaction: discord.Interaction, name: str):
+        guild_id = interaction.guild.id if interaction.guild else None
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="pet", guild_id=guild_id or 0, user_id=interaction.user.id,
+            limit=6, per_seconds=60,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s.", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.adopt, interaction.user.id, guild_id, name
+        )
+        if not result.success:
+            await safe_followup(interaction, content=f"❌ {result.error}")
+            return
+        adopted = result.value
+        embed = discord.Embed(
+            title="🥚 A mysterious egg!",
+            description=(
+                f"**{interaction.user.display_name}** adopted an egg and named it "
+                f"**{adopted.name}** for {adopted.adopt_fee} {JOPACOIN_EMOTE}.\n"
+                f"It hatches <t:{adopted.hatched_at}:R>. What's inside? "
+                "Nobody knows. Not even the egg."
+            ),
+            color=pet_embeds.COLOR_EGG,
+        )
+        file = await asyncio.to_thread(
+            pet_embeds.get_egg_card, adopted.pet_id
+        )
+        if file:
+            embed.set_image(url=f"attachment://{file.filename}")
+        await safe_followup(interaction, embed=embed, file=file)
+
+    @pet.command(name="status", description="Check on your cama (art, hunger, mood)")
+    @app_commands.describe(
+        user="Peek at someone else's pet", public="Show to the whole channel"
+    )
+    @require_guild
+    async def status(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+        public: bool = False,
+    ):
+        guild_id = interaction.guild.id if interaction.guild else None
+        target = user or interaction.user
+        own = target.id == interaction.user.id
+        if not await safe_defer(interaction, ephemeral=not public):
+            return
+        embed, file, view = await self.compose_status(
+            target.id, guild_id, owner_name=target.display_name,
+            with_view=own,
+        )
+        message = await safe_followup(
+            interaction, embed=embed,
+            file=file, view=view,
+        )
+        if view is not None:
+            view.message = message
+
+    @pet.command(name="feed", description="Feed your cama from your supplies")
+    @app_commands.describe(item="Which food to serve")
+    @app_commands.choices(item=FOOD_CHOICES)
+    @require_guild
+    async def feed(self, interaction: discord.Interaction, item: str):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.feed, interaction.user.id, guild_id, item
+        )
+        if not result.success:
+            await safe_followup(interaction, content=f"❌ {result.error}")
+            return
+        outcome = result.value
+        food = FOOD_ITEMS[item]
+        if outcome.spat:
+            await safe_followup(
+                interaction,
+                content=(
+                    f"💢 **{outcome.pet.name}** spat the {food.display_name} "
+                    "straight back at you. The temperament of legends. "
+                    f"({outcome.remaining_qty} left)"
+                ),
+            )
+            return
+        bar = pet_embeds.hunger_bar(outcome.new_hunger)
+        await safe_followup(
+            interaction,
+            content=(
+                f"{food.emoji} **{outcome.pet.name}** munches the "
+                f"{food.display_name}. Hunger {outcome.old_hunger} → "
+                f"**{outcome.new_hunger}** `{bar}` · {outcome.remaining_qty} left · "
+                f"{outcome.feeds_left_today} feeds left today"
+            ),
+        )
+
+    @pet.command(name="shop", description="Browse cama food and treats")
+    @require_guild
+    async def shop(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        status = (
+            await asyncio.to_thread(
+                self.pet_service.get_status, interaction.user.id, guild_id
+            )
+        ).value
+        species_id = status.pet.species if status.pet else ""
+        balance = await asyncio.to_thread(
+            self.pet_service.player_repo.get_balance, interaction.user.id, guild_id
+        )
+        embed = pet_embeds.build_shop_embed(status.supplies, species_id, balance)
+        await safe_followup(interaction, embed=embed)
+
+    @pet.command(name="buy", description="Buy cama supplies")
+    @app_commands.describe(item="What to buy", qty="How many (salt lick: 1)")
+    @app_commands.choices(item=BUY_CHOICES)
+    @require_guild
+    async def buy(
+        self,
+        interaction: discord.Interaction,
+        item: str,
+        qty: app_commands.Range[int, 1, MAX_BUY_QTY] = 1,
+    ):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.buy, interaction.user.id, guild_id, item, qty
+        )
+        if not result.success:
+            await safe_followup(interaction, content=f"❌ {result.error}")
+            return
+        purchase = result.value
+        if item == SALT_LICK.item_id:
+            await safe_followup(
+                interaction,
+                content=(
+                    f"🧂 **{purchase['pet'].name}** is thoroughly pampered until "
+                    f"<t:{purchase['pampered_until']}:t> "
+                    f"(-{purchase['total_cost']} {JOPACOIN_EMOTE})"
+                ),
+            )
+            return
+        food = FOOD_ITEMS[item]
+        await safe_followup(
+            interaction,
+            content=(
+                f"{food.emoji} Bought {purchase['qty']}× {food.display_name} for "
+                f"{purchase['total_cost']} {JOPACOIN_EMOTE} — you now have "
+                f"×{purchase['new_qty']}."
+            ),
+        )
+
+    @pet.command(name="rename", description=f"Rename your cama ({RENAME_COST} JC)")
+    @app_commands.describe(name="The new name")
+    @require_guild
+    async def rename(self, interaction: discord.Interaction, name: str):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.rename, interaction.user.id, guild_id, name
+        )
+        if not result.success:
+            await safe_followup(interaction, content=f"❌ {result.error}")
+            return
+        await safe_followup(
+            interaction,
+            content=(
+                f"✏️ Henceforth known as **{result.value.name}** "
+                f"(-{RENAME_COST} {JOPACOIN_EMOTE})"
+            ),
+        )
+
+    @pet.command(name="graveyard", description="Visit the cama memorial garden")
+    @app_commands.describe(user="Whose graveyard to visit")
+    @require_guild
+    async def graveyard(
+        self, interaction: discord.Interaction, user: discord.Member | None = None
+    ):
+        guild_id = interaction.guild.id if interaction.guild else None
+        target = user or interaction.user
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.get_graveyard, target.id, guild_id
+        )
+        embed = pet_embeds.build_graveyard_embed(
+            result.value, target.display_name
+        )
+        await safe_followup(interaction, embed=embed)
+
+    @pet.command(name="leaderboard", description="The oldest living camas")
+    @require_guild
+    async def leaderboard(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        result = await asyncio.to_thread(self.pet_service.get_leaderboard, guild_id)
+        embed = pet_embeds.build_leaderboard_embed(
+            result.value, self.pet_service.decay_per_day, self.pet_service._now()
+        )
+        await safe_followup(interaction, embed=embed)
+
+    # ────────────────────────────────────────────────────────────────────
+    # Background sweep
+    # ────────────────────────────────────────────────────────────────────
+
+    @tasks.loop(minutes=10)
+    async def _pet_sweep_loop(self):
+        try:
+            result = await asyncio.to_thread(self.pet_service.sweep)
+        except Exception:
+            logger.exception("Pet sweep failed")
+            return
+        for hatch in result["hatches"]:
+            try:
+                await self._deliver_hatch(hatch)
+            except Exception:
+                logger.exception(
+                    "Hatch delivery failed for pet %s; will retry", hatch.pet.pet_id
+                )
+        for death in result["deaths"]:
+            try:
+                await self._deliver_death(death)
+            except Exception:
+                logger.exception(
+                    "Death delivery failed for pet %s; will retry", death.pet.pet_id
+                )
+        for refund in result["refunds"]:
+            try:
+                await self._deliver_refund(refund)
+            except Exception:
+                logger.exception(
+                    "Refund summary failed for guild %s", refund.guild_id
+                )
+
+    @_pet_sweep_loop.before_loop
+    async def _before_sweep(self):
+        await self.bot.wait_until_ready()
+
+    def _pet_channel(self, guild_id: int) -> discord.TextChannel | None:
+        if not PET_CHANNEL_ID:
+            return None
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return None
+        channel = guild.get_channel(PET_CHANNEL_ID)
+        return channel if isinstance(channel, discord.TextChannel) else None
+
+    async def _deliver_hatch(self, notice: HatchNotice) -> None:
+        pet = notice.pet
+        channel = self._pet_channel(pet.guild_id)
+        if channel is not None:
+            embed, file = await asyncio.to_thread(pet_embeds.build_hatch_embed, pet)
+            try:
+                await channel.send(embed=embed, file=file)
+            except discord.Forbidden:
+                pass  # permanent: mark below so we don't loop forever
+        await asyncio.to_thread(self.pet_service.mark_hatch_announced, pet)
+
+    async def _deliver_death(self, notice: DeathNotice) -> None:
+        pet = notice.pet
+        channel = self._pet_channel(pet.guild_id)
+        if channel is not None:
+            embed, file = await asyncio.to_thread(pet_embeds.build_death_embed, pet)
+            try:
+                await channel.send(embed=embed, file=file)
+            except discord.Forbidden:
+                pass
+        await asyncio.to_thread(self.pet_service.mark_death_announced, pet)
+
+    async def _deliver_refund(self, notice: RefundNotice) -> None:
+        channel = self._pet_channel(notice.guild_id)
+        if channel is None:
+            return
+        embed = pet_embeds.build_refund_embed(notice)
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            pass
+
+
+async def setup(bot: commands.Bot):
+    pet_service = getattr(bot, "pet_service", None)
+    if pet_service is None:
+        raise RuntimeError("Pet service not registered on bot.")
+    await bot.add_cog(PetCommands(bot, pet_service))

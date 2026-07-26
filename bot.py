@@ -602,6 +602,7 @@ EXTENSIONS = [
     "commands.mana",
     "commands.dig",
     "commands.mafia",
+    "commands.pet",
     "commands.reminders",
 ]
 

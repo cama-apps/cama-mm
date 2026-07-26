@@ -1339,6 +1339,8 @@ class MatchCommands(commands.Cog):
 
         await self._run_neon_match_hooks(interaction, guild_id, winners, losers, record_result)
 
+        await self._run_pet_match_hooks(interaction, guild_id, record_result)
+
         # Trigger auto-discovery in background if enabled
         match_id = record_result.get("match_id")
         if match_id:
@@ -1347,6 +1349,36 @@ class MatchCommands(commands.Cog):
                     self._trigger_auto_discovery(guild_id, match_id, interaction.channel)
                 )
             )
+
+    async def _run_pet_match_hooks(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        record_result: dict,
+    ) -> None:
+        """Feed the winners' pets and post a snack line. Never blocks recording."""
+        pet_service = getattr(self.bot, "pet_service", None)
+        winning_ids = list(record_result.get("winning_player_ids", []) or [])
+        if pet_service is None or not winning_ids:
+            return
+        try:
+            fed = await asyncio.to_thread(
+                pet_service.on_match_win, winning_ids, guild_id
+            )
+            if not fed:
+                return
+            from domain.pet_constants import get_species
+
+            lines = [
+                f"🦙 **{pet.name}** the {get_species(pet.species).display_name} "
+                f"munches +{amount} hunger in celebration"
+                for pet, amount in fed[:10]
+            ]
+            await interaction.followup.send(
+                "🎉 Post-game snacks:\n" + "\n".join(lines), ephemeral=False
+            )
+        except Exception:
+            logger.exception("Pet match hook failed; match recording unaffected")
 
     async def _send_record_announcement(
         self,
