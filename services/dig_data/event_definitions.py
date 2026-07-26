@@ -4688,6 +4688,105 @@ RANDOM_EVENTS: list[RandomEvent] = [
         social=True,
         splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=22, trigger="success", mode="burn"),
     ),
+    # --- Additional negative-value encounter pressure ---------------------
+    RandomEvent(
+        id="second_life_ledger",
+        name="Second-Life Ledger",
+        description=(
+            "A brass ledger lies open beside a silent bell. The page for second chances has your name on it and a fee already entered.",
+            "A clerk-shaped shadow waits behind a stone counter. Its hourglass is empty, but its hand remains outstretched.",
+            "The tunnel ends at an old revival office. A gold deficit glows beside your name, and the timer is still running.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Pay the revival fee",
+            success=EventOutcome(
+                "You settle the fee. The shadow closes the ledger and lets you pass poorer, but punctual.",
+                0, -6, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sign before the timer clears",
+            success=EventOutcome(
+                "The ledger accepts the early signature and releases someone else's forfeited deposit.",
+                0, 30, False,
+            ),
+            failure=EventOutcome(
+                "The timer resets. The clerk charges the full deficit and an impatience fee.",
+                0, -22, False,
+            ),
+            success_chance=0.25,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="twin_scar_altar",
+        name="Twin-Scar Altar",
+        description=(
+            "A red altar bears one fresh scar and one empty groove. The second mark promises perfection or nothing at all.",
+            "Something valuable has already survived the altar once. The stone is eager to learn whether it can survive twice.",
+            "Two crimson channels cross the altar's face. One is dry. The other is waiting for your offering.",
+        ),
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Seal it with an offering",
+            success=EventOutcome(
+                "You feed the altar enough coin to close the empty groove. The stone keeps every piece.",
+                0, -8, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Press a second mark",
+            success=EventOutcome(
+                "The second scar blooms cleanly. The altar sheds a cache it had been saving for a worthy result.",
+                0, 52, False,
+            ),
+            failure=EventOutcome(
+                "The second mark consumes the first, the offering, and a generous bite from your purse.",
+                0, -29, False,
+            ),
+            success_chance=0.20,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="ember_clearinghouse",
+        name="Ember Clearinghouse",
+        description=(
+            "A many-faced brass engine turns around a coal-bright core. Three heavy accounts glow on its inner walls.",
+            "The clearinghouse counts wealth by the heat it throws. Tonight, three ledgers are burning white.",
+            "A cube of nested gears wakes at your approach. It has already selected the fattest balances in the guild.",
+        ),
+        min_depth=75, max_depth=None,
+        safe_option=EventChoice(
+            "Pay the handling charge",
+            success=EventOutcome(
+                "You feed the engine a small stack. It files the payment under unavoidable friction.",
+                0, -5, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Overfeed the ember core",
+            success=EventOutcome(
+                "The engine clears three swollen accounts through the flame and spits you a modest operator's share.",
+                0, 28, False,
+            ),
+            failure=EventOutcome(
+                "The core rejects the transfer and clears its operating cost directly from you.",
+                0, -20, False,
+            ),
+            success_chance=0.55,
+        ),
+        rarity="legendary",
+        social=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=3, penalty_jc=18,
+            trigger="success", mode="burn",
+        ),
+    ),
     RandomEvent(
         id="abandoned_forge",
         name="Abandoned Forge",

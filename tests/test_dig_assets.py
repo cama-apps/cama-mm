@@ -608,3 +608,27 @@ class TestRoguelikeEventAssets:
             asset = get_event_art(event_id, "Stone")
             assert asset is not None
             assert asset.filename == f"event_{event_id}.png"
+
+
+PRESSURE_EVENT_ASSET_IDS = (
+    "second_life_ledger",
+    "twin_scar_altar",
+    "ember_clearinghouse",
+)
+
+
+class TestPressureEventAssets:
+    def test_assets_are_consistently_sized_rgb_pngs(self):
+        for event_id in PRESSURE_EVENT_ASSET_IDS:
+            path = ASSETS_DIR / "events" / f"{event_id}.png"
+            assert path.is_file(), f"missing event asset: {path}"
+            with Image.open(path) as image:
+                assert image.format == "PNG"
+                assert image.size == (1024, 576)
+                assert image.mode == "RGB"
+
+    def test_event_loader_resolves_every_new_asset(self):
+        for event_id in PRESSURE_EVENT_ASSET_IDS:
+            asset = get_event_art(event_id, "Stone")
+            assert asset is not None
+            assert asset.filename == f"event_{event_id}.png"
