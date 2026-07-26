@@ -327,3 +327,153 @@ assets/dig/pickaxes/obsidian.png
 assets/dig/pickaxes/frostforged.png
 assets/dig/pickaxes/void_touched.png
 ```
+---
+
+## Pet Art — Nano Banana Prompts
+
+Cama pets are camel–llama hybrid creatures collected and raised by players. Same dark underground fantasy RPG aesthetic as the dig art above — but these are companions, not bosses: aim for **cute, expressive, collectible-creature appeal (think Neopets/Tamagotchi charm meets dark Dota bestiary)**.
+
+### Style Bible
+
+- Painterly, pixel-art-adjacent creature portrait, single creature center-frame on a dark simple backdrop (stable, cave mouth, dusky desert) so the silhouette reads at Discord embed size.
+- **512x288** (16:9 landscape, fits Discord embed main image), RGBA PNG.
+- Big expressive eyes with highlights, soft rounded shapes, visible wool texture. Cool Dota references welcome, but the creature stays lovable.
+- Each species ships 6 variants — `{stage}` x `{mood}`:
+  - `baby`: chibi proportions — oversized head, ears, and eyes on a small round body
+  - `adult`: full-size, longer neck, fills more of the frame
+  - `happy`: bright open eyes, ears up, easy smile, blush marks
+  - `neutral`: flat mouth, half-lidded camelid indifference
+  - `hungry`: drooping ears and eyelids, sad frown, a single tear, deflated posture
+
+### Pet File Naming Convention
+
+All 62 files (10 species x 2 stages x 3 moods, plus the shared egg and tombstone):
+
+```
+assets/pets/common_cama_baby_happy.png
+assets/pets/common_cama_baby_neutral.png
+assets/pets/common_cama_baby_hungry.png
+assets/pets/common_cama_adult_happy.png
+assets/pets/common_cama_adult_neutral.png
+assets/pets/common_cama_adult_hungry.png
+assets/pets/dromedary_cross_baby_happy.png
+assets/pets/dromedary_cross_baby_neutral.png
+assets/pets/dromedary_cross_baby_hungry.png
+assets/pets/dromedary_cross_adult_happy.png
+assets/pets/dromedary_cross_adult_neutral.png
+assets/pets/dromedary_cross_adult_hungry.png
+assets/pets/banana_ears_baby_happy.png
+assets/pets/banana_ears_baby_neutral.png
+assets/pets/banana_ears_baby_hungry.png
+assets/pets/banana_ears_adult_happy.png
+assets/pets/banana_ears_adult_neutral.png
+assets/pets/banana_ears_adult_hungry.png
+assets/pets/jopacama_baby_happy.png
+assets/pets/jopacama_baby_neutral.png
+assets/pets/jopacama_baby_hungry.png
+assets/pets/jopacama_adult_happy.png
+assets/pets/jopacama_adult_neutral.png
+assets/pets/jopacama_adult_hungry.png
+assets/pets/pudge_cama_baby_happy.png
+assets/pets/pudge_cama_baby_neutral.png
+assets/pets/pudge_cama_baby_hungry.png
+assets/pets/pudge_cama_adult_happy.png
+assets/pets/pudge_cama_adult_neutral.png
+assets/pets/pudge_cama_adult_hungry.png
+assets/pets/courier_cama_baby_happy.png
+assets/pets/courier_cama_baby_neutral.png
+assets/pets/courier_cama_baby_hungry.png
+assets/pets/courier_cama_adult_happy.png
+assets/pets/courier_cama_adult_neutral.png
+assets/pets/courier_cama_adult_hungry.png
+assets/pets/aegis_cama_baby_happy.png
+assets/pets/aegis_cama_baby_neutral.png
+assets/pets/aegis_cama_baby_hungry.png
+assets/pets/aegis_cama_adult_happy.png
+assets/pets/aegis_cama_adult_neutral.png
+assets/pets/aegis_cama_adult_hungry.png
+assets/pets/invoker_cama_baby_happy.png
+assets/pets/invoker_cama_baby_neutral.png
+assets/pets/invoker_cama_baby_hungry.png
+assets/pets/invoker_cama_adult_happy.png
+assets/pets/invoker_cama_adult_neutral.png
+assets/pets/invoker_cama_adult_hungry.png
+assets/pets/crystal_cama_baby_happy.png
+assets/pets/crystal_cama_baby_neutral.png
+assets/pets/crystal_cama_baby_hungry.png
+assets/pets/crystal_cama_adult_happy.png
+assets/pets/crystal_cama_adult_neutral.png
+assets/pets/crystal_cama_adult_hungry.png
+assets/pets/rama_baby_happy.png
+assets/pets/rama_baby_neutral.png
+assets/pets/rama_baby_hungry.png
+assets/pets/rama_adult_happy.png
+assets/pets/rama_adult_neutral.png
+assets/pets/rama_adult_hungry.png
+assets/pets/egg.png
+assets/pets/tombstone.png
+```
+
+One prompt per species — render all 6 stage/mood variants of it per the Style Bible.
+
+### Common Cama (`common_cama`)
+```
+A perfectly ordinary camel-llama hybrid with warm tan wool, a barely-there hump, long soft neck and big gentle eyes, standing in a dim lantern-lit stable, deliberately unremarkable and proud of it, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Dune Cama (`dromedary_cross`)
+```
+A sandy-gold camel-leaning cama with heroic long eyelashes, closable slit nostrils, and one modest fat hump on its back, standing before dusky desert dunes under early stars, serene and sturdy, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Humming Cama (`banana_ears`)
+```
+A llama-leaning cama with pale green-tinged wool and enormous upright banana-curved ears, mid-hum with tiny faint music notes drifting around its head, standing in a dim stable, endearing and slightly mysterious, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Gilded Cama (`jopacama`)
+```
+A cama whose golden wool grows in faint coin-shaped whorls, a soft shimmer of gold dust and a couple of stray jopacoins at its hooves, smug aura of unexplained wealth, dim vault-like backdrop with warm glints, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Ravenous Cama (`pudge_cama`)
+```
+An extra-round, perpetually hungry cama with meaty red-brown wool, a rusty butcher's hook and chain tangled deep in the wool of its flank (a Pudge homage), a little drool, big pleading eyes, dark butcher-shop-adjacent stable backdrop, cute-but-unsettling collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Pack Cama (`courier_cama`)
+```
+A saddle-brown cama rigged as a Dota courier: bulging leather saddlebags stuffed with potions and wards, a tiny pennant flag on its back, big anxious eyes that say it lives to deliver, dim jungle path backdrop, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Shellback Cama (`aegis_cama`)
+```
+A serene pale-yellow cama with a softly glowing Aegis of the Immortal fused as a golden shell dome across its back, gentle halo light rimming the shell, calm knowing eyes, dark Roshan-pit backdrop with warm glow, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Mystic Cama (`invoker_cama`)
+```
+A violet-wooled cama draped in a scholar's robe, three small glowing orbs orbiting its head — ice blue, storm violet-white, and ember orange (Quas Wex Exort) — an insufferably learned expression, dim arcane library backdrop, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Frostwool Cama (`crystal_cama`)
+```
+An ice-blue cama with frost-rimed glittering wool that never melts, tiny icicles fringing its belly, snowflake motes and a Crystal Maiden-style frost aura, cold breath fog, dim frozen cavern backdrop, cute collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+### Rama the First (`rama`)
+```
+The original cama, bred in Dubai in 1998: regal white coat with a small red royal blanket trimmed in gold, standing on a stone dais, permanently furrowed grumpy brows and a famously terrible attitude (mid-spit when hungry), never fully happy-looking even when pleased, cute-yet-cranky collectible creature portrait, dark fantasy bestiary style, digital painting
+```
+
+Shared art, species-neutral:
+
+### Egg (`assets/pets/egg.png`)
+```
+A single large mysterious speckled egg resting in a warm straw nest, cream shell with earthy speckles and a faint inner glow hinting at the creature within, species-neutral, soft lantern light and gentle vignette in a dark stable, cozy and full of promise, cute collectible style, dark fantasy bestiary style, digital painting
+```
+
+### Tombstone (`assets/pets/tombstone.png`)
+```
+A small weathered gray tombstone on a grassy mound at soft twilight, blank smooth engraving panel (the bot overlays the pet's name), tiny wildflowers at the base and a tuft of wool snagged on one edge, gentle moonlight, stars, quiet and bittersweet rather than grim, dark fantasy bestiary style, digital painting
+```
