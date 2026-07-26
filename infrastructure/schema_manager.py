@@ -628,6 +628,18 @@ class SchemaManager:
                 "add_lobby_enabled_to_reminder_preferences",
                 self._migration_add_lobby_enabled_to_reminder_preferences,
             ),
+            # Cama pets: tamagotchi vertical (adopt / feed / starve / graveyard).
+            # Hunger is derived from anchors, so the tables store moments, not
+            # ticking state; dead rows double as the graveyard.
+            (
+                "create_pet_tables",
+                self._migration_create_pet_tables,
+            ),
+            # Opt-in DMs for pet starvation warnings and death notices.
+            (
+                "add_pet_enabled_to_reminder_preferences",
+                self._migration_add_pet_enabled_to_reminder_preferences,
+            ),
         ]
 
     # --- Migrations ---
@@ -4371,6 +4383,104 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_lobby "
             "ON reminder_preferences(guild_id, lobby_enabled)"
+        )
+
+    def _migration_create_pet_tables(self, cursor) -> None:
+        """Cama pets: pet rows (alive + graveyard), supplies, refund claims.
+
+        Liveness is `died_at IS NULL`; the partial unique index makes
+        one-living-pet-per-(player, guild) a hard DB invariant and lets dead
+        rows serve as the graveyard. Species/item ids deliberately carry no
+        CHECK enum so content additions never need a table rebuild.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pets (
+                pet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 32),
+                species TEXT NOT NULL,
+                adopted_at INTEGER NOT NULL,
+                hatched_at INTEGER NOT NULL,
+                adopt_fee INTEGER NOT NULL CHECK (adopt_fee >= 0),
+                last_fed_at INTEGER NOT NULL,
+                hunger_at_last_fed INTEGER NOT NULL
+                    CHECK (hunger_at_last_fed BETWEEN 0 AND 100),
+                times_fed INTEGER NOT NULL DEFAULT 0 CHECK (times_fed >= 0),
+                feeds_today INTEGER NOT NULL DEFAULT 0 CHECK (feeds_today >= 0),
+                feed_date TEXT,
+                week_consumed_jc INTEGER NOT NULL DEFAULT 0
+                    CHECK (week_consumed_jc >= 0),
+                week_key TEXT,
+                pampered_until INTEGER,
+                aegis_used INTEGER NOT NULL DEFAULT 0 CHECK (aegis_used IN (0, 1)),
+                hatch_announced_at INTEGER,
+                died_at INTEGER,
+                death_cause TEXT,
+                death_announced_at INTEGER,
+                CHECK (hatched_at >= adopted_at),
+                CHECK (died_at IS NULL OR died_at >= adopted_at),
+                CHECK (death_announced_at IS NULL OR died_at IS NOT NULL)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pets_one_alive "
+            "ON pets(discord_id, guild_id) WHERE died_at IS NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_alive_starve_scan "
+            "ON pets(last_fed_at) WHERE died_at IS NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_unannounced_deaths "
+            "ON pets(guild_id, died_at) "
+            "WHERE died_at IS NOT NULL AND death_announced_at IS NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_unannounced_hatches "
+            "ON pets(guild_id, hatched_at) "
+            "WHERE died_at IS NULL AND hatch_announced_at IS NULL"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pets_graveyard "
+            "ON pets(guild_id, discord_id, died_at DESC)"
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_supplies (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                item_id TEXT NOT NULL,
+                qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id, item_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_refund_windows (
+                guild_id INTEGER NOT NULL,
+                week_key TEXT NOT NULL,
+                paid_at INTEGER NOT NULL,
+                total_paid INTEGER NOT NULL CHECK (total_paid >= 0),
+                PRIMARY KEY (guild_id, week_key)
+            )
+            """
+        )
+
+    def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor,
+            "reminder_preferences",
+            "pet_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_pet "
+            "ON reminder_preferences(guild_id, pet_enabled)"
         )
 
     def _migration_drop_mana_shop_items_table(self, cursor) -> None:
