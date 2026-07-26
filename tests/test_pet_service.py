@@ -68,9 +68,23 @@ class TestAdopt:
         assert status.stage == PetStage.EGG
         assert status.hunger == 100
 
+    def test_adopt_over_a_starved_pet_claims_death_and_escalates_fee(
+        self, service, clock
+    ):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + 9 * DAY  # long past starvation, unswept
+        second = adopt_common(service, clock, name="Blep II")
+        assert second.adopt_fee == 50  # the death was claimed before pricing
+        dead = service.pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+        assert dead.died_at == pet.hatched_at + 5 * DAY
+
     def test_adoption_fee_escalates_with_deaths(self, service, clock):
         pet = adopt_common(service, clock)
-        service.pet_repo.claim_death(pet.pet_id, TEST_GUILD_ID, died_at=T0 + 100)
+        service.pet_repo.claim_death(
+            pet.pet_id, TEST_GUILD_ID, died_at=T0 + 100,
+            expected_last_fed_at=pet.last_fed_at,
+            expected_hunger=pet.hunger_at_last_fed,
+        )
         second = adopt_common(service, clock, name="Blep II")
         assert second.adopt_fee == 50
 
@@ -251,6 +265,14 @@ class TestMatchHook:
         service.on_match_win([100], TEST_GUILD_ID)
         assert service.get_status(100, TEST_GUILD_ID).value.hunger == 100
 
+    def test_win_returns_post_top_up_anchors(self, service, clock):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + 2 * DAY  # hunger 60
+        fed = service.on_match_win([100], TEST_GUILD_ID)
+        fed_pet, _amount = fed[0]
+        assert fed_pet.last_fed_at == clock.now
+        assert fed_pet.hunger_at_last_fed == 70
+
     def test_pack_cama_gets_bonus(self, service, clock):
         with patch(
             "services.pet_service.random.choices", return_value=["courier_cama"]
@@ -323,6 +345,67 @@ class TestSweep:
         # Window is claimed; a second sweep pays nothing.
         with patch("services.pet_service.random.randint", return_value=200):
             assert service.sweep()["refunds"] == []
+
+    def test_stale_snapshot_never_kills_a_fed_pet(self, service, clock):
+        """Regression for the critical sweep-vs-feed race: resolving from a
+        stale snapshot must re-read and keep the (fed) pet alive."""
+        pet = adopt_common(service, clock)
+        service.buy(100, TEST_GUILD_ID, "cheese", 2)
+        clock.now = pet.hatched_at + 4 * DAY
+        assert service.feed(100, TEST_GUILD_ID, "cheese").success
+        # Simulate a sweep holding the PRE-feed snapshot past starvation time.
+        clock.now = pet.hatched_at + 6 * DAY
+        resolved = service._resolve_starvation(pet, clock.now)
+        assert resolved is not None
+        assert resolved.died_at is None
+
+    def test_empty_fund_leaves_week_unclaimed_until_topped_up(self, service, clock):
+        pet = adopt_common(service, clock)
+        service.buy(100, TEST_GUILD_ID, "cheese", 20)
+        clock.now = pet.hatched_at + 2 * DAY
+        service.feed(100, TEST_GUILD_ID, "cheese")
+        week_of_feed = _week_key_for_timestamp(clock.now)
+        while _prev_week_key_for_timestamp(clock.now) != week_of_feed:
+            clock.now += DAY
+            service.feed(100, TEST_GUILD_ID, "cheese")
+        _seed_fund(service, 0)
+        with patch("services.pet_service.random.randint", return_value=200):
+            assert service.sweep()["refunds"] == []
+        assert not service.pet_repo.is_refund_window_paid(
+            TEST_GUILD_ID, week_of_feed
+        )
+        _seed_fund(service, 500)
+        service.feed(100, TEST_GUILD_ID, "cheese")  # keep alive for the tick
+        with patch("services.pet_service.random.randint", return_value=200):
+            notices = service.sweep()["refunds"]
+        assert notices and notices[0].total_paid == 32
+
+    def test_outage_spanning_week_still_pays_both_weeks_via_lookback(
+        self, service, clock
+    ):
+        """Care in weeks W and W+1, sweeps down until W+2: the 2-week
+        lookback pays BOTH windows instead of silently forfeiting W."""
+        pet = adopt_common(service, clock)
+        service.buy(100, TEST_GUILD_ID, "cheese", 25)
+        clock.now = pet.hatched_at + 2 * DAY
+        service.feed(100, TEST_GUILD_ID, "cheese")
+        week_w = _week_key_for_timestamp(clock.now)
+        _seed_fund(service, 500)
+        # Feed daily until the LAST day of week W+1 (no sweeps run — outage).
+        while _week_key_for_timestamp(clock.now) == week_w:
+            clock.now += DAY
+            service.feed(100, TEST_GUILD_ID, "cheese")
+        week_w1 = _week_key_for_timestamp(clock.now)
+        while _week_key_for_timestamp(clock.now + DAY) == week_w1:
+            clock.now += DAY
+            service.feed(100, TEST_GUILD_ID, "cheese")
+        # Bot returns on the first day of W+2; pet alive (fed yesterday).
+        clock.now += DAY
+        with patch("services.pet_service.random.randint", return_value=100):
+            notices = service.sweep()["refunds"]
+        paid_weeks = {n.week_key for n in notices}
+        assert week_w in paid_weeks  # would forfeit without the lookback
+        assert week_w1 in paid_weeks
 
     def test_refund_scales_down_to_fund(self, service, clock):
         pet = adopt_common(service, clock)

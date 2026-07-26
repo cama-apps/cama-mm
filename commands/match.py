@@ -1377,6 +1377,11 @@ class MatchCommands(commands.Cog):
             await interaction.followup.send(
                 "🎉 Post-game snacks:\n" + "\n".join(lines), ephemeral=False
             )
+            # Top-ups moved the anchors, so re-arm each owner's hungry warning.
+            pet_cog = self.bot.get_cog("PetCommands")
+            if pet_cog is not None:
+                for pet, _amount in fed:
+                    await pet_cog._rearm_warning(pet)
         except Exception:
             logger.exception("Pet match hook failed; match recording unaffected")
 

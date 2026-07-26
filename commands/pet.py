@@ -31,6 +31,7 @@ from domain.pet_constants import (
     WARNING_HUNGER,
 )
 from utils.formatting import JOPACOIN_EMOTE
+from utils.game_date import game_date_for_timestamp
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -103,7 +104,8 @@ class PetCommands(commands.Cog):
         if with_view and status.pet is not None:
             can_feed = (
                 status.stage != PetStage.EGG
-                and status.pet.feeds_today < FEED_CAP_PER_DAY
+                and status.pet.feeds_used_on(game_date_for_timestamp(now))
+                < FEED_CAP_PER_DAY
             )
             view = PetStatusView(
                 self,
@@ -113,11 +115,15 @@ class PetCommands(commands.Cog):
                 species_id=status.pet.species,
                 can_feed=can_feed,
             )
-            self._rearm_warning(status.pet)
+            await self._rearm_warning(status.pet)
         return embed, file, view
 
-    def _rearm_warning(self, pet) -> None:
-        """(Re)schedule the opt-in hungry-DM for the pet's next warning crossing."""
+    async def _rearm_warning(self, pet) -> None:
+        """(Re)schedule the opt-in hungry-DM for the pet's next warning crossing.
+
+        The preference read happens off-loop; schedule_pet_reminder itself must
+        run on the loop (it creates the asyncio task).
+        """
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is None or pet is None:
             return
@@ -125,8 +131,16 @@ class PetCommands(commands.Cog):
             crossing = pet.hunger_crossing_time(
                 WARNING_HUNGER, self.pet_service.decay_per_day
             )
+            prefs = await asyncio.to_thread(
+                reminder_svc.get_preferences, pet.discord_id, pet.guild_id or 0
+            )
             reminder_svc.schedule_pet_reminder(
-                self.bot, pet.discord_id, pet.guild_id, crossing, pet_name=pet.name
+                self.bot,
+                pet.discord_id,
+                pet.guild_id,
+                crossing,
+                pet_name=pet.name,
+                preference_enabled=bool(prefs.get("pet_enabled")),
             )
         except Exception:
             logger.debug("Pet warning re-arm failed", exc_info=True)
@@ -155,7 +169,7 @@ class PetCommands(commands.Cog):
             self.pet_service.adopt, interaction.user.id, guild_id, name
         )
         if not result.success:
-            await safe_followup(interaction, content=f"❌ {result.error}")
+            await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
             return
         adopted = result.value
         embed = discord.Embed(
@@ -174,7 +188,7 @@ class PetCommands(commands.Cog):
         if file:
             embed.set_image(url=f"attachment://{file.filename}")
         await safe_followup(interaction, embed=embed, file=file)
-        self._rearm_warning(adopted)
+        await self._rearm_warning(adopted)
 
     @pet.command(name="status", description="Check on your cama (art, hunger, mood)")
     @app_commands.describe(
@@ -198,7 +212,7 @@ class PetCommands(commands.Cog):
         )
         message = await safe_followup(
             interaction, embed=embed,
-            file=file, view=view,
+            file=file, view=view, ephemeral=not public,
         )
         if view is not None:
             view.message = message
@@ -215,7 +229,7 @@ class PetCommands(commands.Cog):
             self.pet_service.feed, interaction.user.id, guild_id, item
         )
         if not result.success:
-            await safe_followup(interaction, content=f"❌ {result.error}")
+            await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
             return
         outcome = result.value
         food = FOOD_ITEMS[item]
@@ -227,6 +241,7 @@ class PetCommands(commands.Cog):
                     "straight back at you. The temperament of legends. "
                     f"({outcome.remaining_qty} left)"
                 ),
+                ephemeral=True,
             )
             return
         bar = pet_embeds.hunger_bar(outcome.new_hunger)
@@ -238,8 +253,9 @@ class PetCommands(commands.Cog):
                 f"**{outcome.new_hunger}** `{bar}` · {outcome.remaining_qty} left · "
                 f"{outcome.feeds_left_today} feeds left today"
             ),
+            ephemeral=True,
         )
-        self._rearm_warning(outcome.pet)
+        await self._rearm_warning(outcome.pet)
 
     @pet.command(name="shop", description="Browse cama food and treats")
     @require_guild
@@ -257,7 +273,7 @@ class PetCommands(commands.Cog):
             self.pet_service.player_repo.get_balance, interaction.user.id, guild_id
         )
         embed = pet_embeds.build_shop_embed(status.supplies, species_id, balance)
-        await safe_followup(interaction, embed=embed)
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
     @pet.command(name="buy", description="Buy cama supplies")
     @app_commands.describe(item="What to buy", qty="How many (salt lick: 1)")
@@ -276,7 +292,7 @@ class PetCommands(commands.Cog):
             self.pet_service.buy, interaction.user.id, guild_id, item, qty
         )
         if not result.success:
-            await safe_followup(interaction, content=f"❌ {result.error}")
+            await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
             return
         purchase = result.value
         if item == SALT_LICK.item_id:
@@ -287,6 +303,7 @@ class PetCommands(commands.Cog):
                     f"<t:{purchase['pampered_until']}:t> "
                     f"(-{purchase['total_cost']} {JOPACOIN_EMOTE})"
                 ),
+                ephemeral=True,
             )
             return
         food = FOOD_ITEMS[item]
@@ -297,6 +314,7 @@ class PetCommands(commands.Cog):
                 f"{purchase['total_cost']} {JOPACOIN_EMOTE} — you now have "
                 f"×{purchase['new_qty']}."
             ),
+            ephemeral=True,
         )
 
     @pet.command(name="rename", description=f"Rename your cama ({RENAME_COST} JC)")
@@ -310,7 +328,7 @@ class PetCommands(commands.Cog):
             self.pet_service.rename, interaction.user.id, guild_id, name
         )
         if not result.success:
-            await safe_followup(interaction, content=f"❌ {result.error}")
+            await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
             return
         await safe_followup(
             interaction,
@@ -318,6 +336,7 @@ class PetCommands(commands.Cog):
                 f"✏️ Henceforth known as **{result.value.name}** "
                 f"(-{RENAME_COST} {JOPACOIN_EMOTE})"
             ),
+            ephemeral=True,
         )
 
     @pet.command(name="graveyard", description="Visit the cama memorial garden")
@@ -416,6 +435,9 @@ class PetCommands(commands.Cog):
                 await channel.send(embed=embed, file=file)
             except discord.Forbidden:
                 pass
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc is not None:
+            reminder_svc.cancel_pet_reminder(pet.discord_id, pet.guild_id)
         await self._dm_death_notice(pet)
         await asyncio.to_thread(self.pet_service.mark_death_announced, pet)
 

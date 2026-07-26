@@ -46,6 +46,14 @@ def stock(pet_repo, discord_id=100, guild_id=TEST_GUILD_ID, item="tango", qty=5)
     )
 
 
+def claim_death(pet_repo, pet, *, died_at):
+    return pet_repo.claim_death(
+        pet.pet_id, pet.guild_id, died_at=died_at,
+        expected_last_fed_at=pet.last_fed_at,
+        expected_hunger=pet.hunger_at_last_fed,
+    )
+
+
 def feed(pet_repo, pet, **overrides):
     kwargs = {
         "item_id": "tango",
@@ -119,7 +127,7 @@ class TestAdopt:
 
     def test_dead_pet_does_not_block_re_adopt(self, pet_repo, rich_player):
         pet = adopt(pet_repo)
-        assert pet_repo.claim_death(pet.pet_id, TEST_GUILD_ID, died_at=NOW + 9 * 86400)
+        assert claim_death(pet_repo, pet, died_at=NOW + 9 * 86400)
         second = adopt(pet_repo, name="Blep II")
         assert second.pet_id != pet.pet_id
         assert pet_repo.count_dead_pets(100, TEST_GUILD_ID) == 1
@@ -191,7 +199,7 @@ class TestFeed:
     def test_feed_dead_pet_restores_stock(self, pet_repo, rich_player):
         pet = adopt(pet_repo)
         stock(pet_repo)
-        pet_repo.claim_death(pet.pet_id, TEST_GUILD_ID, died_at=NOW + 9 * 86400)
+        claim_death(pet_repo, pet, died_at=NOW + 9 * 86400)
         with pytest.raises(ValueError, match="pet_dead"):
             feed(pet_repo, pet)
         assert pet_repo.get_supplies(100, TEST_GUILD_ID) == {"tango": 5}
@@ -261,8 +269,8 @@ class TestFeed:
 class TestDeathAndRevival:
     def test_claim_death_is_once_only(self, pet_repo, rich_player):
         pet = adopt(pet_repo)
-        assert pet_repo.claim_death(pet.pet_id, TEST_GUILD_ID, died_at=NOW + 777)
-        assert not pet_repo.claim_death(pet.pet_id, TEST_GUILD_ID, died_at=NOW + 999)
+        assert claim_death(pet_repo, pet, died_at=NOW + 777)
+        assert not claim_death(pet_repo, pet, died_at=NOW + 999)
         dead = pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
         assert dead.died_at == NOW + 777
         assert dead.death_cause == "starvation"
@@ -272,6 +280,8 @@ class TestDeathAndRevival:
         assert pet_repo.revive_with_aegis(
             pet.pet_id, TEST_GUILD_ID,
             revived_last_fed_at=NOW + 6 * 86400, revive_hunger=10,
+            expected_last_fed_at=pet.last_fed_at,
+            expected_hunger=pet.hunger_at_last_fed,
         )
         revived = pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
         assert revived.aegis_used == 1
@@ -279,6 +289,8 @@ class TestDeathAndRevival:
         assert not pet_repo.revive_with_aegis(
             pet.pet_id, TEST_GUILD_ID,
             revived_last_fed_at=NOW + 7 * 86400, revive_hunger=10,
+            expected_last_fed_at=revived.last_fed_at,
+            expected_hunger=revived.hunger_at_last_fed,
         )
 
     def test_starvation_candidates_boundary(self, pet_repo, rich_player):
@@ -296,9 +308,36 @@ class TestDeathAndRevival:
         )
         assert any(p.pet_id == pet.pet_id for p in due)
 
+    def test_stale_anchor_death_claim_loses_to_a_feed(self, pet_repo, rich_player):
+        """Regression: the sweep must not kill a pet fed after its snapshot."""
+        pet = adopt(pet_repo)
+        stock(pet_repo)
+        feed(pet_repo, pet, new_hunger=100)  # anchors move
+        # A claim computed from the PRE-feed snapshot must lose.
+        assert not pet_repo.claim_death(
+            pet.pet_id, TEST_GUILD_ID, died_at=NOW + 5 * 86400,
+            expected_last_fed_at=pet.last_fed_at,
+            expected_hunger=pet.hunger_at_last_fed,
+        )
+        assert pet_repo.get_active_pet(100, TEST_GUILD_ID) is not None
+
+    def test_stale_anchor_aegis_revive_loses_to_a_feed(self, pet_repo, rich_player):
+        pet = adopt(pet_repo, species="aegis_cama")
+        stock(pet_repo)
+        fed = feed(pet_repo, pet, new_hunger=100)
+        assert not pet_repo.revive_with_aegis(
+            pet.pet_id, TEST_GUILD_ID,
+            revived_last_fed_at=NOW + 5 * 86400, revive_hunger=10,
+            expected_last_fed_at=pet.last_fed_at,
+            expected_hunger=pet.hunger_at_last_fed,
+        )
+        fresh = pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+        assert fresh.aegis_used == 0  # Aegis not wasted
+        assert fresh.last_fed_at == fed.last_fed_at  # feed preserved
+
     def test_unannounced_death_flow(self, pet_repo, rich_player):
         pet = adopt(pet_repo)
-        pet_repo.claim_death(pet.pet_id, TEST_GUILD_ID, died_at=NOW + 500)
+        claim_death(pet_repo, pet, died_at=NOW + 500)
         pending = pet_repo.get_unannounced_deaths()
         assert [p.pet_id for p in pending] == [pet.pet_id]
         pet_repo.mark_death_announced(pet.pet_id, TEST_GUILD_ID, NOW + 600)
@@ -359,7 +398,8 @@ class TestRefunds:
         assert not pet_repo.pay_refunds_atomic(TEST_GUILD_ID, WEEK, [(100, 40)], NOW)
         assert player_repository.get_balance(100, TEST_GUILD_ID) == 1040
         assert pet_repo.is_refund_window_paid(TEST_GUILD_ID, WEEK)
-        assert len(_ledger_rows(pet_repo.db_path, "pet_refund")) == 1
+        # Fund debit + player credit, both attributed to pet_refund.
+        assert len(_ledger_rows(pet_repo.db_path, "pet_refund")) == 2
 
     def test_fund_short_rolls_back_claim(
         self, pet_repo, player_repository, rich_player
@@ -369,6 +409,25 @@ class TestRefunds:
             pet_repo.pay_refunds_atomic(TEST_GUILD_ID, WEEK, [(100, 40)], NOW)
         assert not pet_repo.is_refund_window_paid(TEST_GUILD_ID, WEEK)
         assert player_repository.get_balance(100, TEST_GUILD_ID) == 1000
+
+    def test_missing_player_share_returns_to_fund(
+        self, pet_repo, player_repository, rich_player
+    ):
+        """Regression: an unpayable share must not be destroyed."""
+        _seed_nonprofit(pet_repo.db_path, TEST_GUILD_ID, 500)
+        paid = pet_repo.pay_refunds_atomic(
+            TEST_GUILD_ID, WEEK, [(100, 40), (999999, 60)], NOW
+        )
+        assert paid
+        assert player_repository.get_balance(100, TEST_GUILD_ID) == 1040
+        # The ghost's 60 went back to the fund: 500 - 100 + 60 = 460.
+        assert pet_repo.get_nonprofit_balance(TEST_GUILD_ID) == 460
+
+    def test_refund_ledger_covers_fund_debit(self, pet_repo, rich_player):
+        _seed_nonprofit(pet_repo.db_path, TEST_GUILD_ID, 500)
+        pet_repo.pay_refunds_atomic(TEST_GUILD_ID, WEEK, [(100, 40)], NOW)
+        rows = _ledger_rows(pet_repo.db_path, "pet_refund")
+        assert rows, "fund debit and credits must carry pet_refund attribution"
 
     def test_zero_total_claims_without_fund(self, pet_repo, rich_player):
         assert pet_repo.pay_refunds_atomic(TEST_GUILD_ID, WEEK, [], NOW)

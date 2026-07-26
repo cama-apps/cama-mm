@@ -442,14 +442,22 @@ class PetRepository(BaseRepository):
         *,
         died_at: int,
         cause: str = "starvation",
+        expected_last_fed_at: int,
+        expected_hunger: int,
     ) -> bool:
-        """Once-only death claim: the conditional UPDATE is the claim."""
+        """Once-only death claim: the conditional UPDATE is the claim.
+
+        The anchor guard makes the claim optimistic: a feed that committed
+        after the caller's snapshot changes the anchors and the claim loses,
+        so a freshly fed pet can never be killed from stale starvation math.
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.execute(
                 "UPDATE pets SET died_at = ?, death_cause = ? "
-                "WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL",
-                (died_at, cause, pet_id, gid),
+                "WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL "
+                "AND last_fed_at = ? AND hunger_at_last_fed = ?",
+                (died_at, cause, pet_id, gid, expected_last_fed_at, expected_hunger),
             )
             return cursor.rowcount == 1
 
@@ -460,16 +468,28 @@ class PetRepository(BaseRepository):
         *,
         revived_last_fed_at: int,
         revive_hunger: int,
+        expected_last_fed_at: int,
+        expected_hunger: int,
     ) -> bool:
-        """Shellback's one-time save: burn the Aegis instead of dying."""
+        """Shellback's one-time save: burn the Aegis instead of dying.
+
+        Anchor-guarded like claim_death so a concurrent feed can't have its
+        anchors overwritten (and the once-per-lifetime Aegis wasted) by a
+        stale starvation snapshot.
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.execute(
                 """
                 UPDATE pets SET aegis_used = 1, last_fed_at = ?, hunger_at_last_fed = ?
                 WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL AND aegis_used = 0
+                  AND last_fed_at = ? AND hunger_at_last_fed = ?
                 """,
-                (revived_last_fed_at, revive_hunger, pet_id, gid),
+                (
+                    revived_last_fed_at, revive_hunger,
+                    pet_id, gid,
+                    expected_last_fed_at, expected_hunger,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -601,16 +621,6 @@ class PetRepository(BaseRepository):
                 return False
             if total <= 0:
                 return True
-            cursor.execute(
-                """
-                UPDATE nonprofit_fund
-                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE guild_id = ? AND total_collected >= ?
-                """,
-                (total, gid, total),
-            )
-            if cursor.rowcount == 0:
-                raise ValueError("fund_short")
             self._set_economy_ledger_context(
                 cursor,
                 source="pet_refund",
@@ -620,6 +630,18 @@ class PetRepository(BaseRepository):
                 metadata={"total": total, "recipients": len(payouts)},
             )
             try:
+                cursor.execute(
+                    """
+                    UPDATE nonprofit_fund
+                    SET total_collected = total_collected - ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND total_collected >= ?
+                    """,
+                    (total, gid, total),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError("fund_short")
+                unpaid = 0
                 for discord_id, amount in payouts:
                     if amount <= 0:
                         continue
@@ -631,6 +653,25 @@ class PetRepository(BaseRepository):
                         WHERE discord_id = ? AND guild_id = ?
                         """,
                         (amount, discord_id, gid),
+                    )
+                    if cursor.rowcount == 0:
+                        # Missing player row (e.g. purged account): return the
+                        # share to the fund rather than destroying the coins.
+                        unpaid += amount
+                if unpaid:
+                    cursor.execute(
+                        """
+                        UPDATE nonprofit_fund
+                        SET total_collected = total_collected + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE guild_id = ?
+                        """,
+                        (unpaid, gid),
+                    )
+                    cursor.execute(
+                        "UPDATE pet_refund_windows SET total_paid = total_paid - ? "
+                        "WHERE guild_id = ? AND week_key = ?",
+                        (unpaid, gid, week_key),
                     )
             finally:
                 self._clear_economy_ledger_context(cursor)

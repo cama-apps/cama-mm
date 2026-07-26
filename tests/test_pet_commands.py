@@ -209,17 +209,37 @@ class TestPetReminders:
         service._tasks[key].cancel()
 
     @pytest.mark.asyncio
+    async def test_past_crossing_schedules_no_task(self):
+        from services.reminder_service import ReminderService
+
+        notification_repo = MagicMock()
+        notification_repo.get_preferences.return_value = {"pet_enabled": True}
+        service = ReminderService(
+            notification_repo=notification_repo,
+            player_repo=MagicMock(),
+            dig_service=MagicMock(),
+        )
+        # Pet already at/below the warning band: crossing is in the past.
+        service.schedule_pet_reminder(
+            MagicMock(), 111, TEST_GUILD_ID, 12345, pet_name="Blep"
+        )
+        assert (111, TEST_GUILD_ID, "pet") not in service._tasks
+
+    @pytest.mark.asyncio
     async def test_rearm_warning_schedules_at_crossing(self):
         cog = make_cog()
         cog.pet_service.decay_per_day = 20
         reminder_svc = MagicMock()
+        reminder_svc.get_preferences.return_value = {"pet_enabled": True}
         cog.bot.reminder_service = reminder_svc
         pet = make_pet()
-        cog._rearm_warning(pet)
+        await cog._rearm_warning(pet)
         args, kwargs = reminder_svc.schedule_pet_reminder.call_args
         # 100 -> 30 is 70 points at 20/day = 3.5 days after the anchor.
         assert args[3] == pet.last_fed_at + 3 * 86400 + 43200
         assert kwargs["pet_name"] == "Blep"
+        # The pref was pre-fetched off-loop and passed through.
+        assert kwargs["preference_enabled"] is True
 
 
 class TestPetChannel:
