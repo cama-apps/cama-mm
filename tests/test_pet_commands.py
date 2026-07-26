@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -169,10 +168,35 @@ class TestSweepDelivery:
 
 class TestSetup:
     @pytest.mark.asyncio
-    async def test_setup_requires_service(self):
-        bot = SimpleNamespace(pet_service=None)
-        with pytest.raises(RuntimeError, match="Pet service"):
-            await setup(bot)
+    async def test_setup_skips_when_feature_disabled(self):
+        """No PET_CHANNEL_ID -> no pet_service -> the cog must not load."""
+        bot = MagicMock()
+        bot.pet_service = None
+        await setup(bot)
+        bot.add_cog.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_setup_loads_cog_when_service_present(self):
+        bot = MagicMock()
+        bot.pet_service = MagicMock()
+        bot.add_cog = AsyncMock()
+        await setup(bot)
+        bot.add_cog.assert_awaited_once()
+
+    def test_container_gates_service_on_channel_id(self, repo_db_path, monkeypatch):
+        import config
+        from infrastructure.service_container import ServiceContainer
+
+        monkeypatch.setattr(config, "PET_CHANNEL_ID", None)
+        container = ServiceContainer(repo_db_path)
+        container._init_repositories()
+        container._components["player_repo"] = MagicMock()
+        container._init_pet_service()
+        assert container._components["pet_service"] is None
+
+        monkeypatch.setattr(config, "PET_CHANNEL_ID", 123456)
+        container._init_pet_service()
+        assert container._components["pet_service"] is not None
 
 
 class TestPetReminders:
