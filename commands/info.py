@@ -908,6 +908,7 @@ class InfoCommands(commands.Cog):
                 "`/player register` - Register yourself as a player\n"
                 "`/player roles` - Set your preferred roles (1-5)\n"
                 "`/player link` / `unlink` / `steamids` - Manage Steam accounts\n"
+                "`/player lobby autonotify` - Automatically receive 📋 lobby alerts\n"
                 "`/player exclusion` - Check your exclusion factor\n"
                 "`/profile` - View unified profile\n"
                 "`/matchup` - Head-to-head comparison"

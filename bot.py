@@ -871,16 +871,16 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
 
 
 async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, needed: int) -> bool:
-    """Send one claimed near-full notification and ping eligible 📋 subscribers."""
+    """Send one claimed near-full notification and ping eligible subscribers."""
     try:
-        async def load_subscriber_mentions(
+        async def load_reaction_subscribers(
             lobby_message_id: int | None,
             lobby_channel_id: int | None,
-        ) -> list[str]:
+        ) -> list[tuple[int, str]]:
             if not lobby_message_id or not lobby_channel_id:
                 return []
 
-            mentions: list[str] = []
+            subscribers: list[tuple[int, str]] = []
             try:
                 lobby_channel = (
                     channel
@@ -896,11 +896,25 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
                         continue
                     async for subscriber in reaction.users():
                         if not subscriber.bot and subscriber.id not in excluded_ids:
-                            mentions.append(subscriber.mention)
+                            subscribers.append((subscriber.id, subscriber.mention))
                     break
             except Exception as exc:
                 logger.warning("Could not load clipboard lobby subscribers: %s", exc)
-            return mentions
+            return subscribers
+
+        async def load_persistent_subscriber_ids() -> list[int]:
+            reminder_service = getattr(bot, "reminder_service", None)
+            if reminder_service is None:
+                return []
+            try:
+                subscriber_ids = await asyncio.to_thread(
+                    reminder_service.get_lobby_subscriber_ids,
+                    guild_id,
+                )
+                return list(subscriber_ids)
+            except Exception as exc:
+                logger.warning("Could not load persistent lobby subscribers: %s", exc)
+                return []
 
         async def resolve_target_channel(origin_channel_id: int | None):
             target_channel = channel
@@ -943,21 +957,68 @@ async def _send_lobby_rally(channel, thread, lobby, guild_id: int, total: int, n
             jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
-        # Subscriber discovery and origin-channel resolution are independent.
-        # The reaction roster remains the subscription store, so opt-ins
-        # survive restarts and disappear naturally with the lobby message.
-        subscriber_mentions, target_channel = await asyncio.gather(
-            load_subscriber_mentions(lobby_message_id, lobby_channel_id),
+        # Per-lobby reaction subscribers, persistent subscribers, and the
+        # destination channel can all be resolved independently.
+        reaction_subscribers, persistent_subscriber_ids, target_channel = await asyncio.gather(
+            load_reaction_subscribers(lobby_message_id, lobby_channel_id),
+            load_persistent_subscriber_ids(),
             resolve_target_channel(origin_channel_id),
         )
 
+        excluded_ids = set(lobby.players)
+        bot_user_id = getattr(getattr(bot, "user", None), "id", None)
+        if isinstance(bot_user_id, int):
+            excluded_ids.add(bot_user_id)
+        subscriber_mentions: list[str] = []
+        subscriber_ids: list[int] = []
+        seen_ids = set(excluded_ids)
+        for subscriber_id, mention in reaction_subscribers:
+            if subscriber_id not in seen_ids:
+                seen_ids.add(subscriber_id)
+                subscriber_ids.append(subscriber_id)
+                subscriber_mentions.append(mention)
+        valid_persistent_ids = {
+            subscriber_id
+            for subscriber_id in persistent_subscriber_ids
+            if isinstance(subscriber_id, int) and subscriber_id > 0
+        }
+        for subscriber_id in sorted(valid_persistent_ids):
+            if subscriber_id not in seen_ids:
+                seen_ids.add(subscriber_id)
+                subscriber_ids.append(subscriber_id)
+                subscriber_mentions.append(f"<@{subscriber_id}>")
+
+        # Discord caps explicit allowed-mention users at 100 and message content
+        # at 2,000 characters. Prefer the current lobby's 📋 reactors, which
+        # were added first, then fill the remaining capacity with auto-subscribers.
+        selected_mentions: list[str] = []
+        selected_ids: list[int] = []
+        content_length = 0
+        for subscriber_id, mention in zip(subscriber_ids, subscriber_mentions, strict=True):
+            added_length = len(mention) + int(bool(selected_mentions))
+            if len(selected_ids) >= 100 or content_length + added_length > 2000:
+                break
+            selected_ids.append(subscriber_id)
+            selected_mentions.append(mention)
+            content_length += added_length
+        if len(selected_ids) < len(subscriber_ids):
+            logger.warning(
+                "Lobby rally subscriber list truncated from %d to %d for guild %s",
+                len(subscriber_ids),
+                len(selected_ids),
+                guild_id,
+            )
+
         # Send to origin channel (or reaction channel as fallback)
-        content = " ".join(subscriber_mentions) or None
+        content = " ".join(selected_mentions) or None
         target_send = target_channel.send(
             content=content,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(
-                everyone=False, roles=False, users=True, replied_user=False
+                everyone=False,
+                roles=False,
+                users=[discord.Object(id=subscriber_id) for subscriber_id in selected_ids],
+                replied_user=False,
             ),
         )
         if thread:
