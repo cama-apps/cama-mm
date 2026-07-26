@@ -1,0 +1,94 @@
+"""Tests for cama pet art: procedural rendering and the asset loader."""
+
+import discord
+import pytest
+from PIL import Image
+
+from domain.pet_constants import SPECIES
+from utils import pet_assets
+from utils.pet_drawing import render_egg_card, render_pet_card, render_tombstone_card
+
+STAGES = ("baby", "adult")
+MOODS = ("happy", "neutral", "hungry")
+
+
+def _assert_valid_card(buf):
+    with Image.open(buf) as img:
+        assert img.format == "PNG"
+        assert img.size == (512, 288)
+
+
+class TestRenderPetCard:
+    def test_same_seed_is_deterministic(self):
+        first = render_pet_card("common_cama", "baby", "happy", seed=42).getvalue()
+        second = render_pet_card("common_cama", "baby", "happy", seed=42).getvalue()
+        assert first == second
+
+    def test_different_seed_changes_output(self):
+        base = render_pet_card("common_cama", "baby", "happy", seed=42).getvalue()
+        other = render_pet_card("common_cama", "baby", "happy", seed=43).getvalue()
+        assert base != other
+
+    def test_all_species_stages_moods_render_valid_pngs(self):
+        for species_id in SPECIES:
+            for stage in STAGES:
+                for mood in MOODS:
+                    _assert_valid_card(render_pet_card(species_id, stage, mood, seed=7))
+
+    def test_mood_variants_differ(self):
+        happy = render_pet_card("jopacama", "adult", "happy", seed=5).getvalue()
+        hungry = render_pet_card("jopacama", "adult", "hungry", seed=5).getvalue()
+        assert happy != hungry
+
+    def test_stage_variants_differ(self):
+        baby = render_pet_card("jopacama", "baby", "neutral", seed=5).getvalue()
+        adult = render_pet_card("jopacama", "adult", "neutral", seed=5).getvalue()
+        assert baby != adult
+
+    def test_species_sprites_differ_from_each_other(self):
+        renders = {
+            species_id: render_pet_card(species_id, "adult", "neutral", seed=5).getvalue()
+            for species_id in SPECIES
+        }
+        assert len(set(renders.values())) == len(SPECIES)
+
+
+class TestRenderEggAndTombstone:
+    def test_egg_renders_valid_png(self):
+        _assert_valid_card(render_egg_card(seed=11))
+
+    def test_tombstone_renders_valid_png(self):
+        _assert_valid_card(render_tombstone_card("Fluffy"))
+
+    def test_tombstone_handles_long_name(self):
+        _assert_valid_card(render_tombstone_card("A" * 60))
+
+
+class TestPetAssetLoader:
+    @pytest.fixture(autouse=True)
+    def _empty_assets_dir(self, tmp_path, monkeypatch):
+        """Point the loader at an empty dir so the procedural tier is exercised."""
+        monkeypatch.setattr(pet_assets, "ASSETS_DIR", tmp_path / "pets")
+
+    def test_get_pet_card_procedural_fallback_filename(self):
+        file = pet_assets.get_pet_card("common_cama", "adult", "happy", seed=3)
+        assert isinstance(file, discord.File)
+        assert file.filename == "pet_common_cama_adult_happy.png"
+
+    def test_get_pet_card_returns_fresh_file_objects(self):
+        first = pet_assets.get_pet_card("rama", "baby", "neutral", seed=9)
+        second = pet_assets.get_pet_card("rama", "baby", "neutral", seed=9)
+        assert first is not None
+        assert second is not None
+        assert first is not second
+        assert first.fp is not second.fp
+
+    def test_get_egg_card_procedural_fallback(self):
+        file = pet_assets.get_egg_card(seed=4)
+        assert isinstance(file, discord.File)
+        assert file.filename == "pet_egg.png"
+
+    def test_get_tombstone_card_procedural_fallback(self):
+        file = pet_assets.get_tombstone_card("Fluffy", seed=4)
+        assert isinstance(file, discord.File)
+        assert file.filename == "pet_tombstone.png"
