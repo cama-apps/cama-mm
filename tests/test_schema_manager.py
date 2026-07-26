@@ -94,6 +94,39 @@ def test_schema_manager_adds_region_columns(tmp_path):
     assert {"preferred_region", "inferred_region"}.issubset(columns)
 
 
+def test_schema_manager_adds_lobby_reminder_preference(tmp_path):
+    """Lobby auto-notify is an opt-in indexed by guild."""
+    db_path = str(tmp_path / "test.db")
+    SchemaManager(db_path).initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(reminder_preferences)")
+        }
+        indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(reminder_preferences)")
+        }
+        conn.execute(
+            """
+            INSERT INTO reminder_preferences (discord_id, guild_id)
+            VALUES (?, ?)
+            """,
+            (123, TEST_GUILD_ID),
+        )
+        lobby_enabled = conn.execute(
+            """
+            SELECT lobby_enabled
+            FROM reminder_preferences
+            WHERE discord_id = ? AND guild_id = ?
+            """,
+            (123, TEST_GUILD_ID),
+        ).fetchone()[0]
+
+    assert "lobby_enabled" in columns
+    assert "idx_reminder_prefs_lobby" in indexes
+    assert lobby_enabled == 0
+
+
 def test_schema_manager_initialize_is_idempotent(tmp_path):
     """Running initialize twice must not fail or duplicate migration rows."""
     db_path = str(tmp_path / "test.db")

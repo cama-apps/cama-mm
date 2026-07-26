@@ -58,7 +58,13 @@ def mock_bot():
 class TestNotificationRepository:
     def test_defaults_when_no_row(self, notification_repo):
         prefs = notification_repo.get_preferences(9001, TEST_GUILD_ID)
-        assert prefs == {"wheel_enabled": False, "trivia_enabled": False, "betting_enabled": False, "dig_enabled": False}
+        assert prefs == {
+            "wheel_enabled": False,
+            "trivia_enabled": False,
+            "betting_enabled": False,
+            "dig_enabled": False,
+            "lobby_enabled": False,
+        }
 
     def test_set_wheel_preference(self, notification_repo):
         notification_repo.set_preference(1, TEST_GUILD_ID, "wheel", True)
@@ -76,6 +82,14 @@ class TestNotificationRepository:
         notification_repo.set_preference(1, TEST_GUILD_ID, "trivia", True)
         notification_repo.set_preference(1, TEST_GUILD_ID, "trivia", False)
         assert notification_repo.get_preferences(1, TEST_GUILD_ID)["trivia_enabled"] is False
+
+    def test_set_lobby_preference_and_load_subscribers(self, notification_repo):
+        notification_repo.set_preference(1, TEST_GUILD_ID, "lobby", True)
+        notification_repo.set_preference(2, TEST_GUILD_ID, "lobby", False)
+        notification_repo.set_preference(3, TEST_GUILD_ID_2, "lobby", True)
+
+        assert notification_repo.get_preferences(1, TEST_GUILD_ID)["lobby_enabled"] is True
+        assert notification_repo.get_enabled_users_for_type(TEST_GUILD_ID, "lobby") == [1]
 
     def test_get_enabled_users_for_type(self, notification_repo):
         notification_repo.set_preference(1, TEST_GUILD_ID, "wheel", True)
@@ -139,6 +153,13 @@ class TestReminderServicePreferences:
         reminder_service.toggle_preference(1, TEST_GUILD_ID, "betting")
         prefs = reminder_service.get_preferences(1, TEST_GUILD_ID)
         assert prefs["betting_enabled"] is True
+
+    def test_set_and_load_lobby_preference(self, reminder_service):
+        assert reminder_service.set_preference(1, TEST_GUILD_ID, "lobby", True) is True
+        assert reminder_service.get_lobby_subscriber_ids(TEST_GUILD_ID) == [1]
+
+        assert reminder_service.set_preference(1, TEST_GUILD_ID, "lobby", False) is False
+        assert reminder_service.get_lobby_subscriber_ids(TEST_GUILD_ID) == []
 
 
 # ---------------------------------------------------------------------------

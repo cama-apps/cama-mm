@@ -896,6 +896,9 @@ class TestNotifyLobbyRally:
         mock_bot.lobby_service.get_origin_channel_id.return_value = None
         mock_bot.lobby_service.get_lobby_message_id.return_value = 999
         mock_bot.lobby_service.get_lobby_channel_id.return_value = 111
+        mock_bot.reminder_service.get_lobby_subscriber_ids.side_effect = RuntimeError(
+            "database unavailable"
+        )
 
         with (
             patch.object(bot_module, "bot", mock_bot),
@@ -907,10 +910,82 @@ class TestNotifyLobbyRally:
         assert result is True
         send_kwargs = reaction_channel.send.await_args.kwargs
         assert send_kwargs["content"] == "<@10> <@12>"
-        assert send_kwargs["allowed_mentions"].users is True
+        assert [user.id for user in send_kwargs["allowed_mentions"].users] == [10, 12]
         assert "<@11>" not in send_kwargs["content"]
         assert "<@12>" in send_kwargs["content"]
         assert "<@13>" not in send_kwargs["content"]
+
+    @pytest.mark.asyncio
+    async def test_rally_mentions_persistent_subscriber_without_lobby_message(self):
+        """Auto-notify works even when no per-lobby reaction roster can be loaded."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.send = AsyncMock()
+        thread = MagicMock(send=AsyncMock())
+        lobby = MagicMock(players={11})
+        lobby.get_total_count.return_value = 8
+
+        mock_bot = MagicMock()
+        mock_bot.user.id = 999
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        mock_bot.lobby_service.get_lobby_message_id.return_value = None
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = None
+        mock_bot.reminder_service.get_lobby_subscriber_ids.return_value = [10, 11, 999]
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", {}),
+        ):
+            result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+
+        assert result is True
+        send_kwargs = reaction_channel.send.await_args.kwargs
+        assert send_kwargs["content"] == "<@10>"
+        assert [user.id for user in send_kwargs["allowed_mentions"].users] == [10]
+        mock_bot.reminder_service.get_lobby_subscriber_ids.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_rally_deduplicates_reaction_and_persistent_subscribers(self):
+        """A user opted in both ways receives one mention, and lobby players receive none."""
+        import bot as bot_module
+        from bot import notify_lobby_rally
+
+        async def users():
+            yield MagicMock(id=10, bot=False, mention="<@10>")
+            yield MagicMock(id=11, bot=False, mention="<@11>")
+
+        clipboard = MagicMock(emoji="📋")
+        clipboard.users.side_effect = users
+        lobby_message = MagicMock(reactions=[clipboard])
+        reaction_channel = MagicMock(id=111)
+        reaction_channel.fetch_message = AsyncMock(return_value=lobby_message)
+        reaction_channel.send = AsyncMock()
+        thread = MagicMock(send=AsyncMock())
+        lobby = MagicMock(players={12})
+        lobby.get_total_count.return_value = 8
+
+        mock_bot = MagicMock()
+        mock_bot.user.id = 999
+        mock_bot.get_channel.return_value = reaction_channel
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 222
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 111
+        mock_bot.reminder_service.get_lobby_subscriber_ids.return_value = [10, 12, 13]
+
+        with (
+            patch.object(bot_module, "bot", mock_bot),
+            patch.object(bot_module, "_lobby_rally_cooldowns", {}),
+        ):
+            result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+
+        assert result is True
+        send_kwargs = reaction_channel.send.await_args.kwargs
+        assert send_kwargs["content"] == "<@10> <@11> <@13>"
+        assert send_kwargs["content"].count("<@10>") == 1
+        assert "<@12>" not in send_kwargs["content"]
+        assert [user.id for user in send_kwargs["allowed_mentions"].users] == [10, 11, 13]
 
     @pytest.mark.asyncio
     async def test_rally_cooldown_prevents_repeat_clipboard_ping(self):

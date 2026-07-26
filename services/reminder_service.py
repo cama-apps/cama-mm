@@ -28,13 +28,30 @@ class ReminderService:
     def get_preferences(self, discord_id: int, guild_id: int) -> dict:
         return self._notification_repo.get_preferences(discord_id, guild_id)
 
+    def set_preference(
+        self,
+        discord_id: int,
+        guild_id: int,
+        reminder_type: str,
+        enabled: bool,
+    ) -> bool:
+        self._notification_repo.set_preference(
+            discord_id,
+            guild_id,
+            reminder_type,
+            enabled,
+        )
+        if not enabled:
+            self._cancel_task(discord_id, guild_id, reminder_type)
+        return enabled
+
     def toggle_preference(self, discord_id: int, guild_id: int, reminder_type: str) -> bool:
         prefs = self._notification_repo.get_preferences(discord_id, guild_id)
         new_state = not prefs.get(f"{reminder_type}_enabled", False)
-        self._notification_repo.set_preference(discord_id, guild_id, reminder_type, new_state)
-        if not new_state:
-            self._cancel_task(discord_id, guild_id, reminder_type)
-        return new_state
+        return self.set_preference(discord_id, guild_id, reminder_type, new_state)
+
+    def get_lobby_subscriber_ids(self, guild_id: int) -> list[int]:
+        return self._notification_repo.get_enabled_users_for_type(guild_id, "lobby")
 
     # ------------------------------------------------------------------
     # Scheduling

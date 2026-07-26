@@ -27,10 +27,74 @@ class RegistrationCommands(commands.Cog):
     """Commands for player registration and profile management."""
 
     player = app_commands.Group(name="player", description="Player registration and profile management")
+    player_lobby = app_commands.Group(
+        name="lobby",
+        description="Lobby notification preferences",
+        parent=player,
+    )
 
     def __init__(self, bot: commands.Bot, player_service):
         self.bot = bot
         self.player_service = player_service
+
+    @player_lobby.command(
+        name="autonotify",
+        description="Subscribe to automatic lobby-filling notifications",
+    )
+    @app_commands.describe(
+        enabled="Enable or disable persistent lobby notifications",
+    )
+    @require_guild
+    async def lobby_autonotify(
+        self,
+        interaction: discord.Interaction,
+        enabled: bool = True,
+    ):
+        """Set the user's persistent lobby-filling notification preference."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        reminder_service = getattr(self.bot, "reminder_service", None)
+        if reminder_service is None:
+            await safe_followup(
+                interaction,
+                content="❌ Lobby notification preferences are unavailable right now.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                reminder_service.set_preference,
+                interaction.user.id,
+                interaction.guild.id,
+                "lobby",
+                enabled,
+            )
+        except Exception as exc:
+            logger.error(
+                "Error setting lobby auto-notify for %s: %s",
+                interaction.user.id,
+                exc,
+                exc_info=True,
+            )
+            await safe_followup(
+                interaction,
+                content="❌ Couldn't update your lobby notification preference. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        if enabled:
+            message = (
+                "✅ Lobby auto-notify is now **ON**. You'll be pinged with 📋 "
+                "when a lobby is filling up.\n"
+                "This stays enabled across lobbies; reacting 📋 still subscribes "
+                "only to the current lobby."
+            )
+        else:
+            message = "🔕 Lobby auto-notify is now **OFF**."
+        await safe_followup(interaction, content=message, ephemeral=True)
 
     @player.command(name="register", description="Register yourself as a player")
     @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
