@@ -7,6 +7,7 @@ from domain.models.pending_match_state import PendingMatchState
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from services import betting_service as betting_service_module
 from services.betting_service import BettingService
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
@@ -674,6 +675,37 @@ class TestBlindBetsCore:
 class TestAutoSpectatorBets:
     """Rich spectator auto-wagers."""
 
+    def test_disabled_top_tier_uses_base_rate_for_all_slots(
+        self, services, monkeypatch
+    ):
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+        monkeypatch.setattr(
+            betting_service_module,
+            "AUTO_SPECTATOR_BET_TOP_PERCENTAGE",
+            0,
+        )
+
+        for pid in range(14900, 14910):
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Spectator{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repo.update_balance(pid, TEST_GUILD_ID, 100)
+
+        result = betting_service.create_auto_spectator_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=[],
+            dire_ids=[],
+            shuffle_timestamp=int(time.time()),
+        )
+
+        assert result["created"] == 10
+        assert result["top_count"] == 0
+        assert [bet["percentage"] for bet in result["bets"]] == [0.01] * 10
+
     def test_create_auto_spectator_bets_uses_top_richest_spectators(self, services):
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -690,13 +722,18 @@ class TestAutoSpectatorBets:
             player_repo.update_balance(pid, TEST_GUILD_ID, 1000)
 
         spectator_balances = {
-            15100: 500,
-            15101: 400,
-            15102: 300,
-            15103: 200,
-            15104: 100,
-            15105: 90,
-            15106: 80,
+            15100: 1000,
+            15101: 900,
+            15102: 800,
+            15103: 700,
+            15104: 600,
+            15105: 500,
+            15106: 400,
+            15107: 300,
+            15108: 200,
+            15109: 100,
+            15110: 90,
+            15111: 80,
         }
         for pid, balance in spectator_balances.items():
             player_repo.add(
@@ -715,11 +752,29 @@ class TestAutoSpectatorBets:
             shuffle_timestamp=now_ts,
         )
 
-        assert result["created"] == 5
+        assert result["created"] == 10
+        assert result["total_count"] == 10
+        assert result["top_count"] == 5
+        assert result["top_percentage"] == 0.02
+        assert result["percentage"] == 0.01
         bet_ids = {bet["discord_id"] for bet in result["bets"]}
-        assert bet_ids == {15100, 15101, 15102, 15103, 15104}
+        assert bet_ids == set(range(15100, 15110))
         assert bet_ids.isdisjoint(radiant_ids + dire_ids)
-        assert {bet["amount"] for bet in result["bets"]} == {5, 4, 3, 2, 1}
+        assert {
+            bet["discord_id"]: bet["amount"]
+            for bet in result["bets"]
+        } == {
+            15100: 20,
+            15101: 18,
+            15102: 16,
+            15103: 14,
+            15104: 12,
+            15105: 5,
+            15106: 4,
+            15107: 3,
+            15108: 2,
+            15109: 1,
+        }
         assert abs(result["total_radiant"] - result["total_dire"]) <= 2
 
         for bet in result["bets"]:
@@ -730,7 +785,7 @@ class TestAutoSpectatorBets:
         assert betting_service.get_top_voluntary_bettor(TEST_GUILD_ID, pending_state=pending) is None
 
         placed_bets = betting_service.bet_repo.get_bets_for_pending_match(TEST_GUILD_ID, since_ts=now_ts)
-        assert len(placed_bets) == 5
+        assert len(placed_bets) == 10
         assert all(bet["is_blind"] for bet in placed_bets)
 
     def test_auto_spectator_can_manual_bet_opposite_team_on_draft(self, services):

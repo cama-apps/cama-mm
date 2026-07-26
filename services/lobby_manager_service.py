@@ -301,6 +301,25 @@ class LobbyManagerService:
     def get_readycheck_player_data(self, guild_id: int | None = None) -> dict[int, dict]:
         return self.readycheck_player_data.get(self._normalize_guild_id(guild_id), {})
 
+    def get_readycheck_display_snapshot(
+        self,
+        message_id: int,
+        guild_id: int | None = None,
+    ) -> tuple[dict[int, dict], dict[int, str]] | None:
+        """Copy display state only while ``message_id`` is the current generation."""
+        normalized = self._normalize_guild_id(guild_id)
+        with self._state_lock:
+            if self.readycheck_message_ids.get(normalized) != message_id:
+                return None
+            player_data = {
+                discord_id: dict(data)
+                for discord_id, data in self.readycheck_player_data.get(
+                    normalized, {}
+                ).items()
+            }
+            reacted = dict(self.readycheck_reacted.get(normalized, {}))
+            return player_data, reacted
+
     def get_readycheck_created_at(self, guild_id: int | None = None) -> float | None:
         return self.readycheck_created_ats.get(self._normalize_guild_id(guild_id))
 
@@ -329,15 +348,28 @@ class LobbyManagerService:
         lobby_ids: set[int],
         player_data: dict[int, dict],
         guild_id: int | None = None,
-    ) -> None:
+        expected_message_id: int | None = None,
+    ) -> set[int] | None:
+        """Update a readycheck roster and return confirmations that were removed.
+
+        Returns ``None`` when ``expected_message_id`` is no longer the current
+        readycheck generation.
+        """
         normalized = self._normalize_guild_id(guild_id)
         with self._state_lock:
+            if (
+                expected_message_id is not None
+                and self.readycheck_message_ids.get(normalized) != expected_message_id
+            ):
+                return None
+            existing = self.readycheck_reacted.get(normalized, {})
+            removed_confirmations = set(existing) - lobby_ids
             self.readycheck_lobby_ids[normalized] = lobby_ids
             self.readycheck_player_data[normalized] = player_data
-            existing = self.readycheck_reacted.get(normalized, {})
             self.readycheck_reacted[normalized] = {
                 k: v for k, v in existing.items() if k in lobby_ids
             }
+            return removed_confirmations
 
     def add_readycheck_reaction(
         self,
@@ -355,7 +387,12 @@ class LobbyManagerService:
             ):
                 return False
             reacted = self.readycheck_reacted.setdefault(normalized, {})
-            lobby_ids = self.readycheck_lobby_ids.get(normalized, set())
+            lobby = self.lobbies.get(normalized)
+            lobby_ids = (
+                lobby.players
+                if lobby is not None and lobby.status == "open"
+                else self.readycheck_lobby_ids.get(normalized, set())
+            )
             if discord_id in reacted:
                 return False
             if discord_id not in lobby_ids:

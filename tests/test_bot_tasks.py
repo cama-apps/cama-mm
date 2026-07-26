@@ -391,6 +391,7 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
         send=AsyncMock(),
     )
     bot_user = SimpleNamespace(id=999)
+    lobby_cog = SimpleNamespace(sync_readycheck_with_lobby=AsyncMock())
 
     with (
         patch.object(
@@ -401,6 +402,7 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
         patch.object(bot_module, "_init_services"),
         patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
         patch.object(bot_module.bot, "player_service", player_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=lobby_cog),
         patch.object(bot_module.bot, "get_channel", return_value=channel),
         patch.object(bot_module.bot, "get_user") as get_user,
         patch.object(bot_module.bot, "fetch_channel", AsyncMock()) as fetch_channel,
@@ -416,6 +418,7 @@ async def test_sword_reaction_uses_gateway_member_and_partial_message(bot_module
     channel.get_partial_message.assert_called_once_with(payload.message_id)
     message.edit.assert_awaited_once()
     lobby_service.join_lobby.assert_called_once_with(member.id, payload.guild_id)
+    lobby_cog.sync_readycheck_with_lobby.assert_awaited_once_with(payload.guild_id)
     notify_rally.assert_awaited_once_with(
         channel,
         None,
@@ -577,6 +580,7 @@ async def test_sword_reaction_remove_uses_partial_message_without_get(bot_module
         get_partial_message=MagicMock(return_value=message),
     )
     bot_user = SimpleNamespace(id=999)
+    lobby_cog = SimpleNamespace(sync_readycheck_with_lobby=AsyncMock())
 
     with (
         patch.object(
@@ -586,6 +590,7 @@ async def test_sword_reaction_remove_uses_partial_message_without_get(bot_module
         ),
         patch.object(bot_module, "_init_services"),
         patch.object(bot_module.bot, "lobby_service", lobby_service, create=True),
+        patch.object(bot_module.bot, "get_cog", return_value=lobby_cog),
         patch.object(bot_module.bot, "get_channel", return_value=channel),
         patch.object(bot_module.bot, "fetch_channel", AsyncMock()) as fetch_channel,
     ):
@@ -599,6 +604,251 @@ async def test_sword_reaction_remove_uses_partial_message_without_get(bot_module
         payload.user_id,
         payload.guild_id,
     )
+    lobby_cog.sync_readycheck_with_lobby.assert_awaited_once_with(payload.guild_id)
+
+
+async def test_readycheck_sync_tracks_live_lobby_and_clears_departed_reaction():
+    from commands.lobby import LobbyCommands
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    guild_id = 42
+    manager = LobbyManagerService(FakeLobbyRepo())
+    manager.join_lobby(1, guild_id=guild_id)
+    manager.join_lobby(2, guild_id=guild_id)
+    manager.set_readycheck_state(
+        500,
+        200,
+        {1, 2},
+        {
+            1: {"name": "One"},
+            2: {"name": "Two"},
+        },
+        guild_id=guild_id,
+    )
+    manager.add_readycheck_reaction(2, "<@2>", guild_id=guild_id)
+    manager.leave_lobby(2, guild_id=guild_id)
+    manager.join_lobby(3, guild_id=guild_id)
+
+    lobby_service = LobbyService(manager, MagicMock(), ready_threshold=10)
+    readycheck_message = SimpleNamespace(
+        id=500,
+        edit=AsyncMock(),
+        remove_reaction=AsyncMock(),
+    )
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        get_partial_message=MagicMock(return_value=readycheck_message),
+    )
+    guild = SimpleNamespace(id=guild_id)
+    bot = SimpleNamespace(
+        get_guild=MagicMock(return_value=guild),
+        get_channel=MagicMock(return_value=readycheck_channel),
+        fetch_channel=AsyncMock(),
+    )
+    cog = LobbyCommands(bot, lobby_service, MagicMock())
+    cog._classify_readycheck_players = AsyncMock(
+        return_value={
+            1: {
+                "group": "active",
+                "signals": "🟢",
+                "name": "One",
+                "join_ts": None,
+                "is_member": True,
+            },
+            3: {
+                "group": "active",
+                "signals": "🟢",
+                "name": "Three",
+                "join_ts": None,
+                "is_member": True,
+            },
+        }
+    )
+
+    assert await cog.sync_readycheck_with_lobby(guild_id)
+
+    assert manager.get_readycheck_lobby_ids(guild_id=guild_id) == {1, 3}
+    assert manager.get_readycheck_reacted(guild_id=guild_id) == {}
+    edited_embed = readycheck_message.edit.await_args.kwargs["embed"]
+    assert edited_embed.description.startswith("**2** players in lobby")
+    removed = {
+        (awaited.args[0], awaited.args[1].id)
+        for awaited in readycheck_message.remove_reaction.await_args_list
+    }
+    assert removed == {("✅", 2), ("✅", 3)}
+
+
+async def test_readycheck_sync_aborts_when_generation_is_replaced():
+    from commands.lobby import LobbyCommands
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    guild_id = 42
+    manager = LobbyManagerService(FakeLobbyRepo())
+    manager.join_lobby(1, guild_id=guild_id)
+    manager.set_readycheck_state(
+        500,
+        200,
+        {1},
+        {1: {"name": "Old"}},
+        guild_id=guild_id,
+    )
+    lobby_service = LobbyService(manager, MagicMock(), ready_threshold=10)
+    readycheck_message = SimpleNamespace(
+        id=500,
+        edit=AsyncMock(),
+        remove_reaction=AsyncMock(),
+    )
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        get_partial_message=MagicMock(return_value=readycheck_message),
+    )
+    guild = SimpleNamespace(id=guild_id)
+    bot = SimpleNamespace(
+        get_guild=MagicMock(return_value=guild),
+        get_channel=MagicMock(return_value=readycheck_channel),
+        fetch_channel=AsyncMock(),
+    )
+    cog = LobbyCommands(bot, lobby_service, MagicMock())
+
+    async def replace_readycheck(*_args, **_kwargs):
+        manager.set_readycheck_state(
+            600,
+            200,
+            {9},
+            {9: {"name": "Current"}},
+            guild_id=guild_id,
+        )
+        return {
+            1: {
+                "group": "active",
+                "signals": "🟢",
+                "name": "Old",
+                "join_ts": None,
+                "is_member": True,
+            }
+        }
+
+    cog._classify_readycheck_players = AsyncMock(side_effect=replace_readycheck)
+
+    assert not await cog.sync_readycheck_with_lobby(guild_id)
+    assert manager.get_readycheck_message_id(guild_id=guild_id) == 600
+    assert manager.get_readycheck_lobby_ids(guild_id=guild_id) == {9}
+    readycheck_message.edit.assert_not_awaited()
+    readycheck_message.remove_reaction.assert_not_awaited()
+
+
+async def test_readycheck_sync_retries_departed_reaction_cleanup_after_failure():
+    from commands.lobby import LobbyCommands
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    guild_id = 42
+    manager = LobbyManagerService(FakeLobbyRepo())
+    manager.join_lobby(1, guild_id=guild_id)
+    manager.join_lobby(2, guild_id=guild_id)
+    manager.set_readycheck_state(
+        500,
+        200,
+        {1, 2},
+        {
+            1: {"name": "One"},
+            2: {"name": "Two"},
+        },
+        guild_id=guild_id,
+    )
+    manager.add_readycheck_reaction(2, "<@2>", guild_id=guild_id)
+    manager.leave_lobby(2, guild_id=guild_id)
+
+    lobby_service = LobbyService(manager, MagicMock(), ready_threshold=10)
+    readycheck_message = SimpleNamespace(
+        id=500,
+        edit=AsyncMock(),
+        remove_reaction=AsyncMock(
+            side_effect=[RuntimeError("temporary Discord failure"), None]
+        ),
+    )
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        get_partial_message=MagicMock(return_value=readycheck_message),
+    )
+    guild = SimpleNamespace(id=guild_id)
+    bot = SimpleNamespace(
+        get_guild=MagicMock(return_value=guild),
+        get_channel=MagicMock(return_value=readycheck_channel),
+        fetch_channel=AsyncMock(),
+    )
+    cog = LobbyCommands(bot, lobby_service, MagicMock())
+    cog._classify_readycheck_players = AsyncMock(
+        return_value={
+            1: {
+                "group": "active",
+                "signals": "🟢",
+                "name": "One",
+                "join_ts": None,
+                "is_member": True,
+            }
+        }
+    )
+
+    assert not await cog.sync_readycheck_with_lobby(guild_id)
+    assert manager.get_readycheck_reacted(guild_id=guild_id) == {2: "<@2>"}
+
+    assert await cog.sync_readycheck_with_lobby(guild_id)
+    assert manager.get_readycheck_reacted(guild_id=guild_id) == {}
+    assert readycheck_message.remove_reaction.await_count == 2
+
+
+async def test_readycheck_sync_contains_message_edit_failure():
+    from commands.lobby import LobbyCommands
+    from services.lobby_manager_service import LobbyManagerService
+    from services.lobby_service import LobbyService
+    from tests.fakes.lobby_repo import FakeLobbyRepo
+
+    guild_id = 42
+    manager = LobbyManagerService(FakeLobbyRepo())
+    manager.join_lobby(1, guild_id=guild_id)
+    manager.set_readycheck_state(
+        500,
+        200,
+        {1},
+        {1: {"name": "One"}},
+        guild_id=guild_id,
+    )
+    lobby_service = LobbyService(manager, MagicMock(), ready_threshold=10)
+    readycheck_message = SimpleNamespace(
+        id=500,
+        edit=AsyncMock(side_effect=RuntimeError("temporary edit failure")),
+        remove_reaction=AsyncMock(),
+    )
+    readycheck_channel = SimpleNamespace(
+        id=200,
+        get_partial_message=MagicMock(return_value=readycheck_message),
+    )
+    guild = SimpleNamespace(id=guild_id)
+    bot = SimpleNamespace(
+        get_guild=MagicMock(return_value=guild),
+        get_channel=MagicMock(return_value=readycheck_channel),
+        fetch_channel=AsyncMock(),
+    )
+    cog = LobbyCommands(bot, lobby_service, MagicMock())
+    cog._classify_readycheck_players = AsyncMock(
+        return_value={
+            1: {
+                "group": "active",
+                "signals": "🟢",
+                "name": "One",
+                "join_ts": None,
+                "is_member": True,
+            }
+        }
+    )
+
+    assert not await cog.sync_readycheck_with_lobby(guild_id)
 
 
 async def test_failed_readycheck_shortcut_removes_reaction_without_message_fetch(

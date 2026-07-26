@@ -68,6 +68,7 @@ class FakeMessage:
         self.jump_url = f"https://discord.com/channels/1/2/{self.id}"
         self.edited = False
         self.deleted = False
+        self.removed_reactions = []
 
     async def edit(self, embed=None, content=None, allowed_mentions=None):
         self.edited = True
@@ -81,7 +82,7 @@ class FakeMessage:
         self.deleted = True
 
     async def remove_reaction(self, emoji, user):
-        pass
+        self.removed_reactions.append((emoji, user.id))
 
 
 class FakeThread:
@@ -250,6 +251,31 @@ async def test_fresh_refresh_edits_in_place_and_preserves_reacted(monkeypatch):
     reacted = env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id)
     assert 2 in reacted
     assert env.lobby.get_total_count() == 10
+
+
+@pytest.mark.asyncio
+async def test_fresh_refresh_clears_departed_players_physical_reactions(monkeypatch):
+    env = _setup(monkeypatch, regular={1: ONLINE, 2: ONLINE, 3: ONLINE})
+
+    await env.cog._execute_readycheck(env.guild, env.guild_id, invoker_id=1)
+    first_id = env.lobby_service.get_readycheck_message_id(guild_id=env.guild_id)
+    env.lobby_service.add_readycheck_reaction(2, "<@2>", guild_id=env.guild_id)
+    env.lobby_service.leave_lobby(2, env.guild_id)
+
+    status, info = await env.cog._execute_readycheck(
+        env.guild,
+        env.guild_id,
+        invoker_id=1,
+    )
+
+    assert status == "ok" and info["is_refresh"] is True
+    assert env.lobby_service.get_readycheck_reacted(guild_id=env.guild_id) == {
+        1: "<@1>"
+    }
+    assert ("✅", 2) in env.thread.by_id[first_id].removed_reactions
+    assert env.thread.by_id[first_id].embed.description.startswith(
+        "**2** players in lobby"
+    )
 
 
 @pytest.mark.asyncio

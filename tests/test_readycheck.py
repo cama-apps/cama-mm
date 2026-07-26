@@ -330,6 +330,84 @@ class TestReadycheckConfirmationSnapshot:
         assert mgr.get_readycheck_confirmation_snapshot() is None
 
 
+class TestReadycheckLiveLobbyMembership:
+    def test_player_who_joins_after_readycheck_can_confirm(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1}, {}, guild_id=42)
+
+        mgr.join_lobby(2, guild_id=42)
+
+        assert mgr.add_readycheck_reaction(
+            2,
+            "<@2>",
+            guild_id=42,
+            expected_message_id=111,
+        )
+        assert mgr.get_readycheck_reacted(guild_id=42) == {2: "<@2>"}
+
+    def test_player_who_left_after_readycheck_cannot_confirm(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.join_lobby(1, guild_id=42)
+        mgr.join_lobby(2, guild_id=42)
+        mgr.set_readycheck_state(111, 222, {1, 2}, {}, guild_id=42)
+
+        mgr.leave_lobby(2, guild_id=42)
+
+        assert not mgr.add_readycheck_reaction(
+            2,
+            "<@2>",
+            guild_id=42,
+            expected_message_id=111,
+        )
+        assert mgr.get_readycheck_reacted(guild_id=42) == {}
+
+    def test_roster_update_returns_departed_confirmations(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.set_readycheck_state(
+            111,
+            222,
+            {1, 2},
+            {1: {"name": "One"}, 2: {"name": "Two"}},
+            guild_id=42,
+        )
+        mgr.add_readycheck_reaction(2, "<@2>", guild_id=42)
+
+        removed = mgr.update_readycheck_data(
+            {1},
+            {1: {"name": "One"}},
+            guild_id=42,
+            expected_message_id=111,
+        )
+
+        assert removed == {2}
+        assert mgr.get_readycheck_lobby_ids(guild_id=42) == {1}
+        assert mgr.get_readycheck_reacted(guild_id=42) == {}
+
+    def test_replaced_readycheck_rejects_old_roster_update(self):
+        mgr = LobbyManagerService(FakeLobbyRepo())
+        mgr.set_readycheck_state(
+            222,
+            333,
+            {7},
+            {7: {"name": "Current"}},
+            guild_id=42,
+        )
+
+        removed = mgr.update_readycheck_data(
+            {1},
+            {1: {"name": "Stale"}},
+            guild_id=42,
+            expected_message_id=111,
+        )
+
+        assert removed is None
+        assert mgr.get_readycheck_lobby_ids(guild_id=42) == {7}
+        assert mgr.get_readycheck_player_data(guild_id=42) == {
+            7: {"name": "Current"}
+        }
+
+
 class TestLobbyReadycheckSnapshot:
     def test_snapshot_copies_current_lobby_and_confirmations_together(self):
         mgr = LobbyManagerService(FakeLobbyRepo())
