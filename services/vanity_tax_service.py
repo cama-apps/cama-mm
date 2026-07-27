@@ -2,11 +2,13 @@
 
 from collections.abc import Iterable
 
+from config import VANITY_TAX_RATE
+
 
 class VanityTaxService:
     """Apply a 5% profit tax to guild members without a server nickname."""
 
-    TAX_RATE = 0.05
+    TAX_RATE = VANITY_TAX_RATE
 
     def __init__(self) -> None:
         self._taxable_by_guild: dict[int, frozenset[int]] = {}

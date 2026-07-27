@@ -10,7 +10,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_guild
-from config import BANKRUPTCY_PENALTY_GAMES, MINIGAME_JC_DELTA_SCALE
+from config import (
+    BANKRUPTCY_PENALTY_GAMES,
+    MINIGAME_JC_DELTA_SCALE,
+    VANITY_TAX_RATE,
+)
 from services import trivia_data
 from services.permissions import has_tax_man_permission
 from services.tax_service import TaxService
@@ -367,7 +371,12 @@ class TaxCommands(commands.Cog):
 
     @tax.command(
         name="vanity",
-        description="Check the nickname vanity tax (1% of winnings, exemptable)",
+        # Static command metadata can't read the live service, so derive the
+        # advertised rate from config at import time.
+        description=(
+            f"Check the nickname vanity tax ({VANITY_TAX_RATE:.0%} of profits,"
+            " exemptable)"
+        ),
     )
     @app_commands.describe(user="Player to check (defaults to you)")
     @require_guild

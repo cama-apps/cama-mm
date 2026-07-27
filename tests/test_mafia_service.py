@@ -1591,7 +1591,7 @@ def test_finalize_day_resolution_applies_audited_vanity_tax(
         vanity_taxable_ids={512},
     )
 
-    assert result["vanity_taxes"] == {512: 2}  # 5% of the 40 profit
+    assert result["vanity_taxes"] == {512: 2}  # int(217 * 0.01): explicit test rate
     assert player_repo.get_balance(512, TEST_GUILD_ID) == 223
     with mafia_repo.connection() as conn:
         row = conn.execute(
