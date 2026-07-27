@@ -187,6 +187,7 @@ def test_tax_group_contains_audit_and_enforcement_commands():
         "resetcooldown",
         "bankruptcy",
         "policy",
+        "vanity",
     }
 
 

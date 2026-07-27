@@ -1591,8 +1591,8 @@ def test_finalize_day_resolution_applies_audited_vanity_tax(
         vanity_taxable_ids={512},
     )
 
-    assert result["vanity_taxes"] == {512: 2}
-    assert player_repo.get_balance(512, TEST_GUILD_ID) == 223
+    assert result["vanity_taxes"] == {512: 3}  # ceil
+    assert player_repo.get_balance(512, TEST_GUILD_ID) == 222  # one more JC of ceil tax
     with mafia_repo.connection() as conn:
         row = conn.execute(
             "SELECT delta, related_type, related_id "
@@ -1601,7 +1601,7 @@ def test_finalize_day_resolution_applies_audited_vanity_tax(
             (TEST_GUILD_ID, 512),
         ).fetchone()
     assert row is not None
-    assert row["delta"] == -2
+    assert row["delta"] == -3  # ceil
     assert row["related_type"] == "mafia_game"
     assert row["related_id"] == str(gid)
 

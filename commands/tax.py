@@ -365,6 +365,46 @@ class TaxCommands(commands.Cog):
             ephemeral=False,
         )
 
+    @tax.command(
+        name="vanity",
+        description="Check the nickname vanity tax (1% of winnings, exemptable)",
+    )
+    @app_commands.describe(user="Player to check (defaults to you)")
+    @require_guild
+    async def vanity(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+    ):
+        target = user or interaction.user
+        guild_id = interaction.guild.id
+        vanity_service = getattr(self.bot, "vanity_tax_service", None)
+        if vanity_service is None:
+            await interaction.response.send_message(
+                "Vanity tax is not active.", ephemeral=True
+            )
+            return
+        taxable_ids = await asyncio.to_thread(
+            vanity_service.taxable_ids, guild_id
+        )
+        rate_pct = vanity_service.TAX_RATE * 100
+        if target.id in taxable_ids:
+            message = (
+                f"🏷️ **{target.display_name}** has no server nickname, so a "
+                f"**{rate_pct:g}% vanity tax** (minimum 1 {JOPACOIN_EMOTE}) is "
+                "levied on every profit — bets, digs, wheel wins, predictions, "
+                "mafia, match bonuses.\n"
+                "Exemption: right-click your name → **Edit Server Profile** → "
+                "set a nickname. The taxman notices immediately."
+            )
+        else:
+            message = (
+                f"✅ **{target.display_name}** has a server nickname and is "
+                f"exempt from the {rate_pct:g}% vanity tax. Remove it and the "
+                "taxman returns."
+            )
+        await interaction.response.send_message(message, ephemeral=True)
+
     @tax.command(name="player", description="View one player's full monetary exposure")
     @app_commands.describe(user="Player to audit")
     @require_guild

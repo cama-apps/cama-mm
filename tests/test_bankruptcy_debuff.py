@@ -369,7 +369,7 @@ class TestDigDebuff:
 
         assert dig_service._apply_jc_profit_policies(
             pid, TEST_GUILD_ID, 250
-        ) == (248, 0, 2)
+        ) == (247, 0, 3)  # ceil tax
 
     def test_dig_atomic_credit_audits_vanity_tax(self, repos):
         pid = 7004

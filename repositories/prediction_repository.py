@@ -1507,7 +1507,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         profit > 0
                         and p["discord_id"] in (vanity_taxable_ids or ())
                     ):
-                        vanity_tax = int(profit * vanity_tax_rate)
+                        vanity_tax = math.ceil(profit * vanity_tax_rate)
                     settlement_metadata = {
                         "outcome": outcome,
                         "base_gross_payout": base_payout,
