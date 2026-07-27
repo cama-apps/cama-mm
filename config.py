@@ -345,6 +345,11 @@ WHEEL_BOMB_OMB_VICTIM_COUNT = _parse_int("WHEEL_BOMB_OMB_VICTIM_COUNT", 3)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)
 TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%
 
+# Profit tax on guild members without a server nickname. Floored per payout,
+# so profits under 1/rate JC stay untaxed.
+_raw_vanity_tax_rate = _parse_float("VANITY_TAX_RATE", 0.05)
+VANITY_TAX_RATE = max(0.0, min(0.5, _raw_vanity_tax_rate))  # 5% default, max 50%
+
 # AI/LLM Configuration (Groq or Cerebras via LiteLLM)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")

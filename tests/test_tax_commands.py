@@ -844,3 +844,82 @@ async def test_tax_bankruptcy_remove_calls_service(monkeypatch):
     assert message["ephemeral"] is True
     assert "Removed bankruptcy modifier" in message["content"]
     assert "5 -> 0" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_reports_taxable_status_with_exemption_instructions():
+    from services.vanity_tax_service import VanityTaxService
+
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=42, nick=None)])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+    interaction.user.display_name = "NoNick"
+
+    await cog.vanity.callback(cog, interaction)
+
+    message = interaction.response.messages[-1]
+    assert message["ephemeral"] is True
+    assert "5% vanity tax" in message["content"]
+    assert "Edit Server Profile" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_reports_exempt_status():
+    from services.vanity_tax_service import VanityTaxService
+
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=42, nick="Real Name")])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=99)
+    interaction.user.display_name = "Nicked"
+
+    await cog.vanity.callback(cog, interaction)
+
+    message = interaction.response.messages[-1]
+    assert message["ephemeral"] is True
+    assert "exempt" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_handles_missing_service():
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123)
+    interaction.user.display_name = "Anyone"
+
+    await cog.vanity.callback(cog, interaction)
+
+    message = interaction.response.messages[-1]
+    assert message["ephemeral"] is True
+    assert "not active" in message["content"]
+
+
+@pytest.mark.asyncio
+async def test_tax_vanity_is_public_and_does_not_require_tax_man(monkeypatch):
+    """Parity with /tax event: vanity status is deliberately ungated."""
+    from services.vanity_tax_service import VanityTaxService
+
+    monkeypatch.setattr(tax_commands, "has_tax_man_permission", lambda _: False)
+    vanity = VanityTaxService()
+    vanity.refresh_guild(123, [SimpleNamespace(id=42, nick=None)])
+    cog = tax_commands.TaxCommands(
+        bot=SimpleNamespace(vanity_tax_service=vanity),
+        tax_service=SimpleNamespace(),
+    )
+    interaction = _FakeInteraction(guild_id=123, user_id=42)
+    interaction.user.display_name = "NoNick"
+
+    await cog.vanity.callback(cog, interaction)
+
+    message = interaction.response.messages[-1]
+    assert "vanity tax" in message["content"]
+    assert "Only Tax Men" not in message["content"]
