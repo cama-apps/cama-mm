@@ -391,8 +391,8 @@ class TaxCommands(commands.Cog):
         if target.id in taxable_ids:
             message = (
                 f"🏷️ **{target.display_name}** has no server nickname, so a "
-                f"**{rate_pct:g}% vanity tax** (minimum 1 {JOPACOIN_EMOTE}) is "
-                "levied on every profit — bets, digs, wheel wins, predictions, "
+                f"**{rate_pct:g}% vanity tax** is "
+                "levied on profits — bets, digs, wheel wins, predictions, "
                 "mafia, match bonuses.\n"
                 "Exemption: right-click your name → **Edit Server Profile** → "
                 "set a nickname. The taxman notices immediately."

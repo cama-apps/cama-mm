@@ -1,13 +1,12 @@
 """Track Discord nickname eligibility for the vanity tax."""
 
-import math
 from collections.abc import Iterable
 
 
 class VanityTaxService:
-    """Apply a 1% profit tax to guild members without a server nickname."""
+    """Apply a 5% profit tax to guild members without a server nickname."""
 
-    TAX_RATE = 0.01
+    TAX_RATE = 0.05
 
     def __init__(self) -> None:
         self._taxable_by_guild: dict[int, frozenset[int]] = {}
@@ -53,6 +52,6 @@ class VanityTaxService:
             return 0
         if discord_id not in self._taxable_by_guild.get(guild_id, ()):
             return 0
-        # Ceil, not floor: at this economy's scale 1% of a typical payout
-        # truncates to 0, which made the tax invisible in practice.
-        return math.ceil(profit * self.TAX_RATE)
+        # Floor keeps tiny profits untaxed; the 5% rate (up from 1%) is what
+        # makes the tax visible at this economy's payout sizes.
+        return int(profit * self.TAX_RATE)

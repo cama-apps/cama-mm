@@ -1420,14 +1420,14 @@ def test_award_win_bonus_applies_vanity_tax_before_blood_pact(
 
     assert results[pid]["gross"] == 200
     assert results[pid]["bankruptcy_penalty"] == 100
-    assert results[pid]["vanity_tax"] == 2
+    assert results[pid]["vanity_tax"] == 10  # 5% of 200
     buff_service.apply_blood_pact_skim.assert_called_once_with(
-        pid, TEST_GUILD_ID, 98, player_repo
+        pid, TEST_GUILD_ID, 90, player_repo
     )
     assert results[pid]["blood_pact_skimmed"] == 1
-    assert results[pid]["net"] == 97
+    assert results[pid]["net"] == 89
     # Mock skim moves no coins: the player holds the credited post-tax net.
-    assert player_repo.get_balance(pid, TEST_GUILD_ID) == 98
+    assert player_repo.get_balance(pid, TEST_GUILD_ID) == 90
     with player_repo.connection() as conn:
         row = conn.execute(
             "SELECT delta FROM economy_ledger_entries "
@@ -1435,4 +1435,4 @@ def test_award_win_bonus_applies_vanity_tax_before_blood_pact(
             (TEST_GUILD_ID, pid),
         ).fetchone()
     assert row is not None
-    assert row["delta"] == -2
+    assert row["delta"] == -10

@@ -4,7 +4,6 @@ Repository for player data access.
 
 import json
 import logging
-import math
 from datetime import UTC
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
@@ -1562,7 +1561,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     self._clear_economy_ledger_context(cursor)
 
         vanity_tax = (
-            math.ceil(net_before_penalty * vanity_tax_rate)
+            int(net_before_penalty * vanity_tax_rate)
             if vanity_tax_rate > 0 and net_before_penalty > 0
             else 0
         )

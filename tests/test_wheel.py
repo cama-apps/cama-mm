@@ -373,19 +373,19 @@ async def test_wheel_profit_applies_audited_vanity_tax():
                 ):
                     await commands.gamba.callback(commands, interaction)
 
-    assert balance == 149
+    assert balance == 145  # 5% vanity tax on the win
     tax_call = player_service.adjust_balance.call_args_list[-1]
-    assert tax_call.args[:3] == (user_id, guild_id, -1)
+    assert tax_call.args[:3] == (user_id, guild_id, -5)
     assert tax_call.kwargs["source"] == "vanity_tax"
     assert (
         player_service.log_wheel_spin.call_args.kwargs["outcome_metadata"][
             "vanity_tax"
         ]
-        == 1
+        == 5
     )
     embed = message.edit.await_args.kwargs["embed"]
     assert any(
-        field.name == "Vanity Tax" and "−1" in field.value
+        field.name == "Vanity Tax" and "−5" in field.value
         for field in embed.fields
     )
 
