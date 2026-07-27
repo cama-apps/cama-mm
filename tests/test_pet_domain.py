@@ -127,8 +127,8 @@ class TestQuirks:
         assert not get_species("common_cama").has_aegis
 
     def test_frostwool_food_discount(self):
-        assert food_cost("crystal_cama", "cheese") == 14  # 16 * 90%
-        assert food_cost("common_cama", "cheese") == 16
+        assert food_cost("crystal_cama", "cheese") == 27  # 30 * 90%
+        assert food_cost("common_cama", "cheese") == 30
 
     def test_unknown_species_falls_back_to_quirkless(self):
         pet = make_pet(species="retired_species")

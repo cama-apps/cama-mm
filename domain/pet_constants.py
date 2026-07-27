@@ -50,19 +50,20 @@ class PetFood:
     blurb: str
 
 
-# Sized against the wider economy: dig consumables run 4-8 JC, an inhouse
-# night pays ~15-30 JC. Mild bulk discount rewards planning.
+# Tuned so weekly upkeep lands around 50 JC: at 20 hunger/day a pet eats
+# 140 points/week, so ~0.30-0.36 JC per point across the tiers. Mild bulk
+# discount still rewards planning.
 FOOD_ITEMS: dict[str, PetFood] = {
     "tango": PetFood(
-        "tango", "Tango", cost=5, restore=25, emoji="🌿",
+        "tango", "Tango", cost=9, restore=25, emoji="🌿",
         blurb="Classic starter regen. Your cama eats a tree.",
     ),
     "alfalfa": PetFood(
-        "alfalfa", "Alfalfa Bale", cost=9, restore=50, emoji="🌾",
+        "alfalfa", "Alfalfa Bale", cost=17, restore=50, emoji="🌾",
         blurb="Hearty greens for a hearty hybrid.",
     ),
     "cheese": PetFood(
-        "cheese", "Roshan's Cheese", cost=16, restore=100, emoji="🧀",
+        "cheese", "Roshan's Cheese", cost=30, restore=100, emoji="🧀",
         blurb="Dropped on third death. Smells incredible.",
     ),
 }
