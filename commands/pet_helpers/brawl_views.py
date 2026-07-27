@@ -78,6 +78,13 @@ async def _edit_or_send(message: discord.Message | None, **kwargs) -> None:
     attachments = [
         a for a in (kwargs.get("attachments") or []) if isinstance(a, discord.File)
     ]
+    # discord.File is single-use — the failed edit consumed the buffers, so
+    # rewind each before the fallback send.
+    for attachment in attachments:
+        try:
+            attachment.reset()
+        except Exception as exc:
+            logger.debug("Could not rewind brawl attachment: %s", exc)
     try:
         if embed is not None and attachments:
             await channel.send(embed=embed, files=attachments)

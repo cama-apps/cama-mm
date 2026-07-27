@@ -9,7 +9,7 @@ records the spend.
 Validation errors are raised as ``ValueError(code)`` with machine-readable
 codes; the service layer maps them to Result failures:
     insufficient_funds, already_has_pet, no_pet, pet_dead, stale_pet,
-    no_supplies, feed_cap, already_pampered, stack_cap, not_owned
+    no_supplies, feed_cap, already_pampered, stack_cap, not_owned, in_brawl
 """
 
 from __future__ import annotations
@@ -322,8 +322,10 @@ class PetRepository(BaseRepository):
         One transaction so insufficient funds rolls back the death claim too.
         The anchor guard mirrors claim_death: a concurrent feed/settlement
         moves the anchors and surfaces as stale_pet for the service to retry.
-        death_announced_at is set immediately — the altar rite posts its own
-        farewell, so the sweep must not deliver a duplicate tombstone.
+        death_announced_at stays NULL here (at-least-once delivery): the
+        altar command marks it announced only after its farewell actually
+        posts, so a failed post is retried by the sweep instead of being
+        silently lost.
 
         Unlike normal eggs, the sacrifice egg's species is CONCRETE from the
         start: its pool is a property of the sacrificed pet (tier x stage at
@@ -343,13 +345,11 @@ class PetRepository(BaseRepository):
             if mid_brawl:
                 raise ValueError("in_brawl")
             cursor.execute(
-                "UPDATE pets SET died_at = ?, death_cause = 'sacrifice', "
-                "death_announced_at = ? "
+                "UPDATE pets SET died_at = ?, death_cause = 'sacrifice' "
                 "WHERE pet_id = ? AND guild_id = ? AND discord_id = ? "
                 "AND died_at IS NULL "
                 "AND last_fed_at = ? AND hunger_at_last_fed = ?",
                 (
-                    now,
                     now,
                     old_pet_id,
                     gid,
