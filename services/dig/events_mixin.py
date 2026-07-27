@@ -9,7 +9,6 @@ carries no state of its own and is composed into ``DigService``.
 import json
 import math
 import random
-import time
 import uuid
 
 import services.dig_service as dig_service
@@ -51,12 +50,6 @@ from utils.economy_scaling import (
     scale_deflationary_minigame_jc_delta,
     scale_minigame_jc_delta,
 )
-
-SHOP_CURSE_EVENT_RISK_WEIGHT_PER_STACK = 0.50
-SHOP_CURSE_RISKY_PENALTY_PER_STACK = 0.05
-SHOP_CURSE_RISKY_PENALTY_CAP = 0.15
-SHOP_CURSE_CAVE_IN_BONUS_PER_STACK = 0.02
-SHOP_CURSE_CAVE_IN_BONUS_CAP = 0.06
 
 
 class EventsMixin:
@@ -120,26 +113,6 @@ class EventsMixin:
         if luminosity >= LUMINOSITY_DARK:
             return LUMINOSITY_DARK_RISKY_PENALTY
         return LUMINOSITY_PITCH_RISKY_PENALTY
-
-    def _shop_curse_stacks(self, discord_id: int, guild_id) -> int:
-        """Return the number of active shop-bought curses on a digger."""
-        curse_repo = getattr(self, "curse_repo", None)
-        if curse_repo is None:
-            return 0
-        try:
-            return max(0, int(curse_repo.count_active_curses_for_target(
-                discord_id, guild_id, int(time.time()),
-            )))
-        except Exception:
-            logger.debug("shop curse lookup failed during dig", exc_info=True)
-            return 0
-
-    @staticmethod
-    def _shop_curse_cave_in_bonus(stack_count: int) -> float:
-        return min(
-            SHOP_CURSE_CAVE_IN_BONUS_CAP,
-            max(0, stack_count) * SHOP_CURSE_CAVE_IN_BONUS_PER_STACK,
-        )
 
     def _chain_event(self, depth: int, prestige_level: int,
                      trigger_rarity: str,
@@ -296,19 +269,11 @@ class EventsMixin:
         adjusted_weights["rare"] = int(RARITY_WEIGHTS["rare"] * rare_mult)
         adjusted_weights["legendary"] = int(RARITY_WEIGHTS["legendary"] * legendary_mult)
 
-        shop_curse_stacks = (
-            self._shop_curse_stacks(discord_id, guild_id)
-            if discord_id is not None else 0
-        )
         weighted = []
         for event in eligible:
             weight = adjusted_weights.get(event.get("rarity", "common"), 70)
             if self._event_has_risk(event):
                 weight *= self._luminosity_harmful_event_weight(luminosity)
-            if shop_curse_stacks and self._event_has_risk(event):
-                weight *= (
-                    1.0 + SHOP_CURSE_EVENT_RISK_WEIGHT_PER_STACK * shop_curse_stacks
-                )
             weighted.append((event, weight))
         events, w = zip(*weighted)
         event = random.choices(events, weights=w, k=1)[0]
@@ -465,14 +430,6 @@ class EventsMixin:
                 0.05,
                 success_chance - self._luminosity_risky_penalty(luminosity),
             )
-
-        shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
-        if choice in ("risky", "desperate") and shop_curse_stacks:
-            shop_curse_penalty = min(
-                SHOP_CURSE_RISKY_PENALTY_CAP,
-                shop_curse_stacks * SHOP_CURSE_RISKY_PENALTY_PER_STACK,
-            )
-            success_chance = max(0.05, success_chance - shop_curse_penalty)
 
         # P9 Cruel Echoes: safe options now have 10% failure chance
         cruel_fail = ascension.get("cruel_safe_fail", 0)

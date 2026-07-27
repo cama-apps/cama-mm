@@ -141,7 +141,6 @@ class DigService(
         quest_service=None,
         prediction_repo=None,
         protection_service=None,
-        curse_repo=None,
         economy_event_service=None,
         vanity_tax_service=None,
     ):
@@ -156,7 +155,6 @@ class DigService(
         self.balance_history_service = balance_history_service
         self.prediction_repo = prediction_repo
         self.protection_service = protection_service
-        self.curse_repo = curse_repo
         self.economy_event_service = economy_event_service
         self.vanity_tax_service = vanity_tax_service
         # Sub-services for focused concerns. Defaults wire local instances so
@@ -780,11 +778,6 @@ class DigService(
         # Ascension cave-in bonus
         cave_in_chance += ascension.get("cave_in_bonus", 0)
         cave_in_chance += curse_cave_in_bonus
-        shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
-        shop_curse_cave_in_bonus = self._shop_curse_cave_in_bonus(
-            shop_curse_stacks,
-        )
-        cave_in_chance += shop_curse_cave_in_bonus
         # Weather cave-in modifier (negated during Storm if Stormcaller equipped)
         weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
         if weather_cave_in_bonus and self._relic_storm_negates_hazard(
@@ -1722,11 +1715,6 @@ class DigService(
         cave_in_chance += float(route_effects.get("cave_in_bonus", 0))
         cave_in_chance += ascension.get("cave_in_bonus", 0)
         cave_in_chance += curse_cave_in_bonus
-        shop_curse_stacks = self._shop_curse_stacks(discord_id, guild_id)
-        shop_curse_cave_in_bonus = self._shop_curse_cave_in_bonus(
-            shop_curse_stacks,
-        )
-        cave_in_chance += shop_curse_cave_in_bonus
         weather_cave_in_bonus = weather_fx.get("cave_in_bonus", 0)
         if weather_cave_in_bonus and self._relic_storm_negates_hazard(
             discord_id, guild_id, self._get_weather_code(guild_id, layer_name)
@@ -1985,8 +1973,6 @@ class DigService(
             "buff_cavein_reduction": buff_cavein_reduction,
             "curse_advance_bonus": curse_advance_bonus,
             "curse_jc_bonus": curse_jc_bonus,
-            "shop_curse_stacks": shop_curse_stacks,
-            "shop_curse_cave_in_bonus": shop_curse_cave_in_bonus,
             "perks": perks,
             "prestige_level": prestige_level,
             "ascension": ascension,

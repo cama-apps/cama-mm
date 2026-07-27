@@ -84,7 +84,6 @@ class ServiceContainer:
         self._init_advanced_services()
         self._init_ai_services()
         self._init_duel_flavor_service()
-        self._init_curse_service()
         self._init_mana_service()
         self._init_dig_service()
         self._init_mafia_service()
@@ -108,7 +107,6 @@ class ServiceContainer:
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
         from repositories.buff_repository import BuffRepository
-        from repositories.curse_repository import CurseRepository
         from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
         from repositories.dig_quest_repository import DigQuestRepository
         from repositories.dig_repository import DigRepository
@@ -120,6 +118,7 @@ class ServiceContainer:
         from repositories.llm_request_repository import LLMRequestRepository
         from repositories.loan_repository import LoanRepository
         from repositories.lobby_repository import LobbyRepository
+        from repositories.low_priority_repository import LowPriorityRepository
         from repositories.mafia_repository import MafiaRepository
         from repositories.mana_repository import ManaRepository
         from repositories.match_repository import MatchRepository
@@ -154,6 +153,7 @@ class ServiceContainer:
             "duel_repo": DuelChallengeRepository(p),
             "bankruptcy_repo": BankruptcyRepository(p),
             "loan_repo": LoanRepository(p),
+            "low_priority_repo": LowPriorityRepository(p),
             "llm_request_repo": LLMRequestRepository(p),
             "economy_ledger_repo": EconomyLedgerRepository(p),
             "economy_event_repo": EconomyEventRepository(p),
@@ -169,7 +169,6 @@ class ServiceContainer:
             "slow_drip_repo": SlowDripRepository(p),
             "dig_repo": DigRepository(p),
             "notification_repo": NotificationRepository(p),
-            "curse_repo": CurseRepository(p),
             "dig_guild_modifier_repo": DigGuildModifierRepository(p),
             "dig_quest_repo": DigQuestRepository(p),
             "mafia_repo": MafiaRepository(p),
@@ -306,6 +305,7 @@ class ServiceContainer:
             loan_service=c["loan_service"],
             soft_avoid_repo=c["soft_avoid_repo"],
             package_deal_repo=c["package_deal_repo"],
+            low_priority_repo=c["low_priority_repo"],
             state_service=c["match_state_service"],
         )
 
@@ -390,16 +390,6 @@ class ServiceContainer:
             c["guild_config_repo"],
         )
 
-    def _init_curse_service(self) -> None:
-        """Witch's Curse service. Depends on flavor_text_service (optional)."""
-        from services.curse_service import CurseService
-
-        c = self._components
-        c["curse_service"] = CurseService(
-            curse_repo=c["curse_repo"],
-            flavor_text_service=c.get("flavor_text_service"),
-        )
-
     def _init_mana_service(self) -> None:
         from services.buff_service import BuffService
         from services.mana_effects_service import ManaEffectsService
@@ -474,7 +464,6 @@ class ServiceContainer:
             inventory_service=c["dig_inventory_service"],
             quest_service=c["dig_quest_service"],
             prediction_repo=c.get("prediction_repo"),
-            curse_repo=c.get("curse_repo"),
             economy_event_service=c.get("economy_event_service"),
             vanity_tax_service=c["vanity_tax_service"],
         )
@@ -616,6 +605,7 @@ class ServiceContainer:
         bot.player_repo = c["player_repo"]
         bot.match_repo = c["match_repo"]
         bot.bankruptcy_repo = c["bankruptcy_repo"]
+        bot.low_priority_repo = c["low_priority_repo"]
 
         # Services
         bot.player_service = c["player_service"]
@@ -654,7 +644,6 @@ class ServiceContainer:
         bot.duel_service = c["duel_service"]
         bot.duel_flavor_service = c["duel_flavor_service"]
         bot.reminder_service = c["reminder_service"]
-        bot.curse_service = c["curse_service"]
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
         bot.pet_service = c["pet_service"]

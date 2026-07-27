@@ -41,6 +41,11 @@ class AdminCommands(commands.Cog):
         description="Adjust player rating fields",
         parent=admin,
     )
+    lowprio = app_commands.Group(
+        name="lowprio",
+        description="Restricted matchmaking maintenance",
+        parent=admin,
+    )
 
     def __init__(
         self,
@@ -51,6 +56,7 @@ class AdminCommands(commands.Cog):
         bankruptcy_service=None,
         recalibration_service=None,
         match_service=None,
+        low_priority_repo=None,
     ):
         self.bot = bot
         self.lobby_service = lobby_service
@@ -59,6 +65,150 @@ class AdminCommands(commands.Cog):
         self.bankruptcy_service = bankruptcy_service
         self.recalibration_service = recalibration_service
         self.match_service = match_service
+        self.low_priority_repo = low_priority_repo
+
+    @lowprio.command(name="add", description="Set restricted matchmaking state")
+    @app_commands.describe(user="Player to update", reason="Internal reason")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def lowprio_add(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str | None = None,
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        if self.low_priority_repo is None:
+            await interaction.response.send_message(
+                "❌ Matchmaking maintenance is unavailable.",
+                ephemeral=True,
+            )
+            return
+        guild_id = interaction.guild.id
+        player = await asyncio.to_thread(
+            self.player_service.get_player, user.id, guild_id
+        )
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+        state = await asyncio.to_thread(
+            self.low_priority_repo.set_low_priority,
+            user.id,
+            guild_id,
+            set_by=interaction.user.id,
+            reason=reason,
+        )
+        await interaction.response.send_message(
+            f"✅ Updated matchmaking state for {user.mention}. "
+            f"{state.wins_remaining} wins required.",
+            ephemeral=True,
+        )
+        logger.info(
+            "Admin %s set low-priority state for %s in guild %s",
+            interaction.user.id,
+            user.id,
+            guild_id,
+        )
+
+    @lowprio.command(name="remove", description="Clear restricted matchmaking state")
+    @app_commands.describe(user="Player to update", reason="Internal reason")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def lowprio_remove(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str | None = None,
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        if self.low_priority_repo is None:
+            await interaction.response.send_message(
+                "❌ Matchmaking maintenance is unavailable.",
+                ephemeral=True,
+            )
+            return
+        removed = await asyncio.to_thread(
+            self.low_priority_repo.clear_low_priority,
+            user.id,
+            interaction.guild.id,
+            removed_by=interaction.user.id,
+            reason=reason,
+        )
+        message = (
+            f"✅ Cleared matchmaking state for {user.mention}."
+            if removed
+            else f"{user.mention} does not have active restricted matchmaking state."
+        )
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @lowprio.command(name="status", description="Show restricted matchmaking state")
+    @app_commands.describe(user="Player to inspect")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def lowprio_status(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        state = (
+            await asyncio.to_thread(
+                self.low_priority_repo.get_state, user.id, interaction.guild.id
+            )
+            if self.low_priority_repo is not None
+            else None
+        )
+        if state is None or not state.active:
+            message = f"{user.mention} does not have active restricted matchmaking state."
+        else:
+            completed = self.low_priority_repo.REQUIRED_WINS - state.wins_remaining
+            message = (
+                f"{user.mention}: {completed}/{self.low_priority_repo.REQUIRED_WINS} "
+                f"wins completed ({state.wins_remaining} remaining)."
+            )
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @lowprio.command(name="list", description="List restricted matchmaking state")
+    @app_commands.default_permissions(manage_guild=True)
+    @require_guild
+    async def lowprio_list(self, interaction: discord.Interaction):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+        states = (
+            await asyncio.to_thread(
+                self.low_priority_repo.list_active, interaction.guild.id
+            )
+            if self.low_priority_repo is not None
+            else []
+        )
+        if not states:
+            message = "No active restricted matchmaking state."
+        else:
+            message = "\n".join(
+                f"<@{state.discord_id}> — {state.wins_remaining} wins remaining"
+                for state in states
+            )
+        await interaction.response.send_message(message, ephemeral=True)
 
     @admin.command(name="health", description="Show bot health and since-startup usage (Admin only)")
     async def health(self, interaction: discord.Interaction):
@@ -1740,6 +1890,7 @@ async def setup(bot: commands.Bot):
     bankruptcy_service = getattr(bot, "bankruptcy_service", None)
     recalibration_service = getattr(bot, "recalibration_service", None)
     match_service = getattr(bot, "match_service", None)
+    low_priority_repo = getattr(bot, "low_priority_repo", None)
 
     # Check if cog is already loaded
     if "AdminCommands" in [cog.__class__.__name__ for cog in bot.cogs.values()]:
@@ -1748,7 +1899,14 @@ async def setup(bot: commands.Bot):
 
     await bot.add_cog(
         AdminCommands(
-            bot, lobby_service, player_service, loan_service, bankruptcy_service, recalibration_service, match_service
+            bot,
+            lobby_service,
+            player_service,
+            loan_service,
+            bankruptcy_service,
+            recalibration_service,
+            match_service,
+            low_priority_repo,
         )
     )
 

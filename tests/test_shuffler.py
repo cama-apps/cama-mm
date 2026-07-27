@@ -15,6 +15,42 @@ from shuffler import BalancedShuffler, _PoolMatchup
 from utils.region import region_split_mismatches, resolve_region
 
 
+def test_low_priority_penalty_is_500_per_selected_player():
+    shuffler = BalancedShuffler()
+
+    assert shuffler._calculate_low_priority_penalty(
+        {100, 101, 102},
+        {100, 101, 999},
+    ) == 1000.0
+
+
+def test_pool_shuffle_prefers_excluding_low_priority_player():
+    players = [
+        Player(
+            name=f"Player{i}",
+            mmr=3000,
+            preferred_roles=["1", "2", "3", "4", "5"],
+            discord_id=100 + i,
+        )
+        for i in range(11)
+    ]
+    shuffler = BalancedShuffler(
+        use_glicko=False,
+        exclusion_penalty_weight=0.0,
+        recent_match_penalty_weight=0.0,
+        rating_spread_divisor=10.0,
+        rd_priority_weight=0.0,
+    )
+
+    _, _, excluded = shuffler.shuffle_from_pool(
+        players,
+        low_priority_ids={100},
+        rng=random.Random(0),
+    )
+
+    assert {player.discord_id for player in excluded} == {100}
+
+
 class TestPlayer:
     """Test Player class functionality."""
 

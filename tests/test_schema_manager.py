@@ -80,6 +80,26 @@ def test_schema_manager_drops_retired_protected_hero_table(tmp_path):
     assert remaining == []
 
 
+def test_schema_manager_drops_retired_curses_table(tmp_path):
+    db_path = str(tmp_path / "legacy-curses.db")
+    manager = SchemaManager(db_path)
+    with sqlite3.connect(db_path) as conn:
+        manager._migration_create_curses_table(conn.cursor())
+
+    manager.initialize()
+
+    with sqlite3.connect(db_path) as conn:
+        remaining = conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'curses'
+            """
+        ).fetchall()
+
+    assert remaining == []
+
+
 def test_schema_manager_adds_region_columns(tmp_path):
     """The region migration adds preferred_region and inferred_region to players."""
     db_path = str(tmp_path / "test.db")

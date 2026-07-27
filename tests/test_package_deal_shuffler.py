@@ -47,6 +47,45 @@ class TestPackageDealPenalty:
         penalty = shuffler._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
         assert penalty == shuffler.package_deal_penalty
 
+    def test_only_low_priority_buyer_gets_half_strength(self):
+        shuffler = BalancedShuffler(
+            package_deal_penalty=100.0,
+            package_deal_split_penalty=80.0,
+        )
+        team1_ids = {100, 101, 102, 103, 104}
+        team2_ids = {105, 106, 107, 108, 109}
+        deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=105)]
+
+        buyer_penalty = shuffler._calculate_package_deal_penalty(
+            team1_ids,
+            team2_ids,
+            deals,
+            low_priority_ids={100},
+        )
+        partner_penalty = shuffler._calculate_package_deal_penalty(
+            team1_ids,
+            team2_ids,
+            deals,
+            low_priority_ids={105},
+        )
+        buyer_split_penalty = shuffler._calculate_package_deal_split_penalty(
+            {100},
+            {105},
+            deals,
+            low_priority_ids={100},
+        )
+        partner_split_penalty = shuffler._calculate_package_deal_split_penalty(
+            {100},
+            {105},
+            deals,
+            low_priority_ids={105},
+        )
+
+        assert buyer_penalty == 50.0
+        assert partner_penalty == 100.0
+        assert buyer_split_penalty == 40.0
+        assert partner_split_penalty == 80.0
+
     def test_no_penalty_when_together(self, shuffler):
         """Test that no penalty is applied when deal pair is on same team."""
         team1_ids = {100, 101, 102, 103, 104}

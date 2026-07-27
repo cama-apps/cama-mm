@@ -1335,8 +1335,6 @@ class MatchCommands(commands.Cog):
         message = f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
         await self._send_record_announcement(interaction, message)
 
-        self._spawn_curse_flames(interaction, guild, guild_id, winners, losers, record_result)
-
         await self._run_neon_match_hooks(interaction, guild_id, winners, losers, record_result)
 
         await self._run_pet_match_hooks(interaction, guild_id, record_result)
@@ -1621,85 +1619,6 @@ class MatchCommands(commands.Cog):
         return (
             f"\n🌙 First game of the night! (+{FIRST_GAME_BONUS} {JOPACOIN_EMOTE} each)"
         )
-
-    def _spawn_curse_flames(
-        self,
-        interaction: discord.Interaction,
-        guild: discord.Guild | None,
-        guild_id: int | None,
-        winners: list[dict],
-        losers: list[dict],
-        record_result: dict,
-    ) -> None:
-        """Fire Witch's Curse hooks per cursed engager (no-ops fast for non-cursed)."""
-        curse_service = getattr(self.bot, "curse_service", None)
-        if curse_service is None or interaction.channel is None:
-            return
-
-        from services.curse_service import spawn_curse_flame
-
-        channel = interaction.channel
-
-        def _resolve_name(uid: int) -> str | None:
-            if guild is not None and hasattr(guild, "get_member"):
-                member = guild.get_member(uid)
-                if member is not None:
-                    return member.display_name
-            return None
-
-        for uid in record_result.get("winning_player_ids", []) or []:
-            spawn_curse_flame(
-                curse_service,
-                channel,
-                target_id=uid,
-                guild_id=guild_id,
-                system="match",
-                outcome="win",
-                event_context={"team": "winner"},
-                target_display_name=_resolve_name(uid),
-            )
-        for uid in record_result.get("losing_player_ids", []) or []:
-            spawn_curse_flame(
-                curse_service,
-                channel,
-                target_id=uid,
-                guild_id=guild_id,
-                system="match",
-                outcome="loss",
-                event_context={"team": "loser"},
-                target_display_name=_resolve_name(uid),
-            )
-        seen_betters: set[int] = set()
-        for entry in winners or []:
-            uid = entry.get("discord_id")
-            if uid is None or uid in seen_betters:
-                continue
-            seen_betters.add(uid)
-            spawn_curse_flame(
-                curse_service,
-                channel,
-                target_id=uid,
-                guild_id=guild_id,
-                system="bet",
-                outcome="win",
-                event_context={"side": "winner"},
-                target_display_name=_resolve_name(uid),
-            )
-        for entry in losers or []:
-            uid = entry.get("discord_id")
-            if uid is None or uid in seen_betters:
-                continue
-            seen_betters.add(uid)
-            spawn_curse_flame(
-                curse_service,
-                channel,
-                target_id=uid,
-                guild_id=guild_id,
-                system="bet",
-                outcome="loss",
-                event_context={"side": "loser"},
-                target_display_name=_resolve_name(uid),
-            )
 
     async def _run_neon_match_hooks(
         self,
