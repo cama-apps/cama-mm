@@ -193,6 +193,22 @@ PITY_TIER_WEIGHTS = {"uncommon": 80, "rare": 18, "legendary": 2}
 TRINKET_COST = 25
 TRINKET_DUPE_REFUND = 10  # net 15 JC sink when the roll is a duplicate
 
+# --- Pet brawls ------------------------------------------------------------
+
+# Hunger settlement. A brawl must never kill: the loser's hunger is floored,
+# and settlement never touches died_at. Winner gain mirrors match wins
+# (MATCH_WIN_HUNGER) including the Pack Cama bonus, but only for the first
+# few wins each game-day so a throwaway pet can't become a free feeder.
+BRAWL_WIN_HUNGER = 10
+BRAWL_WIN_HUNGER_DAILY_CAP = 3  # rewarded wins per pet per game-day
+BRAWL_LOSS_HUNGER = 15
+BRAWL_LOSS_FLOOR = 10  # a loss never leaves hunger below this
+BRAWL_INSURANCE_REDUCTION = 5  # Gilded Cama (refund_bonus_pp > 0) loses less
+
+PET_BRAWL_ACCEPT_SECONDS = 180
+PET_BRAWL_TURN_SECONDS = 30
+PET_BRAWL_ACTIVE_TTL_SECONDS = 1800  # sweep voids battles stuck this long
+
 
 @dataclass(frozen=True, slots=True)
 class PetAccessory:

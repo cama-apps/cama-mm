@@ -1,0 +1,307 @@
+"""Pure combat engine for pet brawls.
+
+Everything here is deterministic given an injected `random.Random`, so the
+whole fight is unit-testable and replayable. No I/O, no clocks, no config —
+duelists are built from a snapshot of pet state taken once at accept time,
+and nothing in a brawl mutates a pet (settlement happens elsewhere).
+
+Balance philosophy (user-tuned): care matters fully (hunger docks starting
+HP, a pampered pet gets +1 power), rarity tier is nearly flat so quirks and
+move choices dominate, and the RNG is deliberately swingy — wide damage
+ranges and loud crits make better drama than a tight tactical meta.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, replace
+from enum import StrEnum
+
+from domain.models.pet import PetStage
+from domain.pet_constants import get_species
+
+MAX_ROUNDS = 10
+
+# Near-flat tier edge (~55/45 up-tier): power adds to attack and counter
+# damage only. Legendaries feel a touch stronger, never dominant.
+TIER_POWER = {"common": 0, "uncommon": 1, "rare": 1, "legendary": 2}
+
+ADULT_HP_BONUS = 20  # adults 120 max HP, babies 100
+HUNGER_HP_PENALTY_DIV = 5  # start_hp = max_hp - (100 - hunger) // 5
+
+SPIT_DMG = (8, 16)  # safe move, never misses
+STAMPEDE_DMG = (16, 32)
+STAMPEDE_MISS_PCT = 35
+HUNKER_HEAL = (5, 12)
+HUNKER_COUNTER = 5  # + power; 8 base for the Mystic Cama
+MYSTIC_COUNTER = 8
+BASE_CRIT_PCT = 10  # crit = double damage
+SPITTER_CRIT_PCT = 25  # species with spit_one_in > 0 (Rama)
+CHILL_MISS_BONUS_PP = 10  # Frostwool: opponent's Stampede misses more
+RAVENOUS_HEAL_BONUS = 3  # restore_pct > 100: hunker heals a little extra
+
+
+class PetBrawlMove(StrEnum):
+    SPIT = "spit"
+    STAMPEDE = "stampede"
+    HUNKER = "hunker"
+
+
+SAFE_MOVE = PetBrawlMove.SPIT
+
+MOVE_EMOJI = {
+    PetBrawlMove.SPIT: "💦",
+    PetBrawlMove.STAMPEDE: "🐫",
+    PetBrawlMove.HUNKER: "🛡️",
+}
+
+_DEFAULT_MOVE_NAMES = {
+    PetBrawlMove.SPIT: "Spit",
+    PetBrawlMove.STAMPEDE: "Stampede",
+    PetBrawlMove.HUNKER: "Hunker Down",
+}
+
+# Mechanics are identical for everyone; only the words change. Unknown or
+# retired species fall through to the defaults, same philosophy as
+# get_species.
+MOVE_FLAVOR: dict[tuple[str, PetBrawlMove], str] = {
+    ("common_cama", PetBrawlMove.SPIT): "Unremarkable Spit",
+    ("common_cama", PetBrawlMove.STAMPEDE): "Ordinary Stampede",
+    ("common_cama", PetBrawlMove.HUNKER): "Stand There",
+    ("dromedary_cross", PetBrawlMove.SPIT): "Sandy Spit",
+    ("dromedary_cross", PetBrawlMove.STAMPEDE): "Dune Charge",
+    ("dromedary_cross", PetBrawlMove.HUNKER): "Close Nostrils",
+    ("banana_ears", PetBrawlMove.SPIT): "Melodic Spit",
+    ("banana_ears", PetBrawlMove.STAMPEDE): "Humming Charge",
+    ("banana_ears", PetBrawlMove.HUNKER): "Hum Defensively",
+    ("jopacama", PetBrawlMove.SPIT): "Coin-Flecked Spit",
+    ("jopacama", PetBrawlMove.STAMPEDE): "Market Crash",
+    ("jopacama", PetBrawlMove.HUNKER): "Audit Defense",
+    ("pudge_cama", PetBrawlMove.SPIT): "Sloppy Spit",
+    ("pudge_cama", PetBrawlMove.STAMPEDE): "Dinner Rush",
+    ("pudge_cama", PetBrawlMove.HUNKER): "Digest",
+    ("courier_cama", PetBrawlMove.SPIT): "Special Delivery",
+    ("courier_cama", PetBrawlMove.STAMPEDE): "Rush Delivery",
+    ("courier_cama", PetBrawlMove.HUNKER): "Hide Behind Saddlebags",
+    ("aegis_cama", PetBrawlMove.SPIT): "Serene Spit",
+    ("aegis_cama", PetBrawlMove.STAMPEDE): "Shell Rush",
+    ("aegis_cama", PetBrawlMove.HUNKER): "Shell Up",
+    ("invoker_cama", PetBrawlMove.SPIT): "Forged Spit",
+    ("invoker_cama", PetBrawlMove.STAMPEDE): "Orb-Powered Charge",
+    ("invoker_cama", PetBrawlMove.HUNKER): "Quas Ward",
+    ("crystal_cama", PetBrawlMove.SPIT): "Frost Spit",
+    ("crystal_cama", PetBrawlMove.STAMPEDE): "Blizzard Stampede",
+    ("crystal_cama", PetBrawlMove.HUNKER): "Frozen Stance",
+    ("rama", PetBrawlMove.SPIT): "Royal Spit",
+    ("rama", PetBrawlMove.STAMPEDE): "Temperamental Rampage",
+    ("rama", PetBrawlMove.HUNKER): "Refuse to Cooperate",
+}
+
+
+def move_name(species_id: str, move: PetBrawlMove) -> str:
+    return MOVE_FLAVOR.get((species_id, move), _DEFAULT_MOVE_NAMES[move])
+
+
+@dataclass(frozen=True, slots=True)
+class Duelist:
+    pet_id: int
+    owner_id: int
+    name: str
+    species_id: str
+    tier: str
+    is_adult: bool
+    power: int
+    max_hp: int
+    hp: int
+    shield_available: bool  # per-brawl Shellback save; never burns the real Aegis
+
+
+@dataclass(frozen=True, slots=True)
+class PetBrawlState:
+    a: Duelist
+    b: Duelist
+    round_no: int  # completed rounds
+    winner: str | None  # "a" | "b" | None while the fight is live
+
+
+def build_duelist(
+    *,
+    pet_id: int,
+    owner_id: int,
+    name: str,
+    species_id: str,
+    stage: PetStage,
+    hunger: int,
+    happy: bool,
+    aegis_used: int,
+) -> Duelist:
+    """Snapshot a pet into a duelist. `happy` = mood HAPPY or pampered."""
+    species = get_species(species_id)
+    is_adult = stage is PetStage.ADULT
+    max_hp = 100 + (ADULT_HP_BONUS if is_adult else 0)
+    hp = max_hp - (100 - max(0, min(100, hunger))) // HUNGER_HP_PENALTY_DIV
+    power = TIER_POWER.get(species.tier, 0) + (1 if happy else 0)
+    return Duelist(
+        pet_id=pet_id,
+        owner_id=owner_id,
+        name=name,
+        species_id=species_id,
+        tier=species.tier,
+        is_adult=is_adult,
+        power=power,
+        max_hp=max_hp,
+        hp=hp,
+        shield_available=species.has_aegis and not aegis_used,
+    )
+
+
+def initial_state(a: Duelist, b: Duelist) -> PetBrawlState:
+    return PetBrawlState(a=a, b=b, round_no=0, winner=None)
+
+
+def _attack_damage(
+    attacker: Duelist,
+    defender: Duelist,
+    move: PetBrawlMove,
+    defender_hunkers: bool,
+    rng: random.Random,
+) -> tuple[int, bool, bool]:
+    """Return (damage, landed, crit) for one attack, defender mods applied."""
+    atk_sp = get_species(attacker.species_id)
+    def_sp = get_species(defender.species_id)
+    if move is PetBrawlMove.HUNKER:
+        return 0, False, False
+    if move is PetBrawlMove.STAMPEDE:
+        miss_pct = STAMPEDE_MISS_PCT + (
+            CHILL_MISS_BONUS_PP if def_sp.food_cost_pct < 100 else 0
+        )
+        if rng.randint(1, 100) <= miss_pct:
+            return 0, False, False
+        low, high = STAMPEDE_DMG
+    else:
+        low, high = SPIT_DMG
+    dmg = rng.randint(low, high) + attacker.power
+    crit_pct = SPITTER_CRIT_PCT if atk_sp.spit_one_in > 0 else BASE_CRIT_PCT
+    crit = rng.randint(1, 100) <= crit_pct
+    if crit:
+        dmg *= 2
+    if atk_sp.decay_pct > 100:  # Ravenous hits harder...
+        dmg += 1
+    if defender_hunkers:
+        dmg = -(-dmg // 2)  # ceil half
+    if def_sp.decay_pct > 100:  # ...and takes more
+        dmg += 1
+    if def_sp.decay_pct < 100:  # Dune is hardy
+        dmg = max(1, dmg - 1)
+    return dmg, True, crit
+
+
+def _counter_damage(hunkerer: Duelist) -> int:
+    base = (
+        MYSTIC_COUNTER
+        if get_species(hunkerer.species_id).salt_lick_pct > 100
+        else HUNKER_COUNTER
+    )
+    return base + hunkerer.power
+
+
+def _hunker_heal(hunkerer: Duelist, rng: random.Random) -> int:
+    heal = rng.randint(*HUNKER_HEAL)
+    if get_species(hunkerer.species_id).restore_pct > 100:
+        heal += RAVENOUS_HEAL_BONUS
+    return heal
+
+
+def _hp_pct(d: Duelist) -> int:
+    return d.hp * 100 // d.max_hp
+
+
+def resolve_round(
+    state: PetBrawlState,
+    move_a: PetBrawlMove,
+    move_b: PetBrawlMove,
+    rng: random.Random,
+) -> tuple[PetBrawlState, tuple[str, ...]]:
+    """Resolve one simultaneous round. Guaranteed winner by MAX_ROUNDS."""
+    if state.winner is not None:
+        raise ValueError("brawl already resolved")
+    a, b = state.a, state.b
+    log: list[str] = []
+
+    # Both attacks read the round-start state; damage lands simultaneously.
+    dmg_to_b, a_landed, a_crit = _attack_damage(
+        a, b, move_a, move_b is PetBrawlMove.HUNKER, rng
+    )
+    dmg_to_a, b_landed, b_crit = _attack_damage(
+        b, a, move_b, move_a is PetBrawlMove.HUNKER, rng
+    )
+    heal_a = _hunker_heal(a, rng) if move_a is PetBrawlMove.HUNKER else 0
+    heal_b = _hunker_heal(b, rng) if move_b is PetBrawlMove.HUNKER else 0
+    if move_a is PetBrawlMove.HUNKER and b_landed:
+        dmg_to_b += _counter_damage(a)
+    if move_b is PetBrawlMove.HUNKER and a_landed:
+        dmg_to_a += _counter_damage(b)
+
+    for atk, dfn, move, landed, crit, dmg in (
+        (a, b, move_a, a_landed, a_crit, dmg_to_b),
+        (b, a, move_b, b_landed, b_crit, dmg_to_a),
+    ):
+        label = move_name(atk.species_id, move)
+        if move is PetBrawlMove.HUNKER:
+            log.append(f"🛡️ **{atk.name}** hunkers down ({label}).")
+        elif not landed:
+            log.append(f"💨 **{atk.name}**'s {label} misses entirely!")
+        elif crit:
+            log.append(f"💥 CRITICAL! **{atk.name}**'s {label} devastates for {dmg}!")
+        else:
+            log.append(f"{MOVE_EMOJI[move]} **{atk.name}**'s {label} hits for {dmg}.")
+    if heal_a:
+        log.append(f"💚 **{a.name}** recovers {heal_a} HP.")
+    if heal_b:
+        log.append(f"💚 **{b.name}** recovers {heal_b} HP.")
+    if move_a is PetBrawlMove.HUNKER and b_landed:
+        log.append(f"⚡ **{a.name}** counters for {_counter_damage(a)}!")
+    if move_b is PetBrawlMove.HUNKER and a_landed:
+        log.append(f"⚡ **{b.name}** counters for {_counter_damage(b)}!")
+
+    new_hp_a = min(a.max_hp, a.hp - dmg_to_a + heal_a)
+    new_hp_b = min(b.max_hp, b.hp - dmg_to_b + heal_b)
+    shield_a, shield_b = a.shield_available, b.shield_available
+    if new_hp_a <= 0 and shield_a:
+        new_hp_a, shield_a = 1, False
+        log.append(f"🛡️ **{a.name}**'s shell flashes — it survives on 1 HP!")
+    if new_hp_b <= 0 and shield_b:
+        new_hp_b, shield_b = 1, False
+        log.append(f"🛡️ **{b.name}**'s shell flashes — it survives on 1 HP!")
+
+    a = replace(a, hp=new_hp_a, shield_available=shield_a)
+    b = replace(b, hp=new_hp_b, shield_available=shield_b)
+    round_no = state.round_no + 1
+    winner: str | None = None
+
+    if new_hp_a <= 0 and new_hp_b <= 0:
+        if new_hp_a != new_hp_b:
+            winner = "a" if new_hp_a > new_hp_b else "b"
+        else:
+            winner = "a" if rng.randint(0, 1) == 0 else "b"
+        standing = a if winner == "a" else b
+        log.append(f"☄️ Double knockout! **{standing.name}** staggers up last!")
+    elif new_hp_b <= 0:
+        winner = "a"
+        log.append(f"🏆 **{b.name}** is knocked out!")
+    elif new_hp_a <= 0:
+        winner = "b"
+        log.append(f"🏆 **{a.name}** is knocked out!")
+    elif round_no >= MAX_ROUNDS:
+        pct_a, pct_b = _hp_pct(a), _hp_pct(b)
+        if pct_a != pct_b:
+            winner = "a" if pct_a > pct_b else "b"
+        else:
+            winner = "a" if rng.randint(0, 1) == 0 else "b"
+        judge = a if winner == "a" else b
+        log.append(
+            f"🔔 The judges call it after {MAX_ROUNDS} rounds — "
+            f"**{judge.name}** takes it!"
+        )
+
+    return PetBrawlState(a=a, b=b, round_no=round_no, winner=winner), tuple(log)
