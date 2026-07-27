@@ -21,6 +21,13 @@ Component contract (also documented in prompts.md):
     grayscale; they are remapped to the species palette at compose time.
   - Multiple variants per scope are encouraged: the pet's id seeds which
     variant an individual pet gets, so every pet looks subtly unique.
+  - A creature component whose head/body don't sit exactly in the default
+    zones may ship an ANCHOR SIDECAR ({same name}.json) declaring where
+    they actually are: {"head_center": [x, y], "head_width": w,
+    "body_center": [x, y], "body_width": w}. The compositor then shifts
+    and scales the face/front layers to the head anchor and the
+    back/detail layers to the body anchor, so every face variant fits
+    every body variant. No sidecar means the default zones apply.
 
 Directory listings and file bytes are cached for the process lifetime
 (same policy as utils/pet_assets.py — new component packs need a restart).
@@ -28,6 +35,7 @@ Directory listings and file bytes are cached for the process lifetime
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -35,8 +43,12 @@ from PIL import Image
 
 from utils.pet_drawing import (
     _DEFAULT_PALETTE,
+    CARD_HEIGHT,
+    CARD_WIDTH,
+    FLOOR_Y,
     SLOT_ORDER,
     SPECIES_PALETTES,
+    _geometry,
     _slot_rng,
     assemble_card,
     render_layer,
@@ -140,12 +152,116 @@ def _tint_layer(img: Image.Image, species_id: str) -> Image.Image:
     return Image.merge("RGBA", (*bands, img.getchannel("A")))
 
 
+# The frame disk components are AUTHORED against — the zone spec published
+# in prompts.md. Adult matches the procedural geometry exactly; baby differs
+# (AI baby heads sit high on chibi bodies, procedural chibi heads sit low).
+AUTHORING_FRAMES = {
+    "adult": {
+        "head_center": [256, 64], "head_width": 64,
+        "body_center": [256, 184], "body_width": 160,
+    },
+    "baby": {
+        "head_center": [256, 95], "head_width": 80,
+        "body_center": [256, 190], "body_width": 140,
+    },
+}
+
+
+def _geometry_frame(stage: str) -> dict:
+    """The frame procedural layers are DRAWN in, from the pixel geometry."""
+    g = _geometry(stage)
+    return {
+        "head_center": [g.hx + g.hw // 2, g.hy + g.hh // 2],
+        "head_width": g.hw,
+        "body_center": [g.x0 + g.body_w // 2, g.body_top + (FLOOR_Y - g.body_top) // 2],
+        "body_width": g.body_w,
+    }
+
+
+def _authoring_frame(stage: str) -> dict:
+    return AUTHORING_FRAMES.get(stage, _geometry_frame(stage))
+
+
+def _load_anchors(component_path: Path, stage: str) -> dict:
+    """Target anchors for a disk creature: sidecar values over the authoring
+    frame (a component with no sidecar is assumed to match the contract)."""
+    anchors = dict(_authoring_frame(stage))
+    sidecar = component_path.with_suffix(".json")
+    key = f"anchor:{sidecar}"
+    cached = _image_cache.get(key)
+    if cached is None and sidecar.is_file():
+        try:
+            cached = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("Bad pet anchor sidecar %s: %s", sidecar, exc)
+            cached = {}
+        _image_cache[key] = cached
+    if cached:
+        anchors.update(cached)
+    return anchors
+
+
+def _fit_layer(
+    layer: Image.Image,
+    *,
+    scale: float,
+    pivot: tuple[float, float],
+    translate: tuple[float, float],
+) -> Image.Image:
+    """Scale a layer about `pivot`, then translate — used to move face/detail
+    layers onto a creature component's actual anchors."""
+    if abs(scale - 1.0) < 0.01 and translate == (0, 0):
+        return layer
+    px, py = pivot
+    tx, ty = translate
+    # PIL affine maps OUTPUT coords to INPUT coords.
+    inv = 1.0 / scale
+    coeffs = (
+        inv, 0.0, px - (px + tx) * inv,
+        0.0, inv, py - (py + ty) * inv,
+    )
+    return layer.transform(
+        (CARD_WIDTH, CARD_HEIGHT), Image.AFFINE, coeffs, resample=Image.BICUBIC
+    )
+
+
+def _fit_to_target(layer: Image.Image, source: dict, target: dict, kind: str) -> Image.Image:
+    """Map a layer from the frame it was authored/drawn in onto the
+    creature's actual frame. kind is "head" (face/front) or "body"
+    (back/detail)."""
+    src_c, src_w = source[f"{kind}_center"], source[f"{kind}_width"]
+    tgt_c, tgt_w = target[f"{kind}_center"], target[f"{kind}_width"]
+    scale = tgt_w / src_w if src_w else 1.0
+    return _fit_layer(
+        layer,
+        scale=scale,
+        pivot=tuple(src_c),
+        translate=(tgt_c[0] - src_c[0], tgt_c[1] - src_c[1]),
+    )
+
+
 def compose_pet_card(species_id: str, stage: str, mood: str, seed: int):
     """Compose a pet card from disk components with procedural fallback
-    per slot. Returns io.BytesIO of the finished PNG."""
+    per slot. Returns io.BytesIO of the finished PNG.
+
+    Frames: disk components are authored in the AUTHORING frame; procedural
+    layers draw in the geometry frame. Anchored layers (face/front to the
+    head, back/detail to the body) are mapped from their source frame onto
+    the creature's target frame, so any face fits any body.
+    """
+    authoring = _authoring_frame(stage)
+    geometry = _geometry_frame(stage)
+    # Target frame comes from the creature (picked deterministically) and
+    # must be known up front: the `back` slot composites before `creature`.
+    creature_pick = _pick_component("creature", stage, species_id, mood, seed)
+    if creature_pick is not None and _load_component(creature_pick[0]) is not None:
+        target = _load_anchors(creature_pick[0], stage)
+    else:
+        target = geometry  # procedural creature
     layers = []
     for slot in SLOT_ORDER:
         layer: Image.Image | None = None
+        source = authoring
         picked = _pick_component(slot, stage, species_id, mood, seed)
         if picked is not None:
             path, needs_tint = picked
@@ -154,5 +270,10 @@ def compose_pet_card(species_id: str, stage: str, mood: str, seed: int):
                 layer = _tint_layer(component, species_id) if needs_tint else component
         if layer is None:
             layer = render_layer(slot, species_id, stage, mood, seed)
+            source = geometry
+        if layer is not None and slot in ("face", "front"):
+            layer = _fit_to_target(layer, source, target, "head")
+        elif layer is not None and slot in ("back", "detail"):
+            layer = _fit_to_target(layer, source, target, "body")
         layers.append(layer)
     return assemble_card(layers)
