@@ -109,6 +109,24 @@ class TestComposition:
         }
         assert picks == {"any_happy_01.png", "any_happy_02.png"}  # variety across pets
 
+    def test_anchor_sidecar_moves_face_onto_the_creatures_head(self, tmp_path):
+        """A creature component may declare where its head ACTUALLY is; the
+        face layer must follow it."""
+        import json
+
+        write_component(tmp_path, "adult", "creature", "any_01", BODY_BOX, (90, 90, 90, 255))
+        write_component(tmp_path, "adult", "face", "any_happy_01", FACE_BOX, MAGENTA)
+        sidecar = tmp_path / "components" / "adult" / "creature" / "any_01.json"
+        sidecar.write_text(json.dumps({
+            "head_center": [300, 64], "head_width": 64,
+            "body_center": [256, 184], "body_width": 160,
+        }))
+        pet_compositor.clear_caches()
+        img = compose_image()
+        # Face translated +44px right onto the declared head position.
+        assert img.getpixel((300, 60))[:3] == MAGENTA[:3]
+        assert img.getpixel(FACE_PX)[:3] != MAGENTA[:3]
+
     def test_manifest_token_tracks_component_set(self, tmp_path):
         empty = pet_compositor.manifest_token()
         write_component(tmp_path, "adult", "face", "any_happy_01", FACE_BOX, MAGENTA)
