@@ -71,6 +71,6 @@ async def test_event_result_embed_surfaces_gear_drop_details():
     assert "Glassbreaker Pick" in gear_field.value
     assert "Weapon" in gear_field.value
     assert "Durability: 8" in gear_field.value
-    assert gear_field.value.endswith(
-        "Diamond dig bonuses; +2 boss damage; -8% hit chance."
-    )
+    assert "Diamond dig bonuses; +2 boss damage; -8% hit chance." in gear_field.value
+    assert "Stored in your gear inventory" in gear_field.value
+    assert "`/dig gear`" in gear_field.value

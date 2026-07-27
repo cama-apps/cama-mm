@@ -4484,6 +4484,99 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="rare",
     ),
     RandomEvent(
+        id="surveyors_cairn",
+        name="Surveyor's Cairn",
+        description=(
+            "A cairn of numbered stones marks tunnels that do not appear on any living survey.",
+            "Survey pins circle a low stone mound. A silver loop holds the oldest map shut.",
+        ),
+        min_depth=25, max_depth=100,
+        safe_option=EventChoice(
+            "Copy the outer marks",
+            success=EventOutcome(
+                "You copy the reliable bearings and leave the sealed map where it lies.",
+                1, 0, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Lift the center stone",
+            success=EventOutcome(
+                "The cairn settles behind you. Its surveyor's ring fits as if it measured your hand.",
+                4, 3, False,
+                gear_reward_pool=("surveyors_loop",),
+            ),
+            failure=EventOutcome(
+                "Every copied bearing shifts at once. You pay to find the tunnel you just left.",
+                -2, -6, False,
+            ),
+            success_chance=0.44,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="ruinwager_vault",
+        name="Ruinwager Vault",
+        description=(
+            "A vault door offers odds instead of a lock. The numbers improve whenever the ceiling groans.",
+            "An iron betting window opens in bare stone. Something below it is taking wagers on you.",
+        ),
+        min_depth=75, max_depth=200,
+        safe_option=EventChoice(
+            "Buy the marked exit",
+            success=EventOutcome(
+                "The cheap route is narrow, honest, and pointed in the correct direction.",
+                1, -2, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Stake your route",
+            success=EventOutcome(
+                "The vault pays in old coin and a signet warm from somebody else's losing hand.",
+                4, 8, False,
+                gear_reward_pool=("ruinwager_signet",),
+            ),
+            failure=EventOutcome(
+                "The house keeps your route, your stake, and several load-bearing stones.",
+                -3, -12, False,
+            ),
+            success_chance=0.38,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="red_thread_shrine",
+        name="Red Thread Shrine",
+        description=(
+            "Red thread crosses a buried shrine in hundreds of taut lines. One loose end waits for a finger.",
+            "A hand-shaped altar holds a single red loop. Every snapped thread around it points deeper.",
+        ),
+        min_depth=125, max_depth=None,
+        safe_option=EventChoice(
+            "Leave a clean knot",
+            success=EventOutcome(
+                "You tie off a failing support line and follow its tension deeper.",
+                1, 0, False,
+            ),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take the waiting loop",
+            success=EventOutcome(
+                "The shrine pulls once against your pulse, then releases the ring and a hidden path.",
+                5, 5, False,
+                gear_reward_pool=("red_thread_band",),
+            ),
+            failure=EventOutcome(
+                "The loose end was holding the chamber together. The shrine collects its thread.",
+                -4, -10, True,
+            ),
+            success_chance=0.34,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
         id="collectors_roots",
         name="Collector's Roots",
         description=(

@@ -29,6 +29,7 @@ from services.dig_constants import (
     PINNACLE_DEPTH,
     get_boss_pool_for_tier,
 )
+from services.dig_data.items import UNIQUE_GEAR
 from services.dig_service import DigService
 from tests.conftest import TEST_GUILD_ID
 
@@ -445,6 +446,44 @@ class TestStartBossDuel:
         assert result["pending_prompt"]
         state = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
         assert state["player_hit"] == pytest.approx(0.55)
+
+    def test_paused_duel_snapshots_equipped_ring(
+        self,
+        dig_service,
+        dig_repo,
+        player_repository,
+        monkeypatch,
+        deterministic_rng,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001,
+            TEST_GUILD_ID,
+            boss_progress=json.dumps({
+                "25": {"boss_id": "grothak", "status": "active"},
+            }),
+        )
+        definition = UNIQUE_GEAR["red_thread_band"]
+        ring_id = dig_repo.add_gear(
+            10001,
+            TEST_GUILD_ID,
+            definition.slot.value,
+            definition.reference_tier,
+            source="event:test",
+            durability=definition.max_durability,
+            item_id=definition.item_id,
+        )
+        dig_repo.equip_gear(ring_id, 10001, TEST_GUILD_ID, "ring")
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=0,
+        )
+
+        assert result["pending_prompt"]
+        state = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        status_effects = json.loads(state["status_effects"])
+        assert ring_id in status_effects["gear_snapshot_ids"]
 
     def test_resume_loss_ticks_snapshot_armor_twice_after_a_gear_swap(
         self, dig_service, dig_repo, player_repository, monkeypatch,

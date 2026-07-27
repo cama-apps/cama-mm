@@ -50,11 +50,13 @@ PICKAXE_TIERS: list[dict] = [
 # ---------------------------------------------------------------------------
 # Boss-combat Gear
 # ---------------------------------------------------------------------------
-# Four persistent slots (Weapon, Armor, Boots, Amulet) modify boss-fight
-# stats. Weapon reuses the pickaxe names (Wooden → Void-Touched); Armor,
-# Boots, and Amulet each vary their suffix per tier (Iron Hauberk, Iron
-# Sabatons, Iron Talisman, ...). The shop gates each tier by prior depth
-# and current prestige; boss victories can still drop pieces for free.
+# Five persistent slots (Weapon, Armor, Boots, Amulet, Ring) modify Dig
+# choices or boss-fight stats. Weapon reuses the pickaxe names
+# (Wooden → Void-Touched); Armor, Boots, and Amulet each vary their suffix
+# per tier (Iron Hauberk, Iron Sabatons, Iron Talisman, ...). Rings are
+# event-only side-grades and intentionally have no shop tier table.
+# The shop gates each ordinary tier by prior depth and current prestige;
+# boss victories can still drop ordinary pieces for free.
 # Durability ticks once per
 # boss fight; at zero the piece stays equipped but its effects remain
 # disabled until repaired.
@@ -228,6 +230,27 @@ UNIQUE_GEAR: dict[str, UniqueGearDef] = {
         "blood_locket", "Blood Locket", GearSlot.AMULET, 3, 200, 14,
         player_hp_bonus=-1, crit_chance=0.05, effect_id="heal_first_crit",
         effect_summary="-1 HP; +5% crit chance; first crit heals 1 HP.",
+    ),
+    "surveyors_loop": UniqueGearDef(
+        "surveyors_loop", "Surveyor's Loop", GearSlot.RING, 3, 200, 14,
+        effect_id="safe_event_stride",
+        effect_summary=(
+            "Safe event successes gain +1 block; risky and desperate choices "
+            "lose 5% success chance."
+        ),
+    ),
+    "ruinwager_signet": UniqueGearDef(
+        "ruinwager_signet", "Ruinwager Signet", GearSlot.RING, 3, 200, 14,
+        effect_id="risky_event_edge",
+        effect_summary=(
+            "Risky and desperate choices gain +5% success chance; failed JC "
+            "losses are 25% harsher."
+        ),
+    ),
+    "red_thread_band": UniqueGearDef(
+        "red_thread_band", "Red Thread Band", GearSlot.RING, 3, 200, 14,
+        player_hp_bonus=-1, effect_id="reroll_first_miss",
+        effect_summary="-1 HP; reroll the first missed boss attack each fight.",
     ),
 }
 

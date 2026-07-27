@@ -588,6 +588,9 @@ ROGUELIKE_EVENT_ASSET_IDS = (
     "prospector_s_last_pack",
     "song_below_stone",
     "first_descent_cartography",
+    "surveyors_cairn",
+    "ruinwager_vault",
+    "red_thread_shrine",
 )
 
 

@@ -22,6 +22,9 @@ APPROVED_UNIQUE_GEAR = {
     "anchor_boots": ("boots", 16),
     "loaded_die": ("amulet", 12),
     "blood_locket": ("amulet", 14),
+    "surveyors_loop": ("ring", 14),
+    "ruinwager_signet": ("ring", 14),
+    "red_thread_band": ("ring", 14),
 }
 
 
@@ -61,6 +64,10 @@ def test_unique_gear_registry_contains_the_approved_sidegrades():
     assert registry["blood_locket"].crit_chance == pytest.approx(0.05)
     assert registry["blood_locket"].player_hp_bonus == -1
     assert registry["blood_locket"].effect_id == "heal_first_crit"
+    assert registry["surveyors_loop"].effect_id == "safe_event_stride"
+    assert registry["ruinwager_signet"].effect_id == "risky_event_edge"
+    assert registry["red_thread_band"].player_hp_bonus == -1
+    assert registry["red_thread_band"].effect_id == "reroll_first_miss"
 
 
 def test_fresh_schema_adds_nullable_item_id_to_dig_gear(tmp_path):
@@ -122,6 +129,39 @@ def test_service_hydrates_and_serializes_unique_gear(repo_db_path):
     service.dig_repo.equip_gear(gear_id, 101, 7, "armor")
     equipped = service.get_loadout(101, 7)["armor"]
     assert equipped["effect"] == unique["effect"]
+
+
+def test_service_hydrates_and_serializes_equipped_ring(repo_db_path):
+    service = _service(repo_db_path)
+    gear_id = service.dig_repo.add_gear(
+        101,
+        7,
+        "ring",
+        3,
+        source="event:surveyors_cairn",
+        durability=14,
+        item_id="surveyors_loop",
+    )
+
+    equip_result = service.equip_gear(101, 7, gear_id)
+    ring = service.get_loadout(101, 7)["ring"]
+
+    assert equip_result["success"] is True
+    assert equip_result["slot"] == "ring"
+    assert ring == {
+        "id": gear_id,
+        "slot": "ring",
+        "tier": 3,
+        "item_id": "surveyors_loop",
+        "name": "Surveyor's Loop",
+        "durability": 14,
+        "max_durability": 14,
+        "equipped": True,
+        "effect": (
+            "Safe event successes gain +1 block; risky and desperate choices "
+            "lose 5% success chance."
+        ),
+    }
 
 
 def test_unique_gear_repair_preview_matches_prorated_debit(repo_db_path):
