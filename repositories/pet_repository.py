@@ -14,11 +14,13 @@ codes; the service layer maps them to Result failures:
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import sqlite3
 
-from domain.models.pet import Pet
-from repositories.base_repository import BaseRepository
+from domain.models.pet import Pet, RefundNotice, RefundPayout
+from repositories.base_repository import BaseRepository, safe_json_loads
 
 logger = logging.getLogger("cama_bot.repositories.pet")
 
@@ -750,22 +752,39 @@ class PetRepository(BaseRepository):
         week_key: str,
         payouts: list[tuple[int, int]],
         now: int,
+        *,
+        announcement: RefundNotice | None = None,
     ) -> bool:
         """Claim the (guild, week) window and pay refunds from the nonprofit.
 
         Returns False if the window was already claimed. Raises fund_short if
         the nonprofit balance dropped below the pre-scaled total mid-flight —
         the whole transaction (claim included) rolls back and the next sweep
-        recomputes against the fresh balance.
+        recomputes against the fresh balance. When supplied, ``announcement``
+        is persisted in the same transaction for at-least-once delivery.
         """
         gid = self.normalize_guild_id(guild_id)
         total = sum(amount for _, amount in payouts)
+        announcement_payload = (
+            json.dumps(
+                {
+                    "payouts": [
+                        dataclasses.asdict(payout) for payout in announcement.payouts
+                    ],
+                    "scaled_down": announcement.scaled_down,
+                },
+                sort_keys=True,
+            )
+            if announcement is not None
+            else None
+        )
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT OR IGNORE INTO pet_refund_windows "
-                "(guild_id, week_key, paid_at, total_paid) VALUES (?, ?, ?, ?)",
-                (gid, week_key, now, total),
+                "(guild_id, week_key, paid_at, total_paid, announcement_payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (gid, week_key, now, total, announcement_payload),
             )
             if cursor.rowcount == 0:
                 return False
@@ -826,6 +845,57 @@ class PetRepository(BaseRepository):
             finally:
                 self._clear_economy_ledger_context(cursor)
             return True
+
+    def get_unannounced_refunds(self) -> list[RefundNotice]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT guild_id, week_key, total_paid, announcement_payload
+                FROM pet_refund_windows
+                WHERE announcement_payload IS NOT NULL AND announced_at IS NULL
+                ORDER BY paid_at, guild_id, week_key
+                """
+            ).fetchall()
+        notices = []
+        for row in rows:
+            payload = safe_json_loads(
+                row["announcement_payload"],
+                {},
+                context=(
+                    "pet_refund_windows "
+                    f"guild={row['guild_id']} week={row['week_key']}"
+                ),
+            )
+            notices.append(
+                RefundNotice(
+                    guild_id=int(row["guild_id"]),
+                    week_key=row["week_key"],
+                    payouts=tuple(
+                        RefundPayout(**payout)
+                        for payout in payload.get("payouts", [])
+                    ),
+                    total_paid=int(row["total_paid"]),
+                    scaled_down=bool(payload.get("scaled_down")),
+                )
+            )
+        return notices
+
+    def mark_refund_announced(
+        self,
+        guild_id: int | None,
+        week_key: str,
+        announced_at: int,
+    ) -> None:
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE pet_refund_windows
+                SET announced_at = ?
+                WHERE guild_id = ? AND week_key = ? AND announced_at IS NULL
+                """,
+                (announced_at, gid, week_key),
+            )
 
     # --- internals ---
 

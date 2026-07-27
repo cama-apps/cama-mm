@@ -6,6 +6,7 @@ import sqlite3
 
 import pytest
 
+from domain.models.pet import RefundNotice, RefundPayout
 from repositories.pet_repository import PetRepository
 from tests.conftest import TEST_GUILD_ID
 
@@ -431,6 +432,37 @@ class TestSaltLickAndRename:
 
 
 class TestRefunds:
+    def test_refund_notice_persists_until_marked(
+        self, pet_repo, player_repository, rich_player
+    ):
+        _seed_nonprofit(pet_repo.db_path, TEST_GUILD_ID, 500)
+        notice = RefundNotice(
+            guild_id=TEST_GUILD_ID,
+            week_key=WEEK,
+            payouts=(
+                RefundPayout(
+                    discord_id=100,
+                    consumed_jc=20,
+                    multiplier_pct=200,
+                    amount=40,
+                ),
+            ),
+            total_paid=40,
+            scaled_down=False,
+        )
+
+        assert pet_repo.pay_refunds_atomic(
+            TEST_GUILD_ID,
+            WEEK,
+            [(100, 40)],
+            NOW,
+            announcement=notice,
+        )
+        assert pet_repo.get_unannounced_refunds() == [notice]
+
+        pet_repo.mark_refund_announced(TEST_GUILD_ID, WEEK, NOW + 1)
+        assert pet_repo.get_unannounced_refunds() == []
+
     def test_pay_refunds_claims_window_once(
         self, pet_repo, player_repository, rich_player
     ):

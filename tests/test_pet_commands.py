@@ -159,6 +159,33 @@ class TestSweepDelivery:
         channel.send.assert_awaited_once()
         embed = channel.send.await_args.kwargs["embed"]
         assert "150%" in embed.description
+        cog.pet_service.mark_refund_announced.assert_called_once_with(notice)
+
+    @pytest.mark.asyncio
+    async def test_transient_refund_error_leaves_unmarked_for_retry(
+        self, channel, monkeypatch
+    ):
+        notice = RefundNotice(
+            guild_id=TEST_GUILD_ID,
+            week_key="2026-W30",
+            payouts=(
+                RefundPayout(
+                    discord_id=111,
+                    consumed_jc=20,
+                    multiplier_pct=150,
+                    amount=30,
+                ),
+            ),
+            total_paid=30,
+            scaled_down=False,
+        )
+        channel.send.side_effect = RuntimeError("discord hiccup")
+        cog = make_cog({"hatches": [], "deaths": [], "refunds": [notice]})
+        monkeypatch.setattr(cog, "_pet_channel", lambda gid: channel)
+
+        await cog._pet_sweep_loop.coro(cog)
+
+        cog.pet_service.mark_refund_announced.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sweep_service_failure_is_contained(self):
@@ -390,6 +417,27 @@ class TestCommandHandlers:
             live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID).name
             == "Sir Blep"
         )
+
+    @pytest.mark.asyncio
+    async def test_unhatched_species_discount_is_hidden_from_shop_and_buttons(
+        self, live_cog
+    ):
+        with patch(
+            "services.pet_service.random.choices", return_value=["crystal_cama"]
+        ):
+            await live_cog.adopt.callback(live_cog, make_interaction(), "Secret")
+
+        shop_interaction = make_interaction()
+        await live_cog.shop.callback(live_cog, shop_interaction)
+        shop_embed = shop_interaction.followup.send.await_args.kwargs["embed"]
+        assert all("discounted!" not in field.name for field in shop_embed.fields)
+        assert any("Cheese — 30" in field.name for field in shop_embed.fields)
+
+        status_interaction = make_interaction()
+        await live_cog.status.callback(live_cog, status_interaction)
+        view = status_interaction.followup.send.await_args.kwargs["view"]
+        labels = {item.label for item in view.children}
+        assert "Buy Roshan's Cheese (30)" in labels
 
 
 class TestStatusViewButtons:

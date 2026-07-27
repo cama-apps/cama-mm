@@ -115,7 +115,9 @@ class PetCommands(commands.Cog):
                 discord_id,
                 guild_id,
                 supplies=status.supplies,
-                species_id=status.pet.species,
+                species_id=(
+                    status.pet.species if status.stage != PetStage.EGG else ""
+                ),
                 can_feed=can_feed,
             )
             await self._rearm_warning(status.pet)
@@ -288,7 +290,11 @@ class PetCommands(commands.Cog):
                 self.pet_service.get_status, interaction.user.id, guild_id
             )
         ).value
-        species_id = status.pet.species if status.pet else ""
+        species_id = (
+            status.pet.species
+            if status.pet is not None and status.stage != PetStage.EGG
+            else ""
+        )
         balance = await asyncio.to_thread(
             self.pet_service.player_repo.get_balance, interaction.user.id, guild_id
         )
@@ -572,13 +578,13 @@ class PetCommands(commands.Cog):
 
     async def _deliver_refund(self, notice: RefundNotice) -> None:
         channel = self._pet_channel(notice.guild_id)
-        if channel is None:
-            return
-        embed = pet_embeds.build_refund_embed(notice)
-        try:
-            await channel.send(embed=embed)
-        except discord.Forbidden:
-            pass
+        if channel is not None:
+            embed = pet_embeds.build_refund_embed(notice)
+            try:
+                await channel.send(embed=embed)
+            except discord.Forbidden:
+                pass
+        await asyncio.to_thread(self.pet_service.mark_refund_announced, notice)
 
 
 async def setup(bot: commands.Bot):

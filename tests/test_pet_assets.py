@@ -92,3 +92,14 @@ class TestPetAssetLoader:
         file = pet_assets.get_tombstone_card("Fluffy", seed=4)
         assert isinstance(file, discord.File)
         assert file.filename == "pet_tombstone.png"
+
+    def test_get_tombstone_card_engraves_name_on_disk_asset(self):
+        pet_assets.ASSETS_DIR.mkdir(parents=True)
+        Image.new("RGBA", (512, 288), (150, 150, 160, 255)).save(
+            pet_assets.ASSETS_DIR / "tombstone.png"
+        )
+
+        alpha = pet_assets.get_tombstone_card("Alpha", seed=1).fp.read()
+        beta = pet_assets.get_tombstone_card("Beta", seed=2).fp.read()
+
+        assert alpha != beta

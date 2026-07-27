@@ -305,7 +305,7 @@ class PetService:
             )
         now = self._now()
         pet = self._living_pet(discord_id, guild_id, now)
-        species_id = pet.species if pet else ""
+        species_id = pet.species if pet is not None and now >= pet.hatched_at else ""
         unit_cost = food_cost(species_id, item_id)
         total = unit_cost * qty
         try:
@@ -600,6 +600,11 @@ class PetService:
     def mark_hatch_announced(self, pet: Pet) -> None:
         self.pet_repo.mark_hatch_announced(pet.pet_id, pet.guild_id, self._now())
 
+    def mark_refund_announced(self, notice: RefundNotice) -> None:
+        self.pet_repo.mark_refund_announced(
+            notice.guild_id, notice.week_key, self._now()
+        )
+
     def _sweep_refunds(self, now: int) -> list[RefundNotice]:
         # Look back two weeks, oldest first: the two-slot care accumulator can
         # still substantiate both, so an outage spanning a week boundary does
@@ -608,11 +613,10 @@ class PetService:
             _week_key_for_timestamp(now - 14 * 86400),
             _week_key_for_timestamp(now - 7 * 86400),
         ]
-        notices: list[RefundNotice] = []
         for guild_id in self.pet_repo.list_pet_guild_ids():
             for week_key in week_keys:
                 try:
-                    notice = self._pay_guild_refunds(guild_id, week_key, now)
+                    self._pay_guild_refunds(guild_id, week_key, now)
                 except ValueError as exc:
                     if str(exc) == "fund_short":
                         logger.warning(
@@ -621,9 +625,7 @@ class PetService:
                         )
                         continue
                     raise
-                if notice is not None:
-                    notices.append(notice)
-        return notices
+        return self.pet_repo.get_unannounced_refunds()
 
     def _pay_guild_refunds(
         self, guild_id: int, week_key: str, now: int
@@ -670,21 +672,23 @@ class PetService:
                     guild_id, week_key,
                 )
                 return None
-        paid = self.pet_repo.pay_refunds_atomic(
-            guild_id,
-            week_key,
-            [(p.discord_id, p.amount) for p in payouts],
-            now,
-        )
-        if not paid or not payouts:
-            return None
-        return RefundNotice(
+        notice = RefundNotice(
             guild_id=guild_id,
             week_key=week_key,
             payouts=tuple(payouts),
             total_paid=sum(p.amount for p in payouts),
             scaled_down=scaled,
         )
+        paid = self.pet_repo.pay_refunds_atomic(
+            guild_id,
+            week_key,
+            [(p.discord_id, p.amount) for p in payouts],
+            now,
+            announcement=notice if payouts else None,
+        )
+        if not paid or not payouts:
+            return None
+        return notice
 
     # --- internals ---
 

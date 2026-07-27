@@ -20,6 +20,9 @@ import logging
 from pathlib import Path
 
 import discord
+from PIL import Image, ImageDraw
+
+from utils.fonts import get_font
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,31 @@ def _load_cached_bytes(path: Path) -> bytes | None:
 def _file_from_bytes(data: bytes, filename: str) -> discord.File:
     """Create a fresh discord.File from cached bytes."""
     return discord.File(io.BytesIO(data), filename=filename)
+
+
+def _engrave_tombstone(data: bytes, name: str) -> bytes:
+    """Write the memorial inscription onto the shipped blank tombstone."""
+    with Image.open(io.BytesIO(data)) as source:
+        image = source.convert("RGBA")
+    draw = ImageDraw.Draw(image)
+    name_font = get_font(20)
+    shown = name.strip() or "Unnamed"
+    max_width = 132
+    if draw.textlength(shown, font=name_font) > max_width:
+        while (
+            len(shown) > 1
+            and draw.textlength(shown + "...", font=name_font) > max_width
+        ):
+            shown = shown[:-1]
+        shown += "..."
+    for text, font, y in (("R.I.P.", get_font(26, bold=True), 126), (shown, name_font, 164)):
+        width = draw.textlength(text, font=font)
+        x = (image.width - width) // 2
+        draw.text((x + 1, y + 1), text, font=font, fill=(190, 188, 210, 180))
+        draw.text((x, y), text, font=font, fill=(64, 61, 83, 235))
+    rendered = io.BytesIO()
+    image.save(rendered, format="PNG", optimize=True)
+    return rendered.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +185,17 @@ def get_tombstone_card(name: str, seed: int) -> discord.File | None:
     if asset_path:
         data = _load_cached_bytes(asset_path)
         if data:
-            return _file_from_bytes(data, f"pet_tombstone{asset_path.suffix}")
+            cache_key = f"engraved_tombstone_{asset_path}_{name}"
+            engraved = _bytes_cache.get(cache_key)
+            if engraved is None:
+                try:
+                    engraved = _engrave_tombstone(data, name)
+                except (OSError, ValueError) as exc:
+                    logger.warning("Tombstone engraving failed, using fallback: %s", exc)
+                else:
+                    _bytes_cache[cache_key] = engraved
+            if engraved is not None:
+                return _file_from_bytes(engraved, f"pet_tombstone{asset_path.suffix}")
 
     try:
         cache_key = f"render_tombstone_{name}"
