@@ -136,6 +136,32 @@ async def require_dig_channel(interaction: discord.Interaction) -> bool:
     return False
 
 
+async def require_pet_channel(interaction: discord.Interaction) -> bool:
+    """Gate pet brawls to the configured PET_CHANNEL_ID.
+
+    Threads under the pet channel inherit (parent.id check). The pets
+    feature as a whole is already gated on PET_CHANNEL_ID being set, so an
+    unset id passes through rather than blocking. No jopacoin penalty —
+    the camas are gentler than the dig spirits. Must be called before
+    deferring.
+    """
+    from config import PET_CHANNEL_ID
+
+    if not PET_CHANNEL_ID:
+        return True
+    channel = interaction.channel
+    if getattr(channel, "id", None) == PET_CHANNEL_ID:
+        return True
+    parent = getattr(channel, "parent", None)
+    if parent is not None and getattr(parent, "id", None) == PET_CHANNEL_ID:
+        return True
+    await interaction.response.send_message(
+        f"🐫 Pet brawls happen in <#{PET_CHANNEL_ID}> — take it to the arena.",
+        ephemeral=True,
+    )
+    return False
+
+
 async def require_mafia_channel(interaction: discord.Interaction) -> bool:
     """Gate /mafia commands to the configured MAFIA_CHANNEL_ID.
 

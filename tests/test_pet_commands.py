@@ -69,6 +69,10 @@ def make_cog(sweep_result=None, channel=None) -> PetCommands:
     cog = PetCommands.__new__(PetCommands)
     cog.bot = bot
     cog.pet_service = service
+    brawl_service = MagicMock()
+    brawl_service.sweep_stale.return_value = {"expired": 0, "voided": 0}
+    cog.pet_brawl_service = brawl_service
+    cog._brawl_sessions = {}
     if channel is not None:
         with patch.object(pet_commands, "PET_CHANNEL_ID", 42):
             pass
@@ -340,6 +344,9 @@ def live_cog(repo_db_path, monkeypatch):
         lambda **kwargs: MagicMock(allowed=True, retry_after_seconds=0),
     )
 
+    from repositories.pet_brawl_repository import PetBrawlRepository
+    from services.pet_brawl_service import PetBrawlService
+
     player_repo = PlayerRepository(repo_db_path)
     player_repo.add(100, "Owner", TEST_GUILD_ID)
     player_repo.update_balance(100, TEST_GUILD_ID, 1000)
@@ -351,6 +358,10 @@ def live_cog(repo_db_path, monkeypatch):
     cog = PetCommands.__new__(PetCommands)
     cog.bot = bot
     cog.pet_service = service
+    cog.pet_brawl_service = PetBrawlService(
+        service, PetBrawlRepository(repo_db_path)
+    )
+    cog._brawl_sessions = {}
     return cog
 
 

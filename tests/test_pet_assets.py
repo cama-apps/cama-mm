@@ -103,3 +103,26 @@ class TestPetAssetLoader:
         beta = pet_assets.get_tombstone_card("Beta", seed=2).fp.read()
 
         assert alpha != beta
+
+    def test_get_versus_card_composes_two_renders(self):
+        file = pet_assets.get_versus_card(
+            "common_cama", "adult", 3, None, "rama", "baby", 7, "red_bow"
+        )
+        assert isinstance(file, discord.File)
+        assert file.filename == "pet_versus.png"
+        with Image.open(file.fp) as img:
+            # Two 512-wide cards side by side.
+            assert img.width == 1024
+
+    def test_get_altar_card_falls_back_to_tombstone(self):
+        file = pet_assets.get_altar_card("Fluffy", seed=4)
+        assert isinstance(file, discord.File)
+        assert file.filename == "pet_tombstone.png"
+
+    def test_get_altar_card_prefers_authored_asset(self):
+        pet_assets.ASSETS_DIR.mkdir(parents=True)
+        Image.new("RGBA", (512, 288), (40, 20, 60, 255)).save(
+            pet_assets.ASSETS_DIR / "altar.png"
+        )
+        file = pet_assets.get_altar_card("Fluffy", seed=4)
+        assert file.filename == "pet_altar.png"
