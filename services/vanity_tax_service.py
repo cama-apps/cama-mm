@@ -1,5 +1,6 @@
 """Track Discord nickname eligibility for the vanity tax."""
 
+import math
 from collections.abc import Iterable
 
 
@@ -52,4 +53,6 @@ class VanityTaxService:
             return 0
         if discord_id not in self._taxable_by_guild.get(guild_id, ()):
             return 0
-        return int(profit * self.TAX_RATE)
+        # Ceil, not floor: at this economy's scale 1% of a typical payout
+        # truncates to 0, which made the tax invisible in practice.
+        return math.ceil(profit * self.TAX_RATE)

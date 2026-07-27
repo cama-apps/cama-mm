@@ -1,5 +1,6 @@
 """Repository for Daily Mafia subgame data access."""
 
+import math
 import time
 from typing import Any
 
@@ -738,7 +739,7 @@ class MafiaRepository(BaseRepository):
                         if discord_id not in vanity_taxable_ids:
                             continue
                         profit = max(0, int(amount) - entry_fee)
-                        tax = int(profit * vanity_tax_rate)
+                        tax = math.ceil(profit * vanity_tax_rate)
                         if tax <= 0:
                             continue
                         cursor.execute(
