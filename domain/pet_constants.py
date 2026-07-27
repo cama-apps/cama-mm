@@ -209,6 +209,25 @@ PET_BRAWL_ACCEPT_SECONDS = 180
 PET_BRAWL_TURN_SECONDS = 30
 PET_BRAWL_ACTIVE_TTL_SECONDS = 1800  # sweep voids battles stuck this long
 
+# --- Altar (sacrifice reroll) ----------------------------------------------
+
+# Upgraded reroll odds keyed by (sacrificed tier, was_adult), values are
+# percentage weights per tier pool. Every entry strictly dominates the
+# standard 60/30/9/1 pool, adult sacrifices dominate baby ones of the same
+# tier, and rare+ pools drop commons entirely — you never reroll a rare
+# into a guaranteed-worse pool. The fee side of the brake is that the
+# sacrificed pet still counts toward the escalating adoption fee.
+SACRIFICE_TIER_WEIGHTS: dict[tuple[str, bool], dict[str, int]] = {
+    ("common", False): {"common": 55, "uncommon": 33, "rare": 10, "legendary": 2},
+    ("common", True): {"common": 40, "uncommon": 42, "rare": 15, "legendary": 3},
+    ("uncommon", False): {"common": 30, "uncommon": 45, "rare": 20, "legendary": 5},
+    ("uncommon", True): {"common": 15, "uncommon": 50, "rare": 27, "legendary": 8},
+    ("rare", False): {"uncommon": 55, "rare": 35, "legendary": 10},
+    ("rare", True): {"uncommon": 40, "rare": 45, "legendary": 15},
+    ("legendary", False): {"uncommon": 40, "rare": 40, "legendary": 20},
+    ("legendary", True): {"uncommon": 30, "rare": 45, "legendary": 25},
+}
+
 
 @dataclass(frozen=True, slots=True)
 class PetAccessory:

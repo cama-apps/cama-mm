@@ -21,7 +21,7 @@ from commands.checks import require_guild, require_pet_channel
 from commands.pet_helpers import brawl_embeds
 from commands.pet_helpers import embeds as pet_embeds
 from commands.pet_helpers.brawl_views import PetBrawlChallengeView, PetBrawlSession
-from commands.pet_helpers.views import PetStatusView
+from commands.pet_helpers.views import ConfirmSacrificeView, PetStatusView
 from config import PET_CHANNEL_ID
 from domain.models.pet import PetStage
 from domain.pet_constants import (
@@ -40,6 +40,7 @@ from services.pet_flavor_service import PetFlavorEvent
 from utils.formatting import JOPACOIN_EMOTE
 from utils.game_date import game_date_for_timestamp
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.pet_assets import get_altar_card
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -624,6 +625,105 @@ class PetCommands(commands.Cog):
             ),
         )
         view.message = message
+
+    @pet.command(
+        name="altar",
+        description="Sacrifice your cama for a better egg (dark, effective)",
+    )
+    @app_commands.describe(name="The new egg's name")
+    @require_guild
+    async def altar(self, interaction: discord.Interaction, name: str):
+        guild_id = interaction.guild.id if interaction.guild else None
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="pet", guild_id=guild_id or 0, user_id=interaction.user.id,
+            limit=6, per_seconds=60,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s.", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        preview = await asyncio.to_thread(
+            self.pet_service.sacrifice_preview, interaction.user.id, guild_id
+        )
+        if not preview.success:
+            await safe_followup(
+                interaction, content=f"❌ {preview.error}", ephemeral=True
+            )
+            return
+        offer = preview.value
+        odds = " · ".join(
+            f"{tier.title()} {weight}%" for tier, weight in offer["weights"].items()
+        )
+        embed = discord.Embed(
+            title=f"🩸 The altar hungers for {offer['pet'].name}",
+            description=(
+                f"Sacrifice your {pet_embeds.species_label(offer['pet'])} for an "
+                f"immediate reroll with upgraded odds:\n**{odds}**\n\n"
+                f"Fee: **{offer['fee']}** {JOPACOIN_EMOTE} — and this death "
+                "still escalates your future adoption fees. The altar gives, "
+                "but it remembers."
+            ),
+            color=pet_embeds.COLOR_DEAD,
+        )
+        view = ConfirmSacrificeView(interaction.user.id)
+        message = await safe_followup(interaction, embed=embed, view=view)
+        view.message = message
+        await view.wait()
+        if not view.value:
+            cold = discord.Embed(
+                title="🕯️ The altar goes cold",
+                description=f"**{offer['pet'].name}** lives to graze another day.",
+                color=pet_embeds.COLOR_DEAD,
+            )
+            if message is not None:
+                try:
+                    await message.edit(embed=cold, view=None)
+                except discord.HTTPException:
+                    pass
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.sacrifice, interaction.user.id, guild_id, name
+        )
+        if not result.success:
+            await safe_followup(
+                interaction, content=f"❌ {result.error}", ephemeral=True
+            )
+            if message is not None:
+                try:
+                    await message.edit(view=None)
+                except discord.HTTPException:
+                    pass
+            return
+        dead = result.value["dead_pet"]
+        egg = result.value["new_pet"]
+        embed = discord.Embed(
+            title=f"🩸 {dead.name} was given to the altar",
+            description=(
+                f"The altar accepts **{dead.name}** "
+                f"({pet_embeds.species_label(dead)}).\n"
+                f"In the ashes, a new egg: **{egg.name}**, hatching "
+                f"<t:{egg.hatched_at}:R> — its species already chosen, "
+                f"already hidden.\n"
+                f"Fee: {result.value['fee']} {JOPACOIN_EMOTE}."
+            ),
+            color=pet_embeds.COLOR_EGG,
+        )
+        file = await asyncio.to_thread(get_altar_card, dead.name, dead.pet_id)
+        if file:
+            embed.set_image(url=f"attachment://{file.filename}")
+        if message is not None:
+            try:
+                await message.edit(
+                    embed=embed, view=None, attachments=[file] if file else []
+                )
+            except discord.HTTPException:
+                await safe_followup(interaction, embed=embed, file=file)
+        else:
+            await safe_followup(interaction, embed=embed, file=file)
+        await self._rearm_warning(egg)
 
     @pet.command(name="graveyard", description="Visit the cama memorial garden")
     @app_commands.describe(user="Whose graveyard to visit")
