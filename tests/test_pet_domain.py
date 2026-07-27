@@ -37,6 +37,7 @@ def make_pet(**overrides) -> Pet:
         "prev_week_consumed_jc": 0,
         "prev_week_key": None,
         "pampered_until": None,
+        "accessory": None,
         "aegis_used": 0,
         "hatch_announced_at": None,
         "died_at": None,
@@ -210,7 +211,7 @@ class TestConstantsAndRows:
             "times_fed": 0, "feeds_today": 0, "feed_date": None,
             "week_consumed_jc": 0, "week_key": None,
             "prev_week_consumed_jc": 0, "prev_week_key": None,
-            "pampered_until": None, "aegis_used": 0,
+            "pampered_until": None, "accessory": None, "aegis_used": 0,
             "hatch_announced_at": None,
             "died_at": None, "death_cause": None, "death_announced_at": None,
         }

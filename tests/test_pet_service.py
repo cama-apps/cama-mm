@@ -51,7 +51,7 @@ def adopt_common(service, clock, name="Blep"):
     with patch("services.pet_service.random.choices", return_value=["common_cama"]):
         result = service.adopt(100, TEST_GUILD_ID, name)
     assert result.success, result.error
-    return result.value
+    return result.value["pet"]
 
 
 def hatch(service, clock, pet):
@@ -166,7 +166,7 @@ class TestFeeding:
 
     def test_rama_spits_at_seeded_roll(self, service, clock):
         with patch("services.pet_service.random.choices", return_value=["rama"]):
-            pet = service.adopt(100, TEST_GUILD_ID, "Rama").value
+            pet = service.adopt(100, TEST_GUILD_ID, "Rama").value["pet"]
         service.buy(100, TEST_GUILD_ID, "tango", 2)
         clock.now = pet.hatched_at + 2 * DAY
         with patch("services.pet_service.random.randint", return_value=1):
@@ -187,7 +187,7 @@ class TestQuirks:
         with patch(
             "services.pet_service.random.choices", return_value=["aegis_cama"]
         ):
-            pet = service.adopt(100, TEST_GUILD_ID, "Shelly").value
+            pet = service.adopt(100, TEST_GUILD_ID, "Shelly").value["pet"]
         starve_1 = pet.hatched_at + 5 * DAY
         # 10 hunger at 20/day = 12h more life after the revive.
         starve_2 = starve_1 + DAY // 2
@@ -213,7 +213,7 @@ class TestQuirks:
         with patch(
             "services.pet_service.random.choices", return_value=["invoker_cama"]
         ):
-            pet = service.adopt(100, TEST_GUILD_ID, "Orbs").value
+            pet = service.adopt(100, TEST_GUILD_ID, "Orbs").value["pet"]
         clock.now = pet.hatched_at
         result = service.buy(100, TEST_GUILD_ID, "salt_lick", 1)
         assert result.success
@@ -221,7 +221,7 @@ class TestQuirks:
 
     def test_gilded_refund_bonus(self, service, clock):
         with patch("services.pet_service.random.choices", return_value=["jopacama"]):
-            pet = service.adopt(100, TEST_GUILD_ID, "Goldie").value
+            pet = service.adopt(100, TEST_GUILD_ID, "Goldie").value["pet"]
         service.buy(100, TEST_GUILD_ID, "cheese", 20)
         clock.now = pet.hatched_at + 2 * DAY
         service.feed(100, TEST_GUILD_ID, "cheese")
@@ -245,6 +245,108 @@ def _seed_fund(service, amount, guild_id=TEST_GUILD_ID):
             "ON CONFLICT(guild_id) DO UPDATE SET total_collected = excluded.total_collected",
             (guild_id, amount),
         )
+
+
+class TestGacha:
+    def test_gilded_egg_charges_premium_and_skips_commons(self, service, clock):
+        service.player_repo.update_balance(100, TEST_GUILD_ID, 1000)
+        result = service.adopt(100, TEST_GUILD_ID, "Fancy", "gilded")
+        assert result.success, result.error
+        pet = result.value["pet"]
+        assert result.value["egg_tier"] == "gilded"
+        assert pet.adopt_fee == 20 + 230  # base fee + premium
+        from domain.pet_constants import get_species
+
+        assert get_species(pet.species).tier != "common"
+
+    def test_gilded_odds_over_many_rolls_never_common(self, service, clock):
+        from domain.pet_constants import GILDED_TIER_WEIGHTS, get_species
+
+        tiers = {
+            get_species(service._roll_species_tiered(GILDED_TIER_WEIGHTS)).tier
+            for _ in range(200)
+        }
+        assert "common" not in tiers
+        assert "uncommon" in tiers
+
+    def test_pity_activates_after_three_common_deaths(self, service, clock):
+        service.player_repo.update_balance(100, TEST_GUILD_ID, 5000)
+        # Three commons adopted and starved out in sequence.
+        for i in range(3):
+            pet = adopt_common(service, clock, name=f"Common {i}")
+            clock.now = pet.hatched_at + 9 * DAY  # starves; resolved lazily
+            assert service._living_pet(100, TEST_GUILD_ID, clock.now) is None
+        assert service._pity_active(100, TEST_GUILD_ID)
+        result = service.adopt(100, TEST_GUILD_ID, "Pity Roll")
+        assert result.success
+        assert result.value["pity_active"]
+        from domain.pet_constants import get_species
+
+        assert get_species(result.value["pet"].species).tier != "common"
+
+    def test_pity_broken_by_a_non_common(self, service, clock):
+        service.player_repo.update_balance(100, TEST_GUILD_ID, 5000)
+        pet = adopt_common(service, clock, name="C1")
+        clock.now = pet.hatched_at + 9 * DAY
+        service._living_pet(100, TEST_GUILD_ID, clock.now)
+        with patch("services.pet_service.random.choices", return_value=["jopacama"]):
+            pet = service.adopt(100, TEST_GUILD_ID, "Fancy").value["pet"]
+        clock.now = pet.hatched_at + 9 * DAY
+        service._living_pet(100, TEST_GUILD_ID, clock.now)
+        pet = adopt_common(service, clock, name="C2")
+        clock.now = pet.hatched_at + 9 * DAY
+        service._living_pet(100, TEST_GUILD_ID, clock.now)
+        assert not service._pity_active(100, TEST_GUILD_ID)
+
+    def test_trinket_roll_equips_and_dupes_refund(self, service, clock):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + DAY
+        with patch("services.pet_service.random.choices", return_value=["top_hat"]):
+            first = service.roll_trinket(100, TEST_GUILD_ID)
+        assert first.success, first.error
+        assert not first.value.duplicate
+        assert first.value.net_cost == 25
+        assert first.value.owned_count == 1
+        fresh = service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        assert fresh.accessory == "top_hat"
+        with patch("services.pet_service.random.choices", return_value=["top_hat"]):
+            dupe = service.roll_trinket(100, TEST_GUILD_ID)
+        assert dupe.success
+        assert dupe.value.duplicate
+        assert dupe.value.net_cost == 15  # 25 - 10 refund
+        assert dupe.value.owned_count == 1
+
+    def test_trinket_requires_hatched_living_pet(self, service, clock):
+        result = service.roll_trinket(100, TEST_GUILD_ID)
+        assert result.error_code == error_codes.NO_PET
+        adopt_common(service, clock)
+        result = service.roll_trinket(100, TEST_GUILD_ID)  # still an egg
+        assert result.error_code == error_codes.PET_EGG
+
+    def test_wear_trinket_owned_only(self, service, clock):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + DAY
+        assert (
+            service.wear_trinket(100, TEST_GUILD_ID, "red_bow").error_code
+            == error_codes.VALIDATION_ERROR
+        )
+        with patch("services.pet_service.random.choices", return_value=["red_bow"]):
+            service.roll_trinket(100, TEST_GUILD_ID)
+        with patch("services.pet_service.random.choices", return_value=["top_hat"]):
+            service.roll_trinket(100, TEST_GUILD_ID)  # equips top_hat
+        result = service.wear_trinket(100, TEST_GUILD_ID, "red_bow")
+        assert result.success
+        assert service.pet_repo.get_active_pet(100, TEST_GUILD_ID).accessory == "red_bow"
+
+    def test_camadex_counts_hatched_species_only(self, service, clock):
+        assert service.camadex(100, TEST_GUILD_ID) == ([], 10)
+        pet = adopt_common(service, clock)
+        # Still an egg: species not yet revealed.
+        assert service.camadex(100, TEST_GUILD_ID)[0] == []
+        clock.now = pet.hatched_at + DAY
+        raised, total = service.camadex(100, TEST_GUILD_ID)
+        assert raised == ["common_cama"]
+        assert total == 10
 
 
 class TestMatchHook:
@@ -277,7 +379,7 @@ class TestMatchHook:
         with patch(
             "services.pet_service.random.choices", return_value=["courier_cama"]
         ):
-            pet = service.adopt(100, TEST_GUILD_ID, "Donkey").value
+            pet = service.adopt(100, TEST_GUILD_ID, "Donkey").value["pet"]
         clock.now = pet.hatched_at + 2 * DAY
         fed = service.on_match_win([100], TEST_GUILD_ID)
         assert fed[0][1] == 15

@@ -15,6 +15,7 @@ from domain.pet_constants import (
     FEED_CAP_PER_DAY,
     FOOD_ITEMS,
     SALT_LICK,
+    SPECIES,
     get_species,
 )
 from utils.embeds import COLOR_BLUE, COLOR_GREEN, COLOR_ORANGE, COLOR_RED
@@ -187,11 +188,21 @@ def _build_living_embed(
     embed.add_field(
         name="Supplies", value=supplies_line(status.supplies), inline=False
     )
+    if pet.accessory:
+        from domain.pet_constants import get_accessory
+
+        trinket = get_accessory(pet.accessory)
+        embed.add_field(
+            name="Trinket",
+            value=f"{trinket.emoji} {trinket.display_name}",
+            inline=True,
+        )
     feeds_used = pet.feeds_used_on(game_date_for_timestamp(now))
     feeds_left = max(0, FEED_CAP_PER_DAY - feeds_used)
     embed.set_footer(text=f"{feeds_left}/{FEED_CAP_PER_DAY} feeds left today")
     file = get_pet_card(pet.species, (status.stage or PetStage.BABY).value,
-                        pet.art_mood(now, decay_per_day), pet.pet_id)
+                        pet.art_mood(now, decay_per_day), pet.pet_id,
+                        accessory=pet.accessory)
     if file:
         embed.set_image(url=f"attachment://{file.filename}")
     return embed, file
@@ -284,24 +295,44 @@ def build_refund_embed(notice: RefundNotice) -> discord.Embed:
     )
 
 
-def build_graveyard_embed(pets: list[Pet], owner_name: str) -> discord.Embed:
+def build_graveyard_embed(
+    pets: list[Pet],
+    owner_name: str,
+    camadex: tuple[list[str], int] | None = None,
+) -> discord.Embed:
     if not pets:
-        return discord.Embed(
+        embed = discord.Embed(
             title=f"🪦 {owner_name}'s graveyard",
             description="No pets have died. A spotless record. So far.",
             color=COLOR_BLUE,
         )
-    lines = []
-    for pet in pets:
-        age = format_age(pet.age_seconds(pet.died_at or pet.adopted_at))
-        lines.append(
-            f"**{pet.name}** · {species_label(pet)} · {age} · <t:{pet.died_at}:R>"
+    else:
+        lines = []
+        for pet in pets:
+            age = format_age(pet.age_seconds(pet.died_at or pet.adopted_at))
+            lines.append(
+                f"**{pet.name}** · {species_label(pet)} · {age} · <t:{pet.died_at}:R>"
+            )
+        embed = discord.Embed(
+            title=f"🪦 {owner_name}'s graveyard",
+            description="\n".join(lines) + "\n\nF.",
+            color=COLOR_DEAD,
         )
-    return discord.Embed(
-        title=f"🪦 {owner_name}'s graveyard",
-        description="\n".join(lines) + "\n\nF.",
-        color=COLOR_DEAD,
-    )
+    if camadex is not None:
+        raised, total = camadex
+        discovered = set(raised)
+        entries = [
+            get_species(species_id).display_name
+            if species_id in discovered
+            else "???"
+            for species_id in SPECIES
+        ]
+        embed.add_field(
+            name=f"📖 Camadex {len(discovered & set(SPECIES))}/{total}",
+            value=" · ".join(entries),
+            inline=False,
+        )
+    return embed
 
 
 def build_leaderboard_embed(

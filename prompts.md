@@ -349,6 +349,7 @@ Pet cards are NOT shipped as full pre-rendered images. The bot composites each c
 | `detail` | on-wool features: coin speckles, saddlebags, royal blanket, hook glint, icicle fringe | |
 | `face` | eyes + muzzle + mouth, **mood-keyed** | one file per mood |
 | `front` | floating foreground features: the three orbs | |
+| `accessory` | trinket cosmetics (hats, collars, pins), one file per accessory id | optional variants: `{accessory_id}_01.png` |
 
 - Directory + naming: `assets/pets/components/{stage}/{slot}/{scope}_{...}{variant}.png`
   - `{stage}`: `baby` or `adult`
@@ -395,6 +396,18 @@ Painterly pixel-art-adjacent, no head or body — features only, floating where 
 - `crystal_cama` — `detail`: ice glints in the wool plus a small icicle fringe hanging from the belly.
 - `rama` — `detail`: a small red royal blanket with gold trim across the back; species face packs should keep his permanent grumpy brows — Rama never looks fully happy (the real 1998 cama's documented temperament).
 - `common_cama` — deliberately no signature components. Its quirk is having none.
+
+### Accessory components (trinket gacha)
+
+Named by accessory id (no `any_`/species scoping): `{stage}/accessory/{accessory_id}.png` or `{accessory_id}_{variant}.png`. Authored in color in the AUTHORING frame; head-anchored ids (red_bow, straw_hat, flower_crown, top_hat) sit on/above the head zone, body-anchored ids (bell_collar, wool_scarf, aegis_charm, divine_rapier_pin) at the neck/chest. One prompt pattern:
+
+```
+ONLY a [red hair bow / straw sun hat / flower crown / black top hat with red band] floating on a fully transparent 512x288 canvas, positioned to sit on top of a creature's head (head zone x224-288, y40-88 for adult; x216-296, y60-130 for baby), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
+```
+
+```
+ONLY a [leather bell collar / cozy red wool scarf with a hanging tail / small golden Aegis medallion on a cord / tiny silver Divine Rapier lapel pin] floating on a fully transparent 512x288 canvas, positioned at a creature's neck-chest area (upper body zone, around x220-290, y115-150 for adult), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
+```
 
 ### Egg & Tombstone (full cards, not components)
 

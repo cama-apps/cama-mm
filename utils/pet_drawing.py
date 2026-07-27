@@ -417,6 +417,96 @@ def render_layer(
     return img
 
 
+def render_accessory(accessory_id: str, stage: str) -> Image.Image | None:
+    """Procedural fallback art for a trinket, drawn in the geometry frame.
+
+    Deliberately simple shapes — real accessory component art replaces these
+    per-file, exactly like every other slot."""
+    g = _geometry(stage)
+    img = _blank_layer()
+    draw = ImageDraw.Draw(img)
+    cell = g.cell
+    cx = g.hx + g.hw // 2
+    top = g.hy
+    chest_y = g.body_top + int(0.6 * cell)
+    if accessory_id == "red_bow":
+        r = max(4, cell // 2)
+        by = top - r // 2
+        for side in (-1, 1):
+            draw.polygon(
+                [(cx, by), (cx + side * 2 * r, by - r), (cx + side * 2 * r, by + r)],
+                fill=(214, 40, 57), outline=_OUTLINE,
+            )
+        draw.ellipse([cx - r // 2, by - r // 2, cx + r // 2, by + r // 2],
+                     fill=(255, 96, 110))
+    elif accessory_id == "straw_hat":
+        brim_h = max(4, cell // 2)
+        draw.ellipse([g.hx - cell, top - brim_h, g.hx + g.hw + cell, top + brim_h],
+                     fill=(226, 190, 100), outline=(160, 128, 52))
+        draw.rounded_rectangle(
+            [cx - g.hw // 3, top - int(1.4 * cell), cx + g.hw // 3, top],
+            radius=6, fill=(238, 206, 122), outline=(160, 128, 52),
+        )
+    elif accessory_id == "flower_crown":
+        colors = ((244, 156, 166), (250, 220, 120), (170, 200, 240),
+                  (200, 170, 240), (244, 156, 166))
+        for i, color in enumerate(colors):
+            fx = g.hx + int(g.hw * (0.1 + 0.2 * i))
+            fy = top - cell // 3 - (cell // 4 if i % 2 else 0)
+            r = max(3, cell // 4)
+            draw.ellipse([fx - r, fy - r, fx + r, fy + r], fill=color)
+            draw.ellipse([fx - r // 2, fy - r // 2, fx + r // 2, fy + r // 2],
+                         fill=(255, 236, 160))
+    elif accessory_id == "top_hat":
+        brim_h = max(3, cell // 3)
+        draw.rectangle([g.hx - cell // 2, top - brim_h, g.hx + g.hw + cell // 2, top],
+                       fill=(30, 30, 36))
+        draw.rectangle(
+            [cx - g.hw // 3, top - int(2.0 * cell), cx + g.hw // 3, top],
+            fill=(38, 38, 46),
+        )
+        draw.rectangle(
+            [cx - g.hw // 3, top - int(0.55 * cell), cx + g.hw // 3, top - int(0.3 * cell)],
+            fill=(150, 30, 40),
+        )
+    elif accessory_id == "bell_collar":
+        y = g.body_top - cell // 3
+        draw.rounded_rectangle(
+            [cx - int(1.4 * cell), y, cx + int(1.4 * cell), y + cell // 2],
+            radius=4, fill=(140, 60, 50),
+        )
+        r = max(4, cell // 3)
+        draw.ellipse([cx - r, y + cell // 3, cx + r, y + cell // 3 + 2 * r],
+                     fill=(250, 210, 90), outline=(160, 128, 52))
+    elif accessory_id == "wool_scarf":
+        y = g.body_top - cell // 2
+        draw.rounded_rectangle(
+            [cx - int(1.6 * cell), y, cx + int(1.6 * cell), y + int(0.8 * cell)],
+            radius=6, fill=(196, 90, 90),
+        )
+        draw.rounded_rectangle(
+            [cx + int(0.6 * cell), y, cx + int(1.3 * cell), y + int(2.4 * cell)],
+            radius=5, fill=(214, 110, 104),
+        )
+    elif accessory_id == "aegis_charm":
+        r = max(5, cell // 2)
+        draw.ellipse([cx - r, chest_y - r, cx + r, chest_y + r],
+                     fill=(250, 210, 90), outline=(160, 128, 52), width=2)
+        draw.ellipse([cx - r // 2, chest_y - r // 2, cx + r // 2, chest_y + r // 2],
+                     fill=(255, 240, 170))
+    elif accessory_id == "divine_rapier_pin":
+        blade = max(8, int(1.2 * cell))
+        draw.polygon(
+            [(cx, chest_y - blade), (cx - 3, chest_y), (cx + 3, chest_y)],
+            fill=(235, 240, 250), outline=(120, 130, 150),
+        )
+        draw.rectangle([cx - cell // 3, chest_y, cx + cell // 3, chest_y + 4],
+                       fill=(250, 210, 90))
+    else:
+        return None
+    return img
+
+
 def assemble_card(layers: list[Image.Image | None]) -> io.BytesIO:
     """Stack layers back-to-front onto the card and finish with a vignette."""
     img = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), (*_BACKGROUND, 255))
@@ -429,11 +519,15 @@ def assemble_card(layers: list[Image.Image | None]) -> io.BytesIO:
     return _to_png(_vignette(img))
 
 
-def render_pet_card(species_id: str, stage: str, mood: str, seed: int) -> io.BytesIO:
+def render_pet_card(
+    species_id: str, stage: str, mood: str, seed: int, accessory: str | None = None
+) -> io.BytesIO:
     """Render a deterministic, fully procedural 512x288 pet portrait PNG."""
-    return assemble_card(
-        [render_layer(slot, species_id, stage, mood, seed) for slot in SLOT_ORDER]
-    )
+    layers = [render_layer(slot, species_id, stage, mood, seed) for slot in SLOT_ORDER]
+    if accessory:
+        # Trinkets sit above the face, below front features (orbs).
+        layers.insert(SLOT_ORDER.index("front"), render_accessory(accessory, stage))
+    return assemble_card(layers)
 
 
 def render_egg_card(seed: int) -> io.BytesIO:

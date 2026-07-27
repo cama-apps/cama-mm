@@ -23,11 +23,15 @@ from commands.pet_helpers.views import PetStatusView
 from config import PET_CHANNEL_ID
 from domain.models.pet import PetStage
 from domain.pet_constants import (
+    ACCESSORIES,
     FEED_CAP_PER_DAY,
     FOOD_ITEMS,
+    GILDED_EGG_PREMIUM,
     MAX_BUY_QTY,
     RENAME_COST,
     SALT_LICK,
+    TRINKET_COST,
+    get_accessory,
 )
 from utils.formatting import JOPACOIN_EMOTE
 from utils.game_date import game_date_for_timestamp
@@ -147,9 +151,21 @@ class PetCommands(commands.Cog):
     # ────────────────────────────────────────────────────────────────────
 
     @pet.command(name="adopt", description="Adopt a mysterious cama egg")
-    @app_commands.describe(name="Your pet's name (you're naming an egg, brave)")
+    @app_commands.describe(
+        name="Your pet's name (you're naming an egg, brave)",
+        egg=f"Gilded Egg: +{GILDED_EGG_PREMIUM} JC, no commons in the pool",
+    )
+    @app_commands.choices(egg=[
+        app_commands.Choice(name="Standard Egg", value="standard"),
+        app_commands.Choice(
+            name=f"Gilded Egg (+{GILDED_EGG_PREMIUM} JC, uncommon or better)",
+            value="gilded",
+        ),
+    ])
     @require_guild
-    async def adopt(self, interaction: discord.Interaction, name: str):
+    async def adopt(
+        self, interaction: discord.Interaction, name: str, egg: str = "standard"
+    ):
         guild_id = interaction.guild.id if interaction.guild else None
         rl = GLOBAL_RATE_LIMITER.check(
             scope="pet", guild_id=guild_id or 0, user_id=interaction.user.id,
@@ -163,19 +179,26 @@ class PetCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
         result = await asyncio.to_thread(
-            self.pet_service.adopt, interaction.user.id, guild_id, name
+            self.pet_service.adopt, interaction.user.id, guild_id, name, egg
         )
         if not result.success:
             await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
             return
-        adopted = result.value
+        adopted = result.value["pet"]
+        gilded = result.value["egg_tier"] == "gilded"
+        flair = "a **gilded egg**" if gilded else "an egg"
+        pity_line = (
+            "\n✨ The nonprofit took pity: this egg can't be Common."
+            if result.value["pity_active"]
+            else ""
+        )
         embed = discord.Embed(
-            title="🥚 A mysterious egg!",
+            title="🥚 A gilded egg!" if gilded else "🥚 A mysterious egg!",
             description=(
-                f"**{interaction.user.display_name}** adopted an egg and named it "
+                f"**{interaction.user.display_name}** adopted {flair} and named it "
                 f"**{adopted.name}** for {adopted.adopt_fee} {JOPACOIN_EMOTE}.\n"
                 f"It hatches <t:{adopted.hatched_at}:R>. What's inside? "
-                "Nobody knows. Not even the egg."
+                "Nobody knows. Not even the egg." + pity_line
             ),
             color=pet_embeds.COLOR_EGG,
         )
@@ -336,6 +359,91 @@ class PetCommands(commands.Cog):
             ephemeral=True,
         )
 
+    async def _trinket_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        guild_id = interaction.guild.id if interaction.guild else None
+        owned = await asyncio.to_thread(
+            self.pet_service.owned_trinkets, interaction.user.id, guild_id
+        )
+        choices = []
+        for accessory_id in owned:
+            accessory = get_accessory(accessory_id)
+            if current.lower() in accessory.display_name.lower():
+                choices.append(
+                    app_commands.Choice(
+                        name=f"{accessory.display_name} ({accessory.tier})",
+                        value=accessory_id,
+                    )
+                )
+        return choices[:25]
+
+    @pet.command(
+        name="trinket",
+        description=f"Roll a Mystery Trinket ({TRINKET_COST} JC) or wear one you own",
+    )
+    @app_commands.describe(wear="Wear an owned trinket instead of rolling")
+    @app_commands.autocomplete(wear=_trinket_autocomplete)
+    @require_guild
+    async def trinket(
+        self, interaction: discord.Interaction, wear: str | None = None
+    ):
+        guild_id = interaction.guild.id if interaction.guild else None
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+        if wear is not None:
+            result = await asyncio.to_thread(
+                self.pet_service.wear_trinket, interaction.user.id, guild_id, wear
+            )
+            if not result.success:
+                await safe_followup(
+                    interaction, content=f"❌ {result.error}", ephemeral=True
+                )
+                return
+            accessory = get_accessory(result.value)
+            await safe_followup(
+                interaction,
+                content=(
+                    f"{accessory.emoji} Now wearing the "
+                    f"**{accessory.display_name}**."
+                ),
+                ephemeral=True,
+            )
+            return
+        result = await asyncio.to_thread(
+            self.pet_service.roll_trinket, interaction.user.id, guild_id
+        )
+        if not result.success:
+            await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
+            return
+        outcome = result.value
+        accessory = get_accessory(outcome.accessory_id)
+        if outcome.duplicate:
+            await safe_followup(
+                interaction,
+                content=(
+                    f"{accessory.emoji} A duplicate **{accessory.display_name}** "
+                    f"— it dissolves into a partial refund (net "
+                    f"-{outcome.net_cost} {JOPACOIN_EMOTE}). "
+                    f"Collection: {outcome.owned_count}/{len(ACCESSORIES)}"
+                ),
+                ephemeral=True,
+            )
+            return
+        tier_flair = {
+            "common": "", "uncommon": "🔹 Uncommon! ",
+            "rare": "🔮 RARE! ", "legendary": "⚡ LEGENDARY!!! ",
+        }.get(accessory.tier, "")
+        await safe_followup(
+            interaction,
+            content=(
+                f"🎁 {tier_flair}**{accessory.display_name}** {accessory.emoji} — "
+                f"_{accessory.blurb}_ (-{outcome.net_cost} {JOPACOIN_EMOTE})\n"
+                f"Equipped! Collection: {outcome.owned_count}/{len(ACCESSORIES)}"
+            ),
+            ephemeral=True,
+        )
+
     @pet.command(name="graveyard", description="Visit the cama memorial garden")
     @app_commands.describe(user="Whose graveyard to visit")
     @require_guild
@@ -349,8 +457,11 @@ class PetCommands(commands.Cog):
         result = await asyncio.to_thread(
             self.pet_service.get_graveyard, target.id, guild_id
         )
+        camadex = await asyncio.to_thread(
+            self.pet_service.camadex, target.id, guild_id
+        )
         embed = pet_embeds.build_graveyard_embed(
-            result.value, target.display_name
+            result.value, target.display_name, camadex=camadex
         )
         await safe_followup(interaction, embed=embed)
 

@@ -26,7 +26,7 @@ _PET_COLUMNS = (
     "pet_id, discord_id, guild_id, name, species, adopted_at, hatched_at, "
     "adopt_fee, last_fed_at, hunger_at_last_fed, times_fed, feeds_today, "
     "feed_date, week_consumed_jc, week_key, prev_week_consumed_jc, "
-    "prev_week_key, pampered_until, aegis_used, "
+    "prev_week_key, pampered_until, accessory, aegis_used, "
     "hatch_announced_at, died_at, death_cause, death_announced_at"
 )
 
@@ -321,6 +321,128 @@ class PetRepository(BaseRepository):
                 (pet_id,),
             ).fetchone()
             return _row_to_pet(fresh)
+
+    # --- trinkets (accessory gacha) ---
+
+    def buy_trinket_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        accessory_id: str,
+        cost: int,
+        refund: int,
+        now: int,
+    ) -> dict:
+        """Debit for a trinket roll; duplicates cost (cost - refund) net and
+        grant nothing. A new accessory is recorded and auto-equipped on the
+        living pet. Returns {duplicate, net_cost, owned_count}."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            owned = cursor.execute(
+                "SELECT 1 FROM pet_accessories "
+                "WHERE discord_id = ? AND guild_id = ? AND accessory_id = ?",
+                (discord_id, gid, accessory_id),
+            ).fetchone()
+            duplicate = owned is not None
+            net_cost = max(0, cost - refund) if duplicate else cost
+            self._debit_player(
+                cursor,
+                discord_id,
+                gid,
+                net_cost,
+                related_type="pet_trinket",
+                reason=f"mystery trinket roll: {accessory_id}",
+                metadata={
+                    "accessory_id": accessory_id,
+                    "duplicate": duplicate,
+                    "net_cost": net_cost,
+                },
+            )
+            if not duplicate:
+                cursor.execute(
+                    "INSERT INTO pet_accessories "
+                    "(discord_id, guild_id, accessory_id, obtained_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (discord_id, gid, accessory_id, now),
+                )
+                cursor.execute(
+                    "UPDATE pets SET accessory = ? "
+                    "WHERE discord_id = ? AND guild_id = ? AND died_at IS NULL",
+                    (accessory_id, discord_id, gid),
+                )
+            count = cursor.execute(
+                "SELECT COUNT(*) AS n FROM pet_accessories "
+                "WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            ).fetchone()
+            return {
+                "duplicate": duplicate,
+                "net_cost": net_cost,
+                "owned_count": int(count["n"]),
+            }
+
+    def get_accessories(self, discord_id: int, guild_id: int | None) -> list[str]:
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT accessory_id FROM pet_accessories "
+                "WHERE discord_id = ? AND guild_id = ? ORDER BY obtained_at",
+                (discord_id, gid),
+            ).fetchall()
+        return [row["accessory_id"] for row in rows]
+
+    def equip_accessory(
+        self, discord_id: int, guild_id: int | None, accessory_id: str | None
+    ) -> bool:
+        """Equip an OWNED accessory (or None to unequip) on the living pet."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            if accessory_id is not None:
+                owned = cursor.execute(
+                    "SELECT 1 FROM pet_accessories "
+                    "WHERE discord_id = ? AND guild_id = ? AND accessory_id = ?",
+                    (discord_id, gid, accessory_id),
+                ).fetchone()
+                if owned is None:
+                    return False
+            cursor.execute(
+                "UPDATE pets SET accessory = ? "
+                "WHERE discord_id = ? AND guild_id = ? AND died_at IS NULL",
+                (accessory_id, discord_id, gid),
+            )
+            return cursor.rowcount == 1
+
+    # --- collection log + pity ---
+
+    def species_raised(
+        self, discord_id: int, guild_id: int | None, now: int
+    ) -> list[str]:
+        """Distinct species this player has HATCHED (eggs stay a mystery)."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT species FROM pets "
+                "WHERE discord_id = ? AND guild_id = ? AND hatched_at <= ?",
+                (discord_id, gid, now),
+            ).fetchall()
+        return [row["species"] for row in rows]
+
+    def recent_dead_species(
+        self, discord_id: int, guild_id: int | None, limit: int
+    ) -> list[str]:
+        """Species of the most recent dead pets, newest first (pity input)."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT species FROM pets "
+                "WHERE discord_id = ? AND guild_id = ? AND died_at IS NOT NULL "
+                "ORDER BY adopted_at DESC LIMIT ?",
+                (discord_id, gid, limit),
+            ).fetchall()
+        return [row["species"] for row in rows]
 
     # --- feeding (no balance change: consumes stocked supplies) ---
 

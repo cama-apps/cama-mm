@@ -108,6 +108,7 @@ def test_commands_use_approved_consolidated_paths():
         "/pet rename",
         "/pet graveyard",
         "/pet leaderboard",
+        "/pet trinket",
         "/economy tip",
         "/economy paydebt",
         "/economy bankruptcy",

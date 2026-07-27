@@ -4417,6 +4417,7 @@ class SchemaManager:
                     CHECK (prev_week_consumed_jc >= 0),
                 prev_week_key TEXT,
                 pampered_until INTEGER,
+                accessory TEXT,
                 aegis_used INTEGER NOT NULL DEFAULT 0 CHECK (aegis_used IN (0, 1)),
                 hatch_announced_at INTEGER,
                 died_at INTEGER,
@@ -4459,6 +4460,17 @@ class SchemaManager:
                 qty INTEGER NOT NULL DEFAULT 0 CHECK (qty >= 0),
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (discord_id, guild_id, item_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_accessories (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                accessory_id TEXT NOT NULL,
+                obtained_at INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id, accessory_id)
             )
             """
         )

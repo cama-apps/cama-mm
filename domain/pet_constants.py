@@ -166,6 +166,70 @@ SPECIES: dict[str, PetSpecies] = {
 
 _FALLBACK_SPECIES = PetSpecies("unknown", "Cama of Unknown Origin", "common", 0, "")
 
+# --- Gacha layer -----------------------------------------------------------
+
+# Gilded Egg: premium adoption with no commons in the pool. Priced as a
+# flat premium ON TOP of the player's current (escalating) adoption fee.
+GILDED_EGG_PREMIUM = 230
+GILDED_TIER_WEIGHTS = {"uncommon": 65, "rare": 30, "legendary": 5}
+
+# Pity: after this many consecutive common hatches on standard eggs, the
+# next standard egg rolls from a no-common pool.
+PITY_THRESHOLD = 3
+PITY_TIER_WEIGHTS = {"uncommon": 80, "rare": 18, "legendary": 2}
+
+TRINKET_COST = 25
+TRINKET_DUPE_REFUND = 10  # net 15 JC sink when the roll is a duplicate
+
+
+@dataclass(frozen=True, slots=True)
+class PetAccessory:
+    accessory_id: str
+    display_name: str
+    tier: str
+    weight: int  # out of the ACCESSORIES total
+    emoji: str
+    blurb: str
+    anchor: str = "head"  # "head" (hats) or "body" (collars, pins)
+
+
+ACCESSORIES: dict[str, PetAccessory] = {
+    "red_bow": PetAccessory(
+        "red_bow", "Red Bow", "common", 250, "🎀",
+        "A classic. Ties the whole cama together."),
+    "straw_hat": PetAccessory(
+        "straw_hat", "Straw Hat", "common", 250, "👒",
+        "Practical headwear for the discerning grazer."),
+    "bell_collar": PetAccessory(
+        "bell_collar", "Bell Collar", "common", 250, "🔔",
+        "Now you always know where it is. It hates that.", anchor="body"),
+    "wool_scarf": PetAccessory(
+        "wool_scarf", "Wool Scarf", "uncommon", 90, "🧣",
+        "Wool on wool. Scandalous, cozy.", anchor="body"),
+    "flower_crown": PetAccessory(
+        "flower_crown", "Flower Crown", "uncommon", 90, "🌸",
+        "Woven from tombstone-garden flowers. Don't tell it that."),
+    "top_hat": PetAccessory(
+        "top_hat", "Top Hat", "rare", 30, "🎩",
+        "Immediately becomes the most distinguished animal in the league."),
+    "aegis_charm": PetAccessory(
+        "aegis_charm", "Aegis Charm", "rare", 30, "🛡️",
+        "A tiny replica. Grants nothing but confidence.", anchor="body"),
+    "divine_rapier_pin": PetAccessory(
+        "divine_rapier_pin", "Divine Rapier Pin", "legendary", 10, "⚔️",
+        "So shiny it feels like a throw waiting to happen.", anchor="body"),
+}
+
+_FALLBACK_ACCESSORY = PetAccessory("unknown", "Curious Trinket", "common", 0, "🎁", "")
+
+
+def get_accessory(accessory_id: str) -> PetAccessory:
+    return ACCESSORIES.get(accessory_id, _FALLBACK_ACCESSORY)
+
+
+def species_ids_by_tier(tier: str) -> list[str]:
+    return [s.species_id for s in SPECIES.values() if s.tier == tier]
+
 
 def get_species(species_id: str) -> PetSpecies:
     """Look up a species, tolerating ids that predate the current roster."""
