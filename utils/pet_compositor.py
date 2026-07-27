@@ -41,6 +41,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from domain.pet_constants import get_accessory
 from utils.pet_drawing import (
     _DEFAULT_PALETTE,
     CARD_HEIGHT,
@@ -51,6 +52,7 @@ from utils.pet_drawing import (
     _geometry,
     _slot_rng,
     assemble_card,
+    render_accessory,
     render_layer,
 )
 
@@ -89,7 +91,7 @@ def manifest_token() -> int:
     byte-cache keys so composites re-render when the manifest differs."""
     names = []
     for stage in ("baby", "adult"):
-        for slot in SLOT_ORDER:
+        for slot in (*SLOT_ORDER, "accessory"):
             names.extend(p.name for p in _pool(stage, slot))
     return hash(tuple(names))
 
@@ -240,7 +242,30 @@ def _fit_to_target(layer: Image.Image, source: dict, target: dict, kind: str) ->
     )
 
 
-def compose_pet_card(species_id: str, stage: str, mood: str, seed: int):
+def _accessory_layer(
+    accessory_id: str, stage: str, seed: int, authoring: dict, geometry: dict, target: dict
+) -> Image.Image | None:
+    """Resolve a trinket layer: disk component (authored frame) or the
+    procedural draw (geometry frame), anchored per the accessory's kind."""
+    layer = None
+    source = authoring
+    pool = _pool(stage, "accessory")
+    candidates = [p for p in pool if p.name.startswith(f"{accessory_id}")]
+    if candidates:
+        rng = _slot_rng(seed, "pick:accessory")
+        layer = _load_component(rng.choice(candidates))
+    if layer is None:
+        layer = render_accessory(accessory_id, stage)
+        source = geometry
+    if layer is None:
+        return None
+    kind = "head" if get_accessory(accessory_id).anchor == "head" else "body"
+    return _fit_to_target(layer, source, target, kind)
+
+
+def compose_pet_card(
+    species_id: str, stage: str, mood: str, seed: int, accessory: str | None = None
+):
     """Compose a pet card from disk components with procedural fallback
     per slot. Returns io.BytesIO of the finished PNG.
 
@@ -276,4 +301,10 @@ def compose_pet_card(species_id: str, stage: str, mood: str, seed: int):
         elif layer is not None and slot in ("back", "detail"):
             layer = _fit_to_target(layer, source, target, "body")
         layers.append(layer)
+    if accessory:
+        # Trinkets composite above the face, below front features (orbs).
+        layers.insert(
+            SLOT_ORDER.index("front"),
+            _accessory_layer(accessory, stage, seed, authoring, geometry, target),
+        )
     return assemble_card(layers)

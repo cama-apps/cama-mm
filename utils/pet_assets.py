@@ -71,7 +71,7 @@ def _file_from_bytes(data: bytes, filename: str) -> discord.File:
 # ---------------------------------------------------------------------------
 
 def get_pet_card(
-    species_id: str, stage: str, mood: str, seed: int
+    species_id: str, stage: str, mood: str, seed: int, accessory: str | None = None
 ) -> discord.File | None:
     """Return a discord.File for a pet portrait card.
 
@@ -94,12 +94,13 @@ def get_pet_card(
     try:
         from utils import pet_compositor
         cache_key = (
-            f"compose_{base_name}_{seed}_{pet_compositor.manifest_token()}"
+            f"compose_{base_name}_{seed}_{accessory}_"
+            f"{pet_compositor.manifest_token()}"
         )
         data = _bytes_cache.get(cache_key)
         if data is None:
             data = pet_compositor.compose_pet_card(
-                species_id, stage, mood, seed
+                species_id, stage, mood, seed, accessory=accessory
             ).getvalue()
             _bytes_cache[cache_key] = data
         return _file_from_bytes(data, f"pet_{base_name}.png")
@@ -108,11 +109,13 @@ def get_pet_card(
 
     # 3. Fully procedural last resort
     try:
-        cache_key = f"render_{base_name}_{seed}"
+        cache_key = f"render_{base_name}_{seed}_{accessory}"
         data = _bytes_cache.get(cache_key)
         if data is None:
             from utils.pet_drawing import render_pet_card
-            data = render_pet_card(species_id, stage, mood, seed).getvalue()
+            data = render_pet_card(
+                species_id, stage, mood, seed, accessory=accessory
+            ).getvalue()
             _bytes_cache[cache_key] = data
         return _file_from_bytes(data, f"pet_{base_name}.png")
     except Exception as e:

@@ -29,16 +29,22 @@ from domain.models.pet import (
     PetStatus,
     RefundNotice,
     RefundPayout,
+    TrinketOutcome,
 )
 from domain.pet_constants import (
+    ACCESSORIES,
     AEGIS_REVIVE_HUNGER,
     EGG_HATCH_SECONDS,
     FEED_CAP_PER_DAY,
     FOOD_ITEMS,
+    GILDED_EGG_PREMIUM,
+    GILDED_TIER_WEIGHTS,
     MATCH_WIN_HUNGER,
     MAX_BUY_QTY,
     MAX_HUNGER,
     PET_NAME_MAX_LEN,
+    PITY_THRESHOLD,
+    PITY_TIER_WEIGHTS,
     REFUND_MULT_MAX,
     REFUND_MULT_MIN,
     RENAME_COST,
@@ -46,10 +52,13 @@ from domain.pet_constants import (
     SALT_LICK_DURATION_SECONDS,
     SPECIES,
     SUPPLY_STACK_CAP,
+    TRINKET_COST,
+    TRINKET_DUPE_REFUND,
     WARNING_HUNGER,
     adoption_fee,
     food_cost,
     get_species,
+    species_ids_by_tier,
 )
 from services import error_codes
 from services.result import Result
@@ -186,11 +195,25 @@ class PetService:
 
     # --- adopt / rename ---
 
-    def adopt(self, discord_id: int, guild_id: int | None, name: str) -> Result[Pet]:
+    def adopt(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        name: str,
+        egg_tier: str = "standard",
+    ) -> Result[dict]:
+        """Adopt an egg. Returns {"pet", "egg_tier", "pity_active"}.
+
+        Standard eggs use the flat species weights, upgraded to a no-common
+        pool when pity is active (PITY_THRESHOLD consecutive common hatches).
+        Gilded eggs pay a premium for the boosted pool and ignore pity.
+        """
         # NB: a failed Result is falsy, so the sentinel check must be explicit.
         name_error = self._validate_name(name)
         if name_error is not None:
             return name_error
+        if egg_tier not in ("standard", "gilded"):
+            return Result.fail("Unknown egg tier.", code=error_codes.VALIDATION_ERROR)
         if not self.player_repo.exists(
             discord_id, self.pet_repo.normalize_guild_id(guild_id)
         ):
@@ -208,9 +231,18 @@ class PetService:
             )
         prior_deaths = self.pet_repo.count_dead_pets(discord_id, guild_id)
         fee = adoption_fee(prior_deaths)
-        species_ids = list(SPECIES)
-        weights = [SPECIES[s].weight for s in species_ids]
-        species = random.choices(species_ids, weights=weights, k=1)[0]
+        pity_active = False
+        if egg_tier == "gilded":
+            fee += GILDED_EGG_PREMIUM
+            species = self._roll_species_tiered(GILDED_TIER_WEIGHTS)
+        else:
+            pity_active = self._pity_active(discord_id, guild_id)
+            if pity_active:
+                species = self._roll_species_tiered(PITY_TIER_WEIGHTS)
+            else:
+                species_ids = list(SPECIES)
+                weights = [SPECIES[s].weight for s in species_ids]
+                species = random.choices(species_ids, weights=weights, k=1)[0]
         try:
             pet = self.pet_repo.adopt_pet(
                 discord_id,
@@ -223,7 +255,22 @@ class PetService:
             )
         except ValueError as exc:
             return self._map_repo_error(exc, fee=fee)
-        return Result.ok(pet)
+        return Result.ok(
+            {"pet": pet, "egg_tier": egg_tier, "pity_active": pity_active}
+        )
+
+    def _roll_species_tiered(self, tier_weights: dict[str, int]) -> str:
+        tiers = list(tier_weights)
+        tier = random.choices(tiers, weights=list(tier_weights.values()), k=1)[0]
+        return random.choice(species_ids_by_tier(tier))
+
+    def _pity_active(self, discord_id: int, guild_id: int | None) -> bool:
+        recent = self.pet_repo.recent_dead_species(
+            discord_id, guild_id, PITY_THRESHOLD
+        )
+        return len(recent) >= PITY_THRESHOLD and all(
+            get_species(sp).tier == "common" for sp in recent
+        )
 
     def rename(self, discord_id: int, guild_id: int | None, name: str) -> Result[Pet]:
         name_error = self._validate_name(name)
@@ -319,6 +366,71 @@ class PetService:
                 "pet": fresh,
             }
         )
+
+    # --- trinket gacha ---
+
+    def roll_trinket(self, discord_id: int, guild_id: int | None) -> Result[TrinketOutcome]:
+        """Buy a Mystery Trinket: a weighted accessory roll for the living,
+        hatched pet. Duplicates dissolve for a partial refund (net sink)."""
+        now = self._now()
+        pet = self._living_pet(discord_id, guild_id, now)
+        if pet is None:
+            return Result.fail(
+                "Trinkets are gifts — you need a living pet first.",
+                code=error_codes.NO_PET,
+            )
+        if now < pet.hatched_at:
+            return Result.fail(
+                "It's still an egg. Eggs have no fashion sense.",
+                code=error_codes.PET_EGG,
+            )
+        ids = list(ACCESSORIES)
+        weights = [ACCESSORIES[a].weight for a in ids]
+        accessory_id = random.choices(ids, weights=weights, k=1)[0]
+        try:
+            outcome = self.pet_repo.buy_trinket_atomic(
+                discord_id,
+                guild_id,
+                accessory_id=accessory_id,
+                cost=TRINKET_COST,
+                refund=TRINKET_DUPE_REFUND,
+                now=now,
+            )
+        except ValueError as exc:
+            return self._map_repo_error(exc, fee=TRINKET_COST)
+        return Result.ok(
+            TrinketOutcome(
+                accessory_id=accessory_id,
+                duplicate=outcome["duplicate"],
+                net_cost=outcome["net_cost"],
+                owned_count=outcome["owned_count"],
+            )
+        )
+
+    def wear_trinket(
+        self, discord_id: int, guild_id: int | None, accessory_id: str
+    ) -> Result[str]:
+        if accessory_id not in ACCESSORIES:
+            return Result.fail("Unknown trinket.", code=error_codes.VALIDATION_ERROR)
+        now = self._now()
+        if self._living_pet(discord_id, guild_id, now) is None:
+            return Result.fail("You have no living pet.", code=error_codes.NO_PET)
+        if not self.pet_repo.equip_accessory(discord_id, guild_id, accessory_id):
+            return Result.fail(
+                "You don't own that trinket (roll one with `/pet trinket`).",
+                code=error_codes.VALIDATION_ERROR,
+            )
+        return Result.ok(accessory_id)
+
+    def owned_trinkets(self, discord_id: int, guild_id: int | None) -> list[str]:
+        return self.pet_repo.get_accessories(discord_id, guild_id)
+
+    # --- camadex ---
+
+    def camadex(self, discord_id: int, guild_id: int | None) -> tuple[list[str], int]:
+        """(species ids hatched by this player, roster size)."""
+        raised = self.pet_repo.species_raised(discord_id, guild_id, self._now())
+        return raised, len(SPECIES)
 
     # --- feeding ---
 

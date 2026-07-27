@@ -71,6 +71,7 @@ class Pet:
     prev_week_consumed_jc: int
     prev_week_key: str | None
     pampered_until: int | None
+    accessory: str | None
     aegis_used: int
     hatch_announced_at: int | None
     died_at: int | None
@@ -194,6 +195,14 @@ class FeedOutcome:
     remaining_qty: int
     feeds_left_today: int
     spat: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TrinketOutcome:
+    accessory_id: str
+    duplicate: bool
+    net_cost: int
+    owned_count: int
 
 
 @dataclass(frozen=True, slots=True)

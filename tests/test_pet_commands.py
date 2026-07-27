@@ -42,6 +42,7 @@ def make_pet(**overrides) -> Pet:
         "prev_week_consumed_jc": 0,
         "prev_week_key": None,
         "pampered_until": None,
+        "accessory": None,
         "aegis_used": 0,
         "hatch_announced_at": None,
         "died_at": None,
