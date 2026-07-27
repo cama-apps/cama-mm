@@ -86,10 +86,12 @@ class TestSweepDelivery:
     async def test_hatch_posts_to_channel_and_marks(self, channel, monkeypatch):
         pet = make_pet()
         cog = make_cog({"hatches": [HatchNotice(pet=pet)], "deaths": [], "refunds": []})
+        cog._rearm_warning = AsyncMock()
         monkeypatch.setattr(cog, "_pet_channel", lambda gid: channel)
         await cog._pet_sweep_loop.coro(cog)
         channel.send.assert_awaited_once()
         cog.pet_service.mark_hatch_announced.assert_called_once_with(pet)
+        cog._rearm_warning.assert_awaited_once_with(pet)
 
     @pytest.mark.asyncio
     async def test_no_channel_still_marks_announced(self, monkeypatch):
@@ -270,10 +272,10 @@ def live_cog(repo_db_path, monkeypatch):
     return cog
 
 
-async def adopt_via_handler(cog, name="Blep", user_id=100):
+async def adopt_via_handler(cog, name="Blep", user_id=100, egg="standard"):
     inter = make_interaction(user_id=user_id)
     with patch("services.pet_service.random.choices", return_value=["common_cama"]):
-        await cog.adopt.callback(cog, inter, name)
+        await cog.adopt.callback(cog, inter, name, egg)
     return inter
 
 
@@ -285,6 +287,45 @@ class TestCommandHandlers:
         assert "mysterious egg" in kwargs["embed"].title.lower()
         pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
         assert pet is not None and pet.name == "Blep"
+
+    @pytest.mark.asyncio
+    async def test_adopt_does_not_arm_warning_before_hatch(self, live_cog):
+        reminder_svc = MagicMock()
+        reminder_svc.get_preferences.return_value = {"pet_enabled": True}
+        live_cog.bot.reminder_service = reminder_svc
+        await adopt_via_handler(live_cog)
+        reminder_svc.schedule_pet_reminder.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_second_gilded_adoption_upgrades_and_renames_existing_egg(
+        self, live_cog
+    ):
+        await adopt_via_handler(live_cog)
+        inter = await adopt_via_handler(live_cog, name="Goldie", egg="gilded")
+        kwargs = inter.followup.send.await_args.kwargs
+        assert "gilded" in kwargs["embed"].title.lower()
+        assert "upgraded" in kwargs["embed"].description
+        assert "230" in kwargs["embed"].description
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        assert pet.name == "Goldie"
+        assert pet.egg_tier == "gilded"
+        assert pet.species == "unhatched"
+        assert pet.adopt_fee == 250
+        assert live_cog.pet_service.player_repo.get_balance(
+            100, TEST_GUILD_ID
+        ) == 750
+
+    @pytest.mark.asyncio
+    async def test_third_adoption_reports_error_without_second_upgrade_charge(
+        self, live_cog
+    ):
+        await adopt_via_handler(live_cog)
+        await adopt_via_handler(live_cog, name="Goldie", egg="gilded")
+        inter = await adopt_via_handler(live_cog, name="Again", egg="gilded")
+        assert inter.followup.send.await_args.kwargs["content"].startswith("❌")
+        assert live_cog.pet_service.player_repo.get_balance(
+            100, TEST_GUILD_ID
+        ) == 750
 
     @pytest.mark.asyncio
     async def test_adopt_unregistered_reports_error(self, live_cog):
@@ -565,11 +606,16 @@ class TestPetReminders:
             dig_service=None,
             pet_service=live_cog.pet_service,
         )
-        # No clock patching needed: the pet was just adopted, so its warning
-        # crossing (hatch + 3.5 days) is always in the future.
-        assert live_cog.pet_service.warning_crossing_for(pet) > pet.hatched_at
         await service.reschedule_all(MagicMock(), [TEST_GUILD_ID])
         key = (100, TEST_GUILD_ID, "pet")
+        assert key not in service._tasks
+
+        monkeypatch.setattr(live_cog.pet_service, "_now", lambda: pet.hatched_at)
+        with patch(
+            "services.pet_service.random.choices",
+            return_value=["common_cama"],
+        ):
+            await service.reschedule_all(MagicMock(), [TEST_GUILD_ID])
         assert key in service._tasks
         service._tasks[key].cancel()
 

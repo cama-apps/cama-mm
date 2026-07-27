@@ -31,6 +31,7 @@ from domain.pet_constants import (
     RENAME_COST,
     SALT_LICK,
     TRINKET_COST,
+    UNHATCHED_SPECIES,
     get_accessory,
 )
 from utils.formatting import JOPACOIN_EMOTE
@@ -130,7 +131,11 @@ class PetCommands(commands.Cog):
         run on the loop (it creates the asyncio task).
         """
         reminder_svc = getattr(self.bot, "reminder_service", None)
-        if reminder_svc is None or pet is None:
+        if (
+            reminder_svc is None
+            or pet is None
+            or pet.species == UNHATCHED_SPECIES
+        ):
             return
         try:
             crossing = self.pet_service.warning_crossing_for(pet)
@@ -188,20 +193,31 @@ class PetCommands(commands.Cog):
             return
         adopted = result.value["pet"]
         gilded = result.value["egg_tier"] == "gilded"
+        upgraded = result.value["upgraded"]
         flair = "a **gilded egg**" if gilded else "an egg"
         pity_line = (
             "\n✨ The nonprofit took pity: this egg can't be Common."
             if result.value["pity_active"]
             else ""
         )
-        embed = discord.Embed(
-            title="🥚 A gilded egg!" if gilded else "🥚 A mysterious egg!",
-            description=(
+        if upgraded:
+            description = (
+                f"**{interaction.user.display_name}** upgraded their egg to "
+                f"a **gilded egg** and named it **{adopted.name}** for "
+                f"{GILDED_EGG_PREMIUM} {JOPACOIN_EMOTE}.\n"
+                f"It still hatches <t:{adopted.hatched_at}:R>. What's inside? "
+                "Nobody knows. Not even the egg."
+            )
+        else:
+            description = (
                 f"**{interaction.user.display_name}** adopted {flair} and named it "
                 f"**{adopted.name}** for {adopted.adopt_fee} {JOPACOIN_EMOTE}.\n"
                 f"It hatches <t:{adopted.hatched_at}:R>. What's inside? "
                 "Nobody knows. Not even the egg." + pity_line
-            ),
+            )
+        embed = discord.Embed(
+            title="🥚 A gilded egg!" if gilded else "🥚 A mysterious egg!",
+            description=description,
             color=pet_embeds.COLOR_EGG,
         )
         file = await asyncio.to_thread(
@@ -210,7 +226,6 @@ class PetCommands(commands.Cog):
         if file:
             embed.set_image(url=f"attachment://{file.filename}")
         await safe_followup(interaction, embed=embed, file=file)
-        await self._rearm_warning(adopted)
 
     @pet.command(name="status", description="Check on your cama (art, hunger, mood)")
     @app_commands.describe(
@@ -539,6 +554,7 @@ class PetCommands(commands.Cog):
             except discord.Forbidden:
                 pass  # permanent: mark below so we don't loop forever
         await asyncio.to_thread(self.pet_service.mark_hatch_announced, pet)
+        await self._rearm_warning(pet)
 
     async def _deliver_death(self, notice: DeathNotice) -> None:
         pet = notice.pet

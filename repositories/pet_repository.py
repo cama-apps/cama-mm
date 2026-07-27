@@ -20,6 +20,7 @@ import logging
 import sqlite3
 
 from domain.models.pet import Pet, RefundNotice, RefundPayout
+from domain.pet_constants import UNHATCHED_SPECIES
 from repositories.base_repository import BaseRepository, safe_json_loads
 
 logger = logging.getLogger("cama_bot.repositories.pet")
@@ -29,7 +30,7 @@ _PET_COLUMNS = (
     "adopt_fee, last_fed_at, hunger_at_last_fed, times_fed, feeds_today, "
     "feed_date, week_consumed_jc, week_key, prev_week_consumed_jc, "
     "prev_week_key, pampered_until, accessory, aegis_used, "
-    "hatch_announced_at, died_at, death_cause, death_announced_at"
+    "hatch_announced_at, died_at, death_cause, death_announced_at, egg_tier"
 )
 
 # Shared SET fragment: accumulate care JC into the current week, shifting the
@@ -159,7 +160,7 @@ class PetRepository(BaseRepository):
         guild_id: int | None,
         *,
         name: str,
-        species: str,
+        egg_tier: str,
         fee: int,
         now: int,
         hatch_seconds: int,
@@ -175,18 +176,28 @@ class PetRepository(BaseRepository):
                 fee,
                 related_type="pet_adopt",
                 reason=f"adopted pet {name}",
-                metadata={"species": species, "fee": fee},
+                metadata={"egg_tier": egg_tier, "fee": fee},
             )
             try:
                 cursor.execute(
                     """
                     INSERT INTO pets (
-                        discord_id, guild_id, name, species, adopted_at,
+                        discord_id, guild_id, name, species, egg_tier, adopted_at,
                         hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100)
                     """,
-                    (discord_id, gid, name, species, now, hatched_at, fee, hatched_at),
+                    (
+                        discord_id,
+                        gid,
+                        name,
+                        UNHATCHED_SPECIES,
+                        egg_tier,
+                        now,
+                        hatched_at,
+                        fee,
+                        hatched_at,
+                    ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("already_has_pet") from exc
@@ -196,6 +207,98 @@ class PetRepository(BaseRepository):
                 (pet_id,),
             ).fetchone()
             return _row_to_pet(row)
+
+    def upgrade_egg(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        name: str,
+        premium: int,
+        now: int,
+    ) -> Pet:
+        """Atomically charge the gilded premium and change an unhatched pool."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets "
+                "WHERE discord_id = ? AND guild_id = ? AND died_at IS NULL",
+                (discord_id, gid),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no_pet")
+            pet = _row_to_pet(row)
+            if now >= pet.hatched_at or pet.species != UNHATCHED_SPECIES:
+                raise ValueError("pet_hatched")
+            if pet.egg_tier == "gilded":
+                raise ValueError("already_gilded")
+            self._debit_player(
+                cursor,
+                discord_id,
+                gid,
+                premium,
+                related_type="pet_upgrade",
+                reason=f"upgraded egg {pet.name} to gilded",
+                metadata={
+                    "pet_id": pet.pet_id,
+                    "old_name": pet.name,
+                    "new_name": name,
+                    "premium": premium,
+                },
+            )
+            cursor.execute(
+                """
+                UPDATE pets
+                SET name = ?, egg_tier = 'gilded', adopt_fee = adopt_fee + ?
+                WHERE pet_id = ? AND guild_id = ?
+                """,
+                (name, premium, pet.pet_id, gid),
+            )
+            upgraded = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ? AND guild_id = ?",
+                (pet.pet_id, gid),
+            ).fetchone()
+            return _row_to_pet(upgraded)
+
+    def resolve_hatch_species(
+        self,
+        pet_id: int,
+        guild_id: int | None,
+        *,
+        species: str,
+        now: int,
+    ) -> Pet:
+        """Persist the first species selected at hatch; retries return it."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            row = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets "
+                "WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL",
+                (pet_id, gid),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no_pet")
+            pet = _row_to_pet(row)
+            if pet.species != UNHATCHED_SPECIES:
+                return pet
+            if now < pet.hatched_at:
+                raise ValueError("egg_not_ready")
+            cursor.execute(
+                """
+                UPDATE pets
+                SET species = ?
+                WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL
+                  AND species = ?
+                """,
+                (species, pet_id, gid, UNHATCHED_SPECIES),
+            )
+            resolved = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ? AND guild_id = ?",
+                (pet_id, gid),
+            ).fetchone()
+            return _row_to_pet(resolved)
 
     def buy_supplies(
         self,

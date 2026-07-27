@@ -659,6 +659,12 @@ class SchemaManager:
                 self._migration_create_low_priority_state,
             ),
             ("drop_curses_table", self._migration_drop_curses_table),
+            # Egg purchases persist only their roll pool. Species is selected
+            # once the hatch time arrives, not when the egg is bought.
+            (
+                "add_pet_hatch_roll_state",
+                self._migration_add_pet_hatch_roll_state,
+            ),
         ]
 
     # --- Migrations ---
@@ -4451,6 +4457,8 @@ class SchemaManager:
                 guild_id INTEGER NOT NULL,
                 name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 32),
                 species TEXT NOT NULL,
+                egg_tier TEXT NOT NULL DEFAULT 'standard'
+                    CHECK (egg_tier IN ('standard', 'gilded')),
                 adopted_at INTEGER NOT NULL,
                 hatched_at INTEGER NOT NULL,
                 adopt_fee INTEGER NOT NULL CHECK (adopt_fee >= 0),
@@ -4629,6 +4637,34 @@ class SchemaManager:
                 PRIMARY KEY (discord_id, guild_id)
             )
             """
+        )
+
+    def _migration_add_pet_hatch_roll_state(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor,
+            "pets",
+            "egg_tier",
+            "TEXT NOT NULL DEFAULT 'standard' "
+            "CHECK (egg_tier IN ('standard', 'gilded'))",
+        )
+        # Before this column existed, the base adoption fee topped out at
+        # 100 JC and every gilded egg added a 230 JC premium.
+        cursor.execute(
+            """
+            UPDATE pets
+            SET egg_tier = CASE
+                WHEN adopt_fee > 100 THEN 'gilded'
+                ELSE 'standard'
+            END
+            """
+        )
+        cursor.execute(
+            """
+            UPDATE pets
+            SET species = 'unhatched'
+            WHERE died_at IS NULL AND hatched_at > ?
+            """,
+            (int(time.time()),),
         )
 
     def _migration_clear_dig_active_duels_for_retired_timed_mechanics(

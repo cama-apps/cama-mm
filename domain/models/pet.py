@@ -77,6 +77,7 @@ class Pet:
     died_at: int | None
     death_cause: str | None
     death_announced_at: int | None
+    egg_tier: str = "standard"
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> Pet:
