@@ -537,16 +537,24 @@ class ServiceContainer:
         c = self._components
         if not config.PET_CHANNEL_ID:
             c["pet_service"] = None
+            c["pet_flavor_service"] = None
             if c.get("dig_service") is not None:
                 c["dig_service"].pet_service = None
             logger.info("Pet service disabled (PET_CHANNEL_ID not configured)")
             return
+        from services.pet_flavor_service import PetFlavorService
         from services.pet_service import PetService
 
         c["pet_service"] = PetService(
             c["pet_repo"],
             c["player_repo"],
             decay_per_day=config.PET_HUNGER_DECAY_PER_DAY,
+        )
+        c["pet_flavor_service"] = PetFlavorService(
+            ai_service=c.get("ai_service"),
+            guild_config_repo=c["guild_config_repo"],
+            economy_ledger_repo=c["economy_ledger_repo"],
+            player_repo=c["player_repo"],
         )
         if c.get("dig_service") is not None:
             c["dig_service"].pet_service = c["pet_service"]
@@ -651,6 +659,7 @@ class ServiceContainer:
         bot.mafia_service = c["mafia_service"]
         bot.mafia_flavor_service = c["mafia_flavor_service"]
         bot.pet_service = c["pet_service"]
+        bot.pet_flavor_service = c["pet_flavor_service"]
         bot.player_trivia_service = c["player_trivia_service"]
 
         # AI services (may be None)

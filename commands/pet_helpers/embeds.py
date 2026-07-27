@@ -91,13 +91,24 @@ def build_status_embed(
     *,
     owner_name: str,
     next_fee: int,
+    flavor_text: str | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     pet = status.pet
     if pet is None:
-        return _build_petless_embed(status, owner_name=owner_name, next_fee=next_fee)
-    if status.stage == PetStage.EGG:
-        return _build_egg_embed(pet, status)
-    return _build_living_embed(pet, status, decay_per_day, now)
+        embed, file = _build_petless_embed(
+            status, owner_name=owner_name, next_fee=next_fee
+        )
+    elif status.stage == PetStage.EGG:
+        embed, file = _build_egg_embed(pet, status)
+    else:
+        embed, file = _build_living_embed(pet, status, decay_per_day, now)
+    if flavor_text:
+        embed.add_field(
+            name="💬 Cama chatter",
+            value=flavor_text,
+            inline=False,
+        )
+    return embed, file
 
 
 def _build_petless_embed(
@@ -250,7 +261,11 @@ def build_shop_embed(
     return embed
 
 
-def build_hatch_embed(pet: Pet) -> tuple[discord.Embed, discord.File | None]:
+def build_hatch_embed(
+    pet: Pet,
+    *,
+    flavor_text: str | None = None,
+) -> tuple[discord.Embed, discord.File | None]:
     species = get_species(pet.species)
     reveal = TIER_REVEAL.get(species.tier, "It's a")
     embed = discord.Embed(
@@ -261,13 +276,23 @@ def build_hatch_embed(pet: Pet) -> tuple[discord.Embed, discord.File | None]:
         ),
         color=COLOR_LEGENDARY if species.tier == "legendary" else COLOR_GREEN,
     )
+    if flavor_text:
+        embed.add_field(
+            name="💬 Cama chatter",
+            value=flavor_text,
+            inline=False,
+        )
     file = get_pet_card(pet.species, "baby", "happy", pet.pet_id)
     if file:
         embed.set_image(url=f"attachment://{file.filename}")
     return embed, file
 
 
-def build_death_embed(pet: Pet) -> tuple[discord.Embed, discord.File | None]:
+def build_death_embed(
+    pet: Pet,
+    *,
+    flavor_text: str | None = None,
+) -> tuple[discord.Embed, discord.File | None]:
     age = format_age(pet.age_seconds(pet.died_at or pet.adopted_at))
     embed = discord.Embed(
         title=f"🪦 {pet.name} has died",
@@ -277,6 +302,12 @@ def build_death_embed(pet: Pet) -> tuple[discord.Embed, discord.File | None]:
         ),
         color=COLOR_DEAD,
     )
+    if flavor_text:
+        embed.add_field(
+            name="💬 Cama chatter",
+            value=flavor_text,
+            inline=False,
+        )
     file = get_tombstone_card(pet.name, pet.pet_id)
     if file:
         embed.set_image(url=f"attachment://{file.filename}")

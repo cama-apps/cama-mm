@@ -15,6 +15,8 @@ import discord
 
 from domain.pet_constants import FOOD_ITEMS, SALT_LICK, food_cost
 from services import error_codes
+from services.pet_flavor_service import PetFlavorEvent
+from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
     from commands.pet import PetCommands
@@ -68,12 +70,18 @@ class PetStatusView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
-    async def refresh(self, interaction: discord.Interaction) -> None:
+    async def refresh(
+        self,
+        interaction: discord.Interaction,
+        *,
+        flavor_event: PetFlavorEvent = PetFlavorEvent.STATUS,
+    ) -> None:
         """Re-derive status and swap in a fresh embed, art, and view."""
         embed, file, view = await self.cog.compose_status(
             self.owner_id,
             self.guild_id,
             owner_name=interaction.user.display_name,
+            flavor_event=flavor_event,
         )
         self.stop()
         kwargs = {"embed": embed, "view": view, "attachments": [file] if file else []}
@@ -99,17 +107,22 @@ class _FeedButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: PetStatusView = self.view
+        if not await safe_defer(interaction):
+            return
         result = await asyncio.to_thread(
             view.cog.pet_service.feed, view.owner_id, view.guild_id, self.item_id
         )
         if not result.success:
-            await interaction.response.send_message(f"❌ {result.error}", ephemeral=True)
+            await interaction.followup.send(f"❌ {result.error}", ephemeral=True)
             return
-        # Refresh consumes the component response (edit_message on the panel);
-        # the spat notice goes out as a followup so the panel stays live.
+        # The response was deferred before database and flavor work, so refresh
+        # edits the original panel; a spat notice can still use a followup.
         spat = result.value.spat
         pet_name = result.value.pet.name
-        await view.refresh(interaction)
+        await view.refresh(
+            interaction,
+            flavor_event=PetFlavorEvent.SPAT if spat else PetFlavorEvent.FED,
+        )
         if spat:
             await interaction.followup.send(
                 f"💢 **{pet_name}** spat the "
@@ -130,11 +143,13 @@ class _BuyButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: PetStatusView = self.view
+        if not await safe_defer(interaction):
+            return
         result = await asyncio.to_thread(
             view.cog.pet_service.buy, view.owner_id, view.guild_id, self.item_id, 1
         )
         if not result.success:
-            await interaction.response.send_message(f"❌ {result.error}", ephemeral=True)
+            await interaction.followup.send(f"❌ {result.error}", ephemeral=True)
             return
         await view.refresh(interaction)
 
@@ -150,6 +165,8 @@ class _SaltLickButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: PetStatusView = self.view
+        if not await safe_defer(interaction):
+            return
         result = await asyncio.to_thread(
             view.cog.pet_service.buy,
             view.owner_id,
@@ -159,12 +176,12 @@ class _SaltLickButton(discord.ui.Button):
         )
         if not result.success:
             if result.error_code == error_codes.ALREADY_PAMPERED:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "🧂 Already pampered. There is such a thing as too much salt.",
                     ephemeral=True,
                 )
             else:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ {result.error}", ephemeral=True
                 )
             return
