@@ -266,6 +266,53 @@ class TestFeed:
         assert pet_repo.get_supplies(100, TEST_GUILD_ID) == {"tango": 4}
 
 
+class TestTrinkets:
+    def test_dead_pet_is_never_charged_for_a_trinket(
+        self, pet_repo, player_repository, rich_player
+    ):
+        """Regression: liveness re-checked INSIDE the transaction, so a death
+        claimed after the caller's check can't be debited."""
+        pet = adopt(pet_repo)
+        claim_death(pet_repo, pet, died_at=NOW + 9 * 86400)
+        with pytest.raises(ValueError, match="pet_dead"):
+            pet_repo.buy_trinket_atomic(
+                pet.pet_id, 100, TEST_GUILD_ID,
+                accessory_id="top_hat", cost=25, refund=10, now=NOW,
+            )
+        assert player_repository.get_balance(100, TEST_GUILD_ID) == 980  # fee only
+        assert pet_repo.get_accessories(100, TEST_GUILD_ID) == []
+
+    def test_trinket_roll_debits_equips_and_dupe_refunds(
+        self, pet_repo, player_repository, rich_player
+    ):
+        pet = adopt(pet_repo)
+        outcome = pet_repo.buy_trinket_atomic(
+            pet.pet_id, 100, TEST_GUILD_ID,
+            accessory_id="top_hat", cost=25, refund=10, now=NOW,
+        )
+        assert outcome == {"duplicate": False, "net_cost": 25, "owned_count": 1}
+        assert pet_repo.get_active_pet(100, TEST_GUILD_ID).accessory == "top_hat"
+        dupe = pet_repo.buy_trinket_atomic(
+            pet.pet_id, 100, TEST_GUILD_ID,
+            accessory_id="top_hat", cost=25, refund=10, now=NOW + 1,
+        )
+        assert dupe == {"duplicate": True, "net_cost": 15, "owned_count": 1}
+        assert player_repository.get_balance(100, TEST_GUILD_ID) == 980 - 25 - 15
+
+    def test_equip_raises_distinct_codes(self, pet_repo, rich_player):
+        pet = adopt(pet_repo)
+        with pytest.raises(ValueError, match="not_owned"):
+            pet_repo.equip_accessory(pet.pet_id, 100, TEST_GUILD_ID, "red_bow")
+        pet_repo.buy_trinket_atomic(
+            pet.pet_id, 100, TEST_GUILD_ID,
+            accessory_id="red_bow", cost=25, refund=10, now=NOW,
+        )
+        pet_repo.equip_accessory(pet.pet_id, 100, TEST_GUILD_ID, "red_bow")
+        claim_death(pet_repo, pet, died_at=NOW + 9 * 86400)
+        with pytest.raises(ValueError, match="pet_dead"):
+            pet_repo.equip_accessory(pet.pet_id, 100, TEST_GUILD_ID, "red_bow")
+
+
 class TestDeathAndRevival:
     def test_claim_death_is_once_only(self, pet_repo, rich_player):
         pet = adopt(pet_repo)

@@ -127,6 +127,18 @@ class TestComposition:
         assert img.getpixel((300, 60))[:3] == MAGENTA[:3]
         assert img.getpixel(FACE_PX)[:3] != MAGENTA[:3]
 
+    def test_baby_backdrops_fall_back_to_adult_pool(self, tmp_path):
+        """Backdrops are stage-agnostic scenes: no baby dir means reuse the
+        adult set instead of shipping duplicate blobs."""
+        backdrop = (255, 140, 0, 255)
+        write_component(tmp_path, "adult", "backdrop", "any_01",
+                        (0, 0, CARD_WIDTH, CARD_HEIGHT), backdrop)
+        pet_compositor.clear_caches()
+        img = compose_image(stage="baby")
+        # An upper-left pixel (inside the vignette, clear of the creature)
+        # shows the adult backdrop.
+        assert img.getpixel((40, 40))[:3] == backdrop[:3]
+
     def test_manifest_token_tracks_component_set(self, tmp_path):
         empty = pet_compositor.manifest_token()
         write_component(tmp_path, "adult", "face", "any_happy_01", FACE_BOX, MAGENTA)

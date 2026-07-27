@@ -640,6 +640,14 @@ class SchemaManager:
                 "add_pet_enabled_to_reminder_preferences",
                 self._migration_add_pet_enabled_to_reminder_preferences,
             ),
+            # Belt-and-braces for databases initialized mid-branch, before
+            # trinkets were folded into create_pet_tables: idempotently adds
+            # the accessory column and pet_accessories table. A no-op on any
+            # database created from the final create_pet_tables.
+            (
+                "add_pet_accessory_storage",
+                self._migration_add_pet_accessory_storage,
+            ),
         ]
 
     # --- Migrations ---
@@ -4482,6 +4490,20 @@ class SchemaManager:
                 paid_at INTEGER NOT NULL,
                 total_paid INTEGER NOT NULL CHECK (total_paid >= 0),
                 PRIMARY KEY (guild_id, week_key)
+            )
+            """
+        )
+
+    def _migration_add_pet_accessory_storage(self, cursor) -> None:
+        self._add_column_if_not_exists(cursor, "pets", "accessory", "TEXT")
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_accessories (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                accessory_id TEXT NOT NULL,
+                obtained_at INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id, accessory_id)
             )
             """
         )

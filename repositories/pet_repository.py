@@ -9,7 +9,7 @@ records the spend.
 Validation errors are raised as ``ValueError(code)`` with machine-readable
 codes; the service layer maps them to Result failures:
     insufficient_funds, already_has_pet, no_pet, pet_dead, stale_pet,
-    no_supplies, feed_cap, already_pampered, stack_cap
+    no_supplies, feed_cap, already_pampered, stack_cap, not_owned
 """
 
 from __future__ import annotations
@@ -326,6 +326,7 @@ class PetRepository(BaseRepository):
 
     def buy_trinket_atomic(
         self,
+        pet_id: int,
         discord_id: int,
         guild_id: int | None,
         *,
@@ -336,10 +337,23 @@ class PetRepository(BaseRepository):
     ) -> dict:
         """Debit for a trinket roll; duplicates cost (cost - refund) net and
         grant nothing. A new accessory is recorded and auto-equipped on the
-        living pet. Returns {duplicate, net_cost, owned_count}."""
+        living pet. Returns {duplicate, net_cost, owned_count}.
+
+        Like every sibling economy op, the pet's liveness is re-verified
+        INSIDE the transaction so a death claimed after the caller's check
+        can never be charged.
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT died_at FROM pets WHERE pet_id = ? AND guild_id = ?",
+                (pet_id, gid),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no_pet")
+            if row["died_at"] is not None:
+                raise ValueError("pet_dead")
             owned = cursor.execute(
                 "SELECT 1 FROM pet_accessories "
                 "WHERE discord_id = ? AND guild_id = ? AND accessory_id = ?",
@@ -369,8 +383,8 @@ class PetRepository(BaseRepository):
                 )
                 cursor.execute(
                     "UPDATE pets SET accessory = ? "
-                    "WHERE discord_id = ? AND guild_id = ? AND died_at IS NULL",
-                    (accessory_id, discord_id, gid),
+                    "WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL",
+                    (accessory_id, pet_id, gid),
                 )
             count = cursor.execute(
                 "SELECT COUNT(*) AS n FROM pet_accessories "
@@ -394,12 +408,28 @@ class PetRepository(BaseRepository):
         return [row["accessory_id"] for row in rows]
 
     def equip_accessory(
-        self, discord_id: int, guild_id: int | None, accessory_id: str | None
-    ) -> bool:
-        """Equip an OWNED accessory (or None to unequip) on the living pet."""
+        self,
+        pet_id: int,
+        discord_id: int,
+        guild_id: int | None,
+        accessory_id: str | None,
+    ) -> None:
+        """Equip an OWNED accessory (or None to unequip) on the living pet.
+
+        Raises distinct codes so callers can report the real cause:
+        no_pet / pet_dead / not_owned.
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            row = cursor.execute(
+                "SELECT died_at FROM pets WHERE pet_id = ? AND guild_id = ?",
+                (pet_id, gid),
+            ).fetchone()
+            if row is None:
+                raise ValueError("no_pet")
+            if row["died_at"] is not None:
+                raise ValueError("pet_dead")
             if accessory_id is not None:
                 owned = cursor.execute(
                     "SELECT 1 FROM pet_accessories "
@@ -407,13 +437,11 @@ class PetRepository(BaseRepository):
                     (discord_id, gid, accessory_id),
                 ).fetchone()
                 if owned is None:
-                    return False
+                    raise ValueError("not_owned")
             cursor.execute(
-                "UPDATE pets SET accessory = ? "
-                "WHERE discord_id = ? AND guild_id = ? AND died_at IS NULL",
-                (accessory_id, discord_id, gid),
+                "UPDATE pets SET accessory = ? WHERE pet_id = ? AND guild_id = ?",
+                (accessory_id, pet_id, gid),
             )
-            return cursor.rowcount == 1
 
     # --- collection log + pity ---
 

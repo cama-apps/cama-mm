@@ -81,11 +81,12 @@ class TestRegistration:
                 body_bbox[0] - 12, body_bbox[1] - 24,
                 body_bbox[2] + 12, body_bbox[3] + 12,
             )
-            for accessory_id in ACCESSORIES:
+            for accessory_id, accessory in ACCESSORIES.items():
                 layer = render_accessory(accessory_id, stage)
                 assert layer is not None, accessory_id
+                kind = "head" if accessory.anchor == "head" else "body"
                 fitted = pet_compositor._fit_to_target(
-                    layer, geometry, anchors, "head"
+                    layer, geometry, anchors, kind
                 )
                 abox = fitted.getchannel("A").getbbox()
                 assert abox is not None, (accessory_id, path.name)

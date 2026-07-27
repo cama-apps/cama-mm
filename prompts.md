@@ -337,7 +337,8 @@ Pet cards are NOT shipped as full pre-rendered images. The bot composites each c
 
 ### Component Contract (read before generating anything)
 
-- Every component is a **full-canvas 512x288 RGBA PNG with a transparent background**. Draw the part exactly where it belongs on the card; the compositor simply alpha-stacks layers in slot order. No anchor metadata needed.
+- Every component is a **full-canvas 512x288 RGBA PNG with a transparent background**. Draw the part exactly where it belongs on the card; the compositor alpha-stacks layers in slot order.
+- Anchor metadata is only needed when a CREATURE body's head/torso don't sit exactly in the layout zones below: ship a sidecar `{same name}.json` with `{"head_center": [x, y], "head_width": w, "body_center": [x, y], "body_width": w}` and the compositor shifts/scales faces, trinkets, and detail layers onto it (all six shipped bodies carry one). Non-creature components never need sidecars.
 - Canvas layout guide: floor line at y=248; adult body occupies roughly x176–336, y120–248; adult head roughly x224–288, y40–88. Babies are chibi (bigger head ratio, body low and centered). Render a reference card with `utils/pet_drawing.render_pet_card` to trace exact positions per stage.
 - Layer slots, stacked back → front:
 
@@ -399,7 +400,7 @@ Painterly pixel-art-adjacent, no head or body — features only, floating where 
 
 ### Accessory components (trinket gacha)
 
-Named by accessory id (no `any_`/species scoping): `{stage}/accessory/{accessory_id}.png` or `{accessory_id}_{variant}.png`. Authored in color in the AUTHORING frame; head-anchored ids (red_bow, straw_hat, flower_crown, top_hat) sit on/above the head zone, body-anchored ids (bell_collar, wool_scarf, aegis_charm, divine_rapier_pin) at the neck/chest. One prompt pattern:
+Named by accessory id (no `any_`/species scoping): `{stage}/accessory/{accessory_id}.png` or `{accessory_id}_{variant}.png`. Authored in color in the AUTHORING frame. ALL accessories are head-anchored (the head is the precisely tracked anchor on every body): hats (red_bow, straw_hat, flower_crown, top_hat) sit on/above the head zone, and neck/chest items (bell_collar, wool_scarf, aegis_charm, divine_rapier_pin) are drawn just BELOW the head zone so they follow the chin on any body. One prompt pattern:
 
 ```
 ONLY a [red hair bow / straw sun hat / flower crown / black top hat with red band] floating on a fully transparent 512x288 canvas, positioned to sit on top of a creature's head (head zone x224-288, y40-88 for adult; x216-296, y60-130 for baby), painterly pixel-art-adjacent style, cute collectible-sticker feel. Nothing else on the canvas.
