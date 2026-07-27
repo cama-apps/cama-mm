@@ -38,6 +38,16 @@ SALT_LICK_DURATION_SECONDS = 12 * 3600
 REFUND_MULT_MIN = 50
 REFUND_MULT_MAX = 200
 
+# Passive mining stores integer work units so accrual remains exact without
+# floating-point timestamps. One block is one day's worth of units, making
+# the per-second rates equal to the advertised blocks-per-day rates.
+DIG_WORK_UNITS_PER_BLOCK = 86400
+DIG_WORK_RATE_HAPPY = 12
+DIG_WORK_RATE_CONTENT = 8
+DIG_WORK_RATE_HUNGRY = 3
+DIG_WORK_CAP_BLOCKS = 36
+DIG_WORK_PER_DIG_CAP_BLOCKS = 12
+
 SPECIES_WEIGHT_TOTAL = 10_000
 
 

@@ -537,6 +537,8 @@ class ServiceContainer:
         c = self._components
         if not config.PET_CHANNEL_ID:
             c["pet_service"] = None
+            if c.get("dig_service") is not None:
+                c["dig_service"].pet_service = None
             logger.info("Pet service disabled (PET_CHANNEL_ID not configured)")
             return
         from services.pet_service import PetService
@@ -546,6 +548,8 @@ class ServiceContainer:
             c["player_repo"],
             decay_per_day=config.PET_HUNGER_DECAY_PER_DAY,
         )
+        if c.get("dig_service") is not None:
+            c["dig_service"].pet_service = c["pet_service"]
 
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""

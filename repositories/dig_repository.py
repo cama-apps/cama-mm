@@ -19,6 +19,10 @@ class TunnelStateConflictError(Exception):
     """
 
 
+class PetWorkConflictError(RuntimeError):
+    """Raised when a dig tries to claim pet work from a stale snapshot."""
+
+
 class DigRepository(BaseRepository, IDigRepository):
     """Data access for dig tunnels, actions, inventory, and artifacts."""
 
@@ -927,6 +931,7 @@ class DigRepository(BaseRepository, IDigRepository):
         *,
         queue_item_ids: list[int],
         purchases: list[tuple[str, int]],
+        reserved_balance: int = 0,
     ) -> list[int | None]:
         """Queue reserves and buy auto-use items in one transaction.
 
@@ -941,6 +946,7 @@ class DigRepository(BaseRepository, IDigRepository):
             return []
 
         gid = self.normalize_guild_id(guild_id)
+        reserved_balance = max(0, int(reserved_balance))
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             if queue_item_ids:
@@ -976,7 +982,7 @@ class DigRepository(BaseRepository, IDigRepository):
                         WHERE discord_id = ? AND guild_id = ?
                           AND jopacoin_balance >= ?
                         """,
-                        (price, discord_id, gid, price),
+                        (price, discord_id, gid, price + reserved_balance),
                     )
                     debit_rowcount = cursor.rowcount
                 finally:
@@ -1104,6 +1110,7 @@ class DigRepository(BaseRepository, IDigRepository):
         guild_id: int,
         *,
         balance_delta: int = 0,
+        balance_cost: int = 0,
         vanity_tax: int = 0,
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
@@ -1113,6 +1120,7 @@ class DigRepository(BaseRepository, IDigRepository):
         add_gear: dict | None = None,
         consume_inventory_item_ids: list[int] | None = None,
         require_tunnel_state: dict | None = None,
+        pet_work_claim: dict | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None:
@@ -1149,9 +1157,37 @@ class DigRepository(BaseRepository, IDigRepository):
                 )
 
         gid = self.normalize_guild_id(guild_id)
+        balance_cost = max(0, int(balance_cost))
         vanity_tax = max(0, int(vanity_tax))
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+
+            if balance_cost > 0:
+                self._set_economy_ledger_context(
+                    cursor,
+                    source="dig",
+                    actor_id=discord_id,
+                    related_type=log_action_type,
+                    related_id=self._ledger_related_id(log_detail),
+                    reason="paid dig cost",
+                    metadata=log_detail,
+                )
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                          AND jopacoin_balance >= ?
+                        """,
+                        (balance_cost, discord_id, gid, balance_cost),
+                    )
+                    debit_rowcount = cursor.rowcount
+                finally:
+                    self._clear_economy_ledger_context(cursor)
+                if debit_rowcount == 0:
+                    raise ValueError("insufficient_funds")
 
             gross_balance_delta = balance_delta + vanity_tax
             if gross_balance_delta != 0:
@@ -1224,6 +1260,35 @@ class DigRepository(BaseRepository, IDigRepository):
                     raise TunnelStateConflictError(
                         f"tunnel state changed for guard {sorted(require_tunnel_state)}"
                     )
+
+            if pet_work_claim is not None:
+                new_units = int(pet_work_claim["new_units"])
+                new_at = int(pet_work_claim["new_at"])
+                if new_units < 0 or new_at < 0:
+                    raise ValueError("pet work claim cannot store negative values")
+                cursor.execute(
+                    """
+                    UPDATE pets
+                    SET dig_work_units = ?, dig_work_at = ?
+                    WHERE pet_id = ?
+                      AND discord_id = ?
+                      AND guild_id = ?
+                      AND died_at IS NULL
+                      AND dig_work_units = ?
+                      AND dig_work_at = ?
+                    """,
+                    (
+                        new_units,
+                        new_at,
+                        int(pet_work_claim["pet_id"]),
+                        discord_id,
+                        gid,
+                        int(pet_work_claim["expected_units"]),
+                        int(pet_work_claim["expected_at"]),
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise PetWorkConflictError("pet work changed during dig")
 
             inventory_id: int | None = None
             if add_inventory_item is not None:

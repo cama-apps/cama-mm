@@ -187,7 +187,12 @@ class DigInventoryService:
         )
 
     def ensure_auto_buy_items(
-        self, discord_id: int, guild_id, item_types: list[str] | tuple[str, ...]
+        self,
+        discord_id: int,
+        guild_id,
+        item_types: list[str] | tuple[str, ...],
+        *,
+        reserved_balance: int = 0,
     ) -> list[dict]:
         """Ensure selected auto-buy items are queued for the imminent dig.
 
@@ -255,7 +260,11 @@ class DigInventoryService:
 
             price = ITEM_PRICES[item_type]
             if balance is None:
-                balance = self.player_repo.get_balance(discord_id, guild_id)
+                balance = max(
+                    0,
+                    self.player_repo.get_balance(discord_id, guild_id)
+                    - max(0, int(reserved_balance)),
+                )
             if balance < price:
                 results.append({
                     "type": item_type,
@@ -297,6 +306,7 @@ class DigInventoryService:
             guild_id,
             queue_item_ids=queue_item_ids,
             purchases=purchases,
+            reserved_balance=reserved_balance,
         )
         for result_index, item_id in zip(
             purchase_result_indexes, purchased_ids, strict=True

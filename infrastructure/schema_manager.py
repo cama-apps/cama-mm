@@ -665,6 +665,10 @@ class SchemaManager:
                 "add_pet_hatch_roll_state",
                 self._migration_add_pet_hatch_roll_state,
             ),
+            (
+                "add_pet_dig_work",
+                self._migration_add_pet_dig_work,
+            ),
         ]
 
     # --- Migrations ---
@@ -4476,6 +4480,10 @@ class SchemaManager:
                 prev_week_key TEXT,
                 pampered_until INTEGER,
                 accessory TEXT,
+                dig_work_units INTEGER NOT NULL DEFAULT 0
+                    CHECK (dig_work_units >= 0),
+                dig_work_at INTEGER NOT NULL DEFAULT 0
+                    CHECK (dig_work_at >= 0),
                 aegis_used INTEGER NOT NULL DEFAULT 0 CHECK (aegis_used IN (0, 1)),
                 hatch_announced_at INTEGER,
                 died_at INTEGER,
@@ -4585,6 +4593,24 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_pet_refunds_unannounced "
             "ON pet_refund_windows(paid_at) "
             "WHERE announcement_payload IS NOT NULL AND announced_at IS NULL"
+        )
+
+    def _migration_add_pet_dig_work(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor,
+            "pets",
+            "dig_work_units",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (dig_work_units >= 0)",
+        )
+        self._add_column_if_not_exists(
+            cursor,
+            "pets",
+            "dig_work_at",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (dig_work_at >= 0)",
+        )
+        cursor.execute(
+            "UPDATE pets SET dig_work_at = CAST(strftime('%s', 'now') AS INTEGER) "
+            "WHERE dig_work_at = 0"
         )
 
     def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:

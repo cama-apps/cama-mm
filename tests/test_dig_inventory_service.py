@@ -281,6 +281,7 @@ class TestEnsureAutoBuyItems:
             guild_id,
             queue_item_ids=[],
             purchases=[("hard_hat", 8), ("torch", 6)],
+            reserved_balance=0,
         )
 
         assert original_balance(10001, guild_id) == 0
@@ -329,6 +330,49 @@ class TestEnsureAutoBuyItems:
             item["item_type"]
             for item in dig_repo.get_queued_items(10001, guild_id)
         ] == ["torch"]
+
+    def test_reserved_paid_dig_cost_is_not_spent_by_auto_buy(
+        self, inv_service, dig_repo, player_repository, guild_id
+    ):
+        _register_player(player_repository, balance=10)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+
+        results = inv_service.ensure_auto_buy_items(
+            10001,
+            guild_id,
+            ["hard_hat", "torch"],
+            reserved_balance=3,
+        )
+
+        assert [result["status"] for result in results] == [
+            "skipped_insufficient_balance",
+            "purchased",
+        ]
+        assert player_repository.get_balance(10001, guild_id) == 4
+
+    def test_reserved_paid_dig_cost_survives_a_stale_balance_snapshot(
+        self, inv_service, dig_repo, player_repository, guild_id, monkeypatch
+    ):
+        _register_player(player_repository, balance=10)
+        dig_repo.create_tunnel(10001, guild_id, "T")
+        original_balance = player_repository.get_balance
+        monkeypatch.setattr(
+            player_repository,
+            "get_balance",
+            lambda discord_id, target_guild_id: 14,
+        )
+
+        results = inv_service.ensure_auto_buy_items(
+            10001,
+            guild_id,
+            ["hard_hat"],
+            reserved_balance=3,
+        )
+
+        assert results[0]["status"] == "skipped_insufficient_balance"
+        assert "item_id" not in results[0]
+        assert original_balance(10001, guild_id) == 10
+        assert dig_repo.get_queued_items(10001, guild_id) == []
 
     def test_stale_balance_snapshot_cannot_drive_balance_negative(
         self, inv_service, dig_repo, player_repository, guild_id, monkeypatch

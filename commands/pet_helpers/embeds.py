@@ -12,6 +12,8 @@ import discord
 
 from domain.models.pet import Pet, PetMood, PetStage, PetStatus, RefundNotice
 from domain.pet_constants import (
+    DIG_WORK_CAP_BLOCKS,
+    DIG_WORK_UNITS_PER_BLOCK,
     FEED_CAP_PER_DAY,
     FOOD_ITEMS,
     SALT_LICK,
@@ -176,6 +178,16 @@ def _build_living_embed(
     embed.add_field(
         name="Hunger",
         value=f"`{hunger_bar(status.hunger)}` {status.hunger}/100",
+        inline=False,
+    )
+    stored_blocks = status.dig_work_units / DIG_WORK_UNITS_PER_BLOCK
+    stored_text = f"{stored_blocks:.1f}".rstrip("0").rstrip(".")
+    embed.add_field(
+        name="Mining",
+        value=(
+            f"{stored_text}/{DIG_WORK_CAP_BLOCKS} blocks banked"
+            f" · +{status.dig_work_rate}/day"
+        ),
         inline=False,
     )
     if status.hunger <= 30:

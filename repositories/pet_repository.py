@@ -29,7 +29,8 @@ _PET_COLUMNS = (
     "pet_id, discord_id, guild_id, name, species, adopted_at, hatched_at, "
     "adopt_fee, last_fed_at, hunger_at_last_fed, times_fed, feeds_today, "
     "feed_date, week_consumed_jc, week_key, prev_week_consumed_jc, "
-    "prev_week_key, pampered_until, accessory, aegis_used, "
+    "prev_week_key, pampered_until, accessory, dig_work_units, dig_work_at, "
+    "aegis_used, "
     "hatch_announced_at, died_at, death_cause, death_announced_at, egg_tier"
 )
 
@@ -183,9 +184,10 @@ class PetRepository(BaseRepository):
                     """
                     INSERT INTO pets (
                         discord_id, guild_id, name, species, egg_tier, adopted_at,
-                        hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed
+                        hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
+                        dig_work_units, dig_work_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?)
                     """,
                     (
                         discord_id,
@@ -196,6 +198,7 @@ class PetRepository(BaseRepository):
                         now,
                         hatched_at,
                         fee,
+                        hatched_at,
                         hatched_at,
                     ),
                 )
@@ -388,6 +391,12 @@ class PetRepository(BaseRepository):
         now: int,
         pampered_until: int,
         week_key: str,
+        expected_last_fed_at: int | None = None,
+        expected_hunger: int | None = None,
+        expected_dig_work_units: int | None = None,
+        expected_dig_work_at: int | None = None,
+        new_dig_work_units: int | None = None,
+        new_dig_work_at: int | None = None,
     ) -> Pet:
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
@@ -416,11 +425,34 @@ class PetRepository(BaseRepository):
                 f"""
                 UPDATE pets SET
                     pampered_until = ?,
+                    dig_work_units = COALESCE(?, dig_work_units),
+                    dig_work_at = COALESCE(?, dig_work_at),
                     {_WEEK_ACCUMULATE_SQL}
                 WHERE pet_id = ? AND guild_id = ?
+                  AND (? IS NULL OR last_fed_at = ?)
+                  AND (? IS NULL OR hunger_at_last_fed = ?)
+                  AND (? IS NULL OR dig_work_units = ?)
+                  AND (? IS NULL OR dig_work_at = ?)
                 """,
-                (pampered_until, *_week_params(week_key, cost), pet_id, gid),
+                (
+                    pampered_until,
+                    new_dig_work_units,
+                    new_dig_work_at,
+                    *_week_params(week_key, cost),
+                    pet_id,
+                    gid,
+                    expected_last_fed_at,
+                    expected_last_fed_at,
+                    expected_hunger,
+                    expected_hunger,
+                    expected_dig_work_units,
+                    expected_dig_work_units,
+                    expected_dig_work_at,
+                    expected_dig_work_at,
+                ),
             )
+            if cursor.rowcount == 0:
+                raise ValueError("stale_pet")
             fresh = cursor.execute(
                 f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ?",
                 (pet_id,),
@@ -595,6 +627,10 @@ class PetRepository(BaseRepository):
         week_key: str,
         consumed_jc: int,
         spat: bool,
+        expected_dig_work_units: int | None = None,
+        expected_dig_work_at: int | None = None,
+        new_dig_work_units: int | None = None,
+        new_dig_work_at: int | None = None,
     ) -> Pet:
         """Consume one item and move the hunger anchor, all-or-nothing.
 
@@ -607,7 +643,8 @@ class PetRepository(BaseRepository):
             cursor = conn.cursor()
             row = cursor.execute(
                 "SELECT died_at, last_fed_at, hunger_at_last_fed, feeds_today, "
-                "feed_date FROM pets WHERE pet_id = ? AND guild_id = ?",
+                "feed_date, dig_work_units, dig_work_at FROM pets "
+                "WHERE pet_id = ? AND guild_id = ?",
                 (pet_id, gid),
             ).fetchone()
             if row is None:
@@ -617,6 +654,14 @@ class PetRepository(BaseRepository):
             if (
                 row["last_fed_at"] != expected_last_fed_at
                 or row["hunger_at_last_fed"] != expected_hunger
+                or (
+                    expected_dig_work_units is not None
+                    and row["dig_work_units"] != expected_dig_work_units
+                )
+                or (
+                    expected_dig_work_at is not None
+                    and row["dig_work_at"] != expected_dig_work_at
+                )
             ):
                 raise ValueError("stale_pet")
             feeds_today = row["feeds_today"] if row["feed_date"] == feed_date else 0
@@ -638,6 +683,8 @@ class PetRepository(BaseRepository):
                     times_fed = times_fed + (CASE WHEN ? THEN 0 ELSE 1 END),
                     feeds_today = ?,
                     feed_date = ?,
+                    dig_work_units = COALESCE(?, dig_work_units),
+                    dig_work_at = COALESCE(?, dig_work_at),
                     {_WEEK_ACCUMULATE_SQL}
                 WHERE pet_id = ? AND guild_id = ?
                 """,
@@ -647,6 +694,8 @@ class PetRepository(BaseRepository):
                     spat,
                     feeds_today + 1,
                     feed_date,
+                    new_dig_work_units,
+                    new_dig_work_at,
                     *_week_params(week_key, consumed_jc),
                     pet_id, gid,
                 ),
@@ -666,6 +715,10 @@ class PetRepository(BaseRepository):
         expected_hunger: int,
         new_last_fed_at: int,
         new_hunger: int,
+        expected_dig_work_units: int | None = None,
+        expected_dig_work_at: int | None = None,
+        new_dig_work_units: int | None = None,
+        new_dig_work_at: int | None = None,
     ) -> bool:
         """Match-win top-up: anchor move with optimistic guard, no supplies.
 
@@ -676,14 +729,27 @@ class PetRepository(BaseRepository):
         with self.connection() as conn:
             cursor = conn.execute(
                 """
-                UPDATE pets SET last_fed_at = ?, hunger_at_last_fed = ?
+                UPDATE pets SET
+                    last_fed_at = ?,
+                    hunger_at_last_fed = ?,
+                    dig_work_units = COALESCE(?, dig_work_units),
+                    dig_work_at = COALESCE(?, dig_work_at)
                 WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL
                   AND last_fed_at = ? AND hunger_at_last_fed = ?
+                  AND (? IS NULL OR dig_work_units = ?)
+                  AND (? IS NULL OR dig_work_at = ?)
                 """,
                 (
-                    new_last_fed_at, new_hunger,
+                    new_last_fed_at,
+                    new_hunger,
+                    new_dig_work_units,
+                    new_dig_work_at,
                     pet_id, gid,
                     expected_last_fed_at, expected_hunger,
+                    expected_dig_work_units,
+                    expected_dig_work_units,
+                    expected_dig_work_at,
+                    expected_dig_work_at,
                 ),
             )
             return cursor.rowcount == 1
@@ -699,6 +765,10 @@ class PetRepository(BaseRepository):
         cause: str = "starvation",
         expected_last_fed_at: int,
         expected_hunger: int,
+        expected_dig_work_units: int | None = None,
+        expected_dig_work_at: int | None = None,
+        new_dig_work_units: int | None = None,
+        new_dig_work_at: int | None = None,
     ) -> bool:
         """Once-only death claim: the conditional UPDATE is the claim.
 
@@ -709,10 +779,27 @@ class PetRepository(BaseRepository):
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.execute(
-                "UPDATE pets SET died_at = ?, death_cause = ? "
+                "UPDATE pets SET died_at = ?, death_cause = ?, "
+                "dig_work_units = COALESCE(?, dig_work_units), "
+                "dig_work_at = COALESCE(?, dig_work_at) "
                 "WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL "
-                "AND last_fed_at = ? AND hunger_at_last_fed = ?",
-                (died_at, cause, pet_id, gid, expected_last_fed_at, expected_hunger),
+                "AND last_fed_at = ? AND hunger_at_last_fed = ? "
+                "AND (? IS NULL OR dig_work_units = ?) "
+                "AND (? IS NULL OR dig_work_at = ?)",
+                (
+                    died_at,
+                    cause,
+                    new_dig_work_units,
+                    new_dig_work_at,
+                    pet_id,
+                    gid,
+                    expected_last_fed_at,
+                    expected_hunger,
+                    expected_dig_work_units,
+                    expected_dig_work_units,
+                    expected_dig_work_at,
+                    expected_dig_work_at,
+                ),
             )
             return cursor.rowcount == 1
 
@@ -725,6 +812,10 @@ class PetRepository(BaseRepository):
         revive_hunger: int,
         expected_last_fed_at: int,
         expected_hunger: int,
+        expected_dig_work_units: int | None = None,
+        expected_dig_work_at: int | None = None,
+        new_dig_work_units: int | None = None,
+        new_dig_work_at: int | None = None,
     ) -> bool:
         """Shellback's one-time save: burn the Aegis instead of dying.
 
@@ -736,14 +827,28 @@ class PetRepository(BaseRepository):
         with self.connection() as conn:
             cursor = conn.execute(
                 """
-                UPDATE pets SET aegis_used = 1, last_fed_at = ?, hunger_at_last_fed = ?
+                UPDATE pets SET
+                    aegis_used = 1,
+                    last_fed_at = ?,
+                    hunger_at_last_fed = ?,
+                    dig_work_units = COALESCE(?, dig_work_units),
+                    dig_work_at = COALESCE(?, dig_work_at)
                 WHERE pet_id = ? AND guild_id = ? AND died_at IS NULL AND aegis_used = 0
                   AND last_fed_at = ? AND hunger_at_last_fed = ?
+                  AND (? IS NULL OR dig_work_units = ?)
+                  AND (? IS NULL OR dig_work_at = ?)
                 """,
                 (
-                    revived_last_fed_at, revive_hunger,
+                    revived_last_fed_at,
+                    revive_hunger,
+                    new_dig_work_units,
+                    new_dig_work_at,
                     pet_id, gid,
                     expected_last_fed_at, expected_hunger,
+                    expected_dig_work_units,
+                    expected_dig_work_units,
+                    expected_dig_work_at,
+                    expected_dig_work_at,
                 ),
             )
             return cursor.rowcount == 1

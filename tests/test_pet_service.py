@@ -299,6 +299,87 @@ class TestFeeding:
         assert result.value.new_hunger > result.value.old_hunger
 
 
+class TestPassiveDigWork:
+    def test_status_previews_historical_work_without_persisting_it(
+        self, service, clock
+    ):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + 2 * DAY
+
+        status = service.get_status(100, TEST_GUILD_ID).value
+        stored = service.pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+
+        assert status.dig_work_units == (22 * DAY) + (DAY // 5)
+        assert status.dig_work_rate == 8
+        assert stored.dig_work_units == 0
+        assert stored.dig_work_at == pet.hatched_at
+
+    def test_feed_settles_old_moods_before_moving_the_hunger_anchor(
+        self, service, clock
+    ):
+        pet = adopt_common(service, clock)
+        service.buy(100, TEST_GUILD_ID, "cheese", 1)
+        clock.now = pet.hatched_at + 2 * DAY
+
+        assert service.feed(100, TEST_GUILD_ID, "cheese").success
+
+        settled = service.pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+        assert settled.dig_work_units == (22 * DAY) + (DAY // 5)
+        assert settled.dig_work_at == clock.now
+        clock.now += DAY
+        status = service.get_status(100, TEST_GUILD_ID).value
+        assert status.dig_work_units == (34 * DAY) + (DAY // 5)
+
+    def test_pamper_settles_before_the_happy_override_starts(
+        self, service, clock
+    ):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + 2 * DAY
+
+        assert service.buy(100, TEST_GUILD_ID, "salt_lick", 1).success
+
+        clock.now += DAY // 2
+        status = service.get_status(100, TEST_GUILD_ID).value
+        assert status.dig_work_units == (28 * DAY) + (DAY // 5)
+
+    def test_match_top_up_settles_before_moving_the_hunger_anchor(
+        self, service, clock
+    ):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + 2 * DAY
+
+        service.on_match_win([100], TEST_GUILD_ID)
+
+        settled = service.pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+        assert settled.dig_work_units == (22 * DAY) + (DAY // 5)
+        assert settled.dig_work_at == clock.now
+
+    def test_starvation_settles_only_the_productive_lifetime(
+        self, service, clock
+    ):
+        pet = adopt_common(service, clock)
+        clock.now = pet.hatched_at + 9 * DAY
+
+        assert service.get_status(100, TEST_GUILD_ID).value.pet is None
+
+        dead = service.pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+        assert dead.dig_work_units == (34 * DAY) + (7 * DAY // 20)
+        assert dead.dig_work_at == pet.hatched_at + 5 * DAY
+
+    def test_aegis_revive_preserves_work_earned_before_starvation(
+        self, service, clock
+    ):
+        pet = adopt_species(service, "Shelly", "aegis_cama")
+        starved_at = pet.starvation_time(service.decay_per_day)
+        clock.now = starved_at + 60
+
+        status = service.get_status(100, TEST_GUILD_ID).value
+
+        assert status.pet is not None
+        assert status.pet.dig_work_units == (34 * DAY) + (7 * DAY // 20)
+        assert status.pet.dig_work_at == starved_at
+
+
 class TestQuirks:
     def test_aegis_revive_fires_once_then_death(self, service, clock):
         pet = adopt_species(service, "Shelly", "aegis_cama")

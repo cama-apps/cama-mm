@@ -173,6 +173,29 @@ class TestPetMigrations:
                 "gilded",
             )
 
+    def test_pet_rows_persist_passive_dig_work(self, repo_db_path):
+        with _connect(repo_db_path) as conn:
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(pets)")
+            }
+            assert {"dig_work_units", "dig_work_at"} <= columns
+
+    def test_dig_work_migration_starts_existing_pets_at_migration_time(
+        self, repo_db_path
+    ):
+        manager = SchemaManager(repo_db_path)
+        with _connect(repo_db_path) as conn:
+            _insert_pet(conn, 22, 100)
+
+            manager._migration_add_pet_dig_work(conn.cursor())
+
+            row = conn.execute(
+                "SELECT dig_work_units, dig_work_at FROM pets "
+                "WHERE discord_id = 22 AND guild_id = 100"
+            ).fetchone()
+            assert row["dig_work_units"] == 0
+            assert row["dig_work_at"] > 0
+
     def test_reminder_preferences_pet_column(self, repo_db_path):
         with _connect(repo_db_path) as conn:
             columns = {

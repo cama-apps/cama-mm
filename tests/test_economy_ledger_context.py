@@ -1,6 +1,8 @@
 import json
 import sqlite3
 
+import pytest
+
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 
@@ -112,6 +114,27 @@ def test_dig_atomic_balance_update_records_dig_context(repo_db_path):
         "event_id": "crystal_garden",
         "choice": "safe",
     }
+
+
+def test_dig_atomic_paid_cost_rejects_insufficient_funds(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    dig_repo = DigRepository(repo_db_path)
+    player_repo.add(302, "digger", GUILD_ID)
+    player_repo.update_balance(302, GUILD_ID, 2)
+    dig_repo.create_tunnel(302, GUILD_ID, "Test Tunnel")
+    _clear_ledger(repo_db_path)
+
+    with pytest.raises(ValueError, match="insufficient_funds"):
+        dig_repo.atomic_tunnel_balance_update(
+            302,
+            GUILD_ID,
+            balance_cost=3,
+            tunnel_updates={"depth": 3},
+        )
+
+    assert player_repo.get_balance(302, GUILD_ID) == 2
+    assert dig_repo.get_tunnel(302, GUILD_ID)["depth"] == 0
+    assert _ledger_rows(repo_db_path) == []
 
 
 def test_miner_respec_records_sink_context_and_action(repo_db_path):
