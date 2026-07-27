@@ -17,8 +17,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from commands.checks import require_guild
+from commands.checks import require_guild, require_pet_channel
+from commands.pet_helpers import brawl_embeds
 from commands.pet_helpers import embeds as pet_embeds
+from commands.pet_helpers.brawl_views import PetBrawlChallengeView, PetBrawlSession
 from commands.pet_helpers.views import PetStatusView
 from config import PET_CHANNEL_ID
 from domain.models.pet import PetStage
@@ -42,6 +44,7 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
     from domain.models.pet import DeathNotice, HatchNotice, RefundNotice
+    from services.pet_brawl_service import PetBrawlService
     from services.pet_flavor_service import PetFlavorService
     from services.pet_service import PetService
 
@@ -71,11 +74,15 @@ class PetCommands(commands.Cog):
         self,
         bot: commands.Bot,
         pet_service: PetService,
+        pet_brawl_service: PetBrawlService,
         pet_flavor_service: PetFlavorService | None = None,
     ):
         self.bot = bot
         self.pet_service = pet_service
+        self.pet_brawl_service = pet_brawl_service
         self.pet_flavor_service = pet_flavor_service
+        # In-memory battle state per active brawl (see brawl_views docstring).
+        self._brawl_sessions: dict[int, PetBrawlSession] = {}
 
     async def cog_load(self) -> None:
         self._pet_sweep_loop.start()
@@ -114,6 +121,15 @@ class PetCommands(commands.Cog):
                 flavor_pet,
                 status=status,
             )
+        brawl_record = None
+        if (
+            status.pet is not None
+            and status.stage != PetStage.EGG
+            and self.pet_brawl_service is not None
+        ):
+            brawl_record = await asyncio.to_thread(
+                self.pet_brawl_service.record, status.pet.pet_id, guild_id
+            )
         embed, file = await asyncio.to_thread(
             pet_embeds.build_status_embed,
             status,
@@ -122,6 +138,7 @@ class PetCommands(commands.Cog):
             owner_name=owner_name,
             next_fee=next_fee,
             flavor_text=flavor_text,
+            brawl_record=brawl_record,
         )
         view = None
         if with_view and status.pet is not None:
@@ -551,6 +568,63 @@ class PetCommands(commands.Cog):
             ephemeral=True,
         )
 
+    @pet.command(
+        name="brawl",
+        description="Challenge someone to a pet brawl (no coin — hunger and honor)",
+    )
+    @app_commands.describe(user="Whose cama to challenge")
+    @require_guild
+    async def brawl(self, interaction: discord.Interaction, user: discord.Member):
+        guild_id = interaction.guild.id if interaction.guild else None
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="pet", guild_id=guild_id or 0, user_id=interaction.user.id,
+            limit=6, per_seconds=60,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s.", ephemeral=True
+            )
+            return
+        if user.bot:
+            await interaction.response.send_message(
+                "Bots keep no pets. Yet.", ephemeral=True
+            )
+            return
+        if not await require_pet_channel(interaction):
+            return
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+        result = await asyncio.to_thread(
+            self.pet_brawl_service.challenge,
+            interaction.user.id,
+            user.id,
+            guild_id,
+            interaction.channel_id or 0,
+        )
+        if not result.success:
+            await safe_followup(interaction, content=f"❌ {result.error}", ephemeral=True)
+            return
+        challenge = result.value
+        embed, file = await asyncio.to_thread(
+            brawl_embeds.build_challenge_embed,
+            challenge["brawl"],
+            challenge["challenger_pet"],
+            challenge["recipient_pet"],
+            self.pet_service._now(),
+        )
+        view = PetBrawlChallengeView(self, challenge["brawl"])
+        message = await safe_followup(
+            interaction,
+            content=f"<@{user.id}> — you've been challenged!",
+            embed=embed,
+            file=file,
+            view=view,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=[user]
+            ),
+        )
+        view.message = message
+
     @pet.command(name="graveyard", description="Visit the cama memorial garden")
     @app_commands.describe(user="Whose graveyard to visit")
     @require_guild
@@ -579,8 +653,18 @@ class PetCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
         result = await asyncio.to_thread(self.pet_service.get_leaderboard, guild_id)
+        records = {}
+        if self.pet_brawl_service is not None and result.value:
+            records = await asyncio.to_thread(
+                self.pet_brawl_service.records_for,
+                [pet.pet_id for pet in result.value],
+                guild_id,
+            )
         embed = pet_embeds.build_leaderboard_embed(
-            result.value, self.pet_service.decay_per_day, self.pet_service._now()
+            result.value,
+            self.pet_service.decay_per_day,
+            self.pet_service._now(),
+            records=records,
         )
         await safe_followup(interaction, embed=embed)
 
@@ -590,6 +674,11 @@ class PetCommands(commands.Cog):
 
     @tasks.loop(minutes=10)
     async def _pet_sweep_loop(self):
+        if self.pet_brawl_service is not None:
+            try:
+                await asyncio.to_thread(self.pet_brawl_service.sweep_stale)
+            except Exception:
+                logger.exception("Pet brawl sweep failed")
         try:
             result = await asyncio.to_thread(self.pet_service.sweep)
         except Exception:
@@ -723,10 +812,15 @@ async def setup(bot: commands.Bot):
         # no sweep loop, no announcements.
         logger.info("Pets disabled (PET_CHANNEL_ID not configured); skipping cog")
         return
+    pet_brawl_service = getattr(bot, "pet_brawl_service", None)
+    if pet_brawl_service is None:
+        # Wiring bug: the container creates both services behind one gate.
+        raise RuntimeError("pet_service present but pet_brawl_service missing")
     await bot.add_cog(
         PetCommands(
             bot,
             pet_service,
+            pet_brawl_service,
             getattr(bot, "pet_flavor_service", None),
         )
     )

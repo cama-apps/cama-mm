@@ -92,6 +92,7 @@ def build_status_embed(
     owner_name: str,
     next_fee: int,
     flavor_text: str | None = None,
+    brawl_record: tuple[int, int] | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     pet = status.pet
     if pet is None:
@@ -101,7 +102,9 @@ def build_status_embed(
     elif status.stage == PetStage.EGG:
         embed, file = _build_egg_embed(pet, status)
     else:
-        embed, file = _build_living_embed(pet, status, decay_per_day, now)
+        embed, file = _build_living_embed(
+            pet, status, decay_per_day, now, brawl_record=brawl_record
+        )
     if flavor_text:
         embed.add_field(
             name="💬 Cama chatter",
@@ -164,7 +167,12 @@ def _build_egg_embed(
 
 
 def _build_living_embed(
-    pet: Pet, status: PetStatus, decay_per_day: int, now: int
+    pet: Pet,
+    status: PetStatus,
+    decay_per_day: int,
+    now: int,
+    *,
+    brawl_record: tuple[int, int] | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     species = get_species(pet.species)
     mood = status.mood or PetMood.CONTENT
@@ -220,6 +228,9 @@ def _build_living_embed(
             value=f"{trinket.emoji} {trinket.display_name}",
             inline=True,
         )
+    if brawl_record is not None and any(brawl_record):
+        wins, losses = brawl_record
+        embed.add_field(name="⚔️ Brawls", value=f"{wins}W · {losses}L", inline=True)
     feeds_used = pet.feeds_used_on(game_date_for_timestamp(now))
     feeds_left = max(0, FEED_CAP_PER_DAY - feeds_used)
     embed.set_footer(text=f"{feeds_left}/{FEED_CAP_PER_DAY} feeds left today")
@@ -379,7 +390,10 @@ def build_graveyard_embed(
 
 
 def build_leaderboard_embed(
-    pets: list[Pet], decay_per_day: int, now: int
+    pets: list[Pet],
+    decay_per_day: int,
+    now: int,
+    records: dict[int, tuple[int, int]] | None = None,
 ) -> discord.Embed:
     if not pets:
         return discord.Embed(
@@ -392,10 +406,12 @@ def build_leaderboard_embed(
     for i, pet in enumerate(pets):
         medal = medals[i] if i < len(medals) else f"{i + 1}."
         mood = pet.mood(now, decay_per_day)
+        record = (records or {}).get(pet.pet_id, (0, 0))
+        record_text = f" · ⚔️ {record[0]}W-{record[1]}L" if any(record) else ""
         lines.append(
             f"{medal} **{pet.name}** ({species_label(pet)}) — "
             f"<@{pet.discord_id}> · {format_age(pet.age_seconds(now))} "
-            f"{MOOD_EMOJI[mood]}"
+            f"{MOOD_EMOJI[mood]}{record_text}"
         )
     return discord.Embed(
         title="🏆 Oldest living camas",

@@ -151,6 +151,82 @@ def get_pet_card(
         return None
 
 
+def _compose_versus(left_data: bytes, right_data: bytes) -> bytes:
+    """Two pet cards face-to-face (right mirrored) with a VS slash."""
+    with Image.open(io.BytesIO(left_data)) as left_src:
+        left = left_src.convert("RGBA")
+    with Image.open(io.BytesIO(right_data)) as right_src:
+        right = right_src.convert("RGBA").transpose(Image.FLIP_LEFT_RIGHT)
+    height = max(left.height, right.height)
+    canvas = Image.new("RGBA", (left.width + right.width, height), (24, 20, 34, 255))
+    canvas.alpha_composite(left, (0, (height - left.height) // 2))
+    canvas.alpha_composite(right, (left.width, (height - right.height) // 2))
+    draw = ImageDraw.Draw(canvas)
+    font = get_font(64, bold=True)
+    text = "VS"
+    width = draw.textlength(text, font=font)
+    x = (canvas.width - int(width)) // 2
+    y = (height - 64) // 2
+    for dx, dy in ((-2, -2), (2, -2), (-2, 2), (2, 2)):
+        draw.text((x + dx, y + dy), text, font=font, fill=(20, 16, 28, 255))
+    draw.text((x, y), text, font=font, fill=(255, 214, 68, 255))
+    rendered = io.BytesIO()
+    canvas.save(rendered, format="PNG", optimize=True)
+    return rendered.getvalue()
+
+
+def get_versus_card(
+    species_a: str,
+    stage_a: str,
+    seed_a: int,
+    accessory_a: str | None,
+    species_b: str,
+    stage_b: str,
+    seed_b: int,
+    accessory_b: str | None,
+) -> discord.File | None:
+    """Return a wide face-off splash for a brawl challenge, or None.
+
+    Composes the two pets' regular card renders; if either render is
+    unavailable the caller falls back to an embed without art.
+    """
+    try:
+        cache_key = (
+            f"versus_{species_a}_{stage_a}_{seed_a}_{accessory_a}"
+            f"_{species_b}_{stage_b}_{seed_b}_{accessory_b}"
+        )
+        data = _bytes_cache.get(cache_key)
+        if data is None:
+            left = get_pet_card(
+                species_a, stage_a, "happy", seed_a, accessory=accessory_a
+            )
+            right = get_pet_card(
+                species_b, stage_b, "happy", seed_b, accessory=accessory_b
+            )
+            if left is None or right is None:
+                return None
+            data = _compose_versus(left.fp.read(), right.fp.read())
+            _bytes_cache[cache_key] = data
+        return _file_from_bytes(data, "pet_versus.png")
+    except Exception as e:
+        logger.warning("Versus card composition failed: %s", e)
+        return None
+
+
+def get_altar_card(name: str, seed: int) -> discord.File | None:
+    """Sacrifice-rite art: authored altar backdrop, else the tombstone.
+
+    An authored ``assets/pets/altar.png`` (or .gif) takes precedence when
+    present; until it ships, the engraved tombstone keeps the rite somber.
+    """
+    asset_path = _find_asset(ASSETS_DIR, "altar")
+    if asset_path:
+        data = _load_cached_bytes(asset_path)
+        if data:
+            return _file_from_bytes(data, f"pet_altar{asset_path.suffix}")
+    return get_tombstone_card(name, seed)
+
+
 def get_egg_card(seed: int) -> discord.File | None:
     """Return a discord.File for the unhatched-egg card.
 
