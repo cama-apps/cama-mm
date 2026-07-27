@@ -126,6 +126,7 @@ class ServiceContainer:
         from repositories.notification_repository import NotificationRepository
         from repositories.package_deal_repository import PackageDealRepository
         from repositories.pairings_repository import PairingsRepository
+        from repositories.pet_brawl_repository import PetBrawlRepository
         from repositories.pet_repository import PetRepository
         from repositories.player_repository import PlayerRepository
         from repositories.player_trivia_repository import PlayerTriviaRepository
@@ -173,6 +174,7 @@ class ServiceContainer:
             "dig_quest_repo": DigQuestRepository(p),
             "mafia_repo": MafiaRepository(p),
             "pet_repo": PetRepository(p),
+            "pet_brawl_repo": PetBrawlRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -538,10 +540,12 @@ class ServiceContainer:
         if not config.PET_CHANNEL_ID:
             c["pet_service"] = None
             c["pet_flavor_service"] = None
+            c["pet_brawl_service"] = None
             if c.get("dig_service") is not None:
                 c["dig_service"].pet_service = None
             logger.info("Pet service disabled (PET_CHANNEL_ID not configured)")
             return
+        from services.pet_brawl_service import PetBrawlService
         from services.pet_flavor_service import PetFlavorService
         from services.pet_service import PetService
 
@@ -555,6 +559,10 @@ class ServiceContainer:
             guild_config_repo=c["guild_config_repo"],
             economy_ledger_repo=c["economy_ledger_repo"],
             player_repo=c["player_repo"],
+        )
+        c["pet_brawl_service"] = PetBrawlService(
+            c["pet_service"],
+            c["pet_brawl_repo"],
         )
         if c.get("dig_service") is not None:
             c["dig_service"].pet_service = c["pet_service"]
@@ -660,6 +668,7 @@ class ServiceContainer:
         bot.mafia_flavor_service = c["mafia_flavor_service"]
         bot.pet_service = c["pet_service"]
         bot.pet_flavor_service = c["pet_flavor_service"]
+        bot.pet_brawl_service = c["pet_brawl_service"]
         bot.player_trivia_service = c["player_trivia_service"]
 
         # AI services (may be None)
