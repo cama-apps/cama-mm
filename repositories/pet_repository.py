@@ -303,6 +303,116 @@ class PetRepository(BaseRepository):
             ).fetchone()
             return _row_to_pet(resolved)
 
+    def sacrifice_and_adopt_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        old_pet_id: int,
+        expected_last_fed_at: int,
+        expected_hunger: int,
+        name: str,
+        species: str,
+        fee: int,
+        now: int,
+        hatch_seconds: int,
+    ) -> tuple[Pet, Pet]:
+        """Kill the old pet (cause='sacrifice') and adopt the new egg, atomically.
+
+        One transaction so insufficient funds rolls back the death claim too.
+        The anchor guard mirrors claim_death: a concurrent feed/settlement
+        moves the anchors and surfaces as stale_pet for the service to retry.
+        death_announced_at is set immediately — the altar rite posts its own
+        farewell, so the sweep must not deliver a duplicate tombstone.
+
+        Unlike normal eggs, the sacrifice egg's species is CONCRETE from the
+        start: its pool is a property of the sacrificed pet (tier x stage at
+        the rite), not of the egg tier — and a resolved species also makes
+        upgrade_egg reject it, which is exactly the no-gilded-stacking rule.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        hatched_at = now + hatch_seconds
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            mid_brawl = cursor.execute(
+                "SELECT 1 FROM pet_brawls WHERE guild_id = ? "
+                "AND status IN ('pending', 'active') "
+                "AND (challenger_id = ? OR recipient_id = ?) LIMIT 1",
+                (gid, discord_id, discord_id),
+            ).fetchone()
+            if mid_brawl:
+                raise ValueError("in_brawl")
+            cursor.execute(
+                "UPDATE pets SET died_at = ?, death_cause = 'sacrifice', "
+                "death_announced_at = ? "
+                "WHERE pet_id = ? AND guild_id = ? AND discord_id = ? "
+                "AND died_at IS NULL "
+                "AND last_fed_at = ? AND hunger_at_last_fed = ?",
+                (
+                    now,
+                    now,
+                    old_pet_id,
+                    gid,
+                    discord_id,
+                    expected_last_fed_at,
+                    expected_hunger,
+                ),
+            )
+            if cursor.rowcount != 1:
+                row = cursor.execute(
+                    "SELECT died_at FROM pets WHERE pet_id = ? AND guild_id = ? "
+                    "AND discord_id = ?",
+                    (old_pet_id, gid, discord_id),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("no_pet")
+                if row["died_at"] is not None:
+                    raise ValueError("pet_dead")
+                raise ValueError("stale_pet")
+            self._debit_player(
+                cursor,
+                discord_id,
+                gid,
+                fee,
+                related_type="pet_sacrifice",
+                reason=f"altar sacrifice, adopted {name}",
+                metadata={"old_pet_id": old_pet_id, "species": species, "fee": fee},
+            )
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO pets (
+                        discord_id, guild_id, name, species, adopted_at,
+                        hatched_at, adopt_fee, last_fed_at, hunger_at_last_fed,
+                        dig_work_units, dig_work_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100, 0, ?)
+                    """,
+                    (
+                        discord_id,
+                        gid,
+                        name,
+                        species,
+                        now,
+                        hatched_at,
+                        fee,
+                        hatched_at,
+                        hatched_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("already_has_pet") from exc
+            new_pet_id = cursor.lastrowid
+            dead_row = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ?",
+                (old_pet_id,),
+            ).fetchone()
+            egg_row = cursor.execute(
+                f"SELECT {_PET_COLUMNS} FROM pets WHERE pet_id = ?",
+                (new_pet_id,),
+            ).fetchone()
+            return _row_to_pet(dead_row), _row_to_pet(egg_row)
+
     def buy_supplies(
         self,
         discord_id: int,
@@ -602,8 +712,12 @@ class PetRepository(BaseRepository):
         gid = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             rows = conn.execute(
+                # Altar sacrifices are excluded (before the LIMIT, so a
+                # sandwiched sacrifice neither counts toward nor resets a
+                # common streak) — pity is for bad luck, not for rerolling.
                 "SELECT species FROM pets "
                 "WHERE discord_id = ? AND guild_id = ? AND died_at IS NOT NULL "
+                "AND COALESCE(death_cause, '') != 'sacrifice' "
                 "ORDER BY adopted_at DESC LIMIT ?",
                 (discord_id, gid, limit),
             ).fetchall()

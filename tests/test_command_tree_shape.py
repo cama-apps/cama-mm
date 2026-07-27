@@ -110,6 +110,7 @@ def test_commands_use_approved_consolidated_paths():
         "/pet leaderboard",
         "/pet trinket",
         "/pet brawl",
+        "/pet altar",
         "/economy tip",
         "/economy paydebt",
         "/economy bankruptcy",

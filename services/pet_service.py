@@ -28,6 +28,7 @@ from domain.models.pet import (
     Pet,
     PetDigWork,
     PetMood,
+    PetStage,
     PetStatus,
     RefundNotice,
     RefundPayout,
@@ -55,6 +56,7 @@ from domain.pet_constants import (
     REFUND_MULT_MAX,
     REFUND_MULT_MIN,
     RENAME_COST,
+    SACRIFICE_TIER_WEIGHTS,
     SALT_LICK,
     SALT_LICK_DURATION_SECONDS,
     SPECIES,
@@ -362,6 +364,92 @@ class PetService:
                 "pity_active": pity_active,
                 "upgraded": False,
             }
+        )
+
+    # --- altar (sacrifice reroll) ---
+
+    def _sacrificial_pet(
+        self, discord_id: int, guild_id: int | None, now: int
+    ) -> Result | Pet:
+        pet = self._living_pet(discord_id, guild_id, now)
+        if pet is None:
+            return Result.fail(
+                "You have no living pet to sacrifice.", code=error_codes.NO_PET
+            )
+        if now < pet.hatched_at:
+            return Result.fail(
+                "You can't sacrifice a mystery. Let it hatch first.",
+                code=error_codes.PET_EGG,
+            )
+        return pet
+
+    def sacrifice_preview(self, discord_id: int, guild_id: int | None) -> Result[dict]:
+        """What the altar offers: the pet, the fee, and honest odds."""
+        now = self._now()
+        pet = self._sacrificial_pet(discord_id, guild_id, now)
+        if isinstance(pet, Result):
+            return pet
+        tier = get_species(pet.species).tier
+        was_adult = pet.stage(now) is PetStage.ADULT
+        # +1: the pet on the altar counts toward the escalating fee.
+        fee = adoption_fee(self.pet_repo.count_dead_pets(discord_id, guild_id) + 1)
+        weights = SACRIFICE_TIER_WEIGHTS.get(
+            (tier, was_adult), SACRIFICE_TIER_WEIGHTS[("common", was_adult)]
+        )
+        return Result.ok(
+            {
+                "pet": pet,
+                "tier": tier,
+                "was_adult": was_adult,
+                "fee": fee,
+                "weights": weights,
+            }
+        )
+
+    def sacrifice(
+        self, discord_id: int, guild_id: int | None, name: str
+    ) -> Result[dict]:
+        """Kill the living pet at the altar and adopt an upgraded-odds egg."""
+        name_error = self._validate_name(name)
+        if name_error is not None:
+            return name_error
+        for _ in range(2):  # one retry on a lost anchor race (the feed pattern)
+            now = self._now()
+            preview = self.sacrifice_preview(discord_id, guild_id)
+            if not preview.success:
+                return preview
+            pet = preview.value["pet"]
+            fee = preview.value["fee"]
+            species = self._roll_species_tiered(preview.value["weights"])
+            try:
+                dead_pet, new_pet = self.pet_repo.sacrifice_and_adopt_atomic(
+                    discord_id,
+                    guild_id,
+                    old_pet_id=pet.pet_id,
+                    expected_last_fed_at=pet.last_fed_at,
+                    expected_hunger=pet.hunger_at_last_fed,
+                    name=name.strip(),
+                    species=species,
+                    fee=fee,
+                    now=now,
+                    hatch_seconds=EGG_HATCH_SECONDS,
+                )
+            except ValueError as exc:
+                if str(exc) == "stale_pet":
+                    continue
+                return self._map_repo_error(exc, fee=fee)
+            return Result.ok(
+                {
+                    "dead_pet": dead_pet,
+                    "new_pet": new_pet,
+                    "fee": fee,
+                    "tier": preview.value["tier"],
+                    "was_adult": preview.value["was_adult"],
+                }
+            )
+        return Result.fail(
+            "Your pet's state changed mid-ritual — try again.",
+            code=error_codes.VALIDATION_ERROR,
         )
 
     def _roll_species_tiered(self, tier_weights: dict[str, int]) -> str:
@@ -880,6 +968,10 @@ class PetService:
             "not_owned": (
                 "You don't own that trinket (roll one with `/pet trinket`).",
                 error_codes.VALIDATION_ERROR,
+            ),
+            "in_brawl": (
+                "Your cama is mid-brawl — settle that first.",
+                error_codes.BRAWL_BUSY,
             ),
         }
         message, mapped = messages.get(code, (f"Pet error: {code}", None))
