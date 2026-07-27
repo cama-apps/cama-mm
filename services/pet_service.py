@@ -26,6 +26,8 @@ from domain.models.pet import (
     FeedOutcome,
     HatchNotice,
     Pet,
+    PetDigWork,
+    PetMood,
     PetStatus,
     RefundNotice,
     RefundPayout,
@@ -34,6 +36,11 @@ from domain.models.pet import (
 from domain.pet_constants import (
     ACCESSORIES,
     AEGIS_REVIVE_HUNGER,
+    DIG_WORK_CAP_BLOCKS,
+    DIG_WORK_RATE_CONTENT,
+    DIG_WORK_RATE_HAPPY,
+    DIG_WORK_RATE_HUNGRY,
+    DIG_WORK_UNITS_PER_BLOCK,
     EGG_HATCH_SECONDS,
     FEED_CAP_PER_DAY,
     FOOD_ITEMS,
@@ -96,6 +103,28 @@ class PetService:
     def _now(self) -> int:
         return int(time.time())
 
+    def _dig_work_settlement(self, pet: Pet, now: int) -> tuple[int, int]:
+        if pet.died_at is not None:
+            settled_at = min(now, pet.died_at)
+        else:
+            settled_at = min(now, pet.starvation_time(self.decay_per_day))
+        settled_at = max(pet.dig_work_at, settled_at)
+        accrued = pet.dig_work_units_between(
+            pet.dig_work_at, settled_at, self.decay_per_day
+        )
+        cap = DIG_WORK_CAP_BLOCKS * DIG_WORK_UNITS_PER_BLOCK
+        return min(cap, pet.dig_work_units + accrued), settled_at
+
+    def _dig_work_rate(self, pet: Pet, now: int) -> int:
+        if now < pet.hatched_at or pet.is_starved(now, self.decay_per_day):
+            return 0
+        return {
+            PetMood.HAPPY: DIG_WORK_RATE_HAPPY,
+            PetMood.CONTENT: DIG_WORK_RATE_CONTENT,
+            PetMood.HUNGRY: DIG_WORK_RATE_HUNGRY,
+            PetMood.STARVING: 0,
+        }[pet.mood(now, self.decay_per_day)]
+
     # --- lazy starvation resolution ---
 
     def _resolve_hatch(self, pet: Pet, now: int) -> Pet:
@@ -133,6 +162,7 @@ class PetService:
             if not current.is_starved(now, self.decay_per_day):
                 return current
             died_at = current.starvation_time(self.decay_per_day)
+            work_units, work_at = self._dig_work_settlement(current, died_at)
             species = get_species(current.species)
             if species.has_aegis and not current.aegis_used:
                 if self.pet_repo.revive_with_aegis(
@@ -142,6 +172,10 @@ class PetService:
                     revive_hunger=AEGIS_REVIVE_HUNGER,
                     expected_last_fed_at=current.last_fed_at,
                     expected_hunger=current.hunger_at_last_fed,
+                    expected_dig_work_units=current.dig_work_units,
+                    expected_dig_work_at=current.dig_work_at,
+                    new_dig_work_units=work_units,
+                    new_dig_work_at=work_at,
                 ):
                     logger.info(
                         "Pet %s burned its Aegis at %s", current.pet_id, died_at
@@ -157,6 +191,10 @@ class PetService:
                 died_at=died_at,
                 expected_last_fed_at=current.last_fed_at,
                 expected_hunger=current.hunger_at_last_fed,
+                expected_dig_work_units=current.dig_work_units,
+                expected_dig_work_at=current.dig_work_at,
+                new_dig_work_units=work_units,
+                new_dig_work_at=work_at,
             ):
                 return None
             # Lost the claim: the pet was fed/topped-up (or killed) after our
@@ -189,7 +227,31 @@ class PetService:
                 mood=pet.mood(now, self.decay_per_day),
                 age_seconds=pet.age_seconds(now),
                 supplies=supplies,
+                dig_work_units=self._dig_work_settlement(pet, now)[0],
+                dig_work_rate=self._dig_work_rate(pet, now),
             )
+        )
+
+    def preview_dig_work(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        now: int | None = None,
+    ) -> PetDigWork | None:
+        """Return accrued work for a prospective dig without persisting it."""
+        now = self._now() if now is None else int(now)
+        pet = self._living_pet(discord_id, guild_id, now)
+        if pet is None or now < pet.hatched_at:
+            return None
+        accrued_units, as_of = self._dig_work_settlement(pet, now)
+        return PetDigWork(
+            pet_id=pet.pet_id,
+            pet_name=pet.name,
+            expected_units=pet.dig_work_units,
+            expected_at=pet.dig_work_at,
+            accrued_units=accrued_units,
+            as_of=as_of,
         )
 
     def next_adoption_fee(self, discord_id: int, guild_id: int | None) -> int:
@@ -388,6 +450,7 @@ class PetService:
         species = get_species(pet.species)
         duration = SALT_LICK_DURATION_SECONDS * species.salt_lick_pct // 100
         cost = food_cost(pet.species, SALT_LICK.item_id)
+        work_units, work_at = self._dig_work_settlement(pet, now)
         try:
             fresh = self.pet_repo.use_salt_lick(
                 pet.pet_id,
@@ -397,6 +460,12 @@ class PetService:
                 now=now,
                 pampered_until=now + duration,
                 week_key=_week_key_for_timestamp(now),
+                expected_last_fed_at=pet.last_fed_at,
+                expected_hunger=pet.hunger_at_last_fed,
+                expected_dig_work_units=pet.dig_work_units,
+                expected_dig_work_at=pet.dig_work_at,
+                new_dig_work_units=work_units,
+                new_dig_work_at=work_at,
             )
         except ValueError as exc:
             return self._map_repo_error(exc, fee=cost)
@@ -516,6 +585,7 @@ class PetService:
                 if spat
                 else pet.restored_hunger(now, self.decay_per_day, item.restore)
             )
+            work_units, work_at = self._dig_work_settlement(pet, now)
             try:
                 fresh = self.pet_repo.feed_pet(
                     pet.pet_id,
@@ -531,6 +601,10 @@ class PetService:
                     week_key=_week_key_for_timestamp(now),
                     consumed_jc=food_cost(pet.species, item_id),
                     spat=spat,
+                    expected_dig_work_units=pet.dig_work_units,
+                    expected_dig_work_at=pet.dig_work_at,
+                    new_dig_work_units=work_units,
+                    new_dig_work_at=work_at,
                 )
             except ValueError as exc:
                 if str(exc) == "stale_pet":
@@ -572,6 +646,7 @@ class PetService:
                 amount = MATCH_WIN_HUNGER + get_species(living.species).match_feed_bonus
                 current = living.current_hunger(now, self.decay_per_day)
                 new_hunger = min(MAX_HUNGER, current + amount)
+                work_units, work_at = self._dig_work_settlement(living, now)
                 applied = self.pet_repo.apply_hunger_top_up(
                     living.pet_id,
                     living.guild_id,
@@ -579,6 +654,10 @@ class PetService:
                     expected_hunger=living.hunger_at_last_fed,
                     new_last_fed_at=now,
                     new_hunger=new_hunger,
+                    expected_dig_work_units=living.dig_work_units,
+                    expected_dig_work_at=living.dig_work_at,
+                    new_dig_work_units=work_units,
+                    new_dig_work_at=work_at,
                 )
                 if applied:
                     # Return the post-top-up anchors so callers (warning
@@ -589,6 +668,8 @@ class PetService:
                                 living,
                                 last_fed_at=now,
                                 hunger_at_last_fed=new_hunger,
+                                dig_work_units=work_units,
+                                dig_work_at=work_at,
                             ),
                             amount,
                         )

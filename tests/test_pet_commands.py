@@ -13,6 +13,9 @@ from domain.models.pet import (
     DeathNotice,
     HatchNotice,
     Pet,
+    PetMood,
+    PetStage,
+    PetStatus,
     RefundNotice,
     RefundPayout,
 )
@@ -20,6 +23,7 @@ from domain.pet_constants import EGG_HATCH_SECONDS
 from tests.conftest import TEST_GUILD_ID
 
 T0 = 1_800_000_000
+DAY = 86400
 
 
 def make_pet(**overrides) -> Pet:
@@ -43,6 +47,8 @@ def make_pet(**overrides) -> Pet:
         "prev_week_key": None,
         "pampered_until": None,
         "accessory": None,
+        "dig_work_units": 0,
+        "dig_work_at": T0 + EGG_HATCH_SECONDS,
         "aegis_used": 0,
         "hatch_announced_at": None,
         "died_at": None,
@@ -479,6 +485,31 @@ class TestCommandHandlers:
         view = status_interaction.followup.send.await_args.kwargs["view"]
         labels = {item.label for item in view.children}
         assert "Buy Roshan's Cheese (30)" in labels
+
+
+def test_living_status_embed_shows_passive_mining_progress():
+    from commands.pet_helpers.embeds import _build_living_embed
+
+    pet = make_pet()
+    status = PetStatus(
+        pet=pet,
+        hunger=55,
+        stage=PetStage.BABY,
+        mood=PetMood.CONTENT,
+        age_seconds=DAY,
+        dig_work_units=12 * DAY + DAY // 2,
+        dig_work_rate=8,
+    )
+
+    embed, _file = _build_living_embed(
+        pet,
+        status,
+        decay_per_day=20,
+        now=pet.hatched_at + DAY,
+    )
+
+    mining = next(field for field in embed.fields if field.name == "Mining")
+    assert mining.value == "12.5/36 blocks banked · +8/day"
 
 
 class TestStatusViewButtons:

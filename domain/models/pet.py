@@ -13,12 +13,17 @@ multipliers are integer points-per-day and integer percentages.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
 from domain.pet_constants import (
     ADULT_AGE_SECONDS,
+    DIG_WORK_PER_DIG_CAP_BLOCKS,
+    DIG_WORK_RATE_CONTENT,
+    DIG_WORK_RATE_HAPPY,
+    DIG_WORK_RATE_HUNGRY,
+    DIG_WORK_UNITS_PER_BLOCK,
     MAX_HUNGER,
     MOOD_CONTENT_MIN,
     MOOD_HAPPY_MIN,
@@ -72,6 +77,8 @@ class Pet:
     prev_week_key: str | None
     pampered_until: int | None
     accessory: str | None
+    dig_work_units: int
+    dig_work_at: int
     aegis_used: int
     hatch_announced_at: int | None
     died_at: int | None
@@ -150,6 +157,43 @@ class Pet:
     def art_mood(self, now: int, decay_per_day: int) -> str:
         return ART_MOOD[self.mood(now, decay_per_day)]
 
+    def dig_work_units_between(
+        self, start: int, end: int, decay_per_day: int
+    ) -> int:
+        """Work accrued over ``[start, end)`` at the historical mood rates."""
+        start = max(int(start), self.hatched_at)
+        stop = self.died_at if self.died_at is not None else self.starvation_time(
+            decay_per_day
+        )
+        end = min(int(end), stop)
+        if end <= start:
+            return 0
+
+        boundaries = {start, end}
+        for threshold in (
+            MOOD_HAPPY_MIN - 1,
+            MOOD_CONTENT_MIN - 1,
+            MOOD_HUNGRY_MIN - 1,
+        ):
+            crossing = self.hunger_crossing_time(threshold, decay_per_day)
+            if start < crossing < end:
+                boundaries.add(crossing)
+        if self.pampered_until is not None and start < self.pampered_until < end:
+            boundaries.add(self.pampered_until)
+
+        rates = {
+            PetMood.HAPPY: DIG_WORK_RATE_HAPPY,
+            PetMood.CONTENT: DIG_WORK_RATE_CONTENT,
+            PetMood.HUNGRY: DIG_WORK_RATE_HUNGRY,
+            PetMood.STARVING: 0,
+        }
+        living = self if self.died_at is None else replace(self, died_at=None)
+        points = sorted(boundaries)
+        return sum(
+            (right - left) * rates[living.mood(left, decay_per_day)]
+            for left, right in zip(points, points[1:])
+        )
+
     def age_seconds(self, now: int) -> int:
         """Age since hatch; eggs are age 0, dead pets freeze at death."""
         ref = now if self.died_at is None else min(now, self.died_at)
@@ -174,6 +218,40 @@ class Pet:
 
 
 @dataclass(frozen=True, slots=True)
+class PetDigWork:
+    """A point-in-time pet-work offer that can be claimed by one dig."""
+
+    pet_id: int
+    pet_name: str
+    expected_units: int
+    expected_at: int
+    accrued_units: int
+    as_of: int
+
+    @property
+    def available_blocks(self) -> int:
+        return min(
+            DIG_WORK_PER_DIG_CAP_BLOCKS,
+            self.accrued_units // DIG_WORK_UNITS_PER_BLOCK,
+        )
+
+    def claim(self, applied_blocks: int) -> dict[str, int]:
+        applied_blocks = int(applied_blocks)
+        if not 0 < applied_blocks <= self.available_blocks:
+            raise ValueError("applied pet-work blocks exceed the available offer")
+        return {
+            "pet_id": self.pet_id,
+            "expected_units": self.expected_units,
+            "expected_at": self.expected_at,
+            "new_units": (
+                self.accrued_units
+                - applied_blocks * DIG_WORK_UNITS_PER_BLOCK
+            ),
+            "new_at": self.as_of,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PetStatus:
     """Composed view for status embeds: the living pet (if any) with its
     derived state, the owner's supplies, and the most recent memorial."""
@@ -185,6 +263,8 @@ class PetStatus:
     age_seconds: int = 0
     supplies: dict[str, int] | None = None
     last_dead: Pet | None = None
+    dig_work_units: int = 0
+    dig_work_rate: int = 0
 
 
 @dataclass(frozen=True, slots=True)

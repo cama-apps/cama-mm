@@ -115,6 +115,8 @@ class TestAdopt:
         assert pet.last_fed_at == pet.hatched_at
         assert pet.species == "unhatched"
         assert pet.egg_tier == "standard"
+        assert pet.dig_work_units == 0
+        assert pet.dig_work_at == pet.hatched_at
         assert player_repository.get_balance(100, TEST_GUILD_ID) == 980
         assert len(_ledger_rows(pet_repo.db_path, "pet")) == 1
 
@@ -363,6 +365,27 @@ class TestFeed:
         feed(pet_repo, pet)
         with pytest.raises(ValueError, match="stale_pet"):
             feed(pet_repo, pet)  # stale expected anchors
+
+    def test_same_second_pet_work_change_rejects_stale_feed(
+        self, pet_repo, rich_player
+    ):
+        pet = adopt(pet_repo)
+        stock(pet_repo)
+        with pet_repo.connection() as conn:
+            conn.execute(
+                "UPDATE pets SET dig_work_units = ? WHERE pet_id = ?",
+                (86400, pet.pet_id),
+            )
+
+        with pytest.raises(ValueError, match="stale_pet"):
+            feed(
+                pet_repo,
+                pet,
+                expected_dig_work_units=pet.dig_work_units,
+                expected_dig_work_at=pet.dig_work_at,
+                new_dig_work_units=0,
+                new_dig_work_at=pet.dig_work_at,
+            )
 
     def test_spat_feed_consumes_item_but_not_hunger(self, pet_repo, rich_player):
         pet = adopt(pet_repo)

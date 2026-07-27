@@ -2067,6 +2067,7 @@ class IDigRepository(ABC):
         *,
         queue_item_ids: list[int],
         purchases: list[tuple[str, int]],
+        reserved_balance: int = 0,
     ) -> list[int | None]:
         """Queue reserves and buy auto-use items in one transaction.
 
@@ -2082,6 +2083,7 @@ class IDigRepository(ABC):
         guild_id: int,
         *,
         balance_delta: int = 0,
+        balance_cost: int = 0,
         vanity_tax: int = 0,
         tunnel_updates: dict | None = None,
         add_inventory_item: str | None = None,
@@ -2090,6 +2092,8 @@ class IDigRepository(ABC):
         add_artifact_is_relic: bool = False,
         add_gear: dict | None = None,
         consume_inventory_item_ids: list[int] | None = None,
+        require_tunnel_state: dict | None = None,
+        pet_work_claim: dict | None = None,
         log_detail: dict | None = None,
         log_action_type: str = "dig_action",
     ) -> int | None: ...

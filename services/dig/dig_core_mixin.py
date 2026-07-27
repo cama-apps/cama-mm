@@ -213,6 +213,43 @@ class DigCoreMixin:
             and (tunnel.get("depth", 0) or 0) == 0
         )
 
+    def _preview_pet_dig_work(
+        self,
+        discord_id: int,
+        guild_id,
+        now: int,
+    ):
+        if self.pet_service is None:
+            return None
+        return self.pet_service.preview_dig_work(
+            discord_id,
+            guild_id,
+            now=now,
+        )
+
+    def _apply_pet_work_to_advance(
+        self,
+        base_advance: int,
+        depth_before: int,
+        next_boss: int | None,
+        pet_work,
+    ) -> tuple[int, int, bool]:
+        """Add only the pet blocks this dig can use before a boss boundary."""
+        requested_pet_blocks = pet_work.available_blocks if pet_work else 0
+        uncapped_advance = base_advance + requested_pet_blocks
+        boss_encounter = (
+            next_boss is not None
+            and depth_before + uncapped_advance >= next_boss
+        )
+        final_advance = (
+            max(0, next_boss - 1 - depth_before)
+            if boss_encounter
+            else uncapped_advance
+        )
+        base_applied = min(base_advance, final_advance)
+        pet_applied = max(0, final_advance - base_applied)
+        return final_advance, pet_applied, boss_encounter
+
     # ── Layer Weather ────────────────────────────────────────────────
 
     def _build_parked_boss_return(
@@ -265,12 +302,23 @@ class DigCoreMixin:
         """Run the first-ever dig for a tunnel: guaranteed safe, writes the
         initial depth/streak/run counters, awards small JC, returns a welcome
         result dict."""
-        advance = random.randint(3, 7)
+        base_advance = random.randint(3, 7)
         jc_earned = random.randint(1, 5)
         jc_earned = scale_minigame_jc_delta(jc_earned)
         jc_earned = self._apply_daily_economy_reward(guild_id, jc_earned)
         gross_jc = jc_earned
         jc_earned = scale_positive_dig_jc(gross_jc)
+        pet_work = self._preview_pet_dig_work(discord_id, guild_id, now)
+        boss_progress = self._get_boss_progress(tunnel)
+        next_boss = self._next_boss_boundary(boss_progress)
+        advance, pet_dig_bonus, boss_encounter = (
+            self._apply_pet_work_to_advance(
+                base_advance,
+                depth_before,
+                next_boss,
+                pet_work,
+            )
+        )
         new_depth = depth_before + advance
 
         # Tunnel advance + JC payout commit together so a crash can't
@@ -286,6 +334,11 @@ class DigCoreMixin:
                 "streak_days": 1,
                 "streak_last_date": today,
             },
+            pet_work_claim=(
+                pet_work.claim(pet_dig_bonus)
+                if pet_work is not None and pet_dig_bonus > 0
+                else None
+            ),
         )
         # Blood Pact skims the first dig's payout too (tiny amount, but coverage
         # must be uniform across every dig path).
@@ -298,6 +351,8 @@ class DigCoreMixin:
             jc_delta=jc_earned,
             details=json.dumps({
                 "advance": advance, "jc": jc_earned, "first_dig": True,
+                "pet_dig_bonus": pet_dig_bonus,
+                "pet_name": pet_work.pet_name if pet_dig_bonus > 0 else None,
                 "gross_jc": gross_jc,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "depth_before": depth_before, "depth_after": new_depth,
@@ -314,8 +369,12 @@ class DigCoreMixin:
             streak_bonus=0,
             cave_in=False,
             cave_in_detail=None,
-            boss_encounter=False,
-            boss_info=None,
+            boss_encounter=boss_encounter,
+            boss_info=(
+                self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
+                if boss_encounter
+                else None
+            ),
             has_lantern=False,
             event=None,
             artifact=None,
@@ -325,6 +384,8 @@ class DigCoreMixin:
             items_used_ids=[],
             pickaxe_tier=0,
             tip="Welcome to the mines! Use /dig again after the cooldown.",
+            pet_dig_bonus=pet_dig_bonus,
+            pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
         )
 
     def _consume_streak_charm(self, discord_id: int, guild_id) -> bool:
@@ -744,6 +805,7 @@ class DigCoreMixin:
                 gamblers_charm_bonus = max(1, int(block_loss_pre_save * 0.5))
 
             tunnel_updates: dict = {
+                **p.get("paid_dig_updates", {}),
                 "depth": new_depth,
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
@@ -772,7 +834,11 @@ class DigCoreMixin:
                 })
 
             injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
-            balance = self.player_repo.get_balance(discord_id, guild_id)
+            balance = max(
+                0,
+                self.player_repo.get_balance(discord_id, guild_id)
+                - int(p.get("paid_dig_cost") or 0),
+            )
             if grappling_absorbed:
                 catastrophic = False
                 cave_in_detail = {
@@ -806,8 +872,10 @@ class DigCoreMixin:
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=net_delta,
+                balance_cost=int(p.get("paid_dig_cost") or 0),
                 tunnel_updates=tunnel_updates,
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
+                require_tunnel_state=p.get("paid_dig_guard") or None,
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -842,6 +910,8 @@ class DigCoreMixin:
                 tip=self._pick_tip(new_depth),
                 luminosity_info=p["lum_info"],
                 weather=p["weather_info"],
+                pet_dig_bonus=0,
+                pet_name=None,
             )
 
         # No cave-in — roll advance
@@ -900,11 +970,17 @@ class DigCoreMixin:
         # Boss boundary
         boss_progress = self._get_boss_progress(tunnel)
         next_boss = self._next_boss_boundary(boss_progress)
-        boss_encounter = False
+        pet_work = self._preview_pet_dig_work(discord_id, guild_id, now)
+        advance, pet_dig_bonus, boss_encounter = (
+            self._apply_pet_work_to_advance(
+                advance,
+                depth_before,
+                next_boss,
+                pet_work,
+            )
+        )
         boss_info = None
-        if next_boss is not None and depth_before + advance >= next_boss:
-            advance = max(0, next_boss - 1 - depth_before)
-            boss_encounter = True
+        if boss_encounter:
             boss_info = self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
         new_depth = depth_before + advance
 
@@ -1112,6 +1188,7 @@ class DigCoreMixin:
             balance_delta=jc_earned,
             vanity_tax=dig_vanity_tax,
             tunnel_updates={
+                **p.get("paid_dig_updates", {}),
                 "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                 "max_depth": max(prev_max_depth, new_depth),
                 "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1121,13 +1198,22 @@ class DigCoreMixin:
                 "current_run_artifacts": run_artifacts,
                 "current_run_events": run_events_count,
             },
+            balance_cost=int(p.get("paid_dig_cost") or 0),
             consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
+            require_tunnel_state=p.get("paid_dig_guard") or None,
+            pet_work_claim=(
+                pet_work.claim(pet_dig_bonus)
+                if pet_work is not None and pet_dig_bonus > 0
+                else None
+            ),
         )
         jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id, action_type="dig",
             details=json.dumps({
                 "advance": advance, "jc": jc_earned,
+                "pet_dig_bonus": pet_dig_bonus,
+                "pet_name": pet_work.pet_name if pet_dig_bonus > 0 else None,
                 "gross_jc": gross_jc,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                 "overgrowth_bonus": overgrowth_bonus,
@@ -1172,6 +1258,8 @@ class DigCoreMixin:
             sonar_skipped=sonar_skip_consumed,
             weather=p["weather_info"],
             streak_charm_used=streak_charm_used,
+            pet_dig_bonus=pet_dig_bonus,
+            pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
         )
 
     def apply_dig_outcome(self, preconditions: dict, outcome: dict) -> dict:
@@ -1212,7 +1300,9 @@ class DigCoreMixin:
             # All cave-in tunnel mutations and the net JC change accumulate
             # here and commit in one atomic write below, so a crash can't
             # leave depth lost without the matching injury/balance change.
-            cave_in_tunnel_updates: dict = {}
+            cave_in_tunnel_updates: dict = {
+                **p.get("paid_dig_updates", {}),
+            }
             cave_in_balance_delta = 0
             # Enforce game-rule constraints
             grappling_hook_charges = int(p.get("grappling_hook_charges") or 0)
@@ -1270,7 +1360,11 @@ class DigCoreMixin:
                 )
             else:  # medical_bill
                 med_cost = outcome.get("cave_in_jc_lost", 5)
-                balance = self.player_repo.get_balance(discord_id, guild_id)
+                balance = max(
+                    0,
+                    self.player_repo.get_balance(discord_id, guild_id)
+                    - int(p.get("paid_dig_cost") or 0),
+                )
                 med_cost = min(med_cost, max(0, balance))
                 if med_cost > 0:
                     cave_in_balance_delta -= med_cost
@@ -1311,8 +1405,10 @@ class DigCoreMixin:
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=cave_in_balance_delta,
+                balance_cost=int(p.get("paid_dig_cost") or 0),
                 tunnel_updates=cave_in_tunnel_updates,
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
+                require_tunnel_state=p.get("paid_dig_guard") or None,
             )
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id, action_type="dig",
@@ -1348,6 +1444,8 @@ class DigCoreMixin:
                 tip=self._pick_tip(new_depth),
                 luminosity_info=p["lum_info"],
                 weather=p["weather_info"],
+                pet_dig_bonus=0,
+                pet_name=None,
             )
         else:
             # No cave-in — DM-decided advance + JC
@@ -1363,11 +1461,17 @@ class DigCoreMixin:
             # Boss boundary cap (DM cannot skip bosses)
             boss_progress = self._get_boss_progress(tunnel)
             next_boss = self._next_boss_boundary(boss_progress)
-            boss_encounter = False
+            pet_work = self._preview_pet_dig_work(discord_id, guild_id, now)
+            advance, pet_dig_bonus, boss_encounter = (
+                self._apply_pet_work_to_advance(
+                    advance,
+                    depth_before,
+                    next_boss,
+                    pet_work,
+                )
+            )
             boss_info = None
-            if next_boss is not None and depth_before + advance >= next_boss:
-                advance = max(0, next_boss - 1 - depth_before)
-                boss_encounter = True
+            if boss_encounter:
                 boss_info = self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
             new_depth = depth_before + advance
 
@@ -1534,6 +1638,7 @@ class DigCoreMixin:
                 balance_delta=jc_earned,
                 vanity_tax=dig_vanity_tax,
                 tunnel_updates={
+                    **p.get("paid_dig_updates", {}),
                     "depth": new_depth, "total_digs": total_digs, "last_dig_at": now,
                     "max_depth": max(prev_max_depth, new_depth),
                     "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1543,7 +1648,14 @@ class DigCoreMixin:
                     "current_run_artifacts": run_artifacts,
                     "current_run_events": run_events_count,
                 },
+                balance_cost=int(p.get("paid_dig_cost") or 0),
                 consume_inventory_item_ids=p.get("consumed_item_row_ids") or [],
+                require_tunnel_state=p.get("paid_dig_guard") or None,
+                pet_work_claim=(
+                    pet_work.claim(pet_dig_bonus)
+                    if pet_work is not None and pet_dig_bonus > 0
+                    else None
+                ),
             )
             jc_earned = self._apply_blood_pact_skim_to_payout(discord_id, guild_id, jc_earned)
 
@@ -1554,6 +1666,10 @@ class DigCoreMixin:
                 jc_delta=jc_earned,
                 details=json.dumps({
                     "advance": advance, "jc": jc_earned,
+                    "pet_dig_bonus": pet_dig_bonus,
+                    "pet_name": (
+                        pet_work.pet_name if pet_dig_bonus > 0 else None
+                    ),
                     "gross_jc": gross_jc,
                     "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
                     "overgrowth_bonus": overgrowth_bonus,
@@ -1599,6 +1715,8 @@ class DigCoreMixin:
                 sonar_skipped=sonar_skip_consumed,
                 weather=p["weather_info"],
                 streak_charm_used=streak_charm_used,
+                pet_dig_bonus=pet_dig_bonus,
+                pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
             )
 
         return result

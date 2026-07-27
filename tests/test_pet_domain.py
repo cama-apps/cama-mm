@@ -38,6 +38,8 @@ def make_pet(**overrides) -> Pet:
         "prev_week_key": None,
         "pampered_until": None,
         "accessory": None,
+        "dig_work_units": 0,
+        "dig_work_at": T0 + EGG_HATCH_SECONDS,
         "aegis_used": 0,
         "hatch_announced_at": None,
         "died_at": None,
@@ -181,6 +183,40 @@ class TestMood:
         assert pet.art_mood(feed + 4 * DAY, RATE) == "hungry"
 
 
+class TestDigWork:
+    def test_accrues_across_historical_mood_bands(self):
+        pet = make_pet()
+        hatch = pet.hatched_at
+
+        units = pet.dig_work_units_between(hatch, hatch + 2 * DAY, RATE)
+
+        # Hunger 70 is still Happy: 1.55 happy days at 12 blocks/day,
+        # followed by 0.45 content days at 8/day.
+        assert units == (22 * DAY) + (DAY // 5)
+
+    def test_pampering_uses_the_happy_rate_for_that_interval(self):
+        pet = make_pet(
+            hunger_at_last_fed=60,
+            pampered_until=T0 + EGG_HATCH_SECONDS + DAY,
+        )
+        hatch = pet.hatched_at
+
+        assert pet.dig_work_units_between(hatch, hatch + DAY, RATE) == 12 * DAY
+
+    def test_eggs_and_time_after_starvation_do_not_produce(self):
+        pet = make_pet()
+
+        units = pet.dig_work_units_between(
+            pet.adopted_at,
+            pet.hatched_at + 10 * DAY,
+            RATE,
+        )
+
+        # Inclusive 70/40/15 mood floors yield 1.55 happy days,
+        # 1.5 content days, and 1.25 hungry days.
+        assert units == (34 * DAY) + (7 * DAY // 20)
+
+
 class TestConstantsAndRows:
     def test_adoption_fee_escalates_and_clamps(self):
         assert adoption_fee(0) == 20
@@ -211,7 +247,9 @@ class TestConstantsAndRows:
             "times_fed": 0, "feeds_today": 0, "feed_date": None,
             "week_consumed_jc": 0, "week_key": None,
             "prev_week_consumed_jc": 0, "prev_week_key": None,
-            "pampered_until": None, "accessory": None, "aegis_used": 0,
+            "pampered_until": None, "accessory": None,
+            "dig_work_units": 0, "dig_work_at": T0 + EGG_HATCH_SECONDS,
+            "aegis_used": 0,
             "hatch_announced_at": None,
             "died_at": None, "death_cause": None, "death_announced_at": None,
         }

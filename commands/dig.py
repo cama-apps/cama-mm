@@ -2727,6 +2727,12 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     vanity_tax = getattr(result, "vanity_tax", 0) or 0
     if not cave_in or blocks > 0 or jc > 0:
         progress_value = f"+{blocks} blocks | +{jc} {JOPACOIN_EMOTE}"
+        pet_dig_bonus = getattr(result, "pet_dig_bonus", 0) or 0
+        pet_name = getattr(result, "pet_name", None)
+        if pet_dig_bonus > 0 and pet_name:
+            progress_value += (
+                f"\n🐾 {pet_name} excavated +{pet_dig_bonus} blocks"
+            )
         if bankruptcy_penalty > 0:
             progress_value += f"\n−{bankruptcy_penalty} {JOPACOIN_EMOTE} withheld while bankrupt"
         if vanity_tax > 0:

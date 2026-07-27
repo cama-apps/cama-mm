@@ -143,6 +143,7 @@ class DigService(
         protection_service=None,
         economy_event_service=None,
         vanity_tax_service=None,
+        pet_service=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
@@ -157,6 +158,7 @@ class DigService(
         self.protection_service = protection_service
         self.economy_event_service = economy_event_service
         self.vanity_tax_service = vanity_tax_service
+        self.pet_service = pet_service
         # Sub-services for focused concerns. Defaults wire local instances so
         # existing callers (and tests that construct DigService directly) keep
         # working without having to pass anything new.
@@ -326,7 +328,12 @@ class DigService(
         return result
 
     def _apply_auto_buy_for_dig(
-        self, discord_id: int, guild_id, tunnel: dict
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        *,
+        reserved_balance: int = 0,
     ) -> list[dict]:
         """Queue/purchase opted-in consumables for an actual imminent dig."""
         item_types = []
@@ -337,7 +344,10 @@ class DigService(
         if not item_types:
             return []
         return self.inventory_service.ensure_auto_buy_items(
-            discord_id, guild_id, item_types,
+            discord_id,
+            guild_id,
+            item_types,
+            reserved_balance=reserved_balance,
         )
 
     # ------------------------------------------------------------------
@@ -416,21 +426,19 @@ class DigService(
         paid: bool,
         *,
         mana_effects=None,
-    ) -> tuple[dict | None, int]:
+    ) -> tuple[dict | None, int, dict, dict]:
         """Resolve the cooldown / paid-dig gate for a non-first dig.
 
-        Returns ``(block, paid_dig_cost)``: ``block`` is a non-None response
-        dict when the dig can't proceed (on cooldown and not paid, or
-        insufficient balance) and the caller should surface it; otherwise None
-        with ``paid_dig_cost`` (0 when off cooldown). The paid-dig debit and the
-        paid-day counter commit atomically here so a crash between the two
-        writes can't charge JC without counting the dig.
+        Returns ``(block, paid_dig_cost, tunnel_updates, tunnel_guard)``. The
+        cost and paid counter are validated here but committed with the
+        eventual dig outcome, so a failed or stale outcome cannot leave the
+        player charged.
         """
         cooldown_remaining = self._get_cooldown_remaining(
             tunnel, mana_effects=mana_effects,
         )
         if cooldown_remaining <= 0:
-            return None, 0
+            return None, 0, {}, {}
 
         if not paid:
             pc = tunnel.get("paid_digs_today") or 0
@@ -446,7 +454,7 @@ class DigService(
                 "cooldown_remaining": cooldown_remaining,
                 "paid_dig_cost": preview_cost,
                 "paid_dig_available": True,
-            }, 0
+            }, 0, {}, {}
 
         paid_count = tunnel.get("paid_digs_today") or 0
         if tunnel.get("paid_dig_date") != today:
@@ -459,14 +467,20 @@ class DigService(
         if balance < paid_dig_cost:
             return self._error(
                 f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
-            ), 0
+            ), 0, {}, {}
 
-        self.dig_repo.atomic_tunnel_balance_update(
-            discord_id, guild_id,
-            balance_delta=-paid_dig_cost,
-            tunnel_updates={"paid_dig_date": today, "paid_digs_today": paid_count + 1},
+        return (
+            None,
+            paid_dig_cost,
+            {
+                "paid_dig_date": today,
+                "paid_digs_today": paid_count + 1,
+            },
+            {
+                "paid_dig_date": tunnel.get("paid_dig_date"),
+                "paid_digs_today": tunnel.get("paid_digs_today") or 0,
+            },
         )
-        return None, paid_dig_cost
 
     def dig(
         self,
@@ -511,6 +525,7 @@ class DigService(
         tunnel["discord_id"] = discord_id
         tunnel["guild_id"] = guild_id
         deferred_tunnel_updates: dict = {}
+        paid_dig_guard: dict = {}
         relic_trim_notice = int(tunnel.get("relic_trim_notice", 0) or 0) == 1
 
         pending_route = self._pending_route_result(tunnel)
@@ -555,16 +570,19 @@ class DigService(
         mana_effects = None
         if not is_first_dig:
             mana_effects = self._get_mana_effects_snapshot(discord_id, guild_id)
-            block, paid_dig_cost = self._charge_paid_dig_or_block(
-                discord_id,
-                guild_id,
-                tunnel,
-                today,
-                paid,
-                mana_effects=mana_effects,
+            block, paid_dig_cost, paid_dig_updates, paid_dig_guard = (
+                self._charge_paid_dig_or_block(
+                    discord_id,
+                    guild_id,
+                    tunnel,
+                    today,
+                    paid,
+                    mana_effects=mana_effects,
+                )
             )
             if block is not None:
                 return block
+            deferred_tunnel_updates.update(paid_dig_updates)
 
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
@@ -572,7 +590,12 @@ class DigService(
                 discord_id, guild_id, tunnel, depth_before, now, today
             )
 
-        auto_purchases = self._apply_auto_buy_for_dig(discord_id, guild_id, tunnel)
+        auto_purchases = self._apply_auto_buy_for_dig(
+            discord_id,
+            guild_id,
+            tunnel,
+            reserved_balance=paid_dig_cost,
+        )
 
         # 5. Check injury state
         injury = None
@@ -964,7 +987,11 @@ class DigService(
 
             # Mutation: fragile — injuries last longer
             injury_bonus = int(mutation_fx.get("injury_duration_bonus", 0))
-            balance = self.player_repo.get_balance(discord_id, guild_id)
+            balance = max(
+                0,
+                self.player_repo.get_balance(discord_id, guild_id)
+                - paid_dig_cost,
+            )
             # Grappling hook absorbed: skip consequence roll entirely so the
             # player doesn't get stunned/injured by a cave-in their gear caught.
             if grappling_absorbed:
@@ -998,8 +1025,10 @@ class DigService(
             self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
                 balance_delta=cave_in_balance_delta,
+                balance_cost=paid_dig_cost,
                 tunnel_updates=cave_in_tunnel_updates,
                 consume_inventory_item_ids=consumed_item_row_ids,
+                require_tunnel_state=paid_dig_guard or None,
                 log_detail={
                     "cave_in": True, "block_loss": block_loss,
                     "detail": cave_in_detail,
@@ -1049,6 +1078,8 @@ class DigService(
                 weather=weather_info,
                 relic_trim_notice=relic_trim_notice,
                 next_free_dig_at=next_free_dig_at,
+                pet_dig_bonus=0,
+                pet_name=None,
             )
 
         # 11. Roll advance (no cave-in) — with ascension/corruption/mutation
@@ -1110,13 +1141,18 @@ class DigService(
         # 12. Check boss boundary
         boss_progress = self._get_boss_progress(tunnel)
         next_boss = self._next_boss_boundary(boss_progress)
-        boss_encounter = False
+        pet_work = self._preview_pet_dig_work(discord_id, guild_id, now)
+        advance, pet_dig_bonus, boss_encounter = (
+            self._apply_pet_work_to_advance(
+                advance,
+                depth_before,
+                next_boss,
+                pet_work,
+            )
+        )
         boss_info = None
 
-        if next_boss is not None and depth_before + advance >= next_boss:
-            # Cap advance to boundary - 1
-            advance = max(0, next_boss - 1 - depth_before)
-            boss_encounter = True
+        if boss_encounter:
             boss_info = self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
 
         new_depth = depth_before + advance
@@ -1406,11 +1442,20 @@ class DigService(
         self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
             balance_delta=jc_earned,
+            balance_cost=paid_dig_cost,
             vanity_tax=dig_vanity_tax,
             tunnel_updates=final_tunnel_updates,
             consume_inventory_item_ids=consumed_item_row_ids,
+            require_tunnel_state=paid_dig_guard or None,
+            pet_work_claim=(
+                pet_work.claim(pet_dig_bonus)
+                if pet_work is not None and pet_dig_bonus > 0
+                else None
+            ),
             log_detail={
                 "advance": advance, "jc": jc_earned,
+                "pet_dig_bonus": pet_dig_bonus,
+                "pet_name": pet_work.pet_name if pet_dig_bonus > 0 else None,
                 "gross_jc": gross_jc,
                 "vanity_tax": dig_vanity_tax,
                 "reward_multiplier": DIG_POSITIVE_JC_MULTIPLIER,
@@ -1479,6 +1524,8 @@ class DigService(
             streak_charm_used=streak_charm_used,
             relic_trim_notice=relic_trim_notice,
             next_free_dig_at=next_free_dig_at,
+            pet_dig_bonus=pet_dig_bonus,
+            pet_name=pet_work.pet_name if pet_dig_bonus > 0 else None,
         )
 
     # ------------------------------------------------------------------
@@ -1541,19 +1588,29 @@ class DigService(
 
         # Cooldown / paid dig check — normal digs only.
         paid_dig_cost = 0
+        paid_dig_guard: dict = {}
         if not is_first_dig:
-            block, paid_dig_cost = self._charge_paid_dig_or_block(
-                discord_id, guild_id, tunnel, today, paid,
+            block, paid_dig_cost, paid_dig_updates, paid_dig_guard = (
+                self._charge_paid_dig_or_block(
+                    discord_id, guild_id, tunnel, today, paid,
+                )
             )
             if block is not None:
                 return block, None
+        else:
+            paid_dig_updates = {}
 
         if is_first_dig:
             return self._execute_first_dig(
                 discord_id, guild_id, tunnel, depth_before, now, today,
             ), None
 
-        auto_purchases = self._apply_auto_buy_for_dig(discord_id, guild_id, tunnel)
+        auto_purchases = self._apply_auto_buy_for_dig(
+            discord_id,
+            guild_id,
+            tunnel,
+            reserved_balance=paid_dig_cost,
+        )
 
         # Injury state
         injury_advance_mod = 1.0
@@ -1997,6 +2054,8 @@ class DigService(
             "cave_in_chance": cave_in_chance,
             "thick_skin_saved": thick_skin_saved,
             "paid_dig_cost": paid_dig_cost,
+            "paid_dig_updates": paid_dig_updates,
+            "paid_dig_guard": paid_dig_guard,
             "advance_min": advance_min,
             "advance_max": advance_max,
             "jc_min": jc_min,

@@ -734,6 +734,42 @@ class TestDigEmbed:
             for field in embed.fields
         )
 
+    def test_pet_excavation_bonus_is_visible_in_progress(self):
+        from commands.dig import _build_dig_embed
+
+        result = SimpleNamespace(
+            depth=17,
+            depth_after=17,
+            tunnel_name="T",
+            pickaxe_tier=0,
+            cave_in=False,
+            advance=17,
+            jc_earned=1,
+            pet_dig_bonus=12,
+            pet_name="Blep",
+            milestone_bonus=0,
+            streak_bonus=0,
+            artifact=None,
+            event=None,
+            sonar_skipped=False,
+            event_preview=None,
+            boss_scout=None,
+            items_used=None,
+            luminosity_info=None,
+            corruption=None,
+            mutations=None,
+            tip="tip",
+        )
+        user = SimpleNamespace(
+            display_name="Tester",
+            display_avatar=SimpleNamespace(url=""),
+        )
+
+        embed, _, _, _ = _build_dig_embed(result, user)
+
+        progress = next(field for field in embed.fields if field.name == "Progress")
+        assert "Blep excavated +12 blocks" in progress.value
+
     def test_auto_buy_outcomes_are_visible(self):
         from commands.dig import _build_dig_embed
 
