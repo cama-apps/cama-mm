@@ -152,7 +152,13 @@ def get_pet_card(
 
 
 def _compose_versus(left_data: bytes, right_data: bytes) -> bytes:
-    """Two pet cards face-to-face (right mirrored) with a VS slash."""
+    """Two pet cards face-to-face (right mirrored) with a VS slash.
+
+    An authored assets/pets/versus_overlay.png (transparent RGBA, composited
+    over the full canvas) replaces the procedurally drawn "VS" when present.
+    A backdrop slot would be pointless here — the two cards are opaque and
+    cover the canvas — so the authoring hook is an overlay instead.
+    """
     with Image.open(io.BytesIO(left_data)) as left_src:
         left = left_src.convert("RGBA")
     with Image.open(io.BytesIO(right_data)) as right_src:
@@ -161,15 +167,31 @@ def _compose_versus(left_data: bytes, right_data: bytes) -> bytes:
     canvas = Image.new("RGBA", (left.width + right.width, height), (24, 20, 34, 255))
     canvas.alpha_composite(left, (0, (height - left.height) // 2))
     canvas.alpha_composite(right, (left.width, (height - right.height) // 2))
-    draw = ImageDraw.Draw(canvas)
-    font = get_font(64, bold=True)
-    text = "VS"
-    width = draw.textlength(text, font=font)
-    x = (canvas.width - int(width)) // 2
-    y = (height - 64) // 2
-    for dx, dy in ((-2, -2), (2, -2), (-2, 2), (2, 2)):
-        draw.text((x + dx, y + dy), text, font=font, fill=(20, 16, 28, 255))
-    draw.text((x, y), text, font=font, fill=(255, 214, 68, 255))
+
+    overlay_path = _find_asset(ASSETS_DIR, "versus_overlay")
+    overlay_applied = False
+    if overlay_path:
+        overlay_data = _load_cached_bytes(overlay_path)
+        if overlay_data:
+            try:
+                with Image.open(io.BytesIO(overlay_data)) as overlay_src:
+                    overlay = overlay_src.convert("RGBA")
+                if overlay.size != canvas.size:
+                    overlay = overlay.resize(canvas.size, Image.LANCZOS)
+                canvas.alpha_composite(overlay)
+                overlay_applied = True
+            except (OSError, ValueError) as exc:
+                logger.warning("Versus overlay unusable, drawing VS: %s", exc)
+    if not overlay_applied:
+        draw = ImageDraw.Draw(canvas)
+        font = get_font(64, bold=True)
+        text = "VS"
+        width = draw.textlength(text, font=font)
+        x = (canvas.width - int(width)) // 2
+        y = (height - 64) // 2
+        for dx, dy in ((-2, -2), (2, -2), (-2, 2), (2, 2)):
+            draw.text((x + dx, y + dy), text, font=font, fill=(20, 16, 28, 255))
+        draw.text((x, y), text, font=font, fill=(255, 214, 68, 255))
     rendered = io.BytesIO()
     canvas.save(rendered, format="PNG", optimize=True)
     return rendered.getvalue()
@@ -191,9 +213,12 @@ def get_versus_card(
     unavailable the caller falls back to an embed without art.
     """
     try:
+        # Key on the overlay asset too, so a cached drawn-VS render doesn't
+        # outlive the authored overlay landing on disk (or vice versa).
         cache_key = (
             f"versus_{species_a}_{stage_a}_{seed_a}_{accessory_a}"
             f"_{species_b}_{stage_b}_{seed_b}_{accessory_b}"
+            f"_{_find_asset(ASSETS_DIR, 'versus_overlay')}"
         )
         data = _bytes_cache.get(cache_key)
         if data is None:
