@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -60,19 +61,28 @@ def balance(player_repo):
     return player_repo.get_balance(100, TEST_GUILD_ID)
 
 
-def make_living_pet(pet_repo, clock, *, species="common_cama", fee=0):
-    """Adopt directly and steer the clock past hatch."""
-    pet = pet_repo.adopt_pet(
-        100,
-        TEST_GUILD_ID,
-        name="Blep",
-        species=species,
-        fee=fee,
-        now=clock.now,
-        hatch_seconds=HATCH,
-    )
-    clock.now = pet.hatched_at + 1
-    return pet_repo.get_pet_by_id(pet.pet_id, TEST_GUILD_ID)
+def make_living_pet(pet_repo, clock, *, species="common_cama", hatched_ago=3600):
+    """Insert a living hatched pet directly, species already concrete —
+    matching a resolved hatch under the roll-at-hatch design."""
+    hatched_at = clock.now - hatched_ago
+    with sqlite3.connect(pet_repo.db_path) as conn:
+        cursor = conn.execute(
+            "INSERT INTO pets (discord_id, guild_id, name, species, "
+            "adopted_at, hatched_at, adopt_fee, last_fed_at, "
+            "hunger_at_last_fed, dig_work_units, dig_work_at) "
+            "VALUES (?, ?, 'Blep', ?, ?, ?, 20, ?, 100, 0, ?)",
+            (
+                100,
+                TEST_GUILD_ID,
+                species,
+                hatched_at - DAY,
+                hatched_at,
+                clock.now,
+                hatched_at,
+            ),
+        )
+        pet_id = cursor.lastrowid
+    return pet_repo.get_pet_by_id(pet_id, TEST_GUILD_ID)
 
 
 def sacrifice_kwargs(pet, clock, **overrides):
@@ -146,6 +156,18 @@ class TestRepository:
                 100, TEST_GUILD_ID, **sacrifice_kwargs(pet, clock, old_pet_id=9999)
             )
 
+    def test_sacrifice_egg_cannot_be_gilded(self, pet_repo, clock):
+        # The altar egg's species is concrete from the rite, so upgrade_egg
+        # rejects it — which IS the no-gilded-stacking rule.
+        pet = make_living_pet(pet_repo, clock)
+        pet_repo.sacrifice_and_adopt_atomic(
+            100, TEST_GUILD_ID, **sacrifice_kwargs(pet, clock)
+        )
+        with pytest.raises(ValueError, match="pet_hatched"):
+            pet_repo.upgrade_egg(
+                100, TEST_GUILD_ID, name="Shiny", premium=230, now=clock.now
+            )
+
     def test_mid_brawl_guard(self, repo_db_path, pet_repo, clock):
         pet = make_living_pet(pet_repo, clock)
         brawl_repo = PetBrawlRepository(repo_db_path)
@@ -164,7 +186,7 @@ class TestService:
         result = service.sacrifice(100, TEST_GUILD_ID, "Rebirth")
         assert result.error_code == error_codes.NO_PET
         pet_repo.adopt_pet(
-            100, TEST_GUILD_ID, name="Eggy", species="common_cama",
+            100, TEST_GUILD_ID, name="Eggy", egg_tier="standard",
             fee=0, now=clock.now, hatch_seconds=HATCH,
         )
         result = service.sacrifice(100, TEST_GUILD_ID, "Rebirth")
@@ -211,24 +233,24 @@ class TestService:
         assert result.value["new_pet"].species == "rama"
 
     def test_sacrifice_excluded_from_pity(self, service, pet_repo, clock):
-        # Three commons starve honestly.
+        # Three commons starve honestly. Species now rolls at hatch, so the
+        # patch wraps the read that resolves the hatch (and the starvation).
         for i in range(3):
+            adopted = service.adopt(100, TEST_GUILD_ID, f"Common {i}")
+            assert adopted.success, adopted.error
+            clock.now = adopted.value["pet"].hatched_at + 9 * DAY
             with patch(
                 "services.pet_service.random.choices",
                 return_value=["common_cama"],
             ):
-                adopted = service.adopt(100, TEST_GUILD_ID, f"Common {i}")
-            assert adopted.success, adopted.error
-            clock.now = adopted.value["pet"].hatched_at + 9 * DAY
-            assert service._living_pet(100, TEST_GUILD_ID, clock.now) is None
+                assert service._living_pet(100, TEST_GUILD_ID, clock.now) is None
         assert service._pity_active(100, TEST_GUILD_ID)
         # A sacrifice in between must neither count toward nor reset pity.
-        # (Pity is active, so this adopt rolls a TIER first, then a species.)
-        with patch(
-            "services.pet_service.random.choices", return_value=["uncommon"]
-        ):
-            adopted = service.adopt(100, TEST_GUILD_ID, "Altar Fodder")
+        adopted = service.adopt(100, TEST_GUILD_ID, "Altar Fodder")
+        assert adopted.success, adopted.error
         clock.now = adopted.value["pet"].hatched_at + 1
+        # The patched roll serves both the pity hatch-roll (pity is active,
+        # so the egg resolves through the tiered path) and the altar's roll.
         with patch.object(
             service, "_roll_species_tiered", return_value="banana_ears"
         ):
