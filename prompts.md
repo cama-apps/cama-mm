@@ -423,3 +423,11 @@ assets/pets/tombstone.png — A small rounded gravestone at twilight on a grassy
 ### Full-card overrides (optional escape hatch)
 
 A complete card at `assets/pets/{species_id}_{stage}_{mood}.png` bypasses compositing entirely for that combination — useful for one-off hero images (a fully illustrated Rama, seasonal specials) without touching the component system.
+
+---
+
+## Altar Card (512x288, landscape)
+
+```
+Discord embed card art, clear and readable at roughly 400 pixels wide, no watermark or logo, explicitly not photorealistic. A somber stone sacrificial altar in a moonlit grassy paddock, a low dark slab on rough-hewn stone legs, two or three lit candles with small warm flames, faint wisps of pale smoke, scattered tufts of wool and a single small bell on the grass beside it, a cracked egg-shaped glow hovering faintly above the slab hinting at rebirth, night sky with a large low moon, deep indigo and slate palette with warm candlelight accents, quiet and slightly ominous but not gory — no blood, no creature, no text, painterly pixel-art-adjacent style, digital painting, 16:9 landscape composition with the altar centered-low
+```
