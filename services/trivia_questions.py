@@ -13,6 +13,7 @@ from services.trivia_data import (
     AbilityData,
     HeroData,
     get_hero_by_id,
+    item_special_value,
     load_abilities,
     load_heroes,
     load_items,
@@ -473,7 +474,8 @@ def gen_ability_lore() -> TriviaQuestion | None:
 
 def gen_item_lore() -> TriviaQuestion | None:
     """H2: Which item has this lore?"""
-    items = [i for i in load_items() if i.lore and len(i.lore) > 20 and i.icon_url]
+    # Skip leveled items (Dagon 1-5): they share lore, so the exact level is unanswerable.
+    items = [i for i in load_items() if i.lore and len(i.lore) > 20 and i.icon_url and not i.is_leveled]
     if len(items) < 4:
         return None
     item = random.choice(items)
@@ -741,8 +743,12 @@ def gen_innate_ability() -> TriviaQuestion | None:
 
 def gen_item_by_icon() -> TriviaQuestion | None:
     """E8: Name this item from its icon."""
-    # Exclude recipes — they all share the same scroll icon
-    items = [i for i in load_items() if i.icon_url and i.localized_name and "Recipe" not in i.localized_name]
+    # Exclude recipes (shared scroll icon) and leveled items (Dagon 1-5 share one icon,
+    # so the exact level can't be read off the picture).
+    items = [
+        i for i in load_items()
+        if i.icon_url and i.localized_name and "Recipe" not in i.localized_name and not i.is_leveled
+    ]
     if len(items) < 4:
         return None
     item = random.choice(items)
@@ -812,9 +818,11 @@ def gen_ability_mana_cost() -> TriviaQuestion | None:
 
 def gen_item_active_cooldown() -> TriviaQuestion | None:
     """H: What is this item's active cooldown?"""
+    # Skip leveled items (Dagon 1-5): their cooldown field holds a per-level array, and
+    # taking the last value mislabels it (e.g. "Dagon 1's cooldown is 15s" — it's 27s).
     items = [
         i for i in load_items()
-        if i.active_cooldown and i.icon_url and i.neutral_tier is None
+        if i.active_cooldown and i.icon_url and i.neutral_tier is None and not i.is_leveled
     ]
     if len(items) < 4:
         return None
@@ -855,28 +863,70 @@ def gen_item_active_cooldown() -> TriviaQuestion | None:
     )
 
 
-def gen_attack_damage_compare() -> TriviaQuestion | None:
-    """H: Which hero has the highest base attack damage?"""
-    heroes = [h for h in load_heroes() if h.attack_damage_min and h.attack_damage_max]
+def gen_damage_at_level1_compare() -> TriviaQuestion | None:
+    """H: Which hero has the highest attack damage at level 1?
+
+    Uses the stat-panel value (base weapon damage + primary attribute). The correct
+    hero must strictly dominate the others on *both* the minimum and maximum damage,
+    so there is exactly one unambiguous answer.
+    """
+    heroes = [h for h in load_heroes() if h.damage_min_at_level1 and h.damage_max_at_level1]
     if len(heroes) < 4:
         return None
     chosen = random.sample(heroes, 4)
-    # Use average of min/max as the comparison value
-    highest = max(chosen, key=lambda h: (h.attack_damage_min + h.attack_damage_max) / 2)
-    highest_avg = (highest.attack_damage_min + highest.attack_damage_max) / 2
-    if sum(1 for h in chosen if (h.attack_damage_min + h.attack_damage_max) / 2 == highest_avg) > 1:
+    top = max(chosen, key=lambda h: h.damage_max_at_level1)
+    # Reject unless `top` has both the highest minimum *and* the highest maximum —
+    # any overlap on either endpoint makes the answer ambiguous, so re-roll.
+    if any(
+        h is not top
+        and (h.damage_min_at_level1 >= top.damage_min_at_level1
+             or h.damage_max_at_level1 >= top.damage_max_at_level1)
+        for h in chosen
+    ):
         return None
-    distractors = [h.localized_name for h in chosen if h != highest][:3]
-    options, idx = _shuffle_options(highest.localized_name, distractors)
-    dmg_range = f"{highest.attack_damage_min}–{highest.attack_damage_max}"
+    distractors = [h.localized_name for h in chosen if h is not top][:3]
+    options, idx = _shuffle_options(top.localized_name, distractors)
+    dmg_range = f"{top.damage_min_at_level1}–{top.damage_max_at_level1}"
     return TriviaQuestion(
-        text="Which of these heroes has the highest base attack damage?",
+        text="Which of these heroes has the highest attack damage at level 1?",
         options=options,
         correct_index=idx,
         difficulty="hard",
         image_url=None,
-        category="attack_damage_compare",
-        explanation=f"{highest.localized_name} has {dmg_range} base attack damage.",
+        category="damage_at_level1_compare",
+        explanation=f"{top.localized_name} has {dmg_range} attack damage at level 1.",
+    )
+
+
+def gen_dagon_damage_by_level() -> TriviaQuestion | None:
+    """H: How much magic damage does Dagon deal at a given level?
+
+    Dagon's active burst damage scales 400/500/600/700/800 at levels 1-5. dotabase
+    stores the full per-level array on each Dagon item row, so we index level N into it.
+    """
+    dagons = [i for i in load_items() if i.is_leveled and i.localized_name.startswith("Dagon")]
+    if not dagons:
+        return None
+    dmg_raw = item_special_value(dagons[0].ability_special, "damage")
+    if not dmg_raw:
+        return None
+    values = [v for v in dmg_raw.replace("/", " ").split() if v.isdigit()]
+    if len(values) < 4:
+        return None
+    level = random.randint(1, len(values))
+    correct = values[level - 1]
+    distractors = _pick_distractors(correct, values, n=3)
+    if not distractors:
+        return None
+    options, idx = _shuffle_options(correct, distractors)
+    return TriviaQuestion(
+        text=f"How much magic damage does Dagon deal at level {level}?",
+        options=options,
+        correct_index=idx,
+        difficulty="hard",
+        image_url=dagons[0].icon_url,
+        category="dagon_damage_by_level",
+        explanation=f"Dagon {level} deals {correct} magic damage on cast.",
     )
 
 
@@ -971,7 +1021,8 @@ HARD_GENERATORS = [
     gen_armor_at_level1_compare,
     gen_ability_mana_cost,
     gen_item_active_cooldown,
-    gen_attack_damage_compare,
+    gen_damage_at_level1_compare,
+    gen_dagon_damage_by_level,
 ]
 
 CHALLENGING_GENERATORS = [
@@ -1000,6 +1051,7 @@ IMAGE_GENERATORS = {
     gen_ability_cooldown,
     gen_ability_mana_cost,
     gen_item_active_cooldown,
+    gen_dagon_damage_by_level,
     gen_turn_rate,
     gen_voiceline_with_image,
     gen_night_vision_compare,

@@ -39,6 +39,10 @@ class HeroData:
     turn_rate: float | None
     attack_damage_min: int | None
     attack_damage_max: int | None
+    # Attack damage shown on the stat panel at level 1 = base weapon damage + primary
+    # attribute (str/agi/int heroes: +1 dmg/point; universal: +0.7/point of every attribute).
+    damage_min_at_level1: int | None
+    damage_max_at_level1: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,8 @@ class ItemData:
     is_neutral_enhancement: bool
     ability_special: str | None  # JSON string of bonus descriptions
     active_cooldown: str | None  # cooldown for active use (e.g. BKB, Blink)
+    base_level: int | None  # ItemBaseLevel — set for multi-level items (Dagon 1-5)
+    is_leveled: bool  # True when a level suffix was applied (name shared across levels)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +134,54 @@ def item_icon_url(icon_path: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Stat helpers
+# ---------------------------------------------------------------------------
+
+def _level1_attr_bonus(primary: str | None, str_base: float, agi_base: float, int_base: float) -> float:
+    """Attack-damage bonus from attributes at level 1.
+
+    Str/agi/int heroes gain +1 attack damage per point of their primary attribute;
+    universal heroes gain +0.7 per point of *every* attribute.
+    """
+    if primary == "strength":
+        return str_base
+    if primary == "agility":
+        return agi_base
+    if primary == "intelligence":
+        return int_base
+    if primary == "universal":
+        return 0.7 * (str_base + agi_base + int_base)
+    return 0.0
+
+
+def item_special_value(ability_special: str | None, key_substr: str) -> str | None:
+    """Return the raw ``value`` of the first ``ability_special`` entry whose key or
+    header contains ``key_substr`` (case-insensitive). ``None`` if unavailable.
+
+    ``ability_special`` is a JSON list of ``{"header"/"key", "value"}`` dicts — the
+    same shape parsed in ``commands/dota_info.py::_format_ability_values``.
+    """
+    if not ability_special:
+        return None
+    try:
+        specials = json.loads(ability_special) if isinstance(ability_special, str) else ability_special
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(specials, list):
+        return None
+    needle = key_substr.lower()
+    for spec in specials:
+        if not isinstance(spec, dict):
+            continue
+        label = f"{spec.get('key', '')} {spec.get('header', '')}".lower()
+        if needle in label:
+            value = spec.get("value")
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Data loaders (cached)
 # ---------------------------------------------------------------------------
 
@@ -139,8 +193,13 @@ def load_heroes() -> list[HeroData]:
     heroes = session.query(Hero).all()
     result = []
     for h in heroes:
+        str_base = h.attr_strength_base or 0
         agi_base = h.attr_agility_base or 0
+        int_base = h.attr_intelligence_base or 0
         base_a = h.base_armor if h.base_armor is not None else 0
+        bonus = _level1_attr_bonus(h.attr_primary, str_base, agi_base, int_base)
+        dmg_min_l1 = round(h.attack_damage_min + bonus) if h.attack_damage_min else None
+        dmg_max_l1 = round(h.attack_damage_max + bonus) if h.attack_damage_max else None
         result.append(HeroData(
             id=h.id,
             name=h.name or "",
@@ -162,6 +221,8 @@ def load_heroes() -> list[HeroData]:
             turn_rate=h.turn_rate if h.turn_rate else None,
             attack_damage_min=h.attack_damage_min if h.attack_damage_min else None,
             attack_damage_max=h.attack_damage_max if h.attack_damage_max else None,
+            damage_min_at_level1=dmg_min_l1,
+            damage_max_at_level1=dmg_max_l1,
         ))
     return result
 
@@ -245,7 +306,8 @@ def load_items() -> list[ItemData]:
     result = []
     for i, base_level in raw:
         name = i.localized_name
-        if name_counts[name] > 1 and base_level is not None:
+        is_leveled = name_counts[name] > 1 and base_level is not None
+        if is_leveled:
             level_str = f" {base_level}"
             if not name.endswith(level_str):
                 name = name + level_str
@@ -259,6 +321,8 @@ def load_items() -> list[ItemData]:
             is_neutral_enhancement=bool(getattr(i, "is_neutral_enhancement", False)),
             ability_special=i.ability_special if i.ability_special else None,
             active_cooldown=i.cooldown if i.cooldown and i.cooldown != "0" else None,
+            base_level=base_level,
+            is_leveled=is_leveled,
         ))
     return result
 

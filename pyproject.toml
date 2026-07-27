@@ -10,7 +10,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "glicko2>=0.0.5",
-    "dotabase>=7.0",
+    "dotabase>=7.8.11",
     "sqlalchemy>=2.0.0",
     "pillow>=10.0.0",
     "litellm==1.80.13",

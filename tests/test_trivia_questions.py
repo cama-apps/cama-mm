@@ -17,10 +17,11 @@ from services.trivia_questions import (
     gen_ability_mana_cost,
     gen_ability_to_hero,
     gen_armor_at_level1_compare,
-    gen_attack_damage_compare,
     gen_attack_type,
     gen_attribute_gain,
     gen_base_attack_time,
+    gen_dagon_damage_by_level,
+    gen_damage_at_level1_compare,
     gen_damage_type,
     gen_hero_bio,
     gen_hero_by_hype,
@@ -373,15 +374,39 @@ class TestHardGenerators:
                 return
         pytest.fail("gen_item_active_cooldown returned None")
 
-    def test_attack_damage_compare(self):
-        for _ in range(10):
-            q = gen_attack_damage_compare()
+    def test_damage_at_level1_compare(self):
+        from services.trivia_data import load_heroes
+
+        by_name = {h.localized_name: h for h in load_heroes()}
+        for _ in range(20):
+            q = gen_damage_at_level1_compare()
             if q is not None:
                 _validate_question(q)
                 assert q.difficulty == "hard"
-                assert q.category == "attack_damage_compare"
+                assert q.category == "damage_at_level1_compare"
+                assert "level 1" in q.text
+                # The correct hero must strictly dominate the others on both min and max.
+                top = by_name[q.options[q.correct_index]]
+                others = [by_name[o] for o in q.options if o != q.options[q.correct_index]]
+                assert all(top.damage_min_at_level1 > o.damage_min_at_level1 for o in others)
+                assert all(top.damage_max_at_level1 > o.damage_max_at_level1 for o in others)
                 return
-        pytest.fail("gen_attack_damage_compare returned None")
+        pytest.fail("gen_damage_at_level1_compare returned None")
+
+    def test_dagon_damage_by_level(self):
+        for _ in range(10):
+            q = gen_dagon_damage_by_level()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "hard"
+                assert q.category == "dagon_damage_by_level"
+                assert q.image_url is not None
+                # Level N in the prompt; correct answer = that level's damage (400+100*(N-1)).
+                import re
+                level = int(re.search(r"level (\d+)", q.text).group(1))
+                assert q.options[q.correct_index] == str(400 + 100 * (level - 1))
+                return
+        pytest.fail("gen_dagon_damage_by_level returned None")
 
 
 class TestChallengingGenerators:
@@ -533,5 +558,5 @@ class TestGenerateQuestion:
     def test_all_generators_registered(self):
         assert len(EASY_GENERATORS) == 9
         assert len(MEDIUM_GENERATORS) == 4
-        assert len(HARD_GENERATORS) == 12
+        assert len(HARD_GENERATORS) == 13
         assert len(CHALLENGING_GENERATORS) == 5
