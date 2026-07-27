@@ -102,13 +102,34 @@ class TestDataLoading:
             assert f"Dagon {level}" in names, f"Expected 'Dagon {level}' in item pool"
         assert "Dagon" not in names, "Bare 'Dagon' must be replaced by 'Dagon 1'–'Dagon 5'"
 
+    def test_load_items_dagon_is_leveled(self):
+        """The 5 Dagon levels are the only leveled items; each carries base_level 1–5.
+
+        'Dagon Recipe' shares the prefix but is a distinct, non-leveled item.
+        """
+        items = load_items()
+        leveled = sorted((i for i in items if i.is_leveled), key=lambda i: i.base_level)
+        assert [i.localized_name for i in leveled] == [f"Dagon {n}" for n in range(1, 6)]
+        assert [i.base_level for i in leveled] == [1, 2, 3, 4, 5]
+
+    def test_hero_damage_at_level1(self):
+        """damage_*_at_level1 = base weapon damage + primary-attribute bonus at level 1."""
+        heroes = load_heroes()
+        # Present and ordered for every hero that has base attack damage.
+        for h in heroes:
+            if h.attack_damage_min:
+                assert h.damage_min_at_level1 is not None
+                assert h.damage_max_at_level1 >= h.damage_min_at_level1
+                # Level-1 damage includes the attribute bonus, so it exceeds raw weapon damage.
+                assert h.damage_min_at_level1 >= h.attack_damage_min
+
     def test_hero_armor_at_level1(self):
         """armor_at_level1 = base_armor + agility_base / 6, present on all heroes."""
         heroes = load_heroes()
         assert all(h.armor_at_level1 is not None for h in heroes)
-        # Anti-Mage: base_armor=2, agi_base=24 → 2 + 24/6 = 6.0
+        # Anti-Mage: base_armor=2, agi_base=25 → 2 + 25/6 = 6.1667 (dotabase 7.8.11 data)
         am = next(h for h in heroes if h.localized_name == "Anti-Mage")
-        assert abs(am.armor_at_level1 - 6.0) < 0.01
+        assert abs(am.armor_at_level1 - 6.1667) < 0.01
 
     def test_load_abilities_excludes_internal_names(self):
         """Abilities with underscores in localized_name are internal and should be filtered."""
