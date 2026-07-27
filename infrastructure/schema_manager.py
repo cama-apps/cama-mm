@@ -654,9 +654,45 @@ class SchemaManager:
                 "add_pet_refund_announcement_state",
                 self._migration_add_pet_refund_announcement_state,
             ),
+            (
+                "create_low_priority_state",
+                self._migration_create_low_priority_state,
+            ),
+            ("drop_curses_table", self._migration_drop_curses_table),
         ]
 
     # --- Migrations ---
+
+    def _migration_create_low_priority_state(self, cursor) -> None:
+        """Create isolated moderation state for matchmaking priority."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS low_priority_state (
+                discord_id     INTEGER NOT NULL,
+                guild_id       INTEGER NOT NULL DEFAULT 0,
+                wins_remaining INTEGER NOT NULL DEFAULT 3
+                    CHECK(wins_remaining BETWEEN 0 AND 3),
+                active         INTEGER NOT NULL DEFAULT 1
+                    CHECK(active IN (0, 1)),
+                reason         TEXT,
+                set_by         INTEGER NOT NULL,
+                removed_by     INTEGER,
+                removed_reason TEXT,
+                created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_low_priority_active_guild
+            ON low_priority_state(guild_id, active, wins_remaining)
+            """
+        )
+
+    def _migration_drop_curses_table(self, cursor) -> None:
+        cursor.execute("DROP TABLE IF EXISTS curses")
 
     def _migration_create_wrapped_enrichment_facts(self, cursor) -> None:
         """Persist the seven OpenDota facts consumed by Cama Wrapped."""

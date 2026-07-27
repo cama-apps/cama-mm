@@ -18,6 +18,10 @@ from config import (
     SHUFFLER_SETTINGS,
     SOFT_AVOID_PENALTY,
 )
+from domain.low_priority_constants import (
+    LOW_PRIORITY_EFFECTIVENESS,
+    LOW_PRIORITY_GOODNESS_PENALTY,
+)
 from domain.models.player import Player
 from domain.models.team import Team
 from utils.region import region_split_mismatches
@@ -296,6 +300,7 @@ class BalancedShuffler:
         team1_ids: set[int],
         team2_ids: set[int],
         avoids: list | None,
+        low_priority_ids: set[int] | None = None,
     ) -> float:
         """
         Calculate penalty for soft avoids where avoider/avoided are on the same team.
@@ -323,7 +328,12 @@ class BalancedShuffler:
             both_on_team2 = avoider in team2_ids and avoided in team2_ids
 
             if both_on_team1 or both_on_team2:
-                penalty += self.soft_avoid_penalty
+                effectiveness = (
+                    LOW_PRIORITY_EFFECTIVENESS
+                    if low_priority_ids and avoider in low_priority_ids
+                    else 1.0
+                )
+                penalty += self.soft_avoid_penalty * effectiveness
 
         return penalty
 
@@ -332,6 +342,7 @@ class BalancedShuffler:
         team1_ids: set[int],
         team2_ids: set[int],
         deals: list | None,
+        low_priority_ids: set[int] | None = None,
     ) -> float:
         """
         Calculate penalty for package deals where buyer/partner are on DIFFERENT teams.
@@ -362,7 +373,12 @@ class BalancedShuffler:
             )
 
             if on_opposite:
-                penalty += self.package_deal_penalty
+                effectiveness = (
+                    LOW_PRIORITY_EFFECTIVENESS
+                    if low_priority_ids and buyer in low_priority_ids
+                    else 1.0
+                )
+                penalty += self.package_deal_penalty * effectiveness
 
         return penalty
 
@@ -371,6 +387,7 @@ class BalancedShuffler:
         selected_ids: set[int],
         excluded_ids: set[int],
         deals: list | None,
+        low_priority_ids: set[int] | None = None,
     ) -> float:
         """
         Calculate penalty for package deals where one player is selected and one is excluded.
@@ -397,9 +414,26 @@ class BalancedShuffler:
                 (buyer in excluded_ids and partner in selected_ids)
             )
             if is_split:
-                penalty += self.package_deal_split_penalty
+                effectiveness = (
+                    LOW_PRIORITY_EFFECTIVENESS
+                    if low_priority_ids and buyer in low_priority_ids
+                    else 1.0
+                )
+                penalty += self.package_deal_split_penalty * effectiveness
 
         return penalty
+
+    @staticmethod
+    def _calculate_low_priority_penalty(
+        selected_ids: set[int],
+        low_priority_ids: set[int] | None,
+    ) -> float:
+        if not low_priority_ids:
+            return 0.0
+        return (
+            len(selected_ids & low_priority_ids)
+            * LOW_PRIORITY_GOODNESS_PENALTY
+        )
 
     def _greedy_shuffle(
         self,
@@ -408,6 +442,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
+        low_priority_ids: set[int] | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
 
     ) -> tuple[Team, Team, list[Player], float]:
@@ -496,6 +531,7 @@ class BalancedShuffler:
             max_assignments_per_team=3,
             avoids=avoids,
             deals=deals,
+            low_priority_ids=low_priority_ids,
             _scoring_context=_scoring_context,
             _rd_priority=self._calculate_rd_priority(selected),
         )
@@ -517,7 +553,14 @@ class BalancedShuffler:
         selected_discord_ids = {p.discord_id for p in team1.players + team2.players if p.discord_id}
         excluded_discord_ids = {p.discord_id for p in excluded if p.discord_id}
         deal_split_penalty = self._calculate_package_deal_split_penalty(
-            selected_discord_ids, excluded_discord_ids, deals
+            selected_discord_ids,
+            excluded_discord_ids,
+            deals,
+            low_priority_ids=low_priority_ids,
+        )
+        low_priority_penalty = self._calculate_low_priority_penalty(
+            selected_discord_ids,
+            low_priority_ids,
         )
 
         # Rating spread penalty: incentivize selecting players of closer skill
@@ -530,6 +573,7 @@ class BalancedShuffler:
 
         total_score = (
             base_score + exclusion_penalty + recent_penalty + deal_split_penalty
+            + low_priority_penalty
             + rating_spread_penalty - lobby_rating_bonus
         )
 
@@ -734,6 +778,7 @@ class BalancedShuffler:
         max_assignments_per_team: int = 20,
         avoids: list | None = None,
         deals: list | None = None,
+        low_priority_ids: set[int] | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
         _rd_priority: float | None = None,
 
@@ -762,6 +807,7 @@ class BalancedShuffler:
             max_assignments_per_team=max_assignments_per_team,
             avoids=avoids,
             deals=deals,
+            low_priority_ids=low_priority_ids,
             _scoring_context=_scoring_context,
             _rd_priority=_rd_priority,
         )
@@ -841,6 +887,7 @@ class BalancedShuffler:
         max_assignments_per_team: int = 20,
         avoids: list | None = None,
         deals: list | None = None,
+        low_priority_ids: set[int] | None = None,
         _scoring_context: _ShuffleScoringContext | None = None,
         _rd_priority: float | None = None,
     ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, float]:
@@ -873,8 +920,18 @@ class BalancedShuffler:
         # fallback path that can produce a non-zero penalty.
         team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
         team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
-        avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
-        deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
+        avoid_penalty = self._calculate_soft_avoid_penalty(
+            team1_ids,
+            team2_ids,
+            avoids,
+            low_priority_ids=low_priority_ids,
+        )
+        deal_penalty = self._calculate_package_deal_penalty(
+            team1_ids,
+            team2_ids,
+            deals,
+            low_priority_ids=low_priority_ids,
+        )
         region_penalty = self._calculate_region_split_penalty(team1_players, team2_players)
 
         # Try all combinations of valid role assignments. Keep the hot
@@ -993,7 +1050,13 @@ class BalancedShuffler:
             )
         logger.info("=" * 60)
 
-    def shuffle(self, players: list[Player], avoids: list | None = None, deals: list | None = None) -> tuple[Team, Team]:
+    def shuffle(
+        self,
+        players: list[Player],
+        avoids: list | None = None,
+        deals: list | None = None,
+        low_priority_ids: set[int] | None = None,
+    ) -> tuple[Team, Team]:
         """
         Shuffle players into two balanced teams.
 
@@ -1032,6 +1095,7 @@ class BalancedShuffler:
                 team2_players,
                 avoids=avoids,
                 deals=deals,
+                low_priority_ids=low_priority_ids,
                 _scoring_context=scoring_context,
                 _rd_priority=rd_priority,
             )
@@ -1135,6 +1199,7 @@ class BalancedShuffler:
         avoids: list | None,
         deals: list | None,
         scoring_context: _ShuffleScoringContext | None = None,
+        low_priority_ids: set[int] | None = None,
     ) -> _PoolMatchup:
         """
         Optimize role assignments for one team split and score it.
@@ -1149,6 +1214,7 @@ class BalancedShuffler:
             max_assignments_per_team=max_assignments_per_team,
             avoids=avoids,
             deals=deals,
+            low_priority_ids=low_priority_ids,
             _scoring_context=scoring_context,
             _rd_priority=rd_priority,
         )
@@ -1249,6 +1315,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
+        low_priority_ids: set[int] | None = None,
         rng: random.Random | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
@@ -1285,12 +1352,24 @@ class BalancedShuffler:
 
         if len(players) == 10:
             # Just use the regular shuffle
-            team1, team2 = self.shuffle(players, avoids=avoids, deals=deals)
+            team1, team2 = self.shuffle(
+                players,
+                avoids=avoids,
+                deals=deals,
+                low_priority_ids=low_priority_ids,
+            )
             return team1, team2, []
 
         if len(players) == 14:
             # Use branch and bound for 14 players (optimized pruning)
-            return self.shuffle_branch_bound(players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals)
+            return self.shuffle_branch_bound(
+                players,
+                exclusion_counts,
+                recent_match_names,
+                avoids=avoids,
+                deals=deals,
+                low_priority_ids=low_priority_ids,
+            )
 
         # ---- Performance knobs (kept internal to preserve current public API) ----
         # Pool shuffles are far more expensive than 10-player shuffles. We therefore
@@ -1360,7 +1439,14 @@ class BalancedShuffler:
             selected_discord_ids = {p.discord_id for p in selected_players if p.discord_id}
             excluded_discord_ids = {p.discord_id for p in excluded_players if p.discord_id}
             deal_split_penalty = self._calculate_package_deal_split_penalty(
-                selected_discord_ids, excluded_discord_ids, deals
+                selected_discord_ids,
+                excluded_discord_ids,
+                deals,
+                low_priority_ids=low_priority_ids,
+            )
+            low_priority_penalty = self._calculate_low_priority_penalty(
+                selected_discord_ids,
+                low_priority_ids,
             )
 
             # Rating spread penalty: incentivize selecting players of closer skill
@@ -1373,7 +1459,8 @@ class BalancedShuffler:
 
             # Penalties that are constant across every team split of this combination.
             combo_penalty = (
-                exclusion_penalty + deal_split_penalty + rating_spread_penalty
+                exclusion_penalty + deal_split_penalty + low_priority_penalty
+                + rating_spread_penalty
                 - lobby_rating_bonus
             )
             rd_priority = self._calculate_rd_priority(selected_players)
@@ -1395,6 +1482,7 @@ class BalancedShuffler:
                     avoids,
                     deals,
                     scoring_context,
+                    low_priority_ids=low_priority_ids,
                 )
 
                 # Track top-K only (avoid storing all matchups).
@@ -1470,6 +1558,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
+        low_priority_ids: set[int] | None = None,
 
     ) -> tuple[Team, Team, list[Player]]:
         """
@@ -1503,6 +1592,7 @@ class BalancedShuffler:
             recent_match_names,
             avoids=avoids,
             deals=deals,
+            low_priority_ids=low_priority_ids,
             _scoring_context=scoring_context,
         )
         best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
@@ -1593,7 +1683,14 @@ class BalancedShuffler:
             selected_discord_ids = {p.discord_id for p in selected_players if p.discord_id}
             excluded_discord_ids = {p.discord_id for p in excluded_players if p.discord_id}
             deal_split_penalty = self._calculate_package_deal_split_penalty(
-                selected_discord_ids, excluded_discord_ids, deals
+                selected_discord_ids,
+                excluded_discord_ids,
+                deals,
+                low_priority_ids=low_priority_ids,
+            )
+            low_priority_penalty = self._calculate_low_priority_penalty(
+                selected_discord_ids,
+                low_priority_ids,
             )
 
             # Rating spread penalty: incentivize selecting players of closer skill
@@ -1601,7 +1698,8 @@ class BalancedShuffler:
             rating_spread_penalty = self._calculate_rating_spread_penalty(selected_value_list)
             lobby_rating_bonus = self._calculate_lobby_rating_bonus(selected_value_list)
             combo_penalty = (
-                exclusion_penalty + deal_split_penalty + rating_spread_penalty
+                exclusion_penalty + deal_split_penalty + low_priority_penalty
+                + rating_spread_penalty
                 - lobby_rating_bonus
             )
             rd_priority = self._calculate_rd_priority(selected_players)
@@ -1724,6 +1822,7 @@ class BalancedShuffler:
                             max_assignments_per_team=3,
                             avoids=avoids,
                             deals=deals,
+                            low_priority_ids=low_priority_ids,
                             _scoring_context=scoring_context,
                             _rd_priority=rd_priority,
                         )

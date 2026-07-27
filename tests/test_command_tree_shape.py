@@ -125,6 +125,10 @@ def test_commands_use_approved_consolidated_paths():
         "/matches view",
         "/matches recent",
         "/player lobby autonotify",
+        "/admin lowprio add",
+        "/admin lowprio remove",
+        "/admin lowprio status",
+        "/admin lowprio list",
     }
     retired_paths = {
         "/dig resetcooldown",

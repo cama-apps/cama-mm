@@ -67,6 +67,28 @@ class TestSoftAvoidPenaltyCalculation:
         penalty = shuffler._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         assert penalty == 500.0
 
+    def test_only_low_priority_owner_gets_half_strength(self):
+        shuffler = BalancedShuffler(soft_avoid_penalty=500.0)
+        team1_ids = {1000, 1001, 1002, 1003, 1004}
+        team2_ids = {1005, 1006, 1007, 1008, 1009}
+        avoids = [MockSoftAvoid(avoider_discord_id=1000, avoided_discord_id=1001)]
+
+        owner_penalty = shuffler._calculate_soft_avoid_penalty(
+            team1_ids,
+            team2_ids,
+            avoids,
+            low_priority_ids={1000},
+        )
+        target_penalty = shuffler._calculate_soft_avoid_penalty(
+            team1_ids,
+            team2_ids,
+            avoids,
+            low_priority_ids={1001},
+        )
+
+        assert owner_penalty == 250.0
+        assert target_penalty == 500.0
+
     def test_avoid_opposite_teams_no_penalty(self):
         """Test that opposite-team avoid has no penalty."""
         shuffler = BalancedShuffler(soft_avoid_penalty=500.0)

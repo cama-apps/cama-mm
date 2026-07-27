@@ -242,12 +242,28 @@ class ShufflePendingMixin:
         if self.package_deal_repo:
             deals = self.package_deal_repo.get_active_deals_for_players(guild_id, player_ids)
 
+        low_priority_ids = set()
+        if self.low_priority_repo:
+            low_priority_ids = self.low_priority_repo.get_active_ids(
+                player_ids, guild_id
+            )
+
         if len(players) > 10:
             team1, team2, excluded_players = shuffler.shuffle_from_pool(
-                players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals
+                players,
+                exclusion_counts,
+                recent_match_names,
+                avoids=avoids,
+                deals=deals,
+                low_priority_ids=low_priority_ids,
             )
         else:
-            team1, team2 = shuffler.shuffle(players, avoids=avoids, deals=deals)
+            team1, team2 = shuffler.shuffle(
+                players,
+                avoids=avoids,
+                deals=deals,
+                low_priority_ids=low_priority_ids,
+            )
             excluded_players = []
 
         off_role_mult = shuffler.off_role_multiplier
@@ -316,32 +332,26 @@ class ShufflePendingMixin:
             recent_match_penalty = recent_in_match * shuffler.recent_match_penalty_weight
 
         # Calculate soft avoid penalty (for display only - already factored into shuffler)
-        soft_avoid_penalty = 0.0
         radiant_ids_set = {p.discord_id for p in radiant_team.players if p.discord_id}
         dire_ids_set = {p.discord_id for p in dire_team.players if p.discord_id}
-        if avoids:
-            for avoid in avoids:
-                avoider = avoid.avoider_discord_id
-                avoided = avoid.avoided_discord_id
-                # Check if both on same team (penalty was applied)
-                both_radiant = avoider in radiant_ids_set and avoided in radiant_ids_set
-                both_dire = avoider in dire_ids_set and avoided in dire_ids_set
-                if both_radiant or both_dire:
-                    soft_avoid_penalty += shuffler.soft_avoid_penalty
+        soft_avoid_penalty = shuffler._calculate_soft_avoid_penalty(
+            radiant_ids_set,
+            dire_ids_set,
+            avoids,
+            low_priority_ids=low_priority_ids,
+        )
 
         # Calculate package deal penalty (for display only - already factored into shuffler)
-        package_deal_penalty = 0.0
-        if deals:
-            for deal in deals:
-                buyer = deal.buyer_discord_id
-                partner = deal.partner_discord_id
-                # Check if on OPPOSITE teams (penalty was applied)
-                on_opposite = (
-                    (buyer in radiant_ids_set and partner in dire_ids_set) or
-                    (buyer in dire_ids_set and partner in radiant_ids_set)
-                )
-                if on_opposite:
-                    package_deal_penalty += shuffler.package_deal_penalty
+        package_deal_penalty = shuffler._calculate_package_deal_penalty(
+            radiant_ids_set,
+            dire_ids_set,
+            deals,
+            low_priority_ids=low_priority_ids,
+        )
+        low_priority_penalty = shuffler._calculate_low_priority_penalty(
+            radiant_ids_set | dire_ids_set,
+            low_priority_ids,
+        )
 
         region_split_penalty = 0.0
         if shuffle_mode == "region":
@@ -362,7 +372,8 @@ class ShufflePendingMixin:
         goodness_score = (
             value_diff + off_role_penalty + weighted_role_matchup_delta
             + excluded_penalty + recent_match_penalty + soft_avoid_penalty
-            + package_deal_penalty + region_split_penalty + rating_spread_penalty
+            + package_deal_penalty + low_priority_penalty
+            + region_split_penalty + rating_spread_penalty
             - lobby_rating_bonus
         )
 

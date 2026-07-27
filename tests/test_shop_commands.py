@@ -21,7 +21,6 @@ from commands.shop import (
     SHOP_PACKAGE_DEAL_BASE_COST,
     SHOP_PACKAGE_DEAL_RATING_DIVISOR,
     SHOP_RECALIBRATE_COST,
-    SHOP_WITCHS_CURSE_COST,
     ShopCommands,
     _calculate_soft_avoid_cost,
 )
@@ -1217,14 +1216,10 @@ async def test_shop_jopa_coin_routes_to_handler(monkeypatch):
     assert "need to `/player register`" in message
 
 
-# --- Witch's Curse ---
-
-
 @pytest.mark.asyncio
-async def test_handle_witchs_curse_requires_target(monkeypatch):
-    bot = MagicMock()
+async def test_shop_rejects_retired_witchs_curse_value(monkeypatch):
     player_service = MagicMock()
-    commands = ShopCommands(bot, player_service)
+    commands = ShopCommands(MagicMock(), player_service)
     interaction = _make_interaction(guild_id=9000)
 
     monkeypatch.setattr(
@@ -1236,122 +1231,8 @@ async def test_handle_witchs_curse_requires_target(monkeypatch):
 
     interaction.response.send_message.assert_awaited_once()
     message = interaction.response.send_message.call_args.args[0]
-    assert "didn't specify a target" in message
-
-
-@pytest.mark.asyncio
-async def test_handle_witchs_curse_unavailable_when_service_missing():
-    bot = MagicMock()
-    player_service = MagicMock()
-    commands = ShopCommands(bot, player_service, curse_service=None)
-    interaction = _make_interaction()
-    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="Victim")
-
-    await commands._handle_witchs_curse(interaction, target=target)
-
-    interaction.response.send_message.assert_awaited_once()
-    msg = interaction.response.send_message.call_args.args[0]
-    assert "unavailable" in msg.lower() or "currently" in msg.lower()
-
-
-@pytest.mark.asyncio
-async def test_handle_witchs_curse_target_not_registered():
-    bot = MagicMock()
-    player_service = MagicMock()
-    # First call (caster) succeeds; second call (target) returns None
-    player_service.get_player.side_effect = [object(), None]
-    curse_service = MagicMock()
-
-    commands = ShopCommands(bot, player_service, curse_service=curse_service)
-    interaction = _make_interaction()
-    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="Victim")
-
-    await commands._handle_witchs_curse(interaction, target=target)
-
-    interaction.response.send_message.assert_awaited_once()
-    msg = interaction.response.send_message.call_args.args[0]
-    assert "not registered" in msg
-
-
-@pytest.mark.asyncio
-async def test_handle_witchs_curse_insufficient_balance():
-    bot = MagicMock()
-    player_service = MagicMock()
-    player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = SHOP_WITCHS_CURSE_COST - 1
-    curse_service = MagicMock()
-
-    commands = ShopCommands(bot, player_service, curse_service=curse_service)
-    interaction = _make_interaction()
-    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="Victim")
-
-    await commands._handle_witchs_curse(interaction, target=target)
-
-    interaction.response.send_message.assert_awaited_once()
-    msg = interaction.response.send_message.call_args.args[0]
-    assert "You need" in msg
-
-
-@pytest.mark.asyncio
-async def test_handle_witchs_curse_refunds_on_cast_failure():
-    """If cast_curse raises after the balance is debited, the buyer must be refunded."""
-    bot = MagicMock()
-    player_service = MagicMock()
-    player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = SHOP_WITCHS_CURSE_COST + 100
-    curse_service = MagicMock()
-    curse_service.cast_curse = AsyncMock(side_effect=RuntimeError("db locked"))
-
-    commands = ShopCommands(bot, player_service, curse_service=curse_service)
-    interaction = _make_interaction()
-    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="Victim")
-
-    await commands._handle_witchs_curse(interaction, target=target)
-
-    # Two adjust_balance calls: the debit, then the refund.
-    assert player_service.adjust_balance.call_count == 2
-    debit_args = player_service.adjust_balance.call_args_list[0].args
-    refund_args = player_service.adjust_balance.call_args_list[1].args
-    assert debit_args == (interaction.user.id, None, -SHOP_WITCHS_CURSE_COST)
-    assert refund_args == (interaction.user.id, None, SHOP_WITCHS_CURSE_COST)
-    # User gets an ephemeral failure message (not the success "hex sealed" line).
-    interaction.followup.send.assert_awaited()
-    failure_kwargs = interaction.followup.send.call_args.kwargs
-    assert failure_kwargs.get("ephemeral") is True
-    assert "refund" in failure_kwargs.get("content", "").lower()
-
-
-@pytest.mark.asyncio
-async def test_handle_witchs_curse_success_anonymous():
-    bot = MagicMock()
-    player_service = MagicMock()
-    player_service.get_player.side_effect = [object(), object()]
-    player_service.get_balance.return_value = SHOP_WITCHS_CURSE_COST + 100
-    curse_service = MagicMock()
-    curse_service.cast_curse = AsyncMock(return_value=1234567890)
-
-    commands = ShopCommands(bot, player_service, curse_service=curse_service)
-    interaction = _make_interaction()
-    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="Victim")
-
-    await commands._handle_witchs_curse(interaction, target=target)
-
-    # Cost deducted
-    player_service.adjust_balance.assert_called_once_with(
-        interaction.user.id, None, -SHOP_WITCHS_CURSE_COST
-    )
-    # Curse cast through service
-    curse_service.cast_curse.assert_awaited_once()
-    # Ephemeral defer + ephemeral followup (anonymous - no public message)
-    interaction.response.defer.assert_awaited()
-    defer_kwargs = interaction.response.defer.call_args.kwargs
-    assert defer_kwargs.get("ephemeral") is True
-    interaction.followup.send.assert_awaited()
-    followup_kwargs = interaction.followup.send.call_args.kwargs
-    assert followup_kwargs.get("ephemeral") is True
-    confirmation = followup_kwargs.get("content", "")
-    assert "Victim" in confirmation
-    assert "🧙" in confirmation
+    assert "no longer available" in message
+    player_service.adjust_balance.assert_not_called()
 
 
 # --- Recalibrate tests ---
@@ -1509,8 +1390,7 @@ async def test_item_autocomplete_shows_price_when_available():
 
 
 @pytest.mark.asyncio
-async def test_item_autocomplete_includes_curse_and_jopa_coin():
-    """Witch's Curse and Jopa Coin(TM) appear in the autocomplete list."""
+async def test_item_autocomplete_excludes_curse_and_includes_jopa_coin():
     bot = MagicMock()
     player_service = MagicMock()
     recal_service = MagicMock()
@@ -1529,7 +1409,7 @@ async def test_item_autocomplete_includes_curse_and_jopa_coin():
     values = {c.value for c in choices}
     assert "jopa_coin" in values
     assert "mystery_gift" in values
-    assert "witchs_curse" in values
+    assert "witchs_curse" not in values
 
 
 @pytest.mark.asyncio

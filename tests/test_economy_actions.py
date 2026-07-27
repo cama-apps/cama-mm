@@ -117,7 +117,6 @@ async def test_tip_green_mana_generated_bonus_uses_daily_reward_policy(monkeypat
         bot=SimpleNamespace(
             mana_effects_service=mana_service,
             economy_event_service=event_service,
-            curse_service=None,
         ),
         player_service=player_service,
         loan_service=None,

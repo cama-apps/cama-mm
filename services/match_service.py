@@ -67,6 +67,7 @@ class MatchService(
         soft_avoid_repo=None,
         package_deal_repo=None,
         state_service: MatchStateService | None = None,
+        low_priority_repo=None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -103,6 +104,7 @@ class MatchService(
         self.loan_service = loan_service
         self.soft_avoid_repo = soft_avoid_repo
         self.package_deal_repo = package_deal_repo
+        self.low_priority_repo = low_priority_repo
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         # Track matches being recorded as (guild_id, pending_match_id) tuples

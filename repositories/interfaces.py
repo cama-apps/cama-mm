@@ -1688,6 +1688,41 @@ class IBankruptcyRepository(ABC):
     def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int: ...
 
 
+class ILowPriorityRepository(ABC):
+    """Repository for guild-scoped low-priority matchmaking state."""
+
+    @abstractmethod
+    def get_state(self, discord_id: int, guild_id: int | None = None): ...
+
+    @abstractmethod
+    def set_low_priority(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        set_by: int,
+        reason: str | None,
+    ): ...
+
+    @abstractmethod
+    def clear_low_priority(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        *,
+        removed_by: int,
+        reason: str | None,
+    ) -> bool: ...
+
+    @abstractmethod
+    def get_active_ids(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> set[int]: ...
+
+    @abstractmethod
+    def list_active(self, guild_id: int | None = None) -> list: ...
+
+
 class IDisburseRepository(ABC):
     """Repository for managing nonprofit fund disbursement proposals and votes."""
 
@@ -2214,34 +2249,6 @@ class IReminderRepository(ABC):
         self, guild_id: int, reminder_types: tuple[str, ...]
     ) -> dict[str, list[int]]:
         """Load enabled subscribers for several reminder types in one read."""
-        ...
-
-
-class ICurseRepository(ABC):
-    """Repository for the Witch's Curse feature."""
-
-    @abstractmethod
-    def cast_or_extend(
-        self,
-        guild_id: int | None,
-        caster_id: int,
-        target_id: int,
-        days: int,
-    ) -> int:
-        """Insert a new curse or extend an existing (caster, target, guild) curse.
-
-        Returns the resulting expires_at as a unix epoch second.
-        """
-        ...
-
-    @abstractmethod
-    def count_active_curses_for_target(
-        self,
-        target_id: int,
-        guild_id: int | None,
-        now: int,
-    ) -> int:
-        """Number of unexpired curses on this target. Drives both is_cursed and stack_count."""
         ...
 
 
