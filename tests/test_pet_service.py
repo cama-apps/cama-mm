@@ -207,7 +207,7 @@ class TestQuirks:
             assert service.adopt(100, TEST_GUILD_ID, "Frosty").success
         result = service.buy(100, TEST_GUILD_ID, "cheese", 2)
         assert result.success
-        assert result.value["total_cost"] == 28  # 14 each, not 16
+        assert result.value["total_cost"] == 54  # 27 each, not 30
 
     def test_invoker_salt_lick_lasts_longer(self, service, clock):
         with patch(
@@ -441,9 +441,9 @@ class TestSweep:
             result = service.sweep()
         assert len(result["refunds"]) == 1
         notice = result["refunds"][0]
-        assert notice.total_paid == 32  # 16 consumed * 200%
+        assert notice.total_paid == 60  # 30 consumed * 200%
         assert not notice.scaled_down
-        assert _balance(service, 100) == balance_before + 32
+        assert _balance(service, 100) == balance_before + 60
         # Window is claimed; a second sweep pays nothing.
         with patch("services.pet_service.random.randint", return_value=200):
             assert service.sweep()["refunds"] == []
@@ -480,7 +480,7 @@ class TestSweep:
         service.feed(100, TEST_GUILD_ID, "cheese")  # keep alive for the tick
         with patch("services.pet_service.random.randint", return_value=200):
             notices = service.sweep()["refunds"]
-        assert notices and notices[0].total_paid == 32
+        assert notices and notices[0].total_paid == 60
 
     def test_outage_spanning_week_still_pays_both_weeks_via_lookback(
         self, service, clock
