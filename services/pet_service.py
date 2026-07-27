@@ -389,6 +389,7 @@ class PetService:
         accessory_id = random.choices(ids, weights=weights, k=1)[0]
         try:
             outcome = self.pet_repo.buy_trinket_atomic(
+                pet.pet_id,
                 discord_id,
                 guild_id,
                 accessory_id=accessory_id,
@@ -413,13 +414,15 @@ class PetService:
         if accessory_id not in ACCESSORIES:
             return Result.fail("Unknown trinket.", code=error_codes.VALIDATION_ERROR)
         now = self._now()
-        if self._living_pet(discord_id, guild_id, now) is None:
+        pet = self._living_pet(discord_id, guild_id, now)
+        if pet is None:
             return Result.fail("You have no living pet.", code=error_codes.NO_PET)
-        if not self.pet_repo.equip_accessory(discord_id, guild_id, accessory_id):
-            return Result.fail(
-                "You don't own that trinket (roll one with `/pet trinket`).",
-                code=error_codes.VALIDATION_ERROR,
+        try:
+            self.pet_repo.equip_accessory(
+                pet.pet_id, discord_id, guild_id, accessory_id
             )
+        except ValueError as exc:
+            return self._map_repo_error(exc)
         return Result.ok(accessory_id)
 
     def owned_trinkets(self, discord_id: int, guild_id: int | None) -> list[str]:
@@ -734,6 +737,10 @@ class PetService:
             "stack_cap": (
                 "You can't hoard more of that item.",
                 error_codes.STACK_CAP,
+            ),
+            "not_owned": (
+                "You don't own that trinket (roll one with `/pet trinket`).",
+                error_codes.VALIDATION_ERROR,
             ),
         }
         message, mapped = messages.get(code, (f"Pet error: {code}", None))

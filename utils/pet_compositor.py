@@ -80,9 +80,14 @@ def _pool(stage: str, slot: str) -> list[Path]:
     if key not in _pool_cache:
         directory = COMPONENTS_DIR / stage / slot
         try:
-            _pool_cache[key] = sorted(directory.glob("*.png")) if directory.is_dir() else []
+            pool = sorted(directory.glob("*.png")) if directory.is_dir() else []
         except OSError:
-            _pool_cache[key] = []
+            pool = []
+        if not pool and slot == "backdrop" and stage != "adult":
+            # Backdrops are scenes, not creatures — stage-agnostic. Reuse the
+            # adult set instead of shipping byte-identical copies per stage.
+            pool = _pool("adult", slot)
+        _pool_cache[key] = pool
     return _pool_cache[key]
 
 

@@ -191,7 +191,10 @@ class PetAccessory:
     weight: int  # out of the ACCESSORIES total
     emoji: str
     blurb: str
-    anchor: str = "head"  # "head" (hats) or "body" (collars, pins)
+    # All current accessories are head-anchored (neck/chest items are drawn
+    # just below the head so they track the chin on every body variant).
+    # "body" remains available for future torso/tail cosmetics.
+    anchor: str = "head"
 
 
 ACCESSORIES: dict[str, PetAccessory] = {

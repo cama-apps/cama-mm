@@ -315,6 +315,66 @@ class TestCommandHandlers:
         assert content.startswith("❌")
 
     @pytest.mark.asyncio
+    async def test_trinket_roll_via_handler(self, live_cog, monkeypatch):
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        monkeypatch.setattr(
+            live_cog.pet_service, "_now", lambda: pet.hatched_at + 3600
+        )
+        inter = make_interaction()
+        with patch(
+            "services.pet_service.random.choices", return_value=["top_hat"]
+        ):
+            await live_cog.trinket.callback(live_cog, inter)
+        content = inter.followup.send.await_args.kwargs["content"]
+        assert "Top Hat" in content and "Equipped" in content
+        fresh = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        assert fresh.accessory == "top_hat"
+
+    @pytest.mark.asyncio
+    async def test_trinket_wear_branch_via_handler(self, live_cog, monkeypatch):
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        monkeypatch.setattr(
+            live_cog.pet_service, "_now", lambda: pet.hatched_at + 3600
+        )
+        for accessory in ("red_bow", "top_hat"):
+            with patch(
+                "services.pet_service.random.choices", return_value=[accessory]
+            ):
+                await live_cog.trinket.callback(live_cog, make_interaction())
+        inter = make_interaction()
+        await live_cog.trinket.callback(live_cog, inter, wear="red_bow")
+        content = inter.followup.send.await_args.kwargs["content"]
+        assert "Now wearing" in content and "Red Bow" in content
+        fresh = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        assert fresh.accessory == "red_bow"
+
+    @pytest.mark.asyncio
+    async def test_trinket_rejected_for_egg(self, live_cog):
+        await adopt_via_handler(live_cog)  # still an egg
+        inter = make_interaction()
+        await live_cog.trinket.callback(live_cog, inter)
+        content = inter.followup.send.await_args.kwargs["content"]
+        assert content.startswith("❌")
+
+    @pytest.mark.asyncio
+    async def test_trinket_autocomplete_lists_owned_only(self, live_cog, monkeypatch):
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        monkeypatch.setattr(
+            live_cog.pet_service, "_now", lambda: pet.hatched_at + 3600
+        )
+        with patch(
+            "services.pet_service.random.choices", return_value=["wool_scarf"]
+        ):
+            await live_cog.trinket.callback(live_cog, make_interaction())
+        inter = make_interaction()
+        choices = await live_cog._trinket_autocomplete(inter, "")
+        assert [c.value for c in choices] == ["wool_scarf"]
+        assert await live_cog._trinket_autocomplete(inter, "top hat") == []
+
+    @pytest.mark.asyncio
     async def test_shop_rename_graveyard_leaderboard_handlers(self, live_cog):
         await adopt_via_handler(live_cog)
         for handler, args in (

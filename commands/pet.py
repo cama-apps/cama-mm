@@ -1,6 +1,6 @@
 """Cama pets: adopt, feed, and try to keep a camel-llama hybrid alive.
 
-Command surface is the /pet group (8 subcommands). A 10-minute background
+Command surface is the /pet group (9 subcommands). A 10-minute background
 sweep detects hatches and starvation deaths (both computed lazily from
 anchors — the loop only announces) and pays the weekly nonprofit care refund.
 Public posts go to PET_CHANNEL_ID when configured; otherwise pets stay quiet
