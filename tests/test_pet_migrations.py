@@ -196,6 +196,70 @@ class TestPetMigrations:
             assert row["dig_work_units"] == 0
             assert row["dig_work_at"] > 0
 
+    def test_pet_brawls_table_and_indexes(self, repo_db_path):
+        with _connect(repo_db_path) as conn:
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(pet_brawls)")
+            }
+            assert {
+                "brawl_id",
+                "guild_id",
+                "channel_id",
+                "challenger_id",
+                "recipient_id",
+                "challenger_pet_id",
+                "recipient_pet_id",
+                "status",
+                "created_at",
+                "expires_at",
+                "resolved_at",
+                "winner_id",
+                "winner_pet_id",
+                "loser_pet_id",
+                "rounds",
+                "winner_hunger_delta",
+                "loser_hunger_delta",
+            } <= columns
+            indexes = {
+                row["name"]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+            assert "idx_pet_brawls_open" in indexes
+            assert "idx_pet_brawls_record_win" in indexes
+            assert "idx_pet_brawls_record_loss" in indexes
+
+    def test_pet_brawls_check_constraints(self, repo_db_path):
+        base = (
+            "INSERT INTO pet_brawls (guild_id, channel_id, challenger_id, "
+            "recipient_id, challenger_pet_id, status, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        with _connect(repo_db_path) as conn:
+            conn.execute(base, (100, 5, 1, 2, 10, "pending", 1000, 1300))
+            with pytest.raises(sqlite3.IntegrityError):
+                # Self-challenge.
+                conn.execute(base, (100, 5, 1, 1, 10, "pending", 1000, 1300))
+            with pytest.raises(sqlite3.IntegrityError):
+                # Unknown status.
+                conn.execute(base, (100, 5, 1, 2, 10, "brewing", 1000, 1300))
+            with pytest.raises(sqlite3.IntegrityError):
+                # Winner must be a participant.
+                conn.execute(
+                    "INSERT INTO pet_brawls (guild_id, channel_id, challenger_id, "
+                    "recipient_id, challenger_pet_id, status, created_at, "
+                    "expires_at, winner_id) "
+                    "VALUES (100, 5, 1, 2, 10, 'done', 1000, 1300, 3)"
+                )
+
+    def test_pet_brawls_migration_is_idempotent(self, repo_db_path):
+        manager = SchemaManager(repo_db_path)
+        with _connect(repo_db_path) as conn:
+            cursor = conn.cursor()
+            manager._migration_create_pet_brawls(cursor)
+            conn.commit()
+
     def test_reminder_preferences_pet_column(self, repo_db_path):
         with _connect(repo_db_path) as conn:
             columns = {
