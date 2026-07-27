@@ -105,6 +105,13 @@ class TestPetMigrations:
                     "VALUES (100, '2026-W30', 2, 60)"
                 )
 
+    def test_refund_windows_track_pending_announcements(self, repo_db_path):
+        with _connect(repo_db_path) as conn:
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(pet_refund_windows)")
+            }
+            assert {"announcement_payload", "announced_at"} <= columns
+
     def test_reminder_preferences_pet_column(self, repo_db_path):
         with _connect(repo_db_path) as conn:
             columns = {

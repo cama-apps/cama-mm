@@ -648,6 +648,12 @@ class SchemaManager:
                 "add_pet_accessory_storage",
                 self._migration_add_pet_accessory_storage,
             ),
+            # Refund payment and public delivery are separate durable steps:
+            # a transient Discord error must not lose the paid summary.
+            (
+                "add_pet_refund_announcement_state",
+                self._migration_add_pet_refund_announcement_state,
+            ),
         ]
 
     # --- Migrations ---
@@ -4489,9 +4495,16 @@ class SchemaManager:
                 week_key TEXT NOT NULL,
                 paid_at INTEGER NOT NULL,
                 total_paid INTEGER NOT NULL CHECK (total_paid >= 0),
+                announcement_payload TEXT,
+                announced_at INTEGER,
                 PRIMARY KEY (guild_id, week_key)
             )
             """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pet_refunds_unannounced "
+            "ON pet_refund_windows(paid_at) "
+            "WHERE announcement_payload IS NOT NULL AND announced_at IS NULL"
         )
 
     def _migration_add_pet_accessory_storage(self, cursor) -> None:
@@ -4506,6 +4519,28 @@ class SchemaManager:
                 PRIMARY KEY (discord_id, guild_id, accessory_id)
             )
             """
+        )
+
+    def _migration_add_pet_refund_announcement_state(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor, "pet_refund_windows", "announcement_payload", "TEXT"
+        )
+        self._add_column_if_not_exists(
+            cursor, "pet_refund_windows", "announced_at", "INTEGER"
+        )
+        # Pre-migration windows have no reconstructable summary. Treat them as
+        # delivered rather than replaying incomplete historical announcements.
+        cursor.execute(
+            """
+            UPDATE pet_refund_windows
+            SET announced_at = paid_at
+            WHERE announcement_payload IS NULL AND announced_at IS NULL
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pet_refunds_unannounced "
+            "ON pet_refund_windows(paid_at) "
+            "WHERE announcement_payload IS NOT NULL AND announced_at IS NULL"
         )
 
     def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:

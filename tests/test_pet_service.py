@@ -204,10 +204,21 @@ class TestQuirks:
         with patch(
             "services.pet_service.random.choices", return_value=["crystal_cama"]
         ):
-            assert service.adopt(100, TEST_GUILD_ID, "Frosty").success
+            pet = service.adopt(100, TEST_GUILD_ID, "Frosty").value["pet"]
+        clock.now = pet.hatched_at
         result = service.buy(100, TEST_GUILD_ID, "cheese", 2)
         assert result.success
         assert result.value["total_cost"] == 54  # 27 each, not 30
+
+    def test_unhatched_frostwool_uses_species_neutral_prices(self, service, clock):
+        with patch(
+            "services.pet_service.random.choices", return_value=["crystal_cama"]
+        ):
+            pet = service.adopt(100, TEST_GUILD_ID, "Secret").value["pet"]
+        assert clock.now < pet.hatched_at
+        result = service.buy(100, TEST_GUILD_ID, "cheese", 2)
+        assert result.success
+        assert result.value["total_cost"] == 60
 
     def test_invoker_salt_lick_lasts_longer(self, service, clock):
         with patch(
@@ -444,9 +455,14 @@ class TestSweep:
         assert notice.total_paid == 60  # 30 consumed * 200%
         assert not notice.scaled_down
         assert _balance(service, 100) == balance_before + 60
-        # Window is claimed; a second sweep pays nothing.
+        # The payment is claimed once, but its summary is re-offered until
+        # Discord delivery is acknowledged.
         with patch("services.pet_service.random.randint", return_value=200):
-            assert service.sweep()["refunds"] == []
+            retry = service.sweep()["refunds"]
+        assert retry == [notice]
+        assert _balance(service, 100) == balance_before + 60
+        service.mark_refund_announced(notice)
+        assert service.sweep()["refunds"] == []
 
     def test_stale_snapshot_never_kills_a_fed_pet(self, service, clock):
         """Regression for the critical sweep-vs-feed race: resolving from a
