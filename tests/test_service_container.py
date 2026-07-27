@@ -173,6 +173,7 @@ class TestServiceContainerBotExposure:
             "mafia_flavor_service": "mafia_flavor_service",
             "pet_service": "pet_service",
             "pet_flavor_service": "pet_flavor_service",
+            "pet_brawl_service": "pet_brawl_service",
             "player_trivia_service": "player_trivia_service",
             "sql_query_service": "sql_query_service",
             "flavor_text_service": "flavor_text_service",
