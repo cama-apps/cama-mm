@@ -54,6 +54,7 @@ NO_SUPPLIES = "no_supplies"
 FEED_CAP = "feed_cap"
 ALREADY_PAMPERED = "already_pampered"
 STACK_CAP = "stack_cap"
+BRAWL_BUSY = "brawl_busy"
 
 # Enrichment errors
 
