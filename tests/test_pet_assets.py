@@ -1,5 +1,7 @@
 """Tests for cama pet art: procedural rendering and the asset loader."""
 
+import io
+
 import discord
 import pytest
 from PIL import Image
@@ -126,3 +128,19 @@ class TestPetAssetLoader:
         )
         file = pet_assets.get_altar_card("Fluffy", seed=4)
         assert file.filename == "pet_altar.png"
+
+    def test_get_versus_card_prefers_authored_overlay(self):
+        baseline = pet_assets.get_versus_card(
+            "common_cama", "adult", 3, None, "rama", "baby", 7, None
+        ).fp.read()
+        pet_assets.ASSETS_DIR.mkdir(parents=True)
+        # A loud opaque overlay so the difference is unambiguous.
+        Image.new("RGBA", (1024, 288), (255, 0, 0, 255)).save(
+            pet_assets.ASSETS_DIR / "versus_overlay.png"
+        )
+        overlaid = pet_assets.get_versus_card(
+            "common_cama", "adult", 3, None, "rama", "baby", 7, None
+        ).fp.read()
+        assert overlaid != baseline
+        with Image.open(io.BytesIO(overlaid)) as img:
+            assert img.convert("RGBA").getpixel((0, 0)) == (255, 0, 0, 255)

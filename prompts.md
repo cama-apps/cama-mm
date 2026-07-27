@@ -431,3 +431,26 @@ A complete card at `assets/pets/{species_id}_{stage}_{mood}.png` bypasses compos
 ```
 Discord embed card art, clear and readable at roughly 400 pixels wide, no watermark or logo, explicitly not photorealistic. A somber stone sacrificial altar in a moonlit grassy paddock, a low dark slab on rough-hewn stone legs, two or three lit candles with small warm flames, faint wisps of pale smoke, scattered tufts of wool and a single small bell on the grass beside it, a cracked egg-shaped glow hovering faintly above the slab hinting at rebirth, night sky with a large low moon, deep indigo and slate palette with warm candlelight accents, quiet and slightly ominous but not gory — no blood, no creature, no text, painterly pixel-art-adjacent style, digital painting, 16:9 landscape composition with the altar centered-low
 ```
+
+### Altar Card (full card, 512x288)
+
+Shown as-is for every `/pet altar` sacrifice (`assets/pets/altar.png`, or `.gif`).
+The loader adds no text or engraving, so the image must be name- and
+species-agnostic: no pet, no readable text. Ominous-cozy, never gory — it posts
+publicly in the pet channel. Falls back to the engraved tombstone until authored.
+
+```
+A somber stone sacrificial altar in a moonlit grassy paddock, a low dark slab on rough-hewn stone legs, two or three lit candles with small warm flames, faint wisps of pale smoke, scattered tufts of wool and a single small bell on the grass beside it, a cracked egg-shaped glow hovering faintly above the slab hinting at rebirth, night sky with a large low moon, deep indigo and slate palette with warm candlelight accents, quiet and slightly ominous but not gory — no blood, no creature, no text, painterly pixel-art-adjacent style, digital painting, 16:9 landscape composition with the altar centered-low
+```
+
+### Versus Overlay (transparent overlay, 1024x288)
+
+Composited OVER the two pet cards on the `/pet brawl` challenge splash
+(`assets/pets/versus_overlay.png`; other sizes are resized to fit). Must be a
+mostly-transparent RGBA canvas — a central diagonal slash and VS emblem only,
+since the pet cards underneath are the subject. Replaces the procedurally drawn
+"VS" text when present.
+
+```
+ONLY a dramatic central versus emblem on a fully transparent 1024x288 canvas: a bold golden "VS" monogram at the exact center with a dark outline, over a thin diagonal energy slash running from top-center-right to bottom-center-left, a few small spark and dust particles near the emblem, everything confined to the middle fifth of the canvas, edges fully transparent, painterly pixel-art-adjacent style, fighting-game matchup-screen feel. Nothing else on the canvas.
+```
