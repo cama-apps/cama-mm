@@ -54,6 +54,7 @@ from domain.pet_constants import (
     SUPPLY_STACK_CAP,
     TRINKET_COST,
     TRINKET_DUPE_REFUND,
+    UNHATCHED_SPECIES,
     WARNING_HUNGER,
     adoption_fee,
     food_cost,
@@ -97,6 +98,25 @@ class PetService:
 
     # --- lazy starvation resolution ---
 
+    def _resolve_hatch(self, pet: Pet, now: int) -> Pet:
+        """Select and persist a species once an unresolved egg reaches hatch."""
+        if pet.species != UNHATCHED_SPECIES or now < pet.hatched_at:
+            return pet
+        if pet.egg_tier == "gilded":
+            species = self._roll_species_tiered(GILDED_TIER_WEIGHTS)
+        elif self._pity_active(pet.discord_id, pet.guild_id):
+            species = self._roll_species_tiered(PITY_TIER_WEIGHTS)
+        else:
+            species_ids = list(SPECIES)
+            weights = [SPECIES[species_id].weight for species_id in species_ids]
+            species = random.choices(species_ids, weights=weights, k=1)[0]
+        return self.pet_repo.resolve_hatch_species(
+            pet.pet_id,
+            pet.guild_id,
+            species=species,
+            now=now,
+        )
+
     def _resolve_starvation(self, pet: Pet, now: int) -> Pet | None:
         """Return the (possibly Aegis-revived) living pet, or None if it died.
 
@@ -104,7 +124,7 @@ class PetService:
         burns its Aegis instead the first time, reviving at low hunger at
         that same moment — and may then starve again before `now`.
         """
-        current = pet
+        current = self._resolve_hatch(pet, now)
         for _ in range(4):  # aegis/lost-claim re-reads can chain
             if current is None:
                 return None
@@ -188,8 +208,9 @@ class PetService:
         Used by restart recovery so the reminder service never reaches into
         the pet repository or duplicates hunger math.
         """
-        pet = self.pet_repo.get_active_pet(discord_id, guild_id)
-        if pet is None:
+        now = self._now()
+        pet = self._living_pet(discord_id, guild_id, now)
+        if pet is None or now < pet.hatched_at:
             return None
         return self.warning_crossing_for(pet), pet.name
 
@@ -224,31 +245,48 @@ class PetService:
         now = self._now()
         # Resolve a pending starvation first so a long-dead-on-paper pet does
         # not block adoption, and the fee tier reflects that death.
-        if self._living_pet(discord_id, guild_id, now) is not None:
+        existing = self._living_pet(discord_id, guild_id, now)
+        if existing is not None:
+            if (
+                egg_tier == "gilded"
+                and now < existing.hatched_at
+                and existing.egg_tier == "standard"
+            ):
+                try:
+                    pet = self.pet_repo.upgrade_egg(
+                        discord_id,
+                        guild_id,
+                        name=name.strip(),
+                        premium=GILDED_EGG_PREMIUM,
+                        now=now,
+                    )
+                except ValueError as exc:
+                    return self._map_repo_error(exc, fee=GILDED_EGG_PREMIUM)
+                return Result.ok(
+                    {
+                        "pet": pet,
+                        "egg_tier": "gilded",
+                        "pity_active": False,
+                        "upgraded": True,
+                    }
+                )
             return Result.fail(
                 "You already have a pet. One cama per household.",
                 code=error_codes.ALREADY_HAS_PET,
             )
         prior_deaths = self.pet_repo.count_dead_pets(discord_id, guild_id)
         fee = adoption_fee(prior_deaths)
-        pity_active = False
+        pity_active = (
+            egg_tier == "standard" and self._pity_active(discord_id, guild_id)
+        )
         if egg_tier == "gilded":
             fee += GILDED_EGG_PREMIUM
-            species = self._roll_species_tiered(GILDED_TIER_WEIGHTS)
-        else:
-            pity_active = self._pity_active(discord_id, guild_id)
-            if pity_active:
-                species = self._roll_species_tiered(PITY_TIER_WEIGHTS)
-            else:
-                species_ids = list(SPECIES)
-                weights = [SPECIES[s].weight for s in species_ids]
-                species = random.choices(species_ids, weights=weights, k=1)[0]
         try:
             pet = self.pet_repo.adopt_pet(
                 discord_id,
                 guild_id,
                 name=name.strip(),
-                species=species,
+                egg_tier=egg_tier,
                 fee=fee,
                 now=now,
                 hatch_seconds=EGG_HATCH_SECONDS,
@@ -256,7 +294,12 @@ class PetService:
         except ValueError as exc:
             return self._map_repo_error(exc, fee=fee)
         return Result.ok(
-            {"pet": pet, "egg_tier": egg_tier, "pity_active": pity_active}
+            {
+                "pet": pet,
+                "egg_tier": egg_tier,
+                "pity_active": pity_active,
+                "upgraded": False,
+            }
         )
 
     def _roll_species_tiered(self, tier_weights: dict[str, int]) -> str:
@@ -432,7 +475,9 @@ class PetService:
 
     def camadex(self, discord_id: int, guild_id: int | None) -> tuple[list[str], int]:
         """(species ids hatched by this player, roster size)."""
-        raised = self.pet_repo.species_raised(discord_id, guild_id, self._now())
+        now = self._now()
+        self._living_pet(discord_id, guild_id, now)
+        raised = self.pet_repo.species_raised(discord_id, guild_id, now)
         return raised, len(SPECIES)
 
     # --- feeding ---
@@ -589,7 +634,8 @@ class PetService:
 
         deaths = [DeathNotice(pet=p) for p in self.pet_repo.get_unannounced_deaths()]
         hatches = [
-            HatchNotice(pet=p) for p in self.pet_repo.find_unannounced_hatches(now)
+            HatchNotice(pet=self._resolve_hatch(pet, now))
+            for pet in self.pet_repo.find_unannounced_hatches(now)
         ]
         refunds = self._sweep_refunds(now)
         return {"deaths": deaths, "hatches": hatches, "refunds": refunds}
@@ -726,6 +772,14 @@ class PetService:
             ),
             "no_pet": ("You have no living pet.", error_codes.NO_PET),
             "pet_dead": ("Your pet has passed away.", error_codes.PET_DEAD),
+            "pet_hatched": (
+                "Only an unhatched egg can be upgraded.",
+                error_codes.PET_HATCHED,
+            ),
+            "already_gilded": (
+                "Your egg is already gilded.",
+                error_codes.ALREADY_GILDED,
+            ),
             "no_supplies": (
                 "You're out of that food. Visit /pet shop.",
                 error_codes.NO_SUPPLIES,

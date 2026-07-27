@@ -29,15 +29,24 @@ def rich_player(player_repository):
 
 
 def adopt(pet_repo, discord_id=100, guild_id=TEST_GUILD_ID, **overrides):
+    resolved_species = overrides.pop("species", None)
     kwargs = {
         "name": "Blep",
-        "species": "common_cama",
+        "egg_tier": "standard",
         "fee": 20,
         "now": NOW,
         "hatch_seconds": HATCH,
     }
     kwargs.update(overrides)
-    return pet_repo.adopt_pet(discord_id, guild_id, **kwargs)
+    egg = pet_repo.adopt_pet(discord_id, guild_id, **kwargs)
+    if resolved_species is None:
+        return egg
+    return pet_repo.resolve_hatch_species(
+        egg.pet_id,
+        guild_id,
+        species=resolved_species,
+        now=egg.hatched_at,
+    )
 
 
 def stock(pet_repo, discord_id=100, guild_id=TEST_GUILD_ID, item="tango", qty=5):
@@ -104,8 +113,17 @@ class TestAdopt:
         assert pet.hatched_at == NOW + HATCH
         assert pet.hunger_at_last_fed == 100
         assert pet.last_fed_at == pet.hatched_at
+        assert pet.species == "unhatched"
+        assert pet.egg_tier == "standard"
         assert player_repository.get_balance(100, TEST_GUILD_ID) == 980
         assert len(_ledger_rows(pet_repo.db_path, "pet")) == 1
+
+    def test_adopt_persists_gilded_roll_pool_without_selecting_species(
+        self, pet_repo, rich_player
+    ):
+        pet = adopt(pet_repo, egg_tier="gilded", fee=250)
+        assert pet.species == "unhatched"
+        assert pet.egg_tier == "gilded"
 
     def test_adopt_insufficient_funds_leaves_no_row_and_no_debit(
         self, pet_repo, player_repository
@@ -144,6 +162,97 @@ class TestAdopt:
         assert pet_repo.get_active_pet(100, None).pet_id == pet_none.pet_id
         assert pet_repo.get_active_pet(100, 0).pet_id == pet_none.pet_id
         assert pet_repo.get_active_pet(100, TEST_GUILD_ID).name == "Blep"
+
+
+class TestEggUpgradeAndHatch:
+    def test_upgrade_debits_premium_and_changes_only_roll_pool(
+        self, pet_repo, player_repository, rich_player
+    ):
+        egg = adopt(pet_repo)
+        upgraded = pet_repo.upgrade_egg(
+            100,
+            TEST_GUILD_ID,
+            name="Goldie",
+            premium=230,
+            now=NOW + 1,
+        )
+        assert upgraded.pet_id == egg.pet_id
+        assert upgraded.name == "Goldie"
+        assert upgraded.hatched_at == egg.hatched_at
+        assert upgraded.species == "unhatched"
+        assert upgraded.egg_tier == "gilded"
+        assert upgraded.adopt_fee == 250
+        assert player_repository.get_balance(100, TEST_GUILD_ID) == 750
+        assert len(_ledger_rows(pet_repo.db_path, "pet")) == 2
+
+    def test_upgrade_failure_rolls_back_state_and_payment(
+        self, pet_repo, player_repository, rich_player
+    ):
+        egg = adopt(pet_repo)
+        player_repository.update_balance(100, TEST_GUILD_ID, 100)
+        with pytest.raises(ValueError, match="insufficient_funds"):
+            pet_repo.upgrade_egg(
+                100,
+                TEST_GUILD_ID,
+                name="Too Expensive",
+                premium=230,
+                now=NOW + 1,
+            )
+        unchanged = pet_repo.get_pet_by_id(egg.pet_id, TEST_GUILD_ID)
+        assert unchanged.name == "Blep"
+        assert unchanged.egg_tier == "standard"
+        assert unchanged.adopt_fee == 20
+        assert player_repository.get_balance(100, TEST_GUILD_ID) == 100
+
+    def test_upgrade_rejects_gilded_or_hatched_egg(
+        self, pet_repo, player_repository, rich_player
+    ):
+        gilded = adopt(pet_repo, egg_tier="gilded", fee=250)
+        with pytest.raises(ValueError, match="already_gilded"):
+            pet_repo.upgrade_egg(
+                100,
+                TEST_GUILD_ID,
+                name="Again",
+                premium=230,
+                now=NOW + 1,
+            )
+        assert claim_death(pet_repo, gilded, died_at=NOW + 2)
+        standard = adopt(pet_repo, name="Second")
+        with pytest.raises(ValueError, match="pet_hatched"):
+            pet_repo.upgrade_egg(
+                100,
+                TEST_GUILD_ID,
+                name="Too Late",
+                premium=230,
+                now=standard.hatched_at,
+            )
+        assert player_repository.get_balance(100, TEST_GUILD_ID) == 730
+
+    def test_hatch_resolution_is_ready_gated_and_write_once(
+        self, pet_repo, rich_player
+    ):
+        egg = adopt(pet_repo)
+        with pytest.raises(ValueError, match="egg_not_ready"):
+            pet_repo.resolve_hatch_species(
+                egg.pet_id,
+                TEST_GUILD_ID,
+                species="rama",
+                now=egg.hatched_at - 1,
+            )
+        resolved = pet_repo.resolve_hatch_species(
+            egg.pet_id,
+            TEST_GUILD_ID,
+            species="rama",
+            now=egg.hatched_at,
+        )
+        assert resolved.species == "rama"
+        retried = pet_repo.resolve_hatch_species(
+            egg.pet_id,
+            TEST_GUILD_ID,
+            species="common_cama",
+            now=egg.hatched_at + 1,
+        )
+        assert retried.species == "rama"
 
 
 class TestSupplies:

@@ -112,6 +112,67 @@ class TestPetMigrations:
             }
             assert {"announcement_payload", "announced_at"} <= columns
 
+    def test_hatch_roll_state_rerolls_only_unhatched_eggs(self, repo_db_path):
+        future_hatch = 4_000_000_000
+        with _connect(repo_db_path) as conn:
+            _insert_pet(
+                conn,
+                10,
+                100,
+                species="common_cama",
+                hatched_at=future_hatch,
+                last_fed_at=future_hatch,
+                adopt_fee=20,
+            )
+            _insert_pet(
+                conn,
+                11,
+                100,
+                species="rama",
+                hatched_at=future_hatch,
+                last_fed_at=future_hatch,
+                adopt_fee=250,
+            )
+            _insert_pet(
+                conn,
+                12,
+                100,
+                species="jopacama",
+                adopt_fee=250,
+            )
+            manager = SchemaManager(repo_db_path)
+            migration = getattr(
+                manager,
+                "_migration_add_pet_hatch_roll_state",
+                lambda _cursor: None,
+            )
+            migration(conn.cursor())
+            conn.commit()
+
+            columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(pets)")
+            }
+            assert "egg_tier" in columns
+            rows = {
+                row["discord_id"]: row
+                for row in conn.execute(
+                    "SELECT discord_id, species, egg_tier FROM pets "
+                    "WHERE discord_id IN (10, 11, 12)"
+                )
+            }
+            assert (rows[10]["species"], rows[10]["egg_tier"]) == (
+                "unhatched",
+                "standard",
+            )
+            assert (rows[11]["species"], rows[11]["egg_tier"]) == (
+                "unhatched",
+                "gilded",
+            )
+            assert (rows[12]["species"], rows[12]["egg_tier"]) == (
+                "jopacama",
+                "gilded",
+            )
+
     def test_reminder_preferences_pet_column(self, repo_db_path):
         with _connect(repo_db_path) as conn:
             columns = {
