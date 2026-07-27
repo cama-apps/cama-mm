@@ -98,7 +98,9 @@ class TestRepository:
         )
         assert dead.died_at == clock.now
         assert dead.death_cause == "sacrifice"
-        assert dead.death_announced_at == clock.now  # no duplicate tombstone
+        # At-least-once: announced only after the altar rite actually posts
+        # (the command marks it); until then the sweep can retry.
+        assert dead.death_announced_at is None
         assert egg.species == "rama"
         assert egg.hatched_at == clock.now + HATCH
         assert egg.hunger_at_last_fed == 100
@@ -298,7 +300,7 @@ class TestAltarCommand:
     async def test_confirm_performs_the_rite(
         self, altar_cog, pet_repo, clock, monkeypatch
     ):
-        make_living_pet(pet_repo, clock)
+        old = make_living_pet(pet_repo, clock)
         monkeypatch.setattr("commands.pet.ConfirmSacrificeView", AutoConfirmView)
         inter = make_interaction()
         await altar_cog.altar.callback(altar_cog, inter, "Rebirth")
@@ -308,6 +310,39 @@ class TestAltarCommand:
         edit_kwargs = message.edit.await_args.kwargs
         assert "altar" in edit_kwargs["embed"].title.lower()
         assert edit_kwargs["view"] is None
+        # Delivered farewell -> death marked announced (no sweep duplicate).
+        dead = pet_repo.get_pet_by_id(old.pet_id, TEST_GUILD_ID)
+        assert dead.death_announced_at is not None
+
+    @pytest.mark.asyncio
+    async def test_failed_edit_falls_back_and_still_marks(
+        self, altar_cog, pet_repo, clock, monkeypatch
+    ):
+        import discord
+
+        old = make_living_pet(pet_repo, clock)
+        monkeypatch.setattr("commands.pet.ConfirmSacrificeView", AutoConfirmView)
+        inter = make_interaction()
+        message = inter.followup.send.return_value
+        message.edit = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(status=404), "gone")
+        )
+        await altar_cog.altar.callback(altar_cog, inter, "Rebirth")
+        # Fallback path posted (followup.send called again with the embed).
+        assert inter.followup.send.await_count >= 2
+        dead = pet_repo.get_pet_by_id(old.pet_id, TEST_GUILD_ID)
+        assert dead.death_announced_at is not None
+
+    def test_sweep_tombstone_names_the_altar(self, pet_repo, clock):
+        from commands.pet_helpers.embeds import build_death_embed
+
+        pet = make_living_pet(pet_repo, clock)
+        dead, _ = pet_repo.sacrifice_and_adopt_atomic(
+            100, TEST_GUILD_ID, **sacrifice_kwargs(pet, clock)
+        )
+        embed, _ = build_death_embed(dead)
+        assert "altar" in embed.description
+        assert "starved" not in embed.description
 
     @pytest.mark.asyncio
     async def test_cancel_keeps_the_pet(

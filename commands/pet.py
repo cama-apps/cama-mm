@@ -1,10 +1,11 @@
 """Cama pets: adopt, feed, and try to keep a camel-llama hybrid alive.
 
-Command surface is the /pet group (9 subcommands). A 10-minute background
+Command surface is the /pet group (11 subcommands). A 10-minute background
 sweep detects hatches and starvation deaths (both computed lazily from
-anchors — the loop only announces) and pays the weekly nonprofit care refund.
-Public posts go to PET_CHANNEL_ID when configured; otherwise pets stay quiet
-and everything is revealed on the owner's next interaction.
+anchors — the loop only announces), expires/voids stale brawls, and pays the
+weekly nonprofit care refund. Public posts go to PET_CHANNEL_ID when
+configured; otherwise pets stay quiet and everything is revealed on the
+owner's next interaction.
 """
 
 from __future__ import annotations
@@ -714,15 +715,32 @@ class PetCommands(commands.Cog):
         file = await asyncio.to_thread(get_altar_card, dead.name, dead.pet_id)
         if file:
             embed.set_image(url=f"attachment://{file.filename}")
-        if message is not None:
-            try:
+        posted = False
+        try:
+            if message is not None:
                 await message.edit(
                     embed=embed, view=None, attachments=[file] if file else []
                 )
-            except discord.HTTPException:
+            else:
                 await safe_followup(interaction, embed=embed, file=file)
-        else:
-            await safe_followup(interaction, embed=embed, file=file)
+            posted = True
+        except discord.HTTPException:
+            # discord.File is single-use — the failed send consumed the
+            # buffer, so rewind before retrying on the fallback path.
+            if file is not None:
+                file.reset()
+            try:
+                await safe_followup(interaction, embed=embed, file=file)
+                posted = True
+            except discord.HTTPException:
+                logger.warning(
+                    "Altar farewell for pet %s failed to post; sweep will retry",
+                    dead.pet_id,
+                )
+        if posted:
+            # At-least-once: only a delivered farewell marks the death
+            # announced — otherwise the sweep posts the tombstone instead.
+            await asyncio.to_thread(self.pet_service.mark_death_announced, dead)
         await self._rearm_warning(egg)
 
     @pet.command(name="graveyard", description="Visit the cama memorial garden")

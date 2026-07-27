@@ -305,10 +305,15 @@ def build_death_embed(
     flavor_text: str | None = None,
 ) -> tuple[discord.Embed, discord.File | None]:
     age = format_age(pet.age_seconds(pet.died_at or pet.adopted_at))
+    cause = (
+        "was given to the altar"
+        if pet.death_cause == "sacrifice"
+        else "starved"
+    )
     embed = discord.Embed(
         title=f"🪦 {pet.name} has died",
         description=(
-            f"<@{pet.discord_id}>'s {species_label(pet)} starved, {age}.\n"
+            f"<@{pet.discord_id}>'s {species_label(pet)} {cause}, {age}.\n"
             f"Time of death: <t:{pet.died_at}:f>. F."
         ),
         color=COLOR_DEAD,
