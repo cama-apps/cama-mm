@@ -20,7 +20,7 @@ def test_refresh_taxes_only_members_without_server_nicknames():
         ],
     )
 
-    assert service.calculate_tax(1, GUILD_ID, 199) == 2  # ceil
+    assert service.calculate_tax(1, GUILD_ID, 199) == 9  # 5% floored
     assert service.calculate_tax(2, GUILD_ID, 199) == 0
 
 
@@ -32,20 +32,21 @@ def test_member_updates_toggle_taxability_and_removal_fails_open():
     assert service.calculate_tax(1, GUILD_ID, 500) == 0
 
     service.update_member(GUILD_ID, 1, None)
-    assert service.calculate_tax(1, GUILD_ID, 500) == 5
+    assert service.calculate_tax(1, GUILD_ID, 500) == 25
 
     service.remove_member(GUILD_ID, 1)
     assert service.calculate_tax(1, GUILD_ID, 500) == 0
 
 
-def test_tax_ceils_one_percent_and_ignores_unknown_or_nonpositive_profit():
+def test_tax_floors_five_percent_and_ignores_unknown_or_nonpositive_profit():
     service = VanityTaxService()
     service.refresh_guild(GUILD_ID, [_member(1, None)])
 
-    # Ceil: small profits pay a minimum 1 JC instead of truncating to 0
-    # (at this economy's scale a floor made the tax permanently invisible).
-    assert service.calculate_tax(1, GUILD_ID, 99) == 1
-    assert service.calculate_tax(1, GUILD_ID, 100) == 1
+    # Floor keeps tiny profits (< 20 JC) untaxed; the 5% rate is what makes
+    # the tax visible at this economy's payout sizes (1% floored to 0).
+    assert service.calculate_tax(1, GUILD_ID, 19) == 0
+    assert service.calculate_tax(1, GUILD_ID, 99) == 4
+    assert service.calculate_tax(1, GUILD_ID, 100) == 5
     assert service.calculate_tax(1, GUILD_ID, 0) == 0
     assert service.calculate_tax(1, GUILD_ID, -100) == 0
     assert service.calculate_tax(999, GUILD_ID, 1_000) == 0

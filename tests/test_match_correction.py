@@ -492,7 +492,7 @@ class TestMatchCorrection:
             for bet in bets_before
             if bet["discord_id"] == radiant_bettor
         )
-        old_tax = int((old_payout - 100) * 0.01)
+        old_tax = int((old_payout - 100) * 0.05)
         assert old_tax > 0
         balances_before = {
             bettor: player_repo.get_balance(bettor, TEST_GUILD_ID)
@@ -512,7 +512,7 @@ class TestMatchCorrection:
             for bet in bets_after
             if bet["discord_id"] == dire_bettor
         )
-        new_tax = int((new_payout - 100) * 0.01)
+        new_tax = int((new_payout - 100) * 0.05)
         assert new_tax > 0
         assert player_repo.get_balance(
             radiant_bettor, TEST_GUILD_ID
