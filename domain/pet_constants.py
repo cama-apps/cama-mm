@@ -202,10 +202,10 @@ ACCESSORIES: dict[str, PetAccessory] = {
         "Practical headwear for the discerning grazer."),
     "bell_collar": PetAccessory(
         "bell_collar", "Bell Collar", "common", 250, "🔔",
-        "Now you always know where it is. It hates that.", anchor="body"),
+        "Now you always know where it is. It hates that."),
     "wool_scarf": PetAccessory(
         "wool_scarf", "Wool Scarf", "uncommon", 90, "🧣",
-        "Wool on wool. Scandalous, cozy.", anchor="body"),
+        "Wool on wool. Scandalous, cozy."),
     "flower_crown": PetAccessory(
         "flower_crown", "Flower Crown", "uncommon", 90, "🌸",
         "Woven from tombstone-garden flowers. Don't tell it that."),
@@ -214,10 +214,10 @@ ACCESSORIES: dict[str, PetAccessory] = {
         "Immediately becomes the most distinguished animal in the league."),
     "aegis_charm": PetAccessory(
         "aegis_charm", "Aegis Charm", "rare", 30, "🛡️",
-        "A tiny replica. Grants nothing but confidence.", anchor="body"),
+        "A tiny replica. Grants nothing but confidence."),
     "divine_rapier_pin": PetAccessory(
         "divine_rapier_pin", "Divine Rapier Pin", "legendary", 10, "⚔️",
-        "So shiny it feels like a throw waiting to happen.", anchor="body"),
+        "So shiny it feels like a throw waiting to happen."),
 }
 
 _FALLBACK_ACCESSORY = PetAccessory("unknown", "Curious Trinket", "common", 0, "🎁", "")
