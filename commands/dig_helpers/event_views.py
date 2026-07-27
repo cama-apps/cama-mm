@@ -21,6 +21,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.commands.dig")
 
 
+async def _lock_resolved_view(
+    view: discord.ui.View,
+    interaction: discord.Interaction,
+) -> None:
+    """Persist disabled controls on the source event message."""
+    message = getattr(interaction, "message", None)
+    if message is None:
+        return
+    try:
+        await message.edit(view=view)
+    except (discord.NotFound, discord.HTTPException):
+        pass
+
+
 class EventEncounterView(discord.ui.View):
     """Interactive view for choice/complex events with safe and risky buttons."""
 
@@ -114,6 +128,7 @@ class EventEncounterView(discord.ui.View):
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
         await safe_defer(interaction)
+        await _lock_resolved_view(self, interaction)
         result = await self._resolve(choice)
         await self._send_result(interaction, result)
         self.stop()
@@ -189,7 +204,8 @@ class EventEncounterView(discord.ui.View):
                     value=(
                         f"**{gear_d.get('name', 'Gear')}**\n"
                         f"Slot: {slot}\n"
-                        f"Durability: {durability}{effect_line}"
+                        f"Durability: {durability}{effect_line}\n"
+                        "Stored in your gear inventory — equip it with `/dig gear`."
                     ),
                     inline=False,
                 )
@@ -323,6 +339,7 @@ class BoonSelectionView(discord.ui.View):
         self.guild_id = guild_id
         self.event_data = event_data
         self.target_channel = target_channel
+        self._resolved = False
         boons = event_data.get("boon_options", []) if isinstance(event_data, dict) else []
         for i, boon in enumerate(boons[:5]):
             label = boon.get("name", f"Boon {i + 1}")[:80]
@@ -339,7 +356,18 @@ class BoonSelectionView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your event.", ephemeral=True)
                 return
+            if self._resolved:
+                await interaction.response.send_message(
+                    "You've already resolved this event.",
+                    ephemeral=True,
+                )
+                return
+            self._resolved = True
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
             await safe_defer(interaction)
+            await _lock_resolved_view(self, interaction)
             event_id = self.event_data.get("id", "") if isinstance(self.event_data, dict) else ""
             try:
                 result = _wrap(await asyncio.to_thread(

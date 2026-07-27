@@ -328,15 +328,34 @@ class GearMixin:
         )
 
     def _get_loadout(self, discord_id: int, guild_id) -> GearLoadout:
-        """Bundle a player's four equipped gear slots + their relics."""
+        """Bundle a player's five equipped gear slots + their relics."""
         equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
         return GearLoadout(
             weapon=self._hydrate_gear_piece(equipped.get("weapon")),
             armor=self._hydrate_gear_piece(equipped.get("armor")),
             boots=self._hydrate_gear_piece(equipped.get("boots")),
             amulet=self._hydrate_gear_piece(equipped.get("amulet")),
+            ring=self._hydrate_gear_piece(equipped.get("ring")),
             relics=self._get_equipped_relics_for_player(discord_id, guild_id),
         )
+
+    def _has_active_gear_effect(
+        self,
+        discord_id: int,
+        guild_id,
+        effect_id: str,
+    ) -> bool:
+        """Whether functional equipped gear provides ``effect_id``."""
+        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        for row in equipped.values():
+            piece = self._hydrate_gear_piece(row)
+            if (
+                piece is not None
+                and piece.durability > 0
+                and getattr(piece.tier_def, "effect_id", None) == effect_id
+            ):
+                return True
+        return False
 
     def _apply_gear_to_combat(self, base: dict, loadout: GearLoadout) -> dict:
         """Fold a loadout's combat modifiers into the base BOSS_DUEL_STATS dict.
@@ -455,6 +474,7 @@ class GearMixin:
             "armor":  serialize(loadout.armor),
             "boots":  serialize(loadout.boots),
             "amulet": serialize(loadout.amulet),
+            "ring": serialize(loadout.ring),
             "relics": list(loadout.relics),
             "relic_cap": self._relic_slot_cap(prestige),
         }

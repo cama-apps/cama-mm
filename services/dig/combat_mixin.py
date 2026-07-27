@@ -1132,7 +1132,9 @@ class BossCombatMixin:
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
             entry: dict = {"round": round_num}
-            player_roll = random.random() < player_hit
+            player_roll = BossCombatMixin._roll_player_hit(
+                player_hit, legacy_status, entry,
+            )
             crit_this_round = False
             if player_roll:
                 dmg_this_round = player_dmg
@@ -1203,6 +1205,7 @@ class BossCombatMixin:
                     loadout.armor,
                     loadout.boots,
                     loadout.amulet,
+                    loadout.ring,
                 )
                 if piece is not None
             }
@@ -1773,6 +1776,7 @@ class BossCombatMixin:
                     stale_loadout.armor,
                     stale_loadout.boots,
                     stale_loadout.amulet,
+                    stale_loadout.ring,
                 ):
                     if piece is not None:
                         name_by_id[piece.id] = piece.tier_def.name
@@ -1982,7 +1986,13 @@ class BossCombatMixin:
                         # if the player swapped gear during the pause.
                         "gear_snapshot_ids": [
                             int(p.id)
-                            for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
+                            for p in (
+                                loadout.weapon,
+                                loadout.armor,
+                                loadout.boots,
+                                loadout.amulet,
+                                loadout.ring,
+                            )
                             if p is not None
                         ],
                         "armor_snapshot_id": (
@@ -2344,7 +2354,9 @@ class BossCombatMixin:
         # Player swing
         if skip != "player":
             effective_player_hit = 0.0 if silenced else player_hit
-            player_roll = random.random() < effective_player_hit
+            player_roll = BossCombatMixin._roll_player_hit(
+                effective_player_hit, status_effects, entry,
+            )
             crit_this_round = False
             if player_roll:
                 dmg_this_round = player_dmg
@@ -2449,6 +2461,24 @@ class BossCombatMixin:
 
         return entry, player_hp, boss_hp, None
 
+    @staticmethod
+    def _roll_player_hit(
+        hit_chance: float,
+        status_effects: dict,
+        entry: dict,
+    ) -> bool:
+        """Roll one player attack, consuming Red Thread's first reroll."""
+        landed = random.random() < hit_chance
+        if (
+            not landed
+            and hit_chance > 0
+            and status_effects.get("gear_reroll_first_miss")
+        ):
+            status_effects["gear_reroll_first_miss"] = False
+            entry["red_thread_reroll"] = True
+            landed = random.random() < hit_chance
+        return landed
+
     def _trophy_status_seed(self, discord_id: int, guild_id, *, player_start_hp: int) -> dict:
         """Build the initial ``status_effects`` carrying equipped trophy- and combat-relic flags.
 
@@ -2485,11 +2515,13 @@ class BossCombatMixin:
             "springheel_counter": "gear_springheel_counter",
             "block_first_skip": "gear_block_first_skip",
             "heal_first_crit": "gear_heal_first_crit",
+            "reroll_first_miss": "gear_reroll_first_miss",
         }
         if getattr(self, "dig_repo", None) is not None:
             loadout = self._get_loadout(discord_id, guild_id)
             for piece in (
                 loadout.weapon, loadout.armor, loadout.boots, loadout.amulet,
+                loadout.ring,
             ):
                 if piece is None or piece.durability <= 0:
                     continue
@@ -2750,6 +2782,7 @@ class BossCombatMixin:
                         pre_tick_loadout.armor,
                         pre_tick_loadout.boots,
                         pre_tick_loadout.amulet,
+                        pre_tick_loadout.ring,
                     )
                     if piece is not None
                 }

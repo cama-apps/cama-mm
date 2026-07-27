@@ -710,7 +710,13 @@ class PinnacleMixin:
                         },
                         "gear_snapshot_ids": [
                             int(p.id)
-                            for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
+                            for p in (
+                                loadout.weapon,
+                                loadout.armor,
+                                loadout.boots,
+                                loadout.amulet,
+                                loadout.ring,
+                            )
                             if p is not None
                         ],
                         "armor_snapshot_id": (
@@ -775,7 +781,13 @@ class PinnacleMixin:
             pre_loadout = self._get_loadout(discord_id, guild_id)
             name_by_id = {
                 p.id: p.tier_def.name
-                for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots, pre_loadout.amulet)
+                for p in (
+                    pre_loadout.weapon,
+                    pre_loadout.armor,
+                    pre_loadout.boots,
+                    pre_loadout.amulet,
+                    pre_loadout.ring,
+                )
                 if p is not None
             }
             gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
@@ -952,7 +964,13 @@ class PinnacleMixin:
             if broken_ids:
                 name_by_id = {
                     p.id: p.tier_def.name
-                    for p in (loadout.weapon, loadout.armor, loadout.boots, loadout.amulet)
+                    for p in (
+                        loadout.weapon,
+                        loadout.armor,
+                        loadout.boots,
+                        loadout.amulet,
+                        loadout.ring,
+                    )
                     if p is not None
                 }
                 gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]

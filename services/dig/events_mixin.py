@@ -413,10 +413,22 @@ class EventsMixin:
 
         # New-style EventChoice resolution
         success_chance = option.get("success_chance", 1.0)
+        surveyors_loop_active = self._has_active_gear_effect(
+            discord_id, guild_id, "safe_event_stride",
+        )
+        ruinwager_active = self._has_active_gear_effect(
+            discord_id, guild_id, "risky_event_edge",
+        )
 
         # Relic: Diviner's Knot — +10% success on risky choices.
         if choice == "risky" and self._has_relic(discord_id, guild_id, "diviners_knot"):
             success_chance = min(1.0, success_chance + 0.10)
+
+        if choice in ("risky", "desperate"):
+            if surveyors_loop_active:
+                success_chance = max(0.05, success_chance - 0.05)
+            if ruinwager_active:
+                success_chance = min(1.0, success_chance + 0.05)
 
         if (
             choice == "risky"
@@ -504,6 +516,13 @@ class EventsMixin:
             *(("consumable", item_id) for item_id in eligible_consumables),
             *(("artifact", definition) for definition in eligible_artifacts),
         ]
+        duplicate_gear_reward = (
+            bool(gear_reward_pool)
+            and not eligible_gear
+            and not consumable_pool
+            and not artifact_pool
+            and any(item_id in owned_item_ids for item_id in gear_reward_pool)
+        )
         if reward_candidates:
             reward_type, reward = random.choice(reward_candidates)
             if reward_type == "gear":
@@ -523,6 +542,11 @@ class EventsMixin:
         streak_loss = result.get("streak_loss", 0) or 0
         curse = result.get("curse")
         description = result.get("description", "Something happened.")
+        if duplicate_gear_reward:
+            description = (
+                "The find still moves you forward. You already own this gear, "
+                "so you leave the duplicate behind."
+            )
 
         # Subtle variance on the authored outcome so each fire of a given
         # event differs slightly. JC scales by ±50%, advance shifts ±2,
@@ -533,6 +557,12 @@ class EventsMixin:
             jc = int(round(jc * random.uniform(0.5, 1.5)))
         if jc < 0:
             jc = strengthen_dig_event_penalty(jc)
+            if (
+                not succeeded
+                and choice in ("risky", "desperate")
+                and ruinwager_active
+            ):
+                jc = -math.ceil(abs(jc) * 1.25)
         if advance != 0:
             jittered = advance + random.randint(-2, 2)
             advance = max(1, jittered) if advance > 0 else min(-1, jittered)
@@ -540,6 +570,8 @@ class EventsMixin:
                 advance = -math.ceil(
                     abs(advance) * DIG_EVENT_DEPTH_SETBACK_MULTIPLIER
                 )
+        if succeeded and choice == "safe" and surveyors_loop_active:
+            advance += 1
 
         if (
             succeeded

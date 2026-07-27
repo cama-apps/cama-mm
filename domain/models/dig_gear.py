@@ -1,7 +1,7 @@
-"""Dig boss-combat gear: slots, tier defs, owned pieces, and loadouts.
+"""Dig gear: slots, tier definitions, owned pieces, and loadouts.
 
-Four persistent slots (Weapon / Armor / Boots / Amulet) modify boss-fight
-stats in :func:`services.dig_service.DigService.fight_boss`. The Relic
+Five persistent slots (Weapon / Armor / Boots / Amulet / Ring) modify Dig
+choices or boss-fight stats. The Relic
 slot is the existing prestige-scaled artifact slot — relics live in the
 ``dig_artifacts`` table and are exposed here as plain dicts so a
 :class:`GearLoadout` can present the full equipped set in one object.
@@ -11,6 +11,7 @@ Stat axes per slot:
     Armor   +player_hp (absorbs more boss hits)
     Boots   -boss_hit (dodge)
     Amulet  +crit_chance, +crit_bonus (occasional bonus damage)
+    Ring    event-only conditional effects and tradeoffs
     Relic   existing dig effects only (this branch)
 
 The user spec said "Armor reduces boss_dmg taken"; we implement that
@@ -34,6 +35,7 @@ class GearSlot(str, Enum):
     ARMOR = "armor"
     BOOTS = "boots"
     AMULET = "amulet"
+    RING = "ring"
     RELIC = "relic"
 
 
@@ -103,7 +105,7 @@ class GearPiece:
 
 @dataclass
 class GearLoadout:
-    """The four equipped slots for one player at one moment in time.
+    """The five equipped gear slots for one player at one moment in time.
 
     Returned by :func:`DigService._get_loadout` and consumed by
     :func:`DigService._apply_gear_to_combat` and the ``/dig gear`` panel.
@@ -113,6 +115,7 @@ class GearLoadout:
     armor: GearPiece | None = None
     boots: GearPiece | None = None
     amulet: GearPiece | None = None
+    ring: GearPiece | None = None
     relics: list[dict] = field(default_factory=list)
 
     def combat_modifiers(self) -> dict[str, float | int]:
@@ -123,7 +126,9 @@ class GearLoadout:
         """
         pieces = tuple(
             piece
-            for piece in (self.weapon, self.armor, self.boots, self.amulet)
+            for piece in (
+                self.weapon, self.armor, self.boots, self.amulet, self.ring,
+            )
             if piece is not None and piece.durability > 0
         )
         return {

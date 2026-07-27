@@ -57,6 +57,7 @@ def _build_gear_embed(
     embed.add_field(name="Armor",  value=_slot_value("armor"),  inline=False)
     embed.add_field(name="Boots",  value=_slot_value("boots"),  inline=False)
     embed.add_field(name="Amulet", value=_slot_value("amulet"), inline=False)
+    embed.add_field(name="Ring", value=_slot_value("ring"), inline=False)
 
     relics = loadout.get("relics") or []
     cap = loadout.get("relic_cap")
@@ -359,6 +360,8 @@ class RecycleRelicView(discord.ui.View):
 class GearSelectView(discord.ui.View):
     """Sub-view: dropdown of gear / relic items + Back button."""
 
+    PAGE_SIZE = 25
+
     def __init__(
         self,
         *,
@@ -369,6 +372,7 @@ class GearSelectView(discord.ui.View):
         gear_items: list[dict],
         relics: list[dict],
         parent: GearPanelView,
+        page: int = 0,
     ):
         super().__init__(timeout=180)
         self.dig_service = dig_service
@@ -376,9 +380,11 @@ class GearSelectView(discord.ui.View):
         self.guild_id = guild_id
         self.mode = mode
         self.parent = parent
+        self.gear_items = list(gear_items)
+        self.relics = list(relics)
 
         options: list[discord.SelectOption] = []
-        for g in gear_items[:20]:
+        for g in self.gear_items:
             slot_label = g["slot"].title()
             label = f"[{slot_label}] {g['name']} ({g['durability']}/{g['max_durability']})"
             if mode == "repair":
@@ -393,7 +399,7 @@ class GearSelectView(discord.ui.View):
                 value=f"gear:{g['id']}",
                 description=(g.get("effect") or "")[:100] or None,
             ))
-        for r in relics[:25 - len(options)]:
+        for r in self.relics:
             db_id = r.get("db_id")
             if db_id is None:
                 # Skip malformed relic rows rather than encoding a string
@@ -404,18 +410,35 @@ class GearSelectView(discord.ui.View):
                 label=f"[Relic] {r.get('name', r.get('artifact_id', '?'))}"[:100],
                 value=f"relic:{db_id}",
             ))
-        if not options:
-            options = [discord.SelectOption(label="(nothing here)", value="noop")]
+
+        self.page_count = max(
+            1,
+            (len(options) + self.PAGE_SIZE - 1) // self.PAGE_SIZE,
+        )
+        self.page = min(max(0, int(page)), self.page_count - 1)
+        page_start = self.page * self.PAGE_SIZE
+        page_options = options[page_start:page_start + self.PAGE_SIZE]
+        if not page_options:
+            page_options = [
+                discord.SelectOption(label="(nothing here)", value="noop"),
+            ]
 
         verb = {"equip": "Equip", "unequip": "Unequip", "repair": "Repair"}.get(mode, "Choose")
+        page_label = (
+            f" · page {self.page + 1}/{self.page_count}"
+            if self.page_count > 1
+            else ""
+        )
         self.select = discord.ui.Select(
-            placeholder=f"{verb} which piece?",
-            options=options,
+            placeholder=f"{verb} which piece?{page_label}",
+            options=page_options,
             min_values=1,
             max_values=1,
         )
         self.select.callback = self._on_select
         self.add_item(self.select)
+        self.previous_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.page_count - 1
 
     async def _on_select(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
@@ -472,6 +495,46 @@ class GearSelectView(discord.ui.View):
             cost_part = f" for {cost} {JOPACOIN_EMOTE}" if cost else ""
             await interaction.followup.send(f"{verb_past}{cost_part}.", ephemeral=True)
         await self.parent._refresh(interaction)
+
+    def _page_view(self, page: int) -> GearSelectView:
+        return GearSelectView(
+            dig_service=self.dig_service,
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            mode=self.mode,
+            gear_items=self.gear_items,
+            relics=self.relics,
+            parent=self.parent,
+            page=page,
+        )
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def previous_btn(
+        self,
+        interaction: discord.Interaction,
+        _btn: discord.ui.Button,
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your panel.", ephemeral=True)
+            return
+        await safe_defer(interaction)
+        await interaction.edit_original_response(
+            view=self._page_view(self.page - 1),
+        )
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
+    async def next_btn(
+        self,
+        interaction: discord.Interaction,
+        _btn: discord.ui.Button,
+    ):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your panel.", ephemeral=True)
+            return
+        await safe_defer(interaction)
+        await interaction.edit_original_response(
+            view=self._page_view(self.page + 1),
+        )
 
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
     async def back_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):

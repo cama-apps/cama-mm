@@ -24,6 +24,7 @@ from services.dig_constants import (
     GEAR_MAX_DURABILITY,
     GEAR_TIER_TABLES,
     PLAYER_HIT_CEILING,
+    UNIQUE_GEAR,
     WEAPON_TIERS,
     format_relic_label,
 )
@@ -390,6 +391,33 @@ class TestDigGearServiceEquipUnequip:
         assert "armor" not in equipped
 
 
+class TestDigRingLoadout:
+    def _piece(self, *, durability: int) -> GearPiece:
+        definition = UNIQUE_GEAR["red_thread_band"]
+        return GearPiece(
+            id=999,
+            slot=GearSlot.RING,
+            tier=definition.reference_tier,
+            durability=durability,
+            equipped=True,
+            acquired_at=1,
+            source="event:red_thread_shrine",
+            tier_def=definition,
+            item_id=definition.item_id,
+            max_durability=definition.max_durability,
+        )
+
+    def test_ring_contributes_its_authored_combat_tradeoff(self):
+        modifiers = GearLoadout(ring=self._piece(durability=14)).combat_modifiers()
+
+        assert modifiers["player_hp_bonus"] == -1
+
+    def test_broken_ring_contributes_no_combat_modifiers(self):
+        modifiers = GearLoadout(ring=self._piece(durability=0)).combat_modifiers()
+
+        assert modifiers["player_hp_bonus"] == 0
+
+
 class TestDigGearServiceRepair:
     def test_repair_charges_ten_percent_prorated_by_damage(self, svc, player):
         # Diamond Breastplate full repair is 18 JC; 15/20 missing rounds up to 14.
@@ -632,6 +660,31 @@ class TestDigRelicCapEmbed:
 
         assert "+2 boss damage" in weapon.value
         assert "-8% hit chance" in weapon.value
+
+    def test_ring_slot_renders_with_effect_and_durability(self):
+        from commands.dig_helpers.gear_views import _build_gear_embed
+
+        loadout = {
+            "weapon": None,
+            "armor": None,
+            "boots": None,
+            "amulet": None,
+            "ring": {
+                "name": "Surveyor's Loop",
+                "durability": 9,
+                "max_durability": 14,
+                "effect": "Safe event successes gain +1 block.",
+            },
+            "relics": [],
+            "relic_cap": 3,
+        }
+
+        embed = _build_gear_embed(loadout, [], [])
+        ring = next(field for field in embed.fields if field.name == "Ring")
+
+        assert "Surveyor's Loop" in ring.value
+        assert "9/14" in ring.value
+        assert "Safe event successes gain +1 block." in ring.value
 
 
 class TestDigGearServiceApplyGearToCombat:
