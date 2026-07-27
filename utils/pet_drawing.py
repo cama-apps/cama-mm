@@ -428,7 +428,8 @@ def render_accessory(accessory_id: str, stage: str) -> Image.Image | None:
     cell = g.cell
     cx = g.hx + g.hw // 2
     top = g.hy
-    chest_y = g.body_top + int(0.6 * cell)
+    neck_y = g.hy + g.hh + cell // 4        # just under the chin
+    chest_y = g.hy + g.hh + int(1.2 * cell)  # a bit lower on the chest
     if accessory_id == "red_bow":
         r = max(4, cell // 2)
         by = top - r // 2
@@ -470,7 +471,7 @@ def render_accessory(accessory_id: str, stage: str) -> Image.Image | None:
             fill=(150, 30, 40),
         )
     elif accessory_id == "bell_collar":
-        y = g.body_top - cell // 3
+        y = neck_y
         draw.rounded_rectangle(
             [cx - int(1.4 * cell), y, cx + int(1.4 * cell), y + cell // 2],
             radius=4, fill=(140, 60, 50),
@@ -479,7 +480,7 @@ def render_accessory(accessory_id: str, stage: str) -> Image.Image | None:
         draw.ellipse([cx - r, y + cell // 3, cx + r, y + cell // 3 + 2 * r],
                      fill=(250, 210, 90), outline=(160, 128, 52))
     elif accessory_id == "wool_scarf":
-        y = g.body_top - cell // 2
+        y = neck_y
         draw.rounded_rectangle(
             [cx - int(1.6 * cell), y, cx + int(1.6 * cell), y + int(0.8 * cell)],
             radius=6, fill=(196, 90, 90),
