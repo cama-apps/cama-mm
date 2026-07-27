@@ -2,6 +2,7 @@ import pytest
 
 from domain.models.team import Team
 from repositories.base_repository import BaseRepository
+from repositories.low_priority_repository import LowPriorityRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
@@ -50,6 +51,33 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     recorded = match_repo.get_match(result["match_id"], TEST_GUILD_ID)
     assert recorded is not None
     assert recorded["winning_team"] in (1, 2)
+
+
+def test_goodness_adds_500_per_active_low_priority_player(repo_db_path):
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    low_priority_repo = LowPriorityRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        low_priority_repo=low_priority_repo,
+        use_glicko=False,
+        betting_service=None,
+    )
+    player_ids = _seed_players(player_repo, 10)
+
+    baseline = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    low_priority_repo.set_low_priority(
+        player_ids[0], TEST_GUILD_ID, set_by=9001, reason=None
+    )
+    low_priority_repo.set_low_priority(
+        player_ids[1], TEST_GUILD_ID, set_by=9001, reason=None
+    )
+    penalized = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+
+    assert penalized["goodness_score"] - baseline["goodness_score"] == pytest.approx(
+        1000.0
+    )
 
 
 def test_shuffle_uses_three_database_connections(repo_db_path, monkeypatch):

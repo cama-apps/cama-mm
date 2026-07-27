@@ -1855,7 +1855,6 @@ async def test_dig_bonus_wheel_spin_preserves_regular_cooldown():
     bot = MagicMock()
     bot.bankruptcy_service = None
     bot.buff_service = None
-    bot.curse_service = None
     bot.gambling_stats_service = None
     bot.garnishment_service = None
     bot.mana_effects_service = None
@@ -1938,7 +1937,6 @@ async def test_dig_bonus_wheel_explosion_preserves_regular_cooldown():
     bot = MagicMock()
     bot.bankruptcy_service = None
     bot.buff_service = None
-    bot.curse_service = None
     bot.gambling_stats_service = None
     bot.garnishment_service = None
     bot.mana_effects_service = None
@@ -2019,7 +2017,6 @@ def _attach_wheel_protection(bot, protection_service) -> None:
     bot.buff_service = None
     bot.garnishment_service = None
     bot.mana_effects_service = None
-    bot.curse_service = None
     bot.gambling_stats_service = None
     bot.player_repo = None
     bot.reminder_service = None

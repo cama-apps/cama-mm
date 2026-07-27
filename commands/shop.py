@@ -36,8 +36,6 @@ from config import (
     SHOP_PACKAGE_DEAL_RATING_DIVISOR,
     SHOP_RECALIBRATE_COST,
     SHOP_SOFT_AVOID_COST,
-    SHOP_WITCHS_CURSE_COST,
-    WITCHS_CURSE_DURATION_DAYS,
 )
 from domain.package_deal_constants import PACKAGE_DEAL_MAX_GAMES
 from domain.soft_avoid_constants import SOFT_AVOID_GAMES
@@ -56,7 +54,6 @@ from utils.neon_helpers import get_neon_service
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
-    from services.curse_service import CurseService
     from services.dig_service import DigService
     from services.flavor_text_service import FlavorTextService
     from services.gambling_stats_service import GamblingStatsService
@@ -183,7 +180,6 @@ class ShopCommands(commands.Cog):
         gambling_stats_service: GamblingStatsService | None = None,
         recalibration_service: RecalibrationService | None = None,
         dig_service: DigService | None = None,
-        curse_service: CurseService | None = None,
     ):
         self.bot = bot
         self.player_service = player_service
@@ -192,7 +188,6 @@ class ShopCommands(commands.Cog):
         self.gambling_stats_service = gambling_stats_service
         self.recalibration_service = recalibration_service
         self.dig_service = dig_service
-        self.curse_service = curse_service
 
     async def _adjust_generated_mana_reward(
         self, guild_id: int | None, amount: int
@@ -245,10 +240,6 @@ class ShopCommands(commands.Cog):
             app_commands.Choice(
                 name=f"Mystery Gift ({SHOP_NEW_MYSTERY_GIFT_COST} jopacoin)",
                 value="mystery_gift",
-            ),
-            app_commands.Choice(
-                name=f"Witch's Curse ({SHOP_WITCHS_CURSE_COST} jopacoin)",
-                value="witchs_curse",
             ),
             app_commands.Choice(
                 name=f"Double or Nothing ({SHOP_DOUBLE_OR_NOTHING_COST} jopacoin)",
@@ -345,15 +336,6 @@ class ShopCommands(commands.Cog):
             await self._handle_jopa_coin(interaction)
         elif item == "mystery_gift":
             await self._handle_mystery_gift(interaction)
-        elif item == "witchs_curse":
-            if not target:
-                await interaction.response.send_message(
-                    "You selected 'Witch's Curse' but didn't specify a target. "
-                    "The hex needs a victim.",
-                    ephemeral=True,
-                )
-                return
-            await self._handle_witchs_curse(interaction, target=target)
         elif item == "double_or_nothing":
             await self._handle_double_or_nothing(interaction)
         elif item == "soft_avoid":
@@ -932,7 +914,6 @@ class ShopCommands(commands.Cog):
         embed.set_footer(text=f"Cost: {cost} jopacoin")
 
         await safe_followup(interaction, embed=embed)
-        self._maybe_curse_flame_for_shop(interaction, user_id, guild_id, item="jopa_coin")
 
     async def _handle_mystery_gift(
         self,
@@ -972,108 +953,6 @@ class ShopCommands(commands.Cog):
         embed.set_footer(text=f"Cost: {cost} jopacoin")
 
         await safe_followup(interaction, embed=embed)
-        self._maybe_curse_flame_for_shop(interaction, user_id, guild_id, item="mystery_gift")
-
-    async def _handle_witchs_curse(
-        self,
-        interaction: discord.Interaction,
-        target: discord.Member,
-    ):
-        """Cast a 7-day Witch's Curse on the target. Anonymous; only ephemeral confirmation."""
-        user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
-        cost = SHOP_WITCHS_CURSE_COST
-
-        if self.curse_service is None:
-            await interaction.response.send_message(
-                "The witch's craft is currently unavailable.", ephemeral=True
-            )
-            return
-
-        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
-        if not player:
-            await interaction.response.send_message(
-                "You need to `/player register` before you can shop.",
-                ephemeral=True,
-            )
-            return
-
-        target_player = await asyncio.to_thread(
-            self.player_service.get_player, target.id, guild_id
-        )
-        if not target_player:
-            await interaction.response.send_message(
-                f"{target.display_name} is not registered. The hex needs a willing victim of the league.",
-                ephemeral=True,
-            )
-            return
-
-        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-        if balance < cost:
-            await interaction.response.send_message(
-                f"You need {cost} {JOPACOIN_EMOTE} for the hex, but you only have {balance}.",
-                ephemeral=True,
-            )
-            return
-
-        # Ephemeral defer — the curse is anonymous, only the caster gets confirmation.
-        if not await safe_defer(interaction, ephemeral=True):
-            return
-
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-        try:
-            await self.curse_service.cast_curse(
-                caster_id=user_id,
-                target_id=target.id,
-                guild_id=guild_id,
-                days=WITCHS_CURSE_DURATION_DAYS,
-            )
-        except Exception:
-            # Refund on unexpected failure so the buyer isn't charged for a hex that didn't land.
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
-            await safe_followup(
-                interaction,
-                content="The hex faltered unexpectedly. You have been refunded.",
-                ephemeral=True,
-            )
-            return
-
-        await safe_followup(
-            interaction,
-            content=(
-                f"🧙‍♀️ Your hex on **{target.display_name}** is sealed for "
-                f"{WITCHS_CURSE_DURATION_DAYS} days. The chat will see — they will not see you."
-            ),
-            ephemeral=True,
-        )
-        # Buying a curse still counts as the buyer engaging with the shop — if
-        # the buyer is themselves cursed, fire the roll (neutral 5%).
-        self._maybe_curse_flame_for_shop(interaction, user_id, guild_id, item="witchs_curse")
-
-    def _maybe_curse_flame_for_shop(
-        self,
-        interaction: discord.Interaction,
-        user_id: int,
-        guild_id: int | None,
-        *,
-        item: str,
-    ) -> None:
-        """Spawn a fire-and-forget curse roll for a shop purchase by a (possibly cursed) buyer."""
-        from services.curse_service import spawn_curse_flame
-
-        target_display_name = (
-            interaction.user.display_name if hasattr(interaction.user, "display_name") else None
-        )
-        spawn_curse_flame(
-            self.curse_service,
-            interaction.channel,
-            target_id=user_id,
-            guild_id=guild_id,
-            system="shop",
-            outcome="neutral",
-            event_context={"item": item},
-            target_display_name=target_display_name,
-        )
 
     async def _handle_double_or_nothing(
         self,
@@ -2597,9 +2476,7 @@ async def setup(bot: commands.Bot):
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
     recalibration_service = getattr(bot, "recalibration_service", None)
     dig_service = getattr(bot, "dig_service", None)
-    curse_service = getattr(bot, "curse_service", None)
-
     await bot.add_cog(ShopCommands(
         bot, player_service, match_service, flavor_text_service, gambling_stats_service,
-        recalibration_service, dig_service, curse_service,
+        recalibration_service, dig_service,
     ))

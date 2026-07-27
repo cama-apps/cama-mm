@@ -384,6 +384,23 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     [(pid, normalized_guild) for pid in losing_ids],
                 )
 
+            # A recorded Dota win is the only automatic way out of low
+            # priority. This stays inside the match transaction and below the
+            # pending-match idempotency guard so retries cannot count twice.
+            if winning_ids:
+                placeholders = ",".join("?" * len(winning_ids))
+                cursor.execute(
+                    f"""
+                    UPDATE low_priority_state
+                    SET wins_remaining = MAX(0, wins_remaining - 1),
+                        active = CASE WHEN wins_remaining <= 1 THEN 0 ELSE 1 END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND active = 1 AND wins_remaining > 0
+                      AND discord_id IN ({placeholders})
+                    """,
+                    (normalized_guild, *winning_ids),
+                )
+
             # 4. Glicko updates
             if glicko_updates:
                 cursor.executemany(

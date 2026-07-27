@@ -1633,26 +1633,6 @@ class BettingCommands(commands.Cog):
             if candidates:
                 await self._send_first_neon_result(interaction, *candidates)
 
-        # Witch's Curse: wheel result for the spinner.
-        # Positive integer payout → win, negative integer → loss, special wedges → neutral.
-        curse_service = getattr(self.bot, "curse_service", None)
-        if curse_service is not None and interaction.channel is not None:
-            from services.curse_service import spawn_curse_flame
-            if isinstance(result_value, int):
-                wheel_outcome = "win" if result_value > 0 else ("loss" if result_value < 0 else "neutral")
-            else:
-                wheel_outcome = "neutral"
-            spawn_curse_flame(
-                curse_service,
-                interaction.channel,
-                target_id=user_id,
-                guild_id=guild_id,
-                system="wheel",
-                outcome=wheel_outcome,
-                event_context={"wedge": result_wedge[0], "value": result_value, "new_balance": new_balance},
-                target_display_name=getattr(interaction.user, "display_name", None),
-            )
-
     @economy.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(
         player="Player to tip",

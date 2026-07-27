@@ -294,21 +294,6 @@ async def tip_action(
         ephemeral=False,
     )
 
-    # Witch's Curse: tipping out is degen-coded → loss-rated for the sender.
-    curse_service = getattr(cog.bot, "curse_service", None)
-    if curse_service is not None and interaction.channel is not None:
-        from services.curse_service import spawn_curse_flame
-        spawn_curse_flame(
-            curse_service,
-            interaction.channel,
-            target_id=interaction.user.id,
-            guild_id=guild_id,
-            system="tip",
-            outcome="loss",
-            event_context={"amount": amount, "recipient_id": player.id},
-            target_display_name=getattr(interaction.user, "display_name", None),
-        )
-
     # Neon Degen Terminal hook
     neon = cog._get_neon_service()
     if neon:
@@ -827,26 +812,6 @@ async def loan_action(
         embed.add_field(name="Mana Effects", value=_loan_mana_suffix.strip(), inline=False)
 
     await interaction.followup.send(embed=embed)
-
-    # Witch's Curse: taking a loan is degen-coded → loss-rated.
-    curse_service = getattr(cog.bot, "curse_service", None)
-    if curse_service is not None and interaction.channel is not None:
-        from services.curse_service import spawn_curse_flame
-        spawn_curse_flame(
-            curse_service,
-            interaction.channel,
-            target_id=user_id,
-            guild_id=guild_id,
-            system="loan",
-            outcome="loss",
-            event_context={
-                "amount": result.amount,
-                "fee": result.fee,
-                "total_owed": result.total_owed,
-                "was_negative_loan": result.was_negative_loan,
-            },
-            target_display_name=getattr(interaction.user, "display_name", None),
-        )
 
     # Neon Degen Terminal hook
     neon = cog._get_neon_service()

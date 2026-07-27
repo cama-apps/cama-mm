@@ -548,41 +548,11 @@ class DigCommands(commands.Cog):
                 getattr(result, "next_free_dig_at", None),
             )
 
-        # Witch's Curse: roll on successful dig outcomes only — skip the first-dig welcome
-        # and the paid_dig_available cooldown prompt (no actual dig happened on those paths).
+        # Post-result hooks only run when an actual dig happened.
         if (
             not getattr(result, "is_first_dig", False)
             and not getattr(result, "paid_dig_available", False)
         ):
-            curse_service = getattr(self.bot, "curse_service", None)
-            if curse_service is not None and interaction.channel is not None:
-                from services.curse_service import spawn_curse_flame
-                jc_earned = getattr(result, "jc_earned", 0) or 0
-                advance = getattr(result, "advance", 0) or 0
-                if getattr(result, "cave_in", False):
-                    dig_outcome = "loss"
-                elif jc_earned > 0 or advance > 0 or getattr(result, "boss_encounter", False):
-                    dig_outcome = "win"
-                else:
-                    dig_outcome = "neutral"
-                spawn_curse_flame(
-                    curse_service,
-                    interaction.channel,
-                    target_id=interaction.user.id,
-                    guild_id=guild_id,
-                    system="dig",
-                    outcome=dig_outcome,
-                    event_context={
-                        "depth_after": getattr(result, "depth_after", None),
-                        "advance": advance,
-                        "jc_earned": jc_earned,
-                        "cave_in": getattr(result, "cave_in", False),
-                        "boss_encounter": getattr(result, "boss_encounter", False),
-                        "tunnel_name": getattr(result, "tunnel_name", None),
-                    },
-                    target_display_name=getattr(interaction.user, "display_name", None),
-                )
-
             # Catastrophic cave-in: atmospheric public flame.
             cave_in_detail_obj = getattr(result, "cave_in_detail", None)
             cave_in_type_for_flame = ""
