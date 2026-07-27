@@ -669,6 +669,13 @@ class SchemaManager:
                 "add_pet_dig_work",
                 self._migration_add_pet_dig_work,
             ),
+            # Pet brawls: persisted challenge lifecycle + final result. The
+            # battle itself is in-memory (hunger-only stakes, settled
+            # atomically at the end), so a restart voids in-flight rows.
+            (
+                "create_pet_brawls",
+                self._migration_create_pet_brawls,
+            ),
         ]
 
     # --- Migrations ---
@@ -4611,6 +4618,58 @@ class SchemaManager:
         cursor.execute(
             "UPDATE pets SET dig_work_at = CAST(strftime('%s', 'now') AS INTEGER) "
             "WHERE dig_work_at = 0"
+        )
+
+    def _migration_create_pet_brawls(self, cursor) -> None:
+        """Pet brawls: challenge lifecycle rows and final results.
+
+        W/L records are derived by counting done rows over the partial
+        record indexes — no denormalized counters. The one-open-brawl-per-
+        player invariant is enforced in-transaction by the repository (a
+        partial unique index cannot cover the challenger-in-one /
+        recipient-in-another case).
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pet_brawls (
+                brawl_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                challenger_id INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                challenger_pet_id INTEGER NOT NULL,
+                recipient_pet_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK (
+                    status IN ('pending', 'active', 'done',
+                               'declined', 'expired', 'void')
+                ),
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                winner_id INTEGER,
+                winner_pet_id INTEGER,
+                loser_pet_id INTEGER,
+                rounds INTEGER,
+                winner_hunger_delta INTEGER NOT NULL DEFAULT 0,
+                loser_hunger_delta INTEGER NOT NULL DEFAULT 0,
+                CHECK (challenger_id != recipient_id),
+                CHECK (winner_id IS NULL
+                       OR winner_id IN (challenger_id, recipient_id))
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pet_brawls_open "
+            "ON pet_brawls(guild_id, status) "
+            "WHERE status IN ('pending', 'active')"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pet_brawls_record_win "
+            "ON pet_brawls(winner_pet_id) WHERE status = 'done'"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pet_brawls_record_loss "
+            "ON pet_brawls(loser_pet_id) WHERE status = 'done'"
         )
 
     def _migration_add_pet_enabled_to_reminder_preferences(self, cursor) -> None:
