@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -100,12 +101,74 @@ class TestSweepDelivery:
         cog._rearm_warning.assert_awaited_once_with(pet)
 
     @pytest.mark.asyncio
+    async def test_hatch_announcement_includes_generated_flavor(
+        self, channel, monkeypatch
+    ):
+        """Skipping flavor during background delivery would leave hatching static."""
+        pet = make_pet()
+        cog = make_cog()
+        cog.pet_flavor_service = MagicMock()
+        cog.pet_flavor_service.generate = AsyncMock(
+            return_value="New hooves online. The snack economy will never recover."
+        )
+        monkeypatch.setattr(cog, "_pet_channel", lambda gid: channel)
+
+        await cog._deliver_hatch(HatchNotice(pet=pet))
+
+        embed = channel.send.await_args.kwargs["embed"]
+        assert any(
+            field.name == "💬 Cama chatter"
+            and field.value == "New hooves online. The snack economy will never recover."
+            for field in embed.fields
+        )
+
+    @pytest.mark.asyncio
     async def test_no_channel_still_marks_announced(self, monkeypatch):
         pet = make_pet(died_at=T0 + 9 * 86400, death_cause="starvation")
         cog = make_cog({"hatches": [], "deaths": [DeathNotice(pet=pet)], "refunds": []})
         monkeypatch.setattr(cog, "_pet_channel", lambda gid: None)
         await cog._pet_sweep_loop.coro(cog)
         cog.pet_service.mark_death_announced.assert_called_once_with(pet)
+
+    @pytest.mark.asyncio
+    async def test_death_skips_flavor_when_no_delivery_surface(self, monkeypatch):
+        """No channel and an opted-out DM must not spend a provider request."""
+        pet = make_pet(died_at=T0 + 9 * 86400, death_cause="starvation")
+        cog = make_cog()
+        cog.bot.reminder_service.get_preferences.return_value = {
+            "pet_enabled": False,
+        }
+        cog.pet_flavor_service = MagicMock()
+        cog.pet_flavor_service.generate = AsyncMock(return_value="Unused memorial.")
+        monkeypatch.setattr(cog, "_pet_channel", lambda gid: None)
+
+        await cog._deliver_death(DeathNotice(pet=pet))
+
+        cog.pet_flavor_service.generate.assert_not_awaited()
+        cog.pet_service.mark_death_announced.assert_called_once_with(pet)
+
+    @pytest.mark.asyncio
+    async def test_death_announcement_includes_gentle_generated_flavor(
+        self, channel, monkeypatch
+    ):
+        """Skipping the memorial flavor call would leave death announcements static."""
+        pet = make_pet(died_at=T0 + 9 * 86400, death_cause="starvation")
+        cog = make_cog()
+        cog.bot.reminder_service = None
+        cog.pet_flavor_service = MagicMock()
+        cog.pet_flavor_service.generate = AsyncMock(
+            return_value="The great pasture saved the warmest sunbeam for Blep."
+        )
+        monkeypatch.setattr(cog, "_pet_channel", lambda gid: channel)
+
+        await cog._deliver_death(DeathNotice(pet=pet))
+
+        embed = channel.send.await_args.kwargs["embed"]
+        assert any(
+            field.name == "💬 Cama chatter"
+            and field.value == "The great pasture saved the warmest sunbeam for Blep."
+            for field in embed.fields
+        )
 
     @pytest.mark.asyncio
     async def test_forbidden_marks_announced(self, channel, monkeypatch):
@@ -229,10 +292,17 @@ class TestSetup:
         container._components["player_repo"] = MagicMock()
         container._init_pet_service()
         assert container._components["pet_service"] is None
+        assert container._components["pet_flavor_service"] is None
 
         monkeypatch.setattr(config, "PET_CHANNEL_ID", 123456)
         container._init_pet_service()
         assert container._components["pet_service"] is not None
+        flavor = container._components["pet_flavor_service"]
+        assert flavor is not None
+        assert flavor.ai_service is None
+        assert flavor.guild_config_repo is container._components["guild_config_repo"]
+        assert flavor.economy_ledger_repo is container._components["economy_ledger_repo"]
+        assert flavor.player_repo is container._components["player_repo"]
 
 
 def make_interaction(user_id=100, guild_id=TEST_GUILD_ID):
@@ -240,8 +310,14 @@ def make_interaction(user_id=100, guild_id=TEST_GUILD_ID):
     inter.user.id = user_id
     inter.user.display_name = "Owner"
     inter.guild.id = guild_id
-    inter.response.defer = AsyncMock()
-    inter.response.is_done = MagicMock(return_value=False)
+    response_state = {"done": False}
+
+    async def mark_deferred(**kwargs):
+        del kwargs
+        response_state["done"] = True
+
+    inter.response.defer = AsyncMock(side_effect=mark_deferred)
+    inter.response.is_done = MagicMock(side_effect=lambda: response_state["done"])
     inter.response.send_message = AsyncMock()
     inter.response.edit_message = AsyncMock()
     inter.followup.send = AsyncMock()
@@ -334,6 +410,23 @@ class TestCommandHandlers:
         ) == 750
 
     @pytest.mark.asyncio
+    async def test_adoption_embed_includes_generated_egg_flavor(self, live_cog):
+        """Omitting the post-commit flavor call would leave adoption static."""
+        live_cog.pet_flavor_service = MagicMock()
+        live_cog.pet_flavor_service.generate = AsyncMock(
+            return_value="The egg has accepted the lease and requests one sunbeam."
+        )
+
+        inter = await adopt_via_handler(live_cog)
+
+        embed = inter.followup.send.await_args.kwargs["embed"]
+        assert any(
+            field.name == "💬 Cama chatter"
+            and field.value == "The egg has accepted the lease and requests one sunbeam."
+            for field in embed.fields
+        )
+
+    @pytest.mark.asyncio
     async def test_adopt_unregistered_reports_error(self, live_cog):
         inter = make_interaction(user_id=999)
         await live_cog.adopt.callback(live_cog, inter, "Ghost")
@@ -352,6 +445,25 @@ class TestCommandHandlers:
         assert kwargs["ephemeral"] is True  # default is private
 
     @pytest.mark.asyncio
+    async def test_status_embed_includes_generated_pet_chatter(self, live_cog):
+        """Dropping flavor from status composition would make cached quips invisible."""
+        await adopt_via_handler(live_cog)
+        live_cog.pet_flavor_service = MagicMock()
+        live_cog.pet_flavor_service.generate = AsyncMock(
+            return_value="The egg is practicing its mysterious little wobble."
+        )
+        inter = make_interaction()
+
+        await live_cog.status.callback(live_cog, inter)
+
+        embed = inter.followup.send.await_args.kwargs["embed"]
+        assert any(
+            field.name == "💬 Cama chatter"
+            and field.value == "The egg is practicing its mysterious little wobble."
+            for field in embed.fields
+        )
+
+    @pytest.mark.asyncio
     async def test_status_other_user_has_no_buttons(self, live_cog):
         await adopt_via_handler(live_cog)
         inter = make_interaction(user_id=555)
@@ -360,6 +472,27 @@ class TestCommandHandlers:
         member.display_name = "Owner"
         await live_cog.status.callback(live_cog, inter, user=member)
         assert inter.followup.send.await_args.kwargs.get("view") is None
+
+    @pytest.mark.asyncio
+    async def test_status_rate_limit_stops_uncached_target_fanout(
+        self, live_cog, monkeypatch
+    ):
+        """A caller must not fan out cold LLM requests across arbitrary pets."""
+        await adopt_via_handler(live_cog)
+        monkeypatch.setattr(
+            "commands.pet.GLOBAL_RATE_LIMITER.check",
+            lambda **kwargs: MagicMock(allowed=False, retry_after_seconds=9),
+        )
+        inter = make_interaction()
+
+        await live_cog.status.callback(live_cog, inter)
+
+        inter.response.send_message.assert_awaited_once_with(
+            "⏳ Please wait 9s.",
+            ephemeral=True,
+        )
+        inter.response.defer.assert_not_awaited()
+        inter.followup.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_buy_and_feed_flow_through_handlers(self, live_cog, monkeypatch):
@@ -377,6 +510,33 @@ class TestCommandHandlers:
         await live_cog.feed.callback(live_cog, inter2, "tango")
         content = inter2.followup.send.await_args.kwargs["content"]
         assert "munches" in content and "2 left" in content
+
+    @pytest.mark.asyncio
+    async def test_feed_keeps_facts_and_appends_generated_flavor(
+        self, live_cog, monkeypatch
+    ):
+        """Replacing or omitting deterministic feed facts would make LLM copy authoritative."""
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        buy_interaction = make_interaction()
+        await live_cog.buy.callback(live_cog, buy_interaction, "tango", 1)
+        monkeypatch.setattr(
+            live_cog.pet_service,
+            "_now",
+            lambda: pet.hatched_at + 86400,
+        )
+        live_cog.pet_flavor_service = MagicMock()
+        live_cog.pet_flavor_service.generate = AsyncMock(
+            return_value="Snack acquired. Tail-wag protocol engaged."
+        )
+        feed_interaction = make_interaction()
+
+        await live_cog.feed.callback(live_cog, feed_interaction, "tango")
+
+        content = feed_interaction.followup.send.await_args.kwargs["content"]
+        assert "munches the Tango" in content
+        assert "Hunger " in content and " → **100**" in content
+        assert "Snack acquired. Tail-wag protocol engaged." in content
 
     @pytest.mark.asyncio
     async def test_feed_egg_rejected_via_handler(self, live_cog):
@@ -545,8 +705,8 @@ class TestStatusViewButtons:
         )
         inter = make_interaction()
         await buy_tango.callback(inter)
-        # Panel refreshed in place via the component response.
-        inter.response.edit_message.assert_awaited_once()
+        inter.response.defer.assert_awaited_once()
+        inter.edit_original_response.assert_awaited_once()
         supplies = live_cog.pet_service.pet_repo.get_supplies(100, TEST_GUILD_ID)
         assert supplies == {"tango": 1}
 
@@ -560,9 +720,90 @@ class TestStatusViewButtons:
         )
         inter = make_interaction()
         await feed_tango.callback(inter)
-        msg = inter.response.send_message.await_args.args[0]
+        inter.response.defer.assert_awaited_once()
+        msg = inter.followup.send.await_args.args[0]
         assert msg.startswith("❌")
-        inter.response.edit_message.assert_not_awaited()
+        inter.edit_original_response.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_feed_button_refresh_uses_feed_flavor(
+        self, live_cog, monkeypatch
+    ):
+        """Routing button refreshes as generic status would hide the feeding reaction."""
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        live_cog.pet_service.buy(100, TEST_GUILD_ID, "tango", 1)
+        monkeypatch.setattr(
+            live_cog.pet_service,
+            "_now",
+            lambda: pet.hatched_at + 86400,
+        )
+        live_cog.pet_flavor_service = MagicMock()
+
+        async def flavor_for_event(event, **kwargs):
+            del kwargs
+            if event.value == "fed":
+                return "Button snack complete. Wool remains at maximum fluff."
+            return "Generic status line."
+
+        live_cog.pet_flavor_service.generate = AsyncMock(side_effect=flavor_for_event)
+        view = self.make_view(live_cog, supplies={"tango": 1})
+        feed_tango = next(
+            button
+            for button in view.children
+            if (button.label or "").startswith("Feed Tango")
+        )
+        inter = make_interaction()
+
+        await feed_tango.callback(inter)
+
+        embed = inter.edit_original_response.await_args.kwargs["embed"]
+        assert any(
+            field.value == "Button snack complete. Wool remains at maximum fluff."
+            for field in embed.fields
+        )
+
+    @pytest.mark.asyncio
+    async def test_feed_button_defers_before_waiting_for_cold_flavor(
+        self, live_cog, monkeypatch
+    ):
+        """A cold provider call must not consume Discord's acknowledgement window."""
+        await adopt_via_handler(live_cog)
+        pet = live_cog.pet_service.pet_repo.get_active_pet(100, TEST_GUILD_ID)
+        live_cog.pet_service.buy(100, TEST_GUILD_ID, "tango", 1)
+        monkeypatch.setattr(
+            live_cog.pet_service,
+            "_now",
+            lambda: pet.hatched_at + 86400,
+        )
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed_flavor(*args, **kwargs):
+            del args, kwargs
+            started.set()
+            await release.wait()
+            return "The snack committee has reached a fluffy consensus."
+
+        live_cog.pet_flavor_service = MagicMock()
+        live_cog.pet_flavor_service.generate = AsyncMock(side_effect=delayed_flavor)
+        view = self.make_view(live_cog, supplies={"tango": 1})
+        feed_tango = next(
+            button
+            for button in view.children
+            if (button.label or "").startswith("Feed Tango")
+        )
+        inter = make_interaction()
+        callback = asyncio.create_task(feed_tango.callback(inter))
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        try:
+            inter.response.defer.assert_awaited_once()
+        finally:
+            release.set()
+            await callback
+
+        inter.edit_original_response.assert_awaited_once()
 
 
 class TestPetReminders:

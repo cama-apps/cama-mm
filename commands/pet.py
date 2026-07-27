@@ -34,6 +34,7 @@ from domain.pet_constants import (
     UNHATCHED_SPECIES,
     get_accessory,
 )
+from services.pet_flavor_service import PetFlavorEvent
 from utils.formatting import JOPACOIN_EMOTE
 from utils.game_date import game_date_for_timestamp
 from utils.interaction_safety import safe_defer, safe_followup
@@ -41,6 +42,7 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
     from domain.models.pet import DeathNotice, HatchNotice, RefundNotice
+    from services.pet_flavor_service import PetFlavorService
     from services.pet_service import PetService
 
 logger = logging.getLogger("cama_bot.commands.pet")
@@ -65,9 +67,15 @@ class PetCommands(commands.Cog):
         name="pet", description="Adopt and care for your cama (camel-llama hybrid)"
     )
 
-    def __init__(self, bot: commands.Bot, pet_service: PetService):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        pet_service: PetService,
+        pet_flavor_service: PetFlavorService | None = None,
+    ):
         self.bot = bot
         self.pet_service = pet_service
+        self.pet_flavor_service = pet_flavor_service
 
     async def cog_load(self) -> None:
         self._pet_sweep_loop.start()
@@ -86,6 +94,7 @@ class PetCommands(commands.Cog):
         *,
         owner_name: str,
         with_view: bool = True,
+        flavor_event: PetFlavorEvent = PetFlavorEvent.STATUS,
     ) -> tuple[discord.Embed, discord.File | None, PetStatusView | None]:
         status = (
             await asyncio.to_thread(
@@ -96,6 +105,15 @@ class PetCommands(commands.Cog):
             self.pet_service.next_adoption_fee, discord_id, guild_id
         )
         now = self.pet_service._now()
+        flavor_text = None
+        flavor_pet = status.pet or status.last_dead
+        if flavor_pet is not None:
+            flavor_event = flavor_event if status.pet is not None else PetFlavorEvent.DIED
+            flavor_text = await self._generate_pet_flavor(
+                flavor_event,
+                flavor_pet,
+                status=status,
+            )
         embed, file = await asyncio.to_thread(
             pet_embeds.build_status_embed,
             status,
@@ -103,6 +121,7 @@ class PetCommands(commands.Cog):
             now,
             owner_name=owner_name,
             next_fee=next_fee,
+            flavor_text=flavor_text,
         )
         view = None
         if with_view and status.pet is not None:
@@ -123,6 +142,27 @@ class PetCommands(commands.Cog):
             )
             await self._rearm_warning(status.pet)
         return embed, file, view
+
+    async def _generate_pet_flavor(
+        self,
+        event: PetFlavorEvent,
+        pet,
+        *,
+        status=None,
+    ) -> str | None:
+        flavor_service = getattr(self, "pet_flavor_service", None)
+        if flavor_service is None:
+            return None
+        try:
+            return await flavor_service.generate(event, pet=pet, status=status)
+        except Exception:
+            logger.warning(
+                "Pet flavor generation failed for event=%s pet=%s",
+                event.value,
+                pet.pet_id,
+                exc_info=True,
+            )
+            return None
 
     async def _rearm_warning(self, pet) -> None:
         """(Re)schedule the opt-in hungry-DM for the pet's next warning crossing.
@@ -220,6 +260,16 @@ class PetCommands(commands.Cog):
             description=description,
             color=pet_embeds.COLOR_EGG,
         )
+        flavor_text = await self._generate_pet_flavor(
+            PetFlavorEvent.ADOPTED,
+            adopted,
+        )
+        if flavor_text:
+            embed.add_field(
+                name="💬 Cama chatter",
+                value=flavor_text,
+                inline=False,
+            )
         file = await asyncio.to_thread(
             pet_embeds.get_egg_card, adopted.pet_id
         )
@@ -239,6 +289,19 @@ class PetCommands(commands.Cog):
         public: bool = False,
     ):
         guild_id = interaction.guild.id if interaction.guild else None
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="pet_status",
+            guild_id=guild_id or 0,
+            user_id=interaction.user.id,
+            limit=6,
+            per_seconds=60,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s.",
+                ephemeral=True,
+            )
+            return
         target = user or interaction.user
         own = target.id == interaction.user.id
         if not await safe_defer(interaction, ephemeral=not public):
@@ -270,17 +333,39 @@ class PetCommands(commands.Cog):
             return
         outcome = result.value
         food = FOOD_ITEMS[item]
+        flavor_status = None
+        if getattr(self, "pet_flavor_service", None) is not None:
+            flavor_status = (
+                await asyncio.to_thread(
+                    self.pet_service.get_status,
+                    interaction.user.id,
+                    guild_id,
+                )
+            ).value
         if outcome.spat:
+            flavor_text = await self._generate_pet_flavor(
+                PetFlavorEvent.SPAT,
+                outcome.pet,
+                status=flavor_status,
+            )
+            flavor_line = f"\n💬 {flavor_text}" if flavor_text else ""
             await safe_followup(
                 interaction,
                 content=(
                     f"💢 **{outcome.pet.name}** spat the {food.display_name} "
                     "straight back at you. The temperament of legends. "
                     f"({outcome.remaining_qty} left)"
+                    f"{flavor_line}"
                 ),
                 ephemeral=True,
             )
             return
+        flavor_text = await self._generate_pet_flavor(
+            PetFlavorEvent.FED,
+            outcome.pet,
+            status=flavor_status,
+        )
+        flavor_line = f"\n💬 {flavor_text}" if flavor_text else ""
         bar = pet_embeds.hunger_bar(outcome.new_hunger)
         await safe_followup(
             interaction,
@@ -289,6 +374,7 @@ class PetCommands(commands.Cog):
                 f"{food.display_name}. Hunger {outcome.old_hunger} → "
                 f"**{outcome.new_hunger}** `{bar}` · {outcome.remaining_qty} left · "
                 f"{outcome.feeds_left_today} feeds left today"
+                f"{flavor_line}"
             ),
             ephemeral=True,
         )
@@ -548,7 +634,15 @@ class PetCommands(commands.Cog):
         pet = notice.pet
         channel = self._pet_channel(pet.guild_id)
         if channel is not None:
-            embed, file = await asyncio.to_thread(pet_embeds.build_hatch_embed, pet)
+            flavor_text = await self._generate_pet_flavor(
+                PetFlavorEvent.HATCHED,
+                pet,
+            )
+            embed, file = await asyncio.to_thread(
+                pet_embeds.build_hatch_embed,
+                pet,
+                flavor_text=flavor_text,
+            )
             try:
                 await channel.send(embed=embed, file=file)
             except discord.Forbidden:
@@ -559,8 +653,17 @@ class PetCommands(commands.Cog):
     async def _deliver_death(self, notice: DeathNotice) -> None:
         pet = notice.pet
         channel = self._pet_channel(pet.guild_id)
+        flavor_text = None
         if channel is not None:
-            embed, file = await asyncio.to_thread(pet_embeds.build_death_embed, pet)
+            flavor_text = await self._generate_pet_flavor(
+                PetFlavorEvent.DIED,
+                pet,
+            )
+            embed, file = await asyncio.to_thread(
+                pet_embeds.build_death_embed,
+                pet,
+                flavor_text=flavor_text,
+            )
             try:
                 await channel.send(embed=embed, file=file)
             except discord.Forbidden:
@@ -568,10 +671,10 @@ class PetCommands(commands.Cog):
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is not None:
             reminder_svc.cancel_pet_reminder(pet.discord_id, pet.guild_id)
-        await self._dm_death_notice(pet)
+        await self._dm_death_notice(pet, flavor_text=flavor_text)
         await asyncio.to_thread(self.pet_service.mark_death_announced, pet)
 
-    async def _dm_death_notice(self, pet) -> None:
+    async def _dm_death_notice(self, pet, *, flavor_text: str | None = None) -> None:
         """Best-effort opt-in death DM; never blocks announcement bookkeeping."""
         reminder_svc = getattr(self.bot, "reminder_service", None)
         if reminder_svc is None:
@@ -585,7 +688,16 @@ class PetCommands(commands.Cog):
             user = self.bot.get_user(pet.discord_id) or await self.bot.fetch_user(
                 pet.discord_id
             )
-            embed, file = await asyncio.to_thread(pet_embeds.build_death_embed, pet)
+            if flavor_text is None:
+                flavor_text = await self._generate_pet_flavor(
+                    PetFlavorEvent.DIED,
+                    pet,
+                )
+            embed, file = await asyncio.to_thread(
+                pet_embeds.build_death_embed,
+                pet,
+                flavor_text=flavor_text,
+            )
             await user.send(embed=embed, file=file)
         except Exception:
             logger.debug(
@@ -611,4 +723,10 @@ async def setup(bot: commands.Bot):
         # no sweep loop, no announcements.
         logger.info("Pets disabled (PET_CHANNEL_ID not configured); skipping cog")
         return
-    await bot.add_cog(PetCommands(bot, pet_service))
+    await bot.add_cog(
+        PetCommands(
+            bot,
+            pet_service,
+            getattr(bot, "pet_flavor_service", None),
+        )
+    )
