@@ -16,6 +16,7 @@ from typing import Any
 from domain.models.pet import PetStage
 from domain.pet_constants import SPECIES, get_accessory, get_species
 from services.ai_service import ToolCallResult
+from utils.flavor_sanitize import sanitize_output as _sanitize_output
 
 CACHE_SECONDS = 12 * 3600
 MAX_CONCURRENT_AI_REQUESTS = 2
@@ -628,40 +629,3 @@ def _source_category(value: Any) -> str:
     return "other"
 
 
-def _sanitize_output(value: str | None) -> str:
-    if not value:
-        return ""
-    normalized = unicodedata.normalize("NFKC", value)
-    cleaned = "".join(
-        " " if unicodedata.category(character) in {"Cc", "Cf", "Cs"} else character
-        for character in normalized
-    )
-    cleaned = " ".join(cleaned.split())[:220]
-    if _contains_link(cleaned):
-        return ""
-    return cleaned.replace("@", "＠")
-
-
-_SCHEME_RE = re.compile(
-    r"\b(?:[a-z][a-z0-9+.-]{1,31}://|(?:data|javascript|mailto|sms|tel):)",
-    re.IGNORECASE,
-)
-_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\s*\([^)]+\)")
-_DOMAIN_RE = re.compile(
-    r"\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:[/:?#][^\s]*)?",
-    re.IGNORECASE,
-)
-_IP_ADDRESS_RE = re.compile(
-    r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:[/?#][^\s]*)?"
-)
-_DISCORD_MARKUP_RE = re.compile(r"<(?:@!?|@&|#|/|t:|a?:)[^>\r\n]+>")
-
-
-def _contains_link(value: str) -> bool:
-    return bool(
-        _SCHEME_RE.search(value)
-        or _MARKDOWN_LINK_RE.search(value)
-        or _DOMAIN_RE.search(value)
-        or _IP_ADDRESS_RE.search(value)
-        or _DISCORD_MARKUP_RE.search(value)
-    )

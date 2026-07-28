@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from services.duel_flavor_service import (
+    FALLBACKS,
     HERALD_VOICES,
     PROMPT_CONSTRAINTS,
     SYSTEM_PROMPT,
@@ -14,7 +15,7 @@ from services.duel_flavor_service import (
 async def test_flavor_uses_dedicated_prompt_and_sanitizes_output():
     ai = Mock()
     ai.complete = AsyncMock(
-        return_value="@everyone The court trembles.\n<@&123> @here Roshan approves."
+        return_value="@everyone The court trembles.\n@here Roshan approves."
     )
     config = Mock(get_ai_enabled=Mock(return_value=True))
     service = DuelFlavorService(ai, config, rng=Mock(choice=lambda values: values[0]))
@@ -25,6 +26,7 @@ async def test_flavor_uses_dedicated_prompt_and_sanitizes_output():
         {"challenger": "A<@1>", "recipient": "B", "wager": 500},
     )
 
+    assert result == "＠everyone The court trembles. ＠here Roshan approves."
     assert "@everyone" not in result
     assert "@here" not in result
     assert "@" not in result
@@ -36,6 +38,27 @@ async def test_flavor_uses_dedicated_prompt_and_sanitizes_output():
     assert system_prompt == f"{SYSTEM_PROMPT} {HERALD_VOICES[0]} {PROMPT_CONSTRAINTS}"
     assert system_prompt.endswith(PROMPT_CONSTRAINTS)
     assert len(result) <= 300
+
+
+@pytest.mark.parametrize(
+    "unsafe_output",
+    [
+        "Meet me at https://example.com for the tilt.",
+        "The odds live at example.com/duel today.",
+        "Petition the marshal at 192.168.1.1:8080 now.",
+        "[the rolls](https://evil.example) record it all.",
+        "<@&123> the herald summons the banners.",
+        "Use the rune timer <t:1700000000> wisely.",
+    ],
+)
+async def test_flavor_falls_back_when_output_contains_link_or_markup(unsafe_output):
+    ai = Mock(complete=AsyncMock(return_value=unsafe_output))
+    config = Mock(get_ai_enabled=Mock(return_value=True))
+    service = DuelFlavorService(ai, config, rng=Mock(choice=lambda values: values[0]))
+
+    result = await service.generate(DuelFlavorEvent.ISSUED, 42, {})
+
+    assert result == FALLBACKS[DuelFlavorEvent.ISSUED][0]
 
 
 async def test_flavor_falls_back_when_ai_is_missing():

@@ -6,6 +6,8 @@ import unicodedata
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from utils.flavor_sanitize import sanitize_output
+
 if TYPE_CHECKING:
     from repositories.interfaces import IGuildConfigRepository
     from services.ai_service import AIService
@@ -140,7 +142,7 @@ class DuelFlavorService:
         except Exception:
             return fallback()
 
-        cleaned_output = _sanitize_output(generated)
+        cleaned_output = sanitize_output(generated, max_length=300)
         return cleaned_output or fallback()
 
 
@@ -151,9 +153,3 @@ def _sanitize_detail(value: Any) -> str:
         if character not in "<>@`" and unicodedata.category(character) != "Cc"
     )
     return cleaned[:80]
-
-
-def _sanitize_output(value: str | None) -> str:
-    if not value:
-        return ""
-    return " ".join(value.split()).replace("@", "＠")[:300]
