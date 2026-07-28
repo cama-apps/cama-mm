@@ -12,6 +12,7 @@ import discord
 import pytest
 
 from utils.interaction_safety import (
+    edit_message_with_fallback,
     safe_defer,
     safe_followup,
     send_public_or_ephemeral,
@@ -225,3 +226,81 @@ async def test_close_lobby_edits_partial_message_without_fetch():
     message.edit.assert_awaited_once()
     assert message.edit.await_args.kwargs["embed"].title == "🚫 Lobby Reset"
     assert message.edit.await_args.kwargs["view"] is None
+
+
+@pytest.mark.asyncio
+async def test_edit_message_with_fallback_edit_success_skips_fallback():
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    assert await edit_message_with_fallback(message, embed="E") is True
+    message.edit.assert_awaited_once_with(embed="E")
+    message.channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_message_with_fallback_none_message_returns_false():
+    assert await edit_message_with_fallback(None, embed="E") is False
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_rewinds_files_and_resends_without_view():
+    """A failed edit consumed the single-use Files; the fallback send must
+    rewind them and carry embed + files but never the view."""
+    attachment = MagicMock(spec=discord.File)
+    channel = _Recorder()
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=_http_error())
+    message.channel = channel
+
+    ok = await edit_message_with_fallback(
+        message, embed="E", attachments=[attachment], view=object()
+    )
+
+    assert ok is True
+    attachment.reset.assert_called_once()
+    assert channel.calls == [{"embed": "E", "files": [attachment]}]
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_uses_provided_send_fallback():
+    fallback = _Recorder()
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=RuntimeError("token expired"))
+
+    ok = await edit_message_with_fallback(
+        message, send_fallback=fallback.send, embed="E"
+    )
+
+    assert ok is True
+    assert fallback.calls == [{"embed": "E"}]
+    message.channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_content_only_resends_content():
+    channel = _Recorder()
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=_http_error())
+    message.channel = channel
+
+    assert await edit_message_with_fallback(message, content="hi") is True
+    assert channel.calls == [{"content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_edit_failure_with_nothing_resendable_returns_false():
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=_http_error())
+
+    assert await edit_message_with_fallback(message, view=object()) is False
+    message.channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_and_fallback_both_failing_returns_false():
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=_http_error())
+    message.channel = _Recorder(raises=_http_error())
+
+    assert await edit_message_with_fallback(message, embed="E") is False
